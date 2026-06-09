@@ -26,7 +26,6 @@ set(TCPQUIC_PROXY_SOURCES
     http_connect_server.cpp
     socks5_server.cpp
     relay.cpp
-    tcp_write_queue.cpp
     thread_pool.cpp
     tunnel_reaper.cpp
     warmup.cpp
@@ -283,6 +282,12 @@ endif()
 set_property(TARGET tcpquic_router_runtime_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_router_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_production_linkage_guard_test
+    unittest/production_linkage_guard_test.cpp
+)
+set_property(TARGET tcpquic_production_linkage_guard_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_production_linkage_guard_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 set(TCPQUIC_TEST_TARGETS
     tcpquic_tuning_test
     tcpquic_tcp_write_queue_test
@@ -302,6 +307,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_socks5_test
     tcpquic_admin_http_test
     tcpquic_router_runtime_test
+    tcpquic_production_linkage_guard_test
 )
 
 foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
