@@ -230,6 +230,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         linux_relay_worker.cpp
     )
 endif()
+if(WIN32)
+    list(APPEND TCPQUIC_TUNNEL_TEST_SOURCES
+        windows_relay_worker.cpp
+    )
+endif()
 add_executable(tcpquic_tunnel_test ${TCPQUIC_TUNNEL_TEST_SOURCES})
 target_include_directories(tcpquic_tunnel_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -337,6 +342,21 @@ if(WIN32)
     target_link_libraries(tcpquic_platform_socket_test ws2_32)
 endif()
 
+set(TCPQUIC_WINDOWS_TEST_TARGETS)
+if(WIN32)
+    add_executable(tcpquic_windows_relay_worker_test
+        unittest/windows_relay_worker_test.cpp
+        windows_relay_worker.cpp
+        platform_socket_win.cpp
+    )
+    target_include_directories(tcpquic_windows_relay_worker_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${MSQUIC_SOURCE_DIR}/src/inc)
+    target_link_libraries(tcpquic_windows_relay_worker_test ws2_32 inc warnings msquic logging base_link)
+    target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
+endif()
+
 set(TCPQUIC_TEST_TARGETS
     tcpquic_tuning_test
     tcpquic_tcp_write_queue_test
@@ -356,6 +376,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_platform_socket_test
 )
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_LINUX_TEST_TARGETS})
+list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_WINDOWS_TEST_TARGETS})
 
 foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
     target_compile_features(${target} PRIVATE cxx_std_17)

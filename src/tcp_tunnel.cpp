@@ -204,7 +204,7 @@ bool TqResolveAllowedTarget(
 
 } // namespace
 
-class TqTunnelContext final {
+struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
     friend void TqReapTunnelContext(TqTunnelContext* ctx);
