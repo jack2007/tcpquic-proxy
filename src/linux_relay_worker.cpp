@@ -1,11 +1,44 @@
 #include "linux_relay_worker.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cerrno>
 #include <cstring>
+#include <thread>
 
+#include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/uio.h>
 #include <unistd.h>
+
+struct TqLinuxRelayWorker::RelayState {
+    uint64_t Id{0};
+    int TcpFd{-1};
+    MsQuicStream* Stream{nullptr};
+    TqRelayHandle* Handle{nullptr};
+    bool EnableQuicSends{true};
+    TqLinuxRelayBufferPool Pool;
+
+    RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
+        : TcpFd(registration.TcpFd),
+          Stream(registration.Stream),
+          Handle(registration.Handle),
+          EnableQuicSends(registration.EnableQuicSends),
+          Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {}
+};
+
+namespace {
+
+bool TqSetNonBlocking(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0) {
+        return false;
+    }
+    return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+} // namespace
 
 TqLinuxRelayWorker::TqLinuxRelayWorker(const TqLinuxRelayWorkerConfig& config)
     : Config(config) {}
@@ -133,6 +166,93 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
     return processed;
 }
 
+bool TqLinuxRelayWorker::RegisterRelay(const TqLinuxRelayRegistration& registration) {
+    if (registration.TcpFd < 0 || EpollFd < 0) {
+        return false;
+    }
+    if (!TqSetNonBlocking(registration.TcpFd)) {
+        return false;
+    }
+
+    auto relay = std::make_unique<RelayState>(registration, Config);
+    relay->Id = NextRelayId++;
+    RelayState* raw = relay.get();
+
+    epoll_event event{};
+    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
+    event.data.ptr = raw;
+    if (::epoll_ctl(EpollFd, EPOLL_CTL_ADD, registration.TcpFd, &event) != 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> guard(RelayLock);
+    Relays.push_back(std::move(relay));
+    return true;
+}
+
+bool TqLinuxRelayWorker::RegisterRelayForTest(const TqLinuxRelayRegistration& registration) {
+    return RegisterRelay(registration);
+}
+
+bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (TcpReadBytes.load() >= bytes) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return TcpReadBytes.load() >= bytes;
+}
+
+void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
+    if (relay == nullptr) {
+        return;
+    }
+
+    uint64_t readBytes = 0;
+    while (readBytes < Config.ReadBatchBytes) {
+        std::vector<TqBufferRef> refs;
+        std::vector<iovec> iov;
+        const size_t maxIov = std::min<size_t>(Config.MaxIov, 1024);
+        refs.reserve(maxIov);
+        iov.reserve(maxIov);
+
+        for (size_t i = 0; i < maxIov && readBytes + Config.ReadChunkSize <= Config.ReadBatchBytes; ++i) {
+            auto buffer = relay->Pool.Acquire();
+            if (!buffer) {
+                break;
+            }
+            iovec item{};
+            item.iov_base = buffer->Data();
+            item.iov_len = buffer->Capacity();
+            iov.push_back(item);
+            refs.push_back(std::move(buffer));
+        }
+        if (iov.empty()) {
+            break;
+        }
+
+        const ssize_t received = ::readv(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
+        if (received > 0) {
+            readBytes += static_cast<uint64_t>(received);
+            TcpReadBytes.fetch_add(static_cast<uint64_t>(received));
+            TcpReadBatches.fetch_add(1);
+            continue;
+        }
+        if (received == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+        break;
+    }
+}
+
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     std::lock_guard<std::mutex> guard(QueueLock);
     TqLinuxRelayWorkerSnapshot snapshot{};
@@ -140,6 +260,8 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.WakeupWrites = WakeupWrites.load();
     snapshot.PendingEvents = Queue.size();
     snapshot.PendingBytes = 0;
+    snapshot.TcpReadBatches = TcpReadBatches.load();
+    snapshot.TcpReadBytes = TcpReadBytes.load();
     return snapshot;
 }
 
@@ -156,9 +278,16 @@ void TqLinuxRelayWorker::Run() {
         if (count <= 0) {
             continue;
         }
-        uint64_t value = 0;
-        while (::read(WakeFd, &value, sizeof(value)) > 0) {
+        for (int i = 0; i < count; ++i) {
+            if (events[i].data.fd == WakeFd) {
+                uint64_t value = 0;
+                while (::read(WakeFd, &value, sizeof(value)) > 0) {
+                }
+                DrainEvents(Config.EventBudget);
+            } else {
+                auto* relay = static_cast<RelayState*>(events[i].data.ptr);
+                DrainTcpReadable(relay);
+            }
         }
-        DrainEvents(Config.EventBudget);
     }
 }

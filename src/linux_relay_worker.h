@@ -40,11 +40,20 @@ struct TqLinuxRelayWorkerConfig {
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
 };
 
+struct TqLinuxRelayRegistration {
+    int TcpFd{-1};
+    MsQuicStream* Stream{nullptr};
+    TqRelayHandle* Handle{nullptr};
+    bool EnableQuicSends{true};
+};
+
 struct TqLinuxRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
     uint64_t PendingBytes{0};
+    uint64_t TcpReadBatches{0};
+    uint64_t TcpReadBytes{0};
 };
 
 class TqLinuxRelayWorker final {
@@ -62,10 +71,15 @@ public:
     void EnqueueForTest(const TqLinuxRelayEvent& event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
+    bool RegisterRelay(const TqLinuxRelayRegistration& registration);
+    bool RegisterRelayForTest(const TqLinuxRelayRegistration& registration);
+    bool WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs);
 
 private:
+    struct RelayState;
     void Wake();
     size_t DrainEvents(size_t budget);
+    void DrainTcpReadable(RelayState* relay);
     void Run();
 
     TqLinuxRelayWorkerConfig Config;
@@ -78,4 +92,9 @@ private:
     std::thread Thread;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
+    std::mutex RelayLock;
+    std::deque<std::unique_ptr<RelayState>> Relays;
+    uint64_t NextRelayId{1};
+    std::atomic<uint64_t> TcpReadBatches{0};
+    std::atomic<uint64_t> TcpReadBytes{0};
 };
