@@ -191,3 +191,23 @@ target_include_directories(tcpquic_router_runtime_test PRIVATE ${CMAKE_CURRENT_S
 target_link_libraries(tcpquic_router_runtime_test Threads::Threads)
 set_property(TARGET tcpquic_router_runtime_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_router_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+set(TCPQUIC_TEST_TARGETS
+    tcpquic_tuning_test
+    tcpquic_tcp_write_queue_test
+    tcpquic_thread_pool_test
+    tcpquic_tunnel_reaper_test
+    tcpquic_control_test
+    tcpquic_acl_test
+    tcpquic_config_router_test
+    tcpquic_compress_test
+    tcpquic_tunnel_test
+    tcpquic_http_connect_test
+    tcpquic_socks5_test
+    tcpquic_admin_http_test
+    tcpquic_router_runtime_test
+)
+
+foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
+    target_compile_features(${target} PRIVATE cxx_std_17)
+endforeach()
