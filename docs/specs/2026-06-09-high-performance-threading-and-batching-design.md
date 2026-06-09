@@ -1,6 +1,6 @@
 # tcpquic-proxy 高性能线程模型与批量化数据面设计
 
-> 状态：设计建议  
+> 状态：设计建议（已评审，见 §5）  
 > 日期：2026-06-09  
 > 范围：面向 tcpquic-proxy 产品目标的高性能 TCP-over-QUIC 代理设计，不受当前 demo 代码结构约束
 
@@ -510,3 +510,114 @@ per-tunnel + per-worker budget 保证公平和内存上限
 ```
 
 最终设计原则是：**一次线程唤醒尽量处理更多有效字节，但任何批量化都必须受 capacity、memory budget 和 fairness 控制。**
+
+---
+
+## 5. 设计评审
+
+> 评审日期：2026-06-09  
+> 评审范围：本文档（目标架构）  
+> 对照基线：`src/thread_model_cn.md`、当前 `src/relay.cpp` / `src/tcp_write_queue.cpp` / `src/tcp_tunnel.cpp`  
+> 关联规格：`docs/specs/2026-06-09-cross-platform-porting-summary.md`、`docs/specs/2026-06-09-windows-platform-support-design.md`
+
+### 5.1 评审结论
+
+**总体评价：方向正确、结构完整，可作为 Phase 5（sharded reactor + 批量化数据面）的目标架构文档。** 设计目标与 `thread_model_cn.md` §10 中「relay TCP→QUIC 改 epoll 多路复用」的未实现项一致，且比当前「每隧道 2 线程 + MsQuic 回调入队」模型在并发扩展性上更合理。
+
+**当前不建议按本文档一次性重写数据面。** 现有实现已完成 QUIC→TCP 异步 writer、handshake 线程池、全局 reaper 等中期优化；与本文差距主要在 **per-tunnel 线程消除**、**readv/writev 批量化**、**MsQuic 回调与 owner worker 对齐**。建议分阶段落地，并在每阶段补充可测量的验收指标。
+
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| 目标与约束 | ✅ 清晰 | 八项设计目标可验证；「不做不必要 copy / 分配 / 唤醒」表述务实 |
+| 线程模型 | ⚠️ 需补 MsQuic 亲和性 | Sharded reactor 合理，但未说明如何与 MsQuic `quic_worker` 归属对齐 |
+| 数据面批量化 | ✅ 合理 | budget 驱动 drain、fairness queue、backpressure 状态机完整 |
+| 与现网代码差距 | ⚠️ 大 | 当前仍 per-tunnel `TcpThread` + `TcpWriter`，QUIC→TCP 路径仍逐 chunk 拷贝 |
+| 跨平台一致性 | ❌ 与 Windows v1 草案冲突 | 本文假设 IOCP/WSARecv；Windows 支持设计 v1 明确「不支持 IOCP 高性能路径」 |
+| 可落地性 | ⚠️ 缺阶段与验收 | 无迁移路径、无 benchmark 基线、无与 `--max-memory-mb` 等现有参数的映射 |
+
+### 5.2 与当前实现的对照
+
+```text
+当前（thread_model_cn.md §1）          本文目标
+────────────────────────────────────────────────────────────
+每隧道 TcpThread（阻塞 recv）    →    owner worker epoll/IOCP 多路复用
+每隧道 TcpWriter（阻塞 send）    →    同 worker 内 writev/WSASend 批量写
+MsQuic 回调 → Enqueue（拷贝）    →    回调轻量入队 + 尽量零拷贝 view
+server OPEN → detached dial 线程 →    worker 内 async DNS + 非阻塞 connect
+handshake 固定线程池（已实现）   →    acceptor + worker handoff（一致）
+全局 TqTunnelReaper（已实现）    →    main/control 生命周期（一致）
+fast path send context pool      →    worker 级 buffer pool + BufferView（可演进）
+```
+
+**线程数量影响（100 活跃隧道、N≈20）：**
+
+| 模型 | 应用数据路径线程（约） |
+|------|------------------------|
+| 当前 | 2L = 200（TcpThread + TcpWriter）+ H handshake + 2 listener |
+| 本文 | N worker ≈ 8–32 + 1–2 acceptor + MsQuic 内部 2N |
+
+在高并发场景下，本文模型可显著降低 pthread 调度开销；但需避免 tcpquic worker 与 MsQuic `cxplat_worker` / `quic_worker` 叠加后总线程数仍接近 `2N + N + …` 而收益有限。
+
+### 5.3 优点（建议保留）
+
+1. **目标定义务实**：§2.2 明确接受 MsQuic 内部 copy，聚焦应用层 relay，避免过度承诺「端到端零拷贝」。
+2. **批量化有停止条件**：§2.4、§3.3、§4.6 的 budget / capacity / fairness 三元约束，能同时兼顾吞吐与尾延迟。
+3. **Backpressure 前置**：§2.5、§4.6 的 per-tunnel / per-worker / global 三级预算与 read interest 开关，与现有 `TqApplyRelayPoolBudget`、`--max-memory-mb` 思路一致，应在落地时显式对接。
+4. **QUIC 边界清晰**：§3.4 不绕过 MsQuic 直接操作 UDP，符合 msquic 产品化路径。
+5. **Profile 化参数**：§4.9 的 throughput / balanced / low-latency profile 与已有 `--quic-profile` 形成自然扩展点。
+
+### 5.4 问题与修订建议
+
+| No. | 严重级别 | 问题 | 建议 |
+|-----|----------|------|------|
+| 1 | **Major** | **未说明 MsQuic 回调线程与 owner worker 的映射** | 补充一节：连接/stream 创建时如何通过 MsQuic Execution API、Registration 分区或「回调仅入 MPSC 队列、禁止 touch tunnel 状态」保证 §3.1「跨线程只传事件」；明确 `quic_worker` 与 tcpquic worker 是否为 1:1 或 N:M |
+| 2 | **Major** | **QUIC RECEIVE 路径缺少 `StreamReceiveComplete` 语义** | §4.3 必须写明：在 TCP 写完成前不能对 MsQuic 调用 `ReceiveComplete` 的字节数；否则流控窗口提前释放导致内存堆积。当前 `OnStreamReceive` 入队后即返回，若改为 view 直写 TCP，需 deferred complete |
+| 3 | **Major** | **QUIC→TCP 零拷贝前提未验证** | §4.3 已写「callback 返回后 buffer 可能失效」——与 MsQuic 实际行为一致。当前 `TqTcpWriteQueue::Enqueue` 使用 `std::vector` 拷贝（`tcp_write_queue.cpp`）。文档应 **默认推荐 copy-into-pool 为 v1**，零拷贝 view 作为 v2 优化项，并引用 msquic `StreamReceiveComplete` 时序 |
+| 4 | **Major** | **与 Windows 平台设计冲突** | `2026-06-09-windows-platform-support-design.md` v1 非目标含「不支持 IOCP 高性能路径」。本文 §1、§4.2、§4.3 多处假设 IOCP/WSARecv。**二选一**：(a) 将 IOCP 批量化标为 Windows Phase 2；(b) 更新 Windows 设计，声明高性能路径依赖 IOCP。Linux 可先 epoll/readv，Windows 先 WSAPoll + 阻塞 send 对齐现行为 |
+| 5 | **Medium** | **worker tick 提到 io_uring，正文仅 epoll** | §4.5 `poll/io_uring/iocp_wait` 与 §1 Linux epoll 不一致。若 io_uring 在范围外，删除或标注「可选后续」；若在范围内，补充与 epoll 的选型条件（已有 `build-iouring` 构建） |
+| 6 | **Medium** | **MPSC wake coalescing 缺少并发细节** | §4.4 经典 `wake_flag.exchange` 模式需补充：memory order、`clear wake_flag` 与「queue 非空」之间的 lost wakeup 防护（例如 drain 后再 clear，或 seqlock） |
+| 7 | **Medium** | **压缩池「只传 reference 不 copy」不现实** | §4.8 zstd 通常需要连续输入/输出 buffer。改为：压缩池持有 pool slab，fast path 仍在 owner worker 内 lz4；高等级 zstd 允许 copy-in/copy-out 或专用 scratch |
+| 8 | **Medium** | **per-worker QUIC 连接池与连接数权衡** | §4.7 每 worker 独立 conn 子池在 C 较小、L 很大时可能导致连接利用率低。补充：全局 pool + stream 固定 owner worker 的混合策略及切换条件 |
+| 9 | **Medium** | **默认内存参数与现有 CLI 未映射** | §4.9 `per_worker_pending_bytes = 256MB~1GB` × 32 worker 可达 32GB。应对照 `--max-memory-mb`、`RelayMaxFreeSendContexts`、`TqApplyRelayPoolBudget` 给出公式或配置表 |
+| 10 | **Minor** | **缺少分阶段迁移计划** | 建议增加 §6「落地阶段」：Phase A 合并 TcpWriter 进单 worker（仍 copy）；Phase B TCP→QUIC epoll 多路复用；Phase C readv/writev + StreamSend 多 buffer；Phase D receive view / deferred complete |
+| 11 | **Minor** | **缺少验收与回归标准** | 引用 `scripts/test-tcpquic-proxy.sh`、100 隧道压测、线程数上限（如 L=100 时应用线程 < 64）、P99 延迟与 CPU% 对比基线 |
+| 12 | **Minor** | **acceptor 与 handshake 池关系未细化** | 当前 client 为 2 listener + `TqThreadPool`。本文 acceptor thread 与 handshake 是否合并、OPEN 等待是否仍在 handshake 池，需序列图补充 |
+| 13 | **Minor** | **admin / 控制面未纳入** | `TqAdminHttpServer` 等管理 HTTP 线程与 main 生命周期，建议在 §3.1 架构图中点明，避免实现时遗漏 |
+
+### 5.5 MsQuic 集成要点（建议在正文中增补）
+
+以下为评审认为 **必须在详细方案中显式写出** 的 MsQuic 约束，否则实现阶段易出现流控 bug 或 UAF：
+
+1. **`QUIC_STREAM_EVENT_RECEIVE`**：回调内处理时间应极短；若使用 receive buffer 指针直写 TCP，必须在 `StreamReceiveComplete` 之前保证 buffer 不被 MsQuic 回收。
+2. **`QUIC_STREAM_EVENT_SEND_COMPLETE`**：当前 fast path 已在 SEND_COMPLETE 归还 `TqRelaySendContext`（`relay.cpp`）；批量化后「多 buffer 一次 StreamSend」需约定 partial complete 语义（MsQuic 按 send operation 整体 complete）。
+3. **`QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE`**：现有 relay 已用于 `IdealSendBytes` / backpressure；sharded 模型应保留 per-stream ideal send，并纳入 §4.2 `quic_stream_send_capacity_estimate`。
+4. **Execution Profile**：`--quic-profile max-throughput|low-latency` 已落地；worker shard 数与 MsQuic worker 数应联合调参，避免双份 `N` 线程空转。
+
+### 5.6 跨文档一致性检查
+
+| 文档 | 关系 | 动作 |
+|------|------|------|
+| `src/thread_model_cn.md` | 当前线程模型基线 | 本文视为 §10「epoll 多路复用」的展开设计；建议在 thread_model 增加指向本文的链接 |
+| `docs/plans/2026-06-06-tcpquic-thread-model.md` | Phase 1–4 已完成 | 本文是 Phase 5+；避免与已完成项重复描述 |
+| `2026-06-09-windows-platform-support-design.md` | IOCP 范围冲突 | **需统一**：v1 可移植性 vs 高性能 Windows 路径的优先级 |
+| `2026-06-09-cross-platform-porting-summary.md` | 平台抽象 / libuv 调研 | 若引入统一 event loop 抽象，本文 §3.1 的 epoll/IOCP 分支可收敛到平台层 |
+
+### 5.7 建议的文档修订清单
+
+评审人建议在下一轮修订中完成：
+
+- [ ] 新增 **§4.x MsQuic 回调与 StreamReceiveComplete 时序**（含 ASCII 序列图）
+- [ ] 新增 **§6 分阶段落地计划** 与 **§7 验收指标**
+- [ ] 将 Windows IOCP 标为 **Phase 2** 或同步修订 Windows 平台设计
+- [ ] 增加 **与现有 tuning / CLI 参数对照表**（`RelayIoSize`、`--max-memory-mb`、`--handshake-threads` 等）
+- [ ] 在 §4.3 明确 **v1 默认 copy-into-pool**，view 零拷贝为优化路径
+
+### 5.8 评审终态
+
+| 项 | 结论 |
+|----|------|
+| 是否可作为长期目标架构 | ✅ 是 |
+| 是否可直接进入编码 | ❌ 否，需先闭合 MsQuic 时序与 Windows 范围 |
+| 与现实现兼容的下一步 | 优先 **TCP→QUIC epoll 多路复用**（消除 per-tunnel TcpThread），QUIC→TCP 仍用现有 `TqTcpWriteQueue` 或逐步迁入同 worker |
+
+**评审状态：** 有条件通过 — 作为 Phase 5 设计基线采纳，按 §5.7 修订后可用于 implementation plan。
