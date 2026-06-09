@@ -278,5 +278,16 @@ int main() {
         if (streamJson.find("\"total_streams\":1") == std::string::npos) return 43;
         if (streamJson.find("\"active_streams\":0") == std::string::npos) return 44;
     }
+    {
+        TqServerMetrics metrics;
+        const std::string body = TqServerMetricsJson(metrics, 0);
+        if (body.find("\"linux_relay_wakeups\"") == std::string::npos) return 95;
+        if (body.find("\"linux_relay_events_processed\"") == std::string::npos) return 96;
+        if (body.find("\"linux_relay_pending_events\"") == std::string::npos) return 97;
+        if (body.find("\"linux_relay_pending_bytes\"") == std::string::npos) return 98;
+        if (body.find("\"linux_relay_tcp_read_bytes\"") == std::string::npos) return 99;
+        if (body.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
+        if (body.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
+    }
     return 0;
 }
