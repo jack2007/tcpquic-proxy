@@ -101,6 +101,7 @@ public:
     bool RegisterRelayForTest(const TqLinuxRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
     bool WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs);
+    std::vector<uint8_t> TakeCapturedQuicBytesForTest(int tcpFd);
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
 
     static QUIC_STATUS QUIC_API StreamCallback(
@@ -113,6 +114,10 @@ private:
     void Wake();
     size_t DrainEvents(size_t budget);
     void DrainTcpReadable(RelayState* relay);
+    bool BuildTcpToQuicViews(
+        RelayState* relay,
+        std::vector<TqBufferView>& input,
+        std::vector<TqBufferView>& output);
     bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
     void CompleteQuicSend(void* context);
     RelayState* FindRelayById(uint64_t relayId);

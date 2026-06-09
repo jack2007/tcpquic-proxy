@@ -31,6 +31,7 @@ struct TqLinuxRelayWorker::RelayState {
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     std::vector<uint8_t> CompressionOutput;
     std::vector<uint8_t> DecompressionOutput;
+    std::vector<uint8_t> CapturedQuicBytesForTest;
     bool EnableQuicSends{true};
     bool Closing{false};
     uint64_t OutstandingQuicSends{0};
@@ -280,6 +281,16 @@ bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int time
     return TcpReadBytes.load() >= bytes;
 }
 
+std::vector<uint8_t> TqLinuxRelayWorker::TakeCapturedQuicBytesForTest(int tcpFd) {
+    RelayState* relay = FindRelayByFd(tcpFd);
+    if (relay == nullptr) {
+        return {};
+    }
+    std::vector<uint8_t> out;
+    out.swap(relay->CapturedQuicBytesForTest);
+    return out;
+}
+
 void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     if (relay == nullptr || relay->Closing) {
         return;
@@ -336,7 +347,9 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             while (previous < views.size() &&
                    !MaxTcpReadIovUsed.compare_exchange_weak(previous, views.size())) {
             }
-            if (!SubmitTcpBatchToQuic(relay, views)) {
+            std::vector<TqBufferView> sendViews;
+            if (!BuildTcpToQuicViews(relay, views, sendViews) ||
+                !SubmitTcpBatchToQuic(relay, sendViews)) {
                 if (relay->Handle != nullptr) {
                     relay->Handle->Stop.store(true);
                 }
@@ -357,6 +370,45 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     }
 }
 
+bool TqLinuxRelayWorker::BuildTcpToQuicViews(
+    RelayState* relay,
+    std::vector<TqBufferView>& input,
+    std::vector<TqBufferView>& output) {
+    output.clear();
+    if (relay == nullptr) {
+        return false;
+    }
+    if (relay->Compressor == nullptr || relay->CompressAlgo == TqCompressAlgo::None) {
+        output = std::move(input);
+        return true;
+    }
+
+    relay->CompressionOutput.clear();
+    for (const auto& view : input) {
+        if (!relay->Compressor->Compress(view.Data, view.Len, relay->CompressionOutput, false)) {
+            return false;
+        }
+    }
+    if (relay->CompressionOutput.empty() &&
+        !relay->Compressor->Flush(relay->CompressionOutput)) {
+        return false;
+    }
+    if (relay->CompressionOutput.empty()) {
+        input.clear();
+        return true;
+    }
+
+    auto buffer = relay->Pool.Acquire();
+    if (!buffer || relay->CompressionOutput.size() > buffer->Capacity()) {
+        return false;
+    }
+    std::memcpy(buffer->Data(), relay->CompressionOutput.data(), relay->CompressionOutput.size());
+    buffer->SetLength(relay->CompressionOutput.size());
+    output.push_back(TqBufferView{buffer->Data(), relay->CompressionOutput.size(), buffer});
+    input.clear();
+    return true;
+}
+
 // In production, ClientContext owns TqLinuxRelaySendOperation until
 // QUIC_STREAM_EVENT_SEND_COMPLETE is delivered back to the owner worker.
 // Tests can disable sends to verify readv batching without a live MsQuic stream.
@@ -365,6 +417,12 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
         return true;
     }
     if (!relay->EnableQuicSends || relay->Stream == nullptr) {
+        for (const auto& view : views) {
+            relay->CapturedQuicBytesForTest.insert(
+                relay->CapturedQuicBytesForTest.end(),
+                view.Data,
+                view.Data + view.Len);
+        }
         views.clear();
         return true;
     }

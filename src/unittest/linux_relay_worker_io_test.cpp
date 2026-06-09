@@ -1,3 +1,4 @@
+#include "../compress.h"
 #include "../linux_relay_worker.h"
 
 #include <cassert>
@@ -163,17 +164,30 @@ int main() {
         int fds[2]{-1, -1};
         assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
+        auto compressor = TqCreateCompressor(TqCompressAlgo::Zstd, 1);
+        auto decompressor = TqCreateDecompressor(TqCompressAlgo::Zstd);
+        assert(compressor);
+        assert(decompressor);
+
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
         registration.Stream = nullptr;
         registration.Handle = nullptr;
+        registration.Compressor = compressor.get();
         registration.CompressAlgo = TqCompressAlgo::Zstd;
         registration.EnableQuicSends = false;
         assert(worker.RegisterRelayForTest(registration));
 
-        const char payload[] = "compressed-registration-still-reads";
-        assert(::write(fds[1], payload, sizeof(payload)) == static_cast<ssize_t>(sizeof(payload)));
-        assert(worker.WaitForObservedTcpBytesForTest(sizeof(payload), 2000));
+        std::vector<uint8_t> payload(4096, 0x42);
+        assert(::write(fds[1], payload.data(), payload.size()) == static_cast<ssize_t>(payload.size()));
+        assert(worker.WaitForObservedTcpBytesForTest(payload.size(), 2000));
+
+        const std::vector<uint8_t> compressed = worker.TakeCapturedQuicBytesForTest(fds[0]);
+        assert(!compressed.empty());
+
+        std::vector<uint8_t> restored;
+        assert(decompressor->Decompress(compressed.data(), compressed.size(), restored));
+        assert(restored == payload);
 
         worker.Stop();
         ::close(fds[1]);
