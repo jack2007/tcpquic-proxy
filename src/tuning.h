@@ -1,0 +1,71 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+
+enum class TqTuningMode {
+    Auto,
+    Lan,
+    Wan,
+    Custom,
+};
+
+struct TqTuningConfig {
+    uint32_t StreamRecvWindow{536870912u};
+    uint32_t ConnFlowControlWindow{500000000u};
+    uint32_t InitialWindowPackets{2000};
+    uint32_t InitialRttMs{100};
+    size_t RelayIoSize{1024 * 1024};
+    size_t RelayCompressIoSize{256 * 1024};
+    uint64_t RelayDefaultIdealSend{64ull * 1024 * 1024};
+    uint32_t RelayMaxInFlightSends{64};
+    size_t RelayMaxFreeSendContexts{64};
+    int TcpSocketBufferBytes{4 * 1024 * 1024};
+};
+
+struct TqRuntimeObservations {
+    uint32_t MeasuredRttMs{0};
+    uint32_t ThroughputMbps{0};
+    uint64_t IdealSendBytes{0};
+    uint64_t SampleCount{0};
+    bool HasRtt{false};
+    bool HasThroughput{false};
+    bool HasIdealSend{false};
+};
+
+struct TqCompressionObservations {
+    uint32_t RatioPermille{0};
+    uint64_t SampleCount{0};
+    bool HasSample{false};
+};
+
+struct TqConfig;
+
+TqTuningMode TqParseTuningMode(const char* value);
+void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out);
+void TqPrintTuning(const TqTuningConfig& tuning, FILE* out);
+void TqSetActiveTcpSocketBuffer(int bytes);
+int TqGetActiveTcpSocketBuffer();
+void TqSetRelayMemoryBudget(uint32_t maxMemoryMb);
+uint32_t TqGetRelayMemoryBudget();
+uint32_t TqRelayRegisterActive();
+void TqRelayUnregisterActive();
+uint32_t TqGetActiveRelayCount();
+void TqApplyRelayPoolBudget(TqTuningConfig& tuning, uint32_t activeRelays);
+bool TqRuntimeTuningEnabled(const TqConfig& cfg);
+void TqRecordMeasuredRtt(uint32_t rttMs);
+void TqRecordRelayThroughput(
+    uint64_t bytesSent,
+    uint32_t elapsedMs,
+    uint64_t idealSendBytes,
+    uint32_t inflightSends);
+void TqRecordIdealSendHint(uint64_t idealSendBytes);
+void TqApplyRuntimeObservations(TqConfig& cfg);
+TqRuntimeObservations TqGetRuntimeObservations();
+void TqResetRuntimeObservations();
+bool TqCompressionAdaptiveEnabled(const TqConfig& cfg);
+const char* TqResolveAutoCompress(const TqConfig& cfg);
+void TqRecordCompressionSample(uint64_t rawBytes, uint64_t compressedBytes);
+TqCompressionObservations TqGetCompressionObservations();
+void TqResetCompressionObservations();
