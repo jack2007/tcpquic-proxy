@@ -107,6 +107,21 @@ target_link_libraries(tcpquic_linux_relay_worker_io_test Threads::Threads)
 set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_linux_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_relay_backend_selection_test
+    unittest/relay_backend_selection_test.cpp
+    relay.cpp
+    tuning.cpp
+    linux_relay_worker.cpp
+    linux_relay_buffer_pool.cpp
+)
+target_include_directories(tcpquic_relay_backend_selection_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${MSQUIC_SOURCE_DIR}/src/inc)
+target_link_libraries(tcpquic_relay_backend_selection_test Threads::Threads inc warnings msquic logging base_link)
+target_compile_options(tcpquic_relay_backend_selection_test PRIVATE -UNDEBUG)
+set_property(TARGET tcpquic_relay_backend_selection_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_relay_backend_selection_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_thread_pool_test
     unittest/thread_pool_test.cpp
     thread_pool.cpp
@@ -259,6 +274,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_linux_relay_buffer_pool_test
     tcpquic_linux_relay_worker_queue_test
     tcpquic_linux_relay_worker_io_test
+    tcpquic_relay_backend_selection_test
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
     tcpquic_control_test

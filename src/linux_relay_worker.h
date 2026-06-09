@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compress.h"
 #include "linux_relay_buffer_pool.h"
 #include "relay.h"
 #include "tuning.h"
@@ -49,6 +50,9 @@ struct TqLinuxRelayRegistration {
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
     TqRelayHandle* Handle{nullptr};
+    ITqCompressor* Compressor{nullptr};
+    ITqDecompressor* Decompressor{nullptr};
+    TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     bool EnableQuicSends{true};
 };
 

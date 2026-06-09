@@ -686,60 +686,55 @@ bool TqRelayStart(
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
     TqCompressAlgo compressAlgo) {
-    if (handle == nullptr || handle->Relay != nullptr ||
-        handle->Backend != TqRelayBackendType::None) {
+    if (handle == nullptr || handle->Backend != TqRelayBackendType::None) {
         return false;
     }
 
+#if !defined(__linux__)
+    (void)tcpFd;
+    (void)stream;
+    (void)compressor;
+    (void)decompressor;
+    (void)profileTuning;
+    (void)compressAlgo;
+    return false;
+#else
     const uint32_t activeRelays = TqRelayRegisterActive();
     TqTuningConfig tuning = profileTuning;
     TqApplyRelayPoolBudget(tuning, activeRelays);
 
-#if defined(__linux__)
-    if (compressor == nullptr && decompressor == nullptr) {
-        if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
-            TqRelayUnregisterActive();
-            return false;
-        }
-        TqLinuxRelayWorker* worker = TqLinuxRelayRuntime::Instance().PickWorker();
-        if (worker == nullptr) {
-            TqRelayUnregisterActive();
-            return false;
-        }
-        TqLinuxRelayRegistration registration{};
-        registration.TcpFd = tcpFd;
-        registration.Stream = stream;
-        registration.Handle = handle;
-        registration.EnableQuicSends = true;
-        const auto registered = worker->RegisterRelayWithId(registration);
-        if (!registered.Ok) {
-            TqRelayUnregisterActive();
-            return false;
-        }
-        handle->Backend = TqRelayBackendType::LinuxWorker;
-        handle->LinuxWorker = worker;
-        handle->LinuxRelayId = registered.RelayId;
-        handle->Relay = nullptr;
-        return true;
-    }
-#endif
-
-    auto* relay = new (std::nothrow) TqTunnelRelay(
-        tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo);
-    if (relay == nullptr) {
+    if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
     }
 
-    if (!relay->Start()) {
-        delete relay;
+    TqLinuxRelayWorker* worker = TqLinuxRelayRuntime::Instance().PickWorker();
+    if (worker == nullptr) {
         TqRelayUnregisterActive();
         return false;
     }
 
-    handle->Backend = TqRelayBackendType::Blocking;
-    handle->Relay = relay;
+    TqLinuxRelayRegistration registration{};
+    registration.TcpFd = tcpFd;
+    registration.Stream = stream;
+    registration.Handle = handle;
+    registration.Compressor = compressor;
+    registration.Decompressor = decompressor;
+    registration.CompressAlgo = compressAlgo;
+    registration.EnableQuicSends = true;
+
+    const auto registered = worker->RegisterRelayWithId(registration);
+    if (!registered.Ok) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    handle->Stop.store(false);
+    handle->Backend = TqRelayBackendType::LinuxWorker;
+    handle->LinuxWorker = worker;
+    handle->LinuxRelayId = registered.RelayId;
     return true;
+#endif
 }
 
 void TqRelayStop(TqRelayHandle* handle) {
@@ -763,16 +758,7 @@ void TqRelayStop(TqRelayHandle* handle) {
     }
 #endif
 
-    auto* relay = handle->Relay;
-    handle->Relay = nullptr;
-    handle->Backend = TqRelayBackendType::None;
-    if (relay != nullptr) {
-        relay->Stop();
-        delete relay;
-        TqRelayUnregisterActive();
-    } else {
-        handle->Stop.store(true);
-    }
+    handle->Stop.store(true);
 }
 
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle) {
