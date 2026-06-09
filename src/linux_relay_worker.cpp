@@ -1,9 +1,13 @@
 #include "linux_relay_worker.h"
 
+#include <msquic.hpp>
+
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cerrno>
 #include <cstring>
+#include <new>
 #include <thread>
 
 #include <fcntl.h>
@@ -12,12 +16,17 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#if defined(__GNUC__)
+__attribute__((weak)) const MsQuicApi* MsQuic = nullptr;
+#endif
+
 struct TqLinuxRelayWorker::RelayState {
     uint64_t Id{0};
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
     TqRelayHandle* Handle{nullptr};
     bool EnableQuicSends{true};
+    uint64_t OutstandingQuicSends{0};
     TqLinuxRelayBufferPool Pool;
 
     RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
@@ -235,9 +244,29 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
 
         const ssize_t received = ::readv(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (received > 0) {
+            size_t remaining = static_cast<size_t>(received);
+            std::vector<TqBufferView> views;
+            views.reserve(refs.size());
+            for (auto& ref : refs) {
+                if (remaining == 0) {
+                    break;
+                }
+                const size_t len = std::min(ref->Capacity(), remaining);
+                ref->SetLength(len);
+                views.push_back(TqBufferView{ref->Data(), len, ref});
+                remaining -= len;
+            }
+
             readBytes += static_cast<uint64_t>(received);
             TcpReadBytes.fetch_add(static_cast<uint64_t>(received));
             TcpReadBatches.fetch_add(1);
+            uint64_t previous = MaxTcpReadIovUsed.load();
+            while (previous < views.size() &&
+                   !MaxTcpReadIovUsed.compare_exchange_weak(previous, views.size())) {
+            }
+            if (!SubmitTcpBatchToQuic(relay, views)) {
+                break;
+            }
             continue;
         }
         if (received == 0) {
@@ -253,20 +282,92 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     }
 }
 
+// In production, ClientContext owns TqLinuxRelaySendOperation until
+// QUIC_STREAM_EVENT_SEND_COMPLETE is delivered back to the owner worker.
+// Tests can disable sends to verify readv batching without a live MsQuic stream.
+bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views) {
+    if (relay == nullptr || views.empty()) {
+        return true;
+    }
+    if (!relay->EnableQuicSends || relay->Stream == nullptr) {
+        views.clear();
+        return true;
+    }
+
+    std::vector<QUIC_BUFFER> quicBuffers;
+    quicBuffers.reserve(views.size());
+    for (const auto& view : views) {
+        if (view.Len > UINT32_MAX) {
+            return false;
+        }
+        QUIC_BUFFER buffer{};
+        buffer.Buffer = view.Data;
+        buffer.Length = static_cast<uint32_t>(view.Len);
+        quicBuffers.push_back(buffer);
+    }
+
+    auto* operation = new (std::nothrow) TqLinuxRelaySendOperation{};
+    if (operation == nullptr) {
+        return false;
+    }
+    operation->RelayId = relay->Id;
+    operation->Views = std::move(views);
+
+    const QUIC_STATUS status = relay->Stream->Send(
+        quicBuffers.data(),
+        static_cast<uint32_t>(quicBuffers.size()),
+        QUIC_SEND_FLAG_NONE,
+        operation);
+    if (QUIC_FAILED(status)) {
+        delete operation;
+        return false;
+    }
+    ++relay->OutstandingQuicSends;
+    QuicSendOperations.fetch_add(1);
+    return true;
+}
+
+void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
+    auto* operation = static_cast<TqLinuxRelaySendOperation*>(context);
+    if (operation == nullptr) {
+        return;
+    }
+    RelayState* relay = FindRelayById(operation->RelayId);
+    if (relay != nullptr && relay->OutstandingQuicSends > 0) {
+        --relay->OutstandingQuicSends;
+    }
+    delete operation;
+}
+
+TqLinuxRelayWorker::RelayState* TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
+    std::lock_guard<std::mutex> guard(RelayLock);
+    for (const auto& relay : Relays) {
+        if (relay->Id == relayId) {
+            return relay.get();
+        }
+    }
+    return nullptr;
+}
+
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
-    std::lock_guard<std::mutex> guard(QueueLock);
+    std::lock_guard<std::mutex> queueGuard(QueueLock);
     TqLinuxRelayWorkerSnapshot snapshot{};
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
     snapshot.PendingEvents = Queue.size();
-    snapshot.PendingBytes = 0;
     snapshot.TcpReadBatches = TcpReadBatches.load();
     snapshot.TcpReadBytes = TcpReadBytes.load();
+    snapshot.QuicSendOperations = QuicSendOperations.load();
+    snapshot.MaxTcpReadIovUsed = MaxTcpReadIovUsed.load();
+
+    {
+        std::lock_guard<std::mutex> relayGuard(RelayLock);
+        for (const auto& relay : Relays) {
+            snapshot.PendingBytes += relay->Pool.PendingBytes();
+        }
+    }
     return snapshot;
 }
-
-// PendingBytes is zero in this queue-only task because relay pools do not exist yet.
-// Task 7 replaces this with real pool and pending-write accounting before metrics use it.
 
 void TqLinuxRelayWorker::Run() {
     epoll_event events[16]{};

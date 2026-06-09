@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 struct MsQuicStream;
 struct TqRelayHandle;
@@ -47,6 +48,11 @@ struct TqLinuxRelayRegistration {
     bool EnableQuicSends{true};
 };
 
+struct TqLinuxRelaySendOperation {
+    uint64_t RelayId{0};
+    std::vector<TqBufferView> Views;
+};
+
 struct TqLinuxRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
     uint64_t WakeupWrites{0};
@@ -54,6 +60,8 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t PendingBytes{0};
     uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
+    uint64_t QuicSendOperations{0};
+    uint64_t MaxTcpReadIovUsed{0};
 };
 
 class TqLinuxRelayWorker final {
@@ -80,6 +88,9 @@ private:
     void Wake();
     size_t DrainEvents(size_t budget);
     void DrainTcpReadable(RelayState* relay);
+    bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
+    void CompleteQuicSend(void* context);
+    RelayState* FindRelayById(uint64_t relayId);
     void Run();
 
     TqLinuxRelayWorkerConfig Config;
@@ -92,9 +103,11 @@ private:
     std::thread Thread;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
-    std::mutex RelayLock;
+    mutable std::mutex RelayLock;
     std::deque<std::unique_ptr<RelayState>> Relays;
     uint64_t NextRelayId{1};
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};
+    std::atomic<uint64_t> QuicSendOperations{0};
+    std::atomic<uint64_t> MaxTcpReadIovUsed{0};
 };
