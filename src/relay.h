@@ -8,10 +8,20 @@
 
 struct MsQuicStream;
 class TqTunnelRelay;
+class TqLinuxRelayWorker;
+
+enum class TqRelayBackendType {
+    None,
+    Blocking,
+    LinuxWorker,
+};
 
 struct TqRelayHandle {
     std::atomic<bool> Stop{false};
+    TqRelayBackendType Backend{TqRelayBackendType::None};
     TqTunnelRelay* Relay{nullptr};
+    TqLinuxRelayWorker* LinuxWorker{nullptr};
+    uint64_t LinuxRelayId{0};
 };
 
 bool TqRelayStart(
@@ -24,3 +34,4 @@ bool TqRelayStart(
     TqCompressAlgo compressAlgo = TqCompressAlgo::None);
 
 void TqRelayStop(TqRelayHandle* handle);
+bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle);

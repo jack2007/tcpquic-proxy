@@ -1,7 +1,10 @@
 #pragma once
 
 #include "linux_relay_buffer_pool.h"
+#include "relay.h"
 #include "tuning.h"
+
+#include <msquic.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -12,7 +15,7 @@
 #include <vector>
 
 struct MsQuicStream;
-struct TqRelayHandle;
+struct QUIC_STREAM_EVENT;
 
 enum class TqLinuxRelayEventType {
     TestMarker,
@@ -26,6 +29,7 @@ enum class TqLinuxRelayEventType {
 struct TqLinuxRelayEvent {
     TqLinuxRelayEventType Type{TqLinuxRelayEventType::Shutdown};
     uint64_t Value{0};
+    uint64_t RelayId{0};
     void* Relay{nullptr};
     TqBufferRef Buffer;
     size_t Length{0};
@@ -48,6 +52,11 @@ struct TqLinuxRelayRegistration {
     bool EnableQuicSends{true};
 };
 
+struct TqLinuxRelayRegistrationResult {
+    bool Ok{false};
+    uint64_t RelayId{0};
+};
+
 struct TqLinuxRelaySendOperation {
     uint64_t RelayId{0};
     std::vector<TqBufferView> Views;
@@ -62,6 +71,10 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpReadBytes{0};
     uint64_t QuicSendOperations{0};
     uint64_t MaxTcpReadIovUsed{0};
+    uint64_t TcpWriteBatches{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t MaxTcpWriteIovUsed{0};
+    uint64_t ReadDisabledCount{0};
 };
 
 class TqLinuxRelayWorker final {
@@ -79,9 +92,17 @@ public:
     void EnqueueForTest(const TqLinuxRelayEvent& event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
+    TqLinuxRelayRegistrationResult RegisterRelayWithId(const TqLinuxRelayRegistration& registration);
     bool RegisterRelay(const TqLinuxRelayRegistration& registration);
     bool RegisterRelayForTest(const TqLinuxRelayRegistration& registration);
+    void UnregisterRelay(uint64_t relayId);
     bool WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs);
+    bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
+
+    static QUIC_STATUS QUIC_API StreamCallback(
+        _In_ MsQuicStream* stream,
+        _In_opt_ void* context,
+        _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
     struct RelayState;
@@ -91,6 +112,15 @@ private:
     bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
     void CompleteQuicSend(void* context);
     RelayState* FindRelayById(uint64_t relayId);
+    RelayState* FindRelayByFd(int tcpFd);
+    uint64_t FindRelayIdByStream(MsQuicStream* stream);
+    bool CopyQuicReceiveToEvent(uint64_t relayId, const uint8_t* data, uint32_t length);
+    void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
+    void ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event);
+    bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);
+    void FlushTcpWrites(RelayState* relay);
+    void ArmTcpWritable(RelayState* relay, bool enabled);
+    QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
     void Run();
 
     TqLinuxRelayWorkerConfig Config;
@@ -110,4 +140,23 @@ private:
     std::atomic<uint64_t> TcpReadBytes{0};
     std::atomic<uint64_t> QuicSendOperations{0};
     std::atomic<uint64_t> MaxTcpReadIovUsed{0};
+    std::atomic<uint64_t> TcpWriteBatches{0};
+    std::atomic<uint64_t> TcpWriteBytes{0};
+    std::atomic<uint64_t> MaxTcpWriteIovUsed{0};
+    std::atomic<uint64_t> ReadDisabledCount{0};
+};
+
+class TqLinuxRelayRuntime final {
+public:
+    static TqLinuxRelayRuntime& Instance();
+    bool Start(const TqTuningConfig& tuning);
+    void Stop();
+    TqLinuxRelayWorker* PickWorker();
+    TqLinuxRelayWorkerSnapshot Snapshot() const;
+
+private:
+    TqLinuxRelayRuntime() = default;
+    mutable std::mutex Lock;
+    std::vector<std::unique_ptr<TqLinuxRelayWorker>> Workers;
+    size_t NextWorker{0};
 };

@@ -1,5 +1,9 @@
 #include "relay.h"
 
+#if defined(__linux__)
+#include "linux_relay_worker.h"
+#endif
+
 #include "msquic.hpp"
 #include "tcp_write_queue.h"
 #include "tuning.h"
@@ -682,13 +686,43 @@ bool TqRelayStart(
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
     TqCompressAlgo compressAlgo) {
-    if (handle == nullptr || handle->Relay != nullptr) {
+    if (handle == nullptr || handle->Relay != nullptr ||
+        handle->Backend != TqRelayBackendType::None) {
         return false;
     }
 
     const uint32_t activeRelays = TqRelayRegisterActive();
     TqTuningConfig tuning = profileTuning;
     TqApplyRelayPoolBudget(tuning, activeRelays);
+
+#if defined(__linux__)
+    if (compressor == nullptr && decompressor == nullptr) {
+        if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
+            TqRelayUnregisterActive();
+            return false;
+        }
+        TqLinuxRelayWorker* worker = TqLinuxRelayRuntime::Instance().PickWorker();
+        if (worker == nullptr) {
+            TqRelayUnregisterActive();
+            return false;
+        }
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = tcpFd;
+        registration.Stream = stream;
+        registration.Handle = handle;
+        registration.EnableQuicSends = true;
+        const auto registered = worker->RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            TqRelayUnregisterActive();
+            return false;
+        }
+        handle->Backend = TqRelayBackendType::LinuxWorker;
+        handle->LinuxWorker = worker;
+        handle->LinuxRelayId = registered.RelayId;
+        handle->Relay = nullptr;
+        return true;
+    }
+#endif
 
     auto* relay = new (std::nothrow) TqTunnelRelay(
         tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo);
@@ -703,6 +737,7 @@ bool TqRelayStart(
         return false;
     }
 
+    handle->Backend = TqRelayBackendType::Blocking;
     handle->Relay = relay;
     return true;
 }
@@ -712,8 +747,25 @@ void TqRelayStop(TqRelayHandle* handle) {
         return;
     }
 
+#if defined(__linux__)
+    if (handle->Backend == TqRelayBackendType::LinuxWorker) {
+        TqLinuxRelayWorker* worker = handle->LinuxWorker;
+        const uint64_t relayId = handle->LinuxRelayId;
+        handle->Backend = TqRelayBackendType::None;
+        handle->LinuxWorker = nullptr;
+        handle->LinuxRelayId = 0;
+        handle->Stop.store(true);
+        if (worker != nullptr && relayId != 0) {
+            worker->UnregisterRelay(relayId);
+        }
+        TqRelayUnregisterActive();
+        return;
+    }
+#endif
+
     auto* relay = handle->Relay;
     handle->Relay = nullptr;
+    handle->Backend = TqRelayBackendType::None;
     if (relay != nullptr) {
         relay->Stop();
         delete relay;
@@ -721,4 +773,13 @@ void TqRelayStop(TqRelayHandle* handle) {
     } else {
         handle->Stop.store(true);
     }
+}
+
+bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle) {
+#if defined(__linux__)
+    return handle != nullptr && handle->Backend == TqRelayBackendType::LinuxWorker;
+#else
+    (void)handle;
+    return false;
+#endif
 }
