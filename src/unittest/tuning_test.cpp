@@ -203,5 +203,36 @@ int main() {
         assert(!TqParseArgs(12, argv, cfg, err));
     }
 
+    {
+        TqSetRelayMemoryBudget(512);
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Wan;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
+        assert(cfg.Tuning.LinuxRelayMaxIov == 16);
+        assert(cfg.Tuning.LinuxRelayReadChunkSize == 64 * 1024);
+        assert(cfg.Tuning.LinuxRelayReadBatchBytes == 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 4096);
+        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayGlobalPendingBytes == 512ull * 1024 * 1024 / 2);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 4u * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerWorkerPendingBytes >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
+
+        TqSetRelayMemoryBudget(0);
+    }
+
+    {
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Lan;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        assert(cfg.Tuning.LinuxRelayMaxIov == 8);
+        assert(cfg.Tuning.LinuxRelayReadChunkSize == 32 * 1024);
+        assert(cfg.Tuning.LinuxRelayReadBatchBytes == 256 * 1024);
+        assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 1024);
+        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 16u * 1024 * 1024);
+    }
+
     return 0;
 }

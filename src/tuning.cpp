@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 namespace {
 
@@ -129,6 +130,46 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideQuicInitRttMs > 0) {
         out.InitialRttMs = cfg.TuningOverrideQuicInitRttMs;
     }
+}
+
+uint32_t TqDetectLinuxRelayWorkers() {
+    const unsigned int detected = std::thread::hardware_concurrency();
+    if (detected == 0) {
+        return 1;
+    }
+    return std::max(1u, std::min(detected, 8u));
+}
+
+void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
+    out.LinuxRelayWorkerCount = TqDetectLinuxRelayWorkers();
+
+    if (mode == TqTuningMode::Lan) {
+        out.LinuxRelayMaxIov = 8;
+        out.LinuxRelayReadChunkSize = 32 * 1024;
+        out.LinuxRelayReadBatchBytes = 256 * 1024;
+        out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
+        out.LinuxRelayWorkerEventBudget = 1024;
+        out.LinuxRelayWorkerByteBudgetPerTick = 16ull * 1024 * 1024;
+    } else {
+        out.LinuxRelayMaxIov = 16;
+        out.LinuxRelayReadChunkSize = 64 * 1024;
+        out.LinuxRelayReadBatchBytes = 1024 * 1024;
+        out.LinuxRelayQuicRecvBatchBytes = 1024 * 1024;
+        out.LinuxRelayWorkerEventBudget = 4096;
+        out.LinuxRelayWorkerByteBudgetPerTick = 64ull * 1024 * 1024;
+    }
+
+    const uint64_t configuredMemoryBytes =
+        static_cast<uint64_t>(TqGetRelayMemoryBudget()) * 1024ull * 1024ull;
+    const uint64_t relayMemoryBytes =
+        configuredMemoryBytes == 0 ? 512ull * 1024 * 1024 : configuredMemoryBytes;
+    out.LinuxRelayGlobalPendingBytes = relayMemoryBytes / 2;
+    out.LinuxRelayPerTunnelPendingBytes = std::min<uint64_t>(
+        16ull * 1024 * 1024,
+        std::max<uint64_t>(4ull * 1024 * 1024, out.LinuxRelayReadBatchBytes * 4));
+    out.LinuxRelayPerWorkerPendingBytes = std::max<uint64_t>(
+        out.LinuxRelayPerTunnelPendingBytes,
+        out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1));
 }
 
 } // namespace
@@ -256,6 +297,7 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         ApplyCustomOverrides(cfg, out);
         break;
     }
+    TqApplyLinuxRelayDefaults(out, cfg.TuningMode);
 }
 
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb) {

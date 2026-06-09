@@ -22,6 +22,16 @@ struct TqTuningConfig {
     uint32_t RelayMaxInFlightSends{64};
     size_t RelayMaxFreeSendContexts{64};
     int TcpSocketBufferBytes{4 * 1024 * 1024};
+    uint32_t LinuxRelayWorkerCount{0};
+    uint32_t LinuxRelayMaxIov{16};
+    size_t LinuxRelayReadChunkSize{64 * 1024};
+    size_t LinuxRelayReadBatchBytes{1024 * 1024};
+    size_t LinuxRelayQuicRecvBatchBytes{1024 * 1024};
+    uint64_t LinuxRelayGlobalPendingBytes{256ull * 1024 * 1024};
+    uint64_t LinuxRelayPerWorkerPendingBytes{32ull * 1024 * 1024};
+    uint64_t LinuxRelayPerTunnelPendingBytes{4ull * 1024 * 1024};
+    uint32_t LinuxRelayWorkerEventBudget{4096};
+    uint64_t LinuxRelayWorkerByteBudgetPerTick{64ull * 1024 * 1024};
 };
 
 struct TqRuntimeObservations {
