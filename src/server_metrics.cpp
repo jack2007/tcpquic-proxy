@@ -59,6 +59,7 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
 
 #if defined(__linux__)
     const auto linuxRelay = TqLinuxRelayRuntime::Instance().Snapshot();
+    const char* linuxRelayBackend = "worker";
     const uint64_t linuxRelayWakeups = linuxRelay.WakeupWrites;
     const uint64_t linuxRelayEventsProcessed = linuxRelay.EventsProcessed;
     const uint64_t linuxRelayPendingEvents = linuxRelay.PendingEvents;
@@ -66,7 +67,11 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     const uint64_t linuxRelayTcpReadBytes = linuxRelay.TcpReadBytes;
     const uint64_t linuxRelayTcpWriteBytes = linuxRelay.TcpWriteBytes;
     const uint64_t linuxRelayReadDisabledCount = linuxRelay.ReadDisabledCount;
+    const uint64_t linuxRelayCompressedTcpBytes = linuxRelay.CompressedTcpBytes;
+    const uint64_t linuxRelayDecompressedTcpBytes = linuxRelay.DecompressedTcpBytes;
+    const uint64_t linuxRelayErrors = linuxRelay.Errors;
 #else
+    const char* linuxRelayBackend = "unsupported";
     const uint64_t linuxRelayWakeups = metrics.LinuxRelayWakeups;
     const uint64_t linuxRelayEventsProcessed = metrics.LinuxRelayEventsProcessed;
     const uint64_t linuxRelayPendingEvents = metrics.LinuxRelayPendingEvents;
@@ -74,6 +79,9 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     const uint64_t linuxRelayTcpReadBytes = metrics.LinuxRelayTcpReadBytes;
     const uint64_t linuxRelayTcpWriteBytes = metrics.LinuxRelayTcpWriteBytes;
     const uint64_t linuxRelayReadDisabledCount = metrics.LinuxRelayReadDisabledCount;
+    const uint64_t linuxRelayCompressedTcpBytes = 0;
+    const uint64_t linuxRelayDecompressedTcpBytes = 0;
+    const uint64_t linuxRelayErrors = 0;
 #endif
 
     out << ",\"linux_relay_wakeups\":" << linuxRelayWakeups;
@@ -83,6 +91,11 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     out << ",\"linux_relay_tcp_read_bytes\":" << linuxRelayTcpReadBytes;
     out << ",\"linux_relay_tcp_write_bytes\":" << linuxRelayTcpWriteBytes;
     out << ",\"linux_relay_read_disabled_count\":" << linuxRelayReadDisabledCount;
+    out << ',';
+    TqAppendJsonString(out, "linux_relay_backend", linuxRelayBackend);
+    out << ",\"linux_relay_compressed_tcp_bytes\":" << linuxRelayCompressedTcpBytes;
+    out << ",\"linux_relay_decompressed_tcp_bytes\":" << linuxRelayDecompressedTcpBytes;
+    out << ",\"linux_relay_errors\":" << linuxRelayErrors;
     out << ',';
     TqAppendJsonString(out, "last_error", metrics.LastError);
     out << '}';

@@ -79,6 +79,9 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpWriteBytes{0};
     uint64_t MaxTcpWriteIovUsed{0};
     uint64_t ReadDisabledCount{0};
+    uint64_t CompressedTcpBytes{0};
+    uint64_t DecompressedTcpBytes{0};
+    uint64_t Errors{0};
 };
 
 class TqLinuxRelayWorker final {
@@ -153,6 +156,9 @@ private:
     std::atomic<uint64_t> TcpWriteBytes{0};
     std::atomic<uint64_t> MaxTcpWriteIovUsed{0};
     std::atomic<uint64_t> ReadDisabledCount{0};
+    std::atomic<uint64_t> CompressedTcpBytes{0};
+    std::atomic<uint64_t> DecompressedTcpBytes{0};
+    std::atomic<uint64_t> Errors{0};
 };
 
 class TqLinuxRelayRuntime final {

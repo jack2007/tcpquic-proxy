@@ -313,6 +313,7 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
         for (size_t i = 0; i < maxIov && readBytes + Config.ReadChunkSize <= tickBudget; ++i) {
             auto buffer = relay->Pool.Acquire();
             if (!buffer) {
+                Errors.fetch_add(1);
                 break;
             }
             iovec item{};
@@ -386,11 +387,13 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
     relay->CompressionOutput.clear();
     for (const auto& view : input) {
         if (!relay->Compressor->Compress(view.Data, view.Len, relay->CompressionOutput, false)) {
+            Errors.fetch_add(1);
             return false;
         }
     }
     if (relay->CompressionOutput.empty() &&
         !relay->Compressor->Flush(relay->CompressionOutput)) {
+        Errors.fetch_add(1);
         return false;
     }
     if (relay->CompressionOutput.empty()) {
@@ -400,11 +403,13 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
 
     auto buffer = relay->Pool.Acquire();
     if (!buffer || relay->CompressionOutput.size() > buffer->Capacity()) {
+        Errors.fetch_add(1);
         return false;
     }
     std::memcpy(buffer->Data(), relay->CompressionOutput.data(), relay->CompressionOutput.size());
     buffer->SetLength(relay->CompressionOutput.size());
     output.push_back(TqBufferView{buffer->Data(), relay->CompressionOutput.size(), buffer});
+    CompressedTcpBytes.fetch_add(relay->CompressionOutput.size());
     input.clear();
     return true;
 }
@@ -431,6 +436,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     quicBuffers.reserve(views.size());
     for (const auto& view : views) {
         if (view.Len > UINT32_MAX) {
+            Errors.fetch_add(1);
             return false;
         }
         QUIC_BUFFER buffer{};
@@ -441,6 +447,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
 
     auto* operation = new (std::nothrow) TqLinuxRelaySendOperation{};
     if (operation == nullptr) {
+        Errors.fetch_add(1);
         return false;
     }
     operation->RelayId = relay->Id;
@@ -453,6 +460,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
         operation);
     if (QUIC_FAILED(status)) {
         delete operation;
+        Errors.fetch_add(1);
         return false;
     }
     ++relay->OutstandingQuicSends;
@@ -524,6 +532,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveToEvent(
     while (offset < length) {
         auto buffer = relay->Pool.Acquire();
         if (!buffer) {
+            Errors.fetch_add(1);
             return false;
         }
         const size_t chunk = std::min(buffer->Capacity(), static_cast<size_t>(length - offset));
@@ -578,8 +587,10 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
     if (relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None) {
         relay->DecompressionOutput.clear();
         if (!relay->Decompressor->Decompress(data, length, relay->DecompressionOutput)) {
+            Errors.fetch_add(1);
             return false;
         }
+        DecompressedTcpBytes.fetch_add(relay->DecompressionOutput.size());
         writeData = relay->DecompressionOutput.data();
         writeLength = relay->DecompressionOutput.size();
     }
@@ -588,6 +599,7 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
     while (offset < writeLength) {
         auto buffer = relay->Pool.Acquire();
         if (!buffer) {
+            Errors.fetch_add(1);
             return false;
         }
         const size_t chunk = std::min(buffer->Capacity(), writeLength - offset);
@@ -707,6 +719,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpWriteBytes = TcpWriteBytes.load();
     snapshot.MaxTcpWriteIovUsed = MaxTcpWriteIovUsed.load();
     snapshot.ReadDisabledCount = ReadDisabledCount.load();
+    snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
+    snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
+    snapshot.Errors = Errors.load();
 
     {
         std::lock_guard<std::mutex> relayGuard(RelayLock);
@@ -869,6 +884,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpWriteBytes += snapshot.TcpWriteBytes;
         total.MaxTcpWriteIovUsed = std::max(total.MaxTcpWriteIovUsed, snapshot.MaxTcpWriteIovUsed);
         total.ReadDisabledCount += snapshot.ReadDisabledCount;
+        total.CompressedTcpBytes += snapshot.CompressedTcpBytes;
+        total.DecompressedTcpBytes += snapshot.DecompressedTcpBytes;
+        total.Errors += snapshot.Errors;
     }
     return total;
 }
