@@ -1,9 +1,15 @@
 #include "acl.h"
 
+#include "platform_socket.h"
+
+#if !defined(_WIN32)
 #include <arpa/inet.h>
+#endif
 #include <cctype>
 #include <cstring>
+#if !defined(_WIN32)
 #include <netdb.h>
+#endif
 #include <string>
 #include <vector>
 
@@ -46,7 +52,7 @@ bool ParseCidr(const std::string& cidr, ParsedCidr& out) {
     }
 
     in_addr v4{};
-    if (inet_pton(AF_INET, addr_str.c_str(), &v4) == 1) {
+    if (TqInetPton(AF_INET, addr_str.c_str(), &v4)) {
         if (prefix < 0 || prefix > 32) {
             return false;
         }
@@ -58,7 +64,7 @@ bool ParseCidr(const std::string& cidr, ParsedCidr& out) {
     }
 
     in6_addr v6{};
-    if (inet_pton(AF_INET6, addr_str.c_str(), &v6) == 1) {
+    if (TqInetPton(AF_INET6, addr_str.c_str(), &v6)) {
         if (prefix < 0 || prefix > 128) {
             return false;
         }
@@ -124,7 +130,7 @@ bool ParseIpLiteral(const std::string& host, sockaddr_storage& out) {
     std::memset(&out, 0, sizeof(out));
 
     in_addr v4{};
-    if (inet_pton(AF_INET, host.c_str(), &v4) == 1) {
+    if (TqInetPton(AF_INET, host.c_str(), &v4)) {
         auto* sin = reinterpret_cast<sockaddr_in*>(&out);
         out.ss_family = AF_INET;
         sin->sin_addr = v4;
@@ -132,7 +138,7 @@ bool ParseIpLiteral(const std::string& host, sockaddr_storage& out) {
     }
 
     in6_addr v6{};
-    if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) {
+    if (TqInetPton(AF_INET6, host.c_str(), &v6)) {
         auto* sin6 = reinterpret_cast<sockaddr_in6*>(&out);
         out.ss_family = AF_INET6;
         sin6->sin6_addr = v6;
