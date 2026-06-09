@@ -573,14 +573,25 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
         return false;
     }
 
+    const uint8_t* writeData = data;
+    size_t writeLength = length;
+    if (relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None) {
+        relay->DecompressionOutput.clear();
+        if (!relay->Decompressor->Decompress(data, length, relay->DecompressionOutput)) {
+            return false;
+        }
+        writeData = relay->DecompressionOutput.data();
+        writeLength = relay->DecompressionOutput.size();
+    }
+
     size_t offset = 0;
-    while (offset < length) {
+    while (offset < writeLength) {
         auto buffer = relay->Pool.Acquire();
         if (!buffer) {
             return false;
         }
-        const size_t chunk = std::min(buffer->Capacity(), length - offset);
-        std::memcpy(buffer->Data(), data + offset, chunk);
+        const size_t chunk = std::min(buffer->Capacity(), writeLength - offset);
+        std::memcpy(buffer->Data(), writeData + offset, chunk);
         buffer->SetLength(chunk);
         relay->PendingTcpWrites.push_back(TqBufferView{buffer->Data(), chunk, buffer});
         offset += chunk;
