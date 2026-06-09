@@ -4,16 +4,16 @@
 
 ## 1. 总体结论
 
-`tcpquic-proxy` 是 **应用自建线程 + MsQuic MAX_THROUGHPUT worker + 每隧道 relay 线程** 的混合模型：
+`tcpquic-proxy` 是 **应用自建线程 + MsQuic MAX_THROUGHPUT worker + Linux relay worker 分片** 的混合模型：
 
 - MsQuic 协议执行使用 `QUIC_EXECUTION_PROFILE_TYPE_MAX_THROUGHPUT`，因此会创建独立 `quic_worker` 线程。
 - UDP datapath 仍由 msquic 库级 `cxplat_worker` 处理。
 - client 模式额外创建 2 个监听线程：SOCKS5 listener 和 HTTP CONNECT listener。
 - 每个 accepted 本地 TCP 连接由固定大小的 **handshake 线程池**（`TqThreadPool`，默认 8 worker，`--handshake-threads` 可配）处理 SOCKS5 / HTTP CONNECT 握手和 OPEN 阶段，不再为每个连接 detached 一个 handler 线程。
-- 每条已建立隧道会创建 1 个 `TqTunnelRelay::TcpThread`，负责 **TCP → QUIC Stream** 方向的阻塞 `recv()` 与 `Stream->Send()`。
-- **QUIC Stream → TCP** 方向在 MsQuic stream 回调线程上只做入队：`OnStreamReceive()` 将数据写入 `TqTcpWriteQueue`，由独立的 **TcpWriter 线程** 阻塞 `send()` 到 TCP fd，避免慢 TCP 写阻塞 `quic_worker`。
+- Linux 生产路径不再为每条隧道创建 relay TCP 线程。所有 relay TCP fd 由 `TqLinuxRelayWorker` 分片持有，通过 `epoll`、`readv`、`writev` 处理。旧 `TqBlockingDemoRelay` 仅用于 demo/legacy 对比，不属于生产线程模型。
+- **QUIC Stream → TCP** 方向：MsQuic stream 回调将 receive 数据拷贝到 worker 池化缓冲，由 owner worker 通过 `writev` 写出，避免慢 TCP 写阻塞 `quic_worker`。
 - 隧道清理由进程级 **全局 reaper**（`TqTunnelReaper`，单线程轮询）统一回收 context，不再为每条隧道创建 cleanup watcher。
-- server 模式没有 SOCKS5 / HTTP CONNECT 监听线程，但每条入站 QUIC stream 会创建拨号线程和 relay 线程。
+- server 模式没有 SOCKS5 / HTTP CONNECT 监听线程，但每条入站 QUIC stream 会创建拨号线程；relay 注册到 Linux worker 分片。
 - 同一 QUIC connection / stream 的 MsQuic 回调仍遵守 msquic 串行语义：不会对同一连接并行回调应用。
 
 ## 2. 线程来源
@@ -48,8 +48,8 @@ TqToMsQuicProfile(cfg.QuicProfile)
 | HTTP CONNECT listener | 有 | 无 | `RunClient()` | 阻塞 `accept()` HTTP CONNECT TCP 连接 |
 | handshake 线程池 | 有 | 无 | `RunClient()` → `TqThreadPool` | 固定 worker 数（默认 8），处理 SOCKS5 / HTTP CONNECT 握手与 OPEN |
 | server dial worker | 无 | 有 | `TryHandleServerOpen()` | 每条入站 QUIC stream 一个 detached 线程，DNS/ACL 后非阻塞 connect 目标 TCP |
-| relay TCP thread | 有 | 有 | `TqTunnelRelay::Start()` | 每条隧道一个线程，负责 TCP→QUIC 方向 |
-| QUIC→TCP writer | 有 | 有 | `TqTcpWriteQueue::Start()` | 每条隧道一个 writer 线程，从队列阻塞写 TCP fd |
+| Linux relay worker | 有 | 有 | `TqLinuxRelayRuntime::Start()` | 固定数量 worker 分片，epoll 多路复用所有 relay TCP fd |
+| relay TCP fd 注册 | 有 | 有 | `TqRelayStart()` → `RegisterRelayWithId()` | 每条隧道注册到某个 worker，无 per-tunnel TCP 读线程 |
 | tunnel reaper | 有 | 有 | `TqTunnelReaper::Instance()` | 全局单线程，轮询已停止隧道并释放 context |
 
 ## 3. Client 模式线程模型
@@ -115,17 +115,17 @@ quic_worker thread
 handler thread
   └─ StartRelay()
        └─ TqRelayStart()
-            ├─ 设置 StreamCallback = TqTunnelRelay::StreamCallback
-            ├─ fast path 预分配 send context pool
-            └─ std::thread(&TqTunnelRelay::TcpToStreamLoop)
+            ├─ TqLinuxRelayRuntime::PickWorker()
+            ├─ worker->RegisterRelayWithId(registration)
+            └─ StreamCallback = TqLinuxRelayWorker::StreamCallback
 ```
 
 数据方向分为两条线程路径：
 
 | 方向 | 线程 | 路径 |
 |------|------|------|
-| 本地 TCP → QUIC | relay `TcpThread` | `recv(tunnelFd)` → 可选压缩 → `Stream->Send()` |
-| QUIC → 本地 TCP | relay `TcpWriter` 线程 | `QUIC_STREAM_EVENT_RECEIVE` → 入队 `TqTcpWriteQueue` → `send(tunnelFd)` |
+| 本地 TCP → QUIC | Linux relay worker | `epoll` 就绪 → `readv(tunnelFd)` → 可选压缩 → 多缓冲 `Stream->Send()` |
+| QUIC → 本地 TCP | Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入池 → 可选解压 → `writev(tunnelFd)` |
 
 ## 4. Server 模式线程模型
 
@@ -191,8 +191,8 @@ relay 成功后，server 的数据路径与 client 对称：
 
 | 方向 | 线程 | 路径 |
 |------|------|------|
-| 目标 TCP → QUIC | relay `TcpThread` | `recv(targetFd)` → 可选压缩 → `Stream->Send()` |
-| QUIC → 目标 TCP | relay `TcpWriter` 线程 | `QUIC_STREAM_EVENT_RECEIVE` → 入队 `TqTcpWriteQueue` → `send(targetFd)` |
+| 目标 TCP → QUIC | Linux relay worker | `epoll` 就绪 → `readv(targetFd)` → 可选压缩 → 多缓冲 `Stream->Send()` |
+| QUIC → 目标 TCP | Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入池 → 可选解压 → `writev(targetFd)` |
 
 ## 5. 每条隧道的线程与对象生命周期
 
@@ -202,8 +202,8 @@ relay 成功后，server 的数据路径与 client 对称：
 |-------------|------|----------|
 | `TqTunnelContext` | 1 | OPEN 阶段创建并 `Register` 到 reaper，relay 结束后由全局 reaper 删除 |
 | `MsQuicStream` wrapper | 1 | QUIC stream 生命周期 |
-| relay `TcpThread` | 1 | `TqRelayStart()` 创建，`TqRelayStop()` join |
-| relay `TcpWriter` | 1 | `TqTcpWriteQueue` writer 线程，`TqRelayStop()` 时 join |
+| Linux relay 注册 | 1 | `TqRelayStart()` 注册到 worker，`TqRelayStop()` 注销 |
+| `TqLinuxRelayWorker` 分片 | W（tuning 决定） | 进程级 runtime，`TqLinuxRelayRuntime` 管理 |
 | tunnel reaper | 全局 1 | `TqTunnelReaper::ReaperLoop()` 轮询所有已注册 context |
 | server dial worker | server 侧 0 或 1 | OPEN request 后创建，拨号完成即退出 |
 | handshake pool worker | client 侧固定 H | 复用处理本地 CONNECT/SOCKS 握手，任务完成后归还池 |
@@ -217,9 +217,8 @@ TCP recv 返回 0 或 QUIC FIN/abort
   ├─ SendCv.notify_all()
   ├─ 全局 reaper 观察到 Stop
   ├─ TqRelayStop()
+  │    ├─ worker->UnregisterRelay(relayId)
   │    ├─ DetachStreamCallback()
-  │    ├─ Stop TcpWriter 并 join
-  │    ├─ join TcpThread
   │    └─ FlushRuntimeSample / FlushCompressionSample
   ├─ CloseTcp()
   └─ delete TqTunnelContext（reaper Unregister）
@@ -234,37 +233,35 @@ TCP recv 返回 0 或 QUIC FIN/abort
 ### 6.1 TCP → QUIC 发送路径
 
 ```text
-relay TcpThread
-  ├─ recv(TcpFd, ...)
-  ├─ fast path: 直接 recv 到 TqRelaySendContext::Data
-  ├─ SendContextToStream
-  │    └─ Stream->Send(...)
-  └─ FillSendPipeline
-       └─ MSG_DONTWAIT 继续 pump，直到 in-flight / ideal send 达上限
+Linux relay worker
+  ├─ epoll 就绪 → readv(TcpFd, pooled buffers)
+  ├─ 可选压缩 → 多缓冲 TqBufferView
+  ├─ Stream->Send(...)
+  └─ SEND_COMPLETE → 释放池化缓冲并继续 pump
 ```
 
 `Stream->Send()` 的真实组包与 UDP `sendmsg()` 是否在当前线程完成，取决于 msquic 的 worker 归属：
 
 - 如果当前线程不是连接所属 `quic_worker`，MsQuic 会把 API send 操作投递到连接 worker。
 - 后续 `QUIC_STREAM_EVENT_SEND_COMPLETE` 在 `quic_worker` 回调线程触发。
-- relay 在 SEND_COMPLETE 中减少 `OutstandingBytes` / `InFlightSends` 并唤醒 `TcpThread`。
+- relay worker 在 SEND_COMPLETE 中释放缓冲并继续处理同 relay 的 TCP 可读事件。
 
 ### 6.2 QUIC → TCP 接收路径
 
 ```text
 MsQuic quic_worker thread
   └─ QUIC_STREAM_EVENT_RECEIVE
-       └─ TqTunnelRelay::OnStreamReceive
+       └─ TqLinuxRelayWorker::OnStreamEvent
+            ├─ 拷贝 receive buffer 到 worker 池
             ├─ 可选 Decompress
-            └─ TcpWriter->Enqueue(...)
-                 └─ 唤醒 relay TcpWriter 线程
+            └─ 入队 QUIC receive 事件 → 唤醒 owner worker
 
-relay TcpWriter thread
-  └─ TqTcpWriteQueue::WriterLoop
-       └─ TqWriteAll(TcpFd) → send(TcpFd, ..., MSG_NOSIGNAL)
+Linux relay worker
+  └─ ProcessQuicReceiveEvent
+       └─ writev(TcpFd, pooled views)
 ```
 
-优化后 QUIC 回调只做入队，**阻塞 TCP send 发生在独立 TcpWriter 线程**，不再占用 `quic_worker`。
+优化后 QUIC 回调只做拷贝与入队，**阻塞 TCP writev 发生在 owner relay worker 线程**，不再占用 `quic_worker`，也不再为每条隧道创建 TcpWriter 线程。
 
 ## 7. 线程数量估算
 
@@ -277,6 +274,7 @@ L = 当前活跃隧道数
 H = handshake 线程池 worker 数（默认 8，`--handshake-threads` 或 0=auto）
 A = 正在握手队列中等待的 accepted TCP 数（≤ H 并发执行）
 D = server 正在拨号的 OPEN 请求数
+W = Linux relay worker 分片数（tuning 决定，通常 ≪ L）
 ```
 
 ### 7.1 Client 模式
@@ -291,23 +289,22 @@ D = server 正在拨号的 OPEN 请求数
 + 2 listener 线程
 + H handshake pool worker
 + 1 tunnel reaper
-+ L relay TcpThread
-+ L TcpWriter 线程
++ W Linux relay worker
 ```
 
 即：
 
 ```text
-client_threads ≈ 1 + 2N + 2 + 2 + H + 1 + 2L
+client_threads ≈ 1 + 2N + 2 + 2 + H + 1 + W
 ```
 
-如果 N=20、L=100、H=8，则约：
+如果 N=20、L=100、H=8、W=4，则约：
 
 ```text
-1 + 40 + 2 + 2 + 8 + 1 + 200 = 254 线程
+1 + 40 + 2 + 2 + 8 + 1 + 4 = 58 线程
 ```
 
-相较优化前（每隧道 relay + cleanup watcher ≈ 2L 隧道线程），**去掉 L 个 cleanup watcher，净减少约 L−1 个线程**（100 隧道时约少 99 个）。
+相较 per-tunnel blocking relay（≈ 2L 隧道线程 + cleanup watcher），**Linux worker 分片将 relay 侧线程从 O(L) 降为 O(W)**。
 
 ### 7.2 Server 模式
 
@@ -319,21 +316,20 @@ client_threads ≈ 1 + 2N + 2 + 2 + H + 1 + 2L
 + N quic_worker
 + 2 MsQuic 辅助线程左右
 + 1 tunnel reaper
-+ L relay TcpThread
-+ L TcpWriter 线程
++ W Linux relay worker
 + D dial worker
 ```
 
 即：
 
 ```text
-server_threads ≈ 1 + 2N + 2 + 1 + 2L + D
+server_threads ≈ 1 + 2N + 2 + 1 + W + D
 ```
 
-如果 N=20、L=100、D≈0，则约：
+如果 N=20、L=100、W=4、D≈0，则约：
 
 ```text
-1 + 40 + 2 + 1 + 200 = 244 线程
+1 + 40 + 2 + 1 + 4 = 48 线程
 ```
 
 实际线程数会随 Registration close worker、系统库线程、短生命周期 handler/dial 线程略有波动。
@@ -344,36 +340,30 @@ server_threads ≈ 1 + 2N + 2 + 1 + 2L + D
 |------|------------|---------------|
 | 执行 profile | CLI `-exec:` 可选 | CLI `--quic-profile` 可选 max-throughput / low-latency |
 | 工具级 WorkerPool | 有，通常多一套 `cxplat_worker` | 无 |
-| 应用发送线程 | `Perf Worker -threads:N` | 每隧道 1 个 relay `TcpThread` |
-| 应用接收处理 | perf 回调较轻，统计为主 | QUIC 回调入队，blocking `send()` 在 TcpWriter 线程 |
+| 应用发送线程 | `Perf Worker -threads:N` | W 个 Linux relay worker 分片 epoll/readv 多路复用 |
+| 应用接收处理 | perf 回调较轻，统计为主 | QUIC 回调拷贝入池，blocking `writev()` 在 owner relay worker |
 | 连接/stream 数 | 压测参数控制 | 1 TCP 连接 = 1 QUIC 双向 stream |
-| 并发模型 | 少量 perf worker 驱动大量 stream | 大量 TCP 隧道会线性增加应用线程 |
+| 并发模型 | 少量 perf worker 驱动大量 stream | relay 侧线程数随 W 而非 L 增长 |
 
 ## 9. 性能风险点
 
 ### 9.1 QUIC 回调与 TCP 写路径（已优化）
 
-`OnStreamReceive()` 在 MsQuic `quic_worker` 上只做解压与 `TcpWriter->Enqueue()`，阻塞 `send()` 已移到 `TqTcpWriteQueue` writer 线程。慢 TCP 后端不再直接占用 `quic_worker`。
+MsQuic `quic_worker` 上的 stream 回调只做 receive 拷贝与事件入队；阻塞 `writev()` 在 owner `TqLinuxRelayWorker` 线程执行。慢 TCP 后端不再直接占用 `quic_worker`。
 
-剩余风险：入队队列满或 writer 线程阻塞时，仍可能通过背压间接影响接收侧；高并发需关注 `TqTcpWriteQueue` 的 `maxChunks` / `maxBytes` 上限。
+剩余风险：worker 侧 TCP 写缓冲积压或池化缓冲耗尽时，仍可能通过背压间接影响接收侧；高并发需关注 `TqLinuxRelayBufferPool` 预算与 worker fairness tick。
 
-### 9.2 每隧道两个数据路径线程
+### 9.2 relay worker 分片与公平性
 
-每条活跃隧道有：
-
-```text
-relay TcpThread（TCP→QUIC）+ TcpWriter 线程（QUIC→TCP）
-```
-
-100 并发时数据路径约 200 个线程。相较优化前，**不再额外增加 per-tunnel cleanup watcher**；清理由全局单线程 reaper 承担。
+Linux 生产路径不再为每条隧道创建 relay 线程。所有 relay TCP fd 由固定数量 worker 分片 epoll 多路复用；单 worker 上 relay 过多时需关注 fairness budget 与 wake coalescing。
 
 ### 9.3 handshake 线程池容量
 
 client 的 SOCKS5 / HTTP listener 将 accept 的 fd 提交到 `TqThreadPool`。默认 8 worker 时，突发 100 并发握手会在队列中排队；压测脚本默认 `--handshake-threads 32` 以保证 100 隧道回归稳定。生产环境应按峰值并发调大 `--handshake-threads`。
 
-### 9.4 relay fast path 内存
+### 9.4 relay worker 内存
 
-fast path 会按 tuning 为每条 relay 预分配 send context pool，并按 active relays / memory budget 缩放。高并发时必须关注 `--max-memory-mb` 和 `RelayMaxFreeSendContexts`，避免 64 × 1MiB × 隧道数造成内存压力。
+relay worker 按 tuning 为每个 worker 维护池化缓冲，并按 active relays / memory budget 缩放。高并发时必须关注 `--max-memory-mb` 和 worker pool 上限，避免缓冲池随隧道数线性膨胀。
 
 ## 10. 建议优化方向
 
@@ -381,18 +371,21 @@ fast path 会按 tuning 为每条 relay 预分配 send context pool，并按 act
 |--------|------|------|------|
 | 高 | 保持 `MAX_THROUGHPUT` 作为 WAN / 高吞吐默认 | ✅ 默认 | 能把 datapath 与 QUIC 协议线程分离 |
 | 高 | 继续避免在 OPEN 回调中做 DNS / TCP connect | ✅ 已有 | server 已派发 dial worker |
-| 中 | QUIC→TCP 改异步 writer | ✅ DONE | `TqTcpWriteQueue` + per-tunnel TcpWriter 线程 |
+| 中 | QUIC→TCP 改 worker writev | ✅ DONE | `TqLinuxRelayWorker` copy-into-pool + writev |
 | 中 | cleanup watcher 合并为集中 reaper | ✅ DONE | `TqTunnelReaper` 全局单线程 |
 | 中 | accept handler 改线程池 | ✅ DONE | `TqThreadPool` handshake pool |
 | 中 | 按 profile 支持 LOW_LATENCY / MAX_THROUGHPUT 切换 | ✅ DONE | `--quic-profile max-throughput\|low-latency` |
-| 低 | relay TCP→QUIC 改 epoll 多路复用 | ✅ Linux fast path | Linux 无压缩 relay 已走 owner worker + epoll |
-| 低 | relay QUIC→TCP 改 worker writev | ✅ Linux fast path | 池化缓冲 + writev，替代 per-tunnel TcpWriter |
+| 低 | relay TCP→QUIC 改 epoll 多路复用 | ✅ DONE | Linux 生产路径：`TqLinuxRelayWorker` + epoll + readv |
+| 低 | relay QUIC→TCP 改 worker writev | ✅ DONE | 池化缓冲 + writev，无 per-tunnel TcpWriter |
+| 低 | 压缩隧道走 worker inline 压缩 | ✅ DONE | 含 zstd/lz4 的生产 relay 均注册到 worker |
 
-## Linux Phase 5 relay worker status
+## Linux relay worker 生产状态
 
-Linux fast-path relays now use owner workers with `epoll`, `eventfd`, `readv`, pooled buffers, batched `StreamSend`, and worker-owned `writev` for QUIC receive data. Compressed relays keep the previous blocking relay implementation because compression output still uses separate contiguous buffers and requires a later compression-pool design.
+Linux 生产 relay 仅走 `TqLinuxRelayWorker`：owner worker 通过 `epoll`、`eventfd`、`readv`、池化缓冲、多缓冲 `StreamSend` 与 worker 侧 `writev` 处理全部隧道（含压缩）。`TqRelayStop()` 只注销 worker relay，不删除 blocking demo 对象。
 
-Windows remains on the existing path in this phase. IOCP, WSARecv, and WSASend are not part of this Linux implementation.
+旧 blocking relay 已重命名为 `TqBlockingDemoRelay`，仅存在于 demo/test target，不参与 `tcpquic-proxy` 链接。
+
+Windows 仍沿用本阶段之前的实现路径；IOCP、WSAPoll、WSARecv、WSASend 不在 Linux worker 方案范围内。
 
 ## 11. 调试线程角色
 
@@ -414,10 +407,13 @@ thread apply all bt
 | `TqThreadPool::WorkerLoop` | handshake 线程池 worker |
 | `TqHandleSocks5Client` / `TqHandleHttpConnectClient` | 本地 TCP 握手（在线程池中执行） |
 | `FinishServerOpenAfterDial` / `TqDialTcp` | server 目标 TCP 拨号线程 |
-| `TqTunnelRelay::TcpToStreamLoop` | 每隧道 TCP→QUIC relay 线程 |
-| `TqTcpWriteQueue::WriterLoop` | 每隧道 QUIC→TCP writer 线程 |
+| `TqLinuxRelayWorker::Run` → `epoll_wait` | Linux relay worker 分片 |
+| `TqLinuxRelayWorker::DrainTcpReadable` | worker 侧 TCP→QUIC readv |
+| `TqLinuxRelayWorker::FlushTcpWrites` | worker 侧 QUIC→TCP writev |
 | `TqTunnelReaper::ReaperLoop` | 全局 tunnel 清理 reaper |
-| `TqTunnelRelay::OnStreamReceive` → `Enqueue` | QUIC worker 回调（仅入队，不阻塞 send） |
+| `TqLinuxRelayWorker::OnStreamEvent` | QUIC worker 回调（拷贝入池，不阻塞 writev） |
+| `TqBlockingDemoRelay::TcpToStreamLoop` | demo/legacy：每隧道 blocking relay（非 Linux 生产） |
+| `TqTcpWriteQueue::WriterLoop` | demo/legacy：每隧道 QUIC→TCP writer（非 Linux 生产） |
 
 ## 12. 关键源文件索引
 
@@ -430,11 +426,14 @@ thread apply all bt
 | `http_connect_server.cpp` | HTTP CONNECT accept loop、提交 handshake pool |
 | `tcp_tunnel.cpp` | OPEN 状态机、server dial worker、reaper 注册 |
 | `tunnel_reaper.cpp` | 全局 tunnel 清理 reaper |
-| `tcp_write_queue.cpp` | QUIC→TCP 异步写队列与 writer 线程 |
-| `relay.cpp` | 每隧道 TCP→QUIC 线程、QUIC→TCP 入队、send buffer pool |
+| `linux_relay_worker.cpp` | Linux 生产 relay：epoll/readv/writev、压缩/解压 |
+| `linux_relay_buffer_pool.cpp` | worker 池化缓冲 |
+| `relay.cpp` | 生产 `TqRelayStart()` / `TqRelayStop()`，Linux worker 选择 |
+| `relay_blocking_demo.cpp` | demo/legacy `TqBlockingDemoRelay`（非生产链接） |
+| `tcp_write_queue.cpp` | demo/legacy QUIC→TCP 写队列（非 Linux 生产） |
 | `tcp_dialer.cpp` | server 侧非阻塞 TCP connect、socket buffer 调优 |
 | `tuning.cpp` | 自适应 tuning、relay memory budget、runtime samples |
 
 ## 13. 一句话总结
 
-`tcpquic-proxy` 线程模型优化（阶段 1–4）已完成：MsQuic profile 可切换（默认 `MAX_THROUGHPUT`），每隧道 relay 线程负责阻塞 TCP 读，QUIC→TCP 经 `TqTcpWriteQueue` 异步写出，handshake 走固定线程池，隧道清理由全局 `TqTunnelReaper` 单线程回收（无 per-tunnel cleanup watcher）。100 隧道并发回归已通过。下一步可选方向是 relay TCP→QUIC 的 epoll 多路复用（未纳入本轮范围）。
+`tcpquic-proxy` Linux 生产线程模型：MsQuic profile 可切换（默认 `MAX_THROUGHPUT`），relay 由固定数量 `TqLinuxRelayWorker` 分片通过 epoll/readv/writev 多路复用全部隧道（含压缩），handshake 走固定线程池，隧道清理由全局 `TqTunnelReaper` 单线程回收。旧 `TqBlockingDemoRelay` / `TqTcpWriteQueue` 仅保留在 demo/legacy target 供对比，不参与生产链接。

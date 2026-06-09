@@ -1,5 +1,7 @@
 # Linux High Performance Threading and Batching Implementation Plan
 
+> Superseded production target: `docs/superpowers/plans/2026-06-09-linux-relay-full-replacement.md` changes the final target from "Linux worker fast path with blocking compressed fallback" to "Linux worker is the only production relay backend; blocking relay is demo-only."
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the Linux relay data path's per-tunnel TCP reader with worker-owned epoll/readv batching, then migrate QUIC receive writes into the same worker using bounded pooled buffers and writev.
