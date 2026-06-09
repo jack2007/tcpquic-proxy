@@ -1369,3 +1369,75 @@ rtk git commit -m "docs: record linux relay replacement verification"
 - Spec coverage: The plan covers production backend selection, code isolation, compressed worker support, production linkage guards, metrics, documentation, and final verification.
 - Placeholder scan: No unfinished placeholder markers or unspecified "add tests" steps remain.
 - Type consistency: The plan consistently uses `TqRelayBackendType::LinuxWorker`, `TqLinuxRelayRegistration`, `TqBlockingDemoRelay`, and `TqLinuxRelayWorkerSnapshot`.
+
+## Code Review Findings - 2026-06-09
+
+### Finding 1: Production QUIC receive callback path bypasses decompression
+
+Severity: High
+
+Location:
+- `src/linux_relay_worker.cpp`: `OnStreamEvent()` calls `CopyQuicReceiveToEvent()` for `QUIC_STREAM_EVENT_RECEIVE`.
+- `src/linux_relay_worker.cpp`: `ProcessQuicReceiveEvent()` pushes `event.Buffer` directly into `PendingTcpWrites`.
+- `src/linux_relay_worker.cpp`: decompression only happens in `EnqueueQuicReceive()`, which is currently used by `EnqueueQuicReceiveForTest()`.
+
+Problem:
+
+The worker decompression implementation is not used by the production MsQuic receive path. In production, compressed QUIC receive buffers are copied into `TqLinuxRelayEvent::Buffer`, then `ProcessQuicReceiveEvent()` writes those bytes directly to the TCP fd. The LZ4 decompression test calls `EnqueueQuicReceiveForTest()`, so it verifies the helper path rather than the actual `QUIC_STREAM_EVENT_RECEIVE` callback path.
+
+Impact:
+
+Compressed tunnels can write compressed payload bytes to the TCP peer on the QUIC-to-TCP direction, breaking production compressed relay behavior.
+
+Solution:
+
+Route all QUIC receive events through one worker-owned receive path. `ProcessQuicReceiveEvent()` should call `EnqueueQuicReceive(relay, event.Buffer->Data(), event.Length, event.Fin)` and then `FlushTcpWrites(relay)`, instead of directly appending `event.Buffer` to `PendingTcpWrites`. The FIN-only event should still call `EnqueueQuicReceive(relay, nullptr, 0, true)` so shutdown ordering stays centralized.
+
+Add a production-path unit test that constructs a fake `QUIC_STREAM_EVENT_RECEIVE`, invokes `TqLinuxRelayWorker::StreamCallback()`/`OnStreamEvent()` through the registered `MsQuicStream`, drains the worker event queue, and asserts the TCP peer receives decompressed bytes. Keep the existing helper test, but do not treat it as sufficient coverage for production receive behavior.
+
+### Finding 2: TCP-to-QUIC compression output is forced into one read-chunk buffer
+
+Severity: High
+
+Location:
+- `src/linux_relay_worker.cpp`: `BuildTcpToQuicViews()` stores the full compressed batch in `relay->CompressionOutput`.
+- `src/linux_relay_worker.cpp`: the method then acquires one pool buffer and fails if `CompressionOutput.size() > buffer->Capacity()`.
+
+Problem:
+
+The worker can read a batch larger than a single pool buffer (`ReadBatchBytes` and `MaxIov` allow multiple chunks), but compressed output must fit into one `ReadChunkSize` buffer. Incompressible payloads can also grow slightly after compression. With the default `ReadChunkSize` around 64 KiB and larger read batches, valid traffic can make `BuildTcpToQuicViews()` return false, set the relay stop flag, and stop forwarding.
+
+Impact:
+
+Compressed production tunnels can fail under normal high-entropy traffic or multi-iov batches, especially with Zstd/LZ4 framing overhead or read batches larger than one chunk.
+
+Solution:
+
+Split `CompressionOutput` across multiple acquired pool buffers and append multiple `TqBufferView`s to `output`, or introduce a separate send-buffer allocation sized for the compressed bound. The multi-buffer solution is closer to the current worker design because `SubmitTcpBatchToQuic()` already accepts multiple views. Add tests using incompressible payloads larger than `ReadChunkSize`, and a test where `ReadBatchBytes` spans several iov entries, then verify the captured QUIC bytes decompress back to the original payload.
+
+### Finding 3: `RelayState*` lifetime is unsafe across callback/stop concurrency
+
+Severity: High
+
+Location:
+- `src/linux_relay_worker.cpp`: `FindRelayById()` and `FindRelayByFd()` return raw `RelayState*` after releasing `RelayLock`.
+- `src/linux_relay_worker.cpp`: `CopyQuicReceiveToEvent()`, `TakeCapturedQuicBytesForTest()`, `EnqueueQuicReceiveForTest()`, `CompleteQuicSend()`, and event processing use those raw pointers after the lock is released.
+- `src/linux_relay_worker.cpp`: `UnregisterRelay()` erases and destroys the `RelayState` while callbacks or other threads may still hold one of those raw pointers.
+- `src/linux_relay_worker.cpp`: `RegisterRelayWithId()` increments `NextRelayId` outside `RelayLock`.
+
+Problem:
+
+The implementation mixes worker-thread event handling, MsQuic callbacks, test helpers, and external `TqRelayStop()` calls around `RelayState` without a stable lifetime model. A callback can obtain a raw `RelayState*`, release `RelayLock`, then race with `UnregisterRelay()` destroying that state. `NextRelayId++` is also unsynchronized if multiple tunnels register concurrently on the same worker.
+
+Impact:
+
+Under shutdown, peer abort, or concurrent tunnel creation, production can hit use-after-free, data races, duplicate/corrupted relay ids, or pool corruption.
+
+Solution:
+
+Make relay state mutation and lifetime worker-owned. Options:
+
+- Use `std::shared_ptr<RelayState>` in `Relays`, have lookup return a `shared_ptr`, and keep `RelayState` alive until callbacks/events finish. Protect mutable fields with worker-thread ownership or a per-relay mutex.
+- Preferably, make MsQuic callbacks never touch `RelayState` internals: have callbacks resolve only a stable relay id/context and enqueue self-contained events with copied receive bytes. The worker thread then owns lookup, compression/decompression state, TCP writes, send completion accounting, and final destruction.
+
+Also move `NextRelayId++` under `RelayLock` or make it an atomic counter. Add stress tests that concurrently register/stop relays while injecting receive and send-complete events, ideally under TSAN where available.
