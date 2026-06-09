@@ -106,6 +106,7 @@ public:
     bool WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs);
     std::vector<uint8_t> TakeCapturedQuicBytesForTest(int tcpFd);
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
+    QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
 
     static QUIC_STATUS QUIC_API StreamCallback(
         _In_ MsQuicStream* stream,
@@ -123,8 +124,8 @@ private:
         std::vector<TqBufferView>& output);
     bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
     void CompleteQuicSend(void* context);
-    RelayState* FindRelayById(uint64_t relayId);
-    RelayState* FindRelayByFd(int tcpFd);
+    std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
+    std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
     uint64_t FindRelayIdByStream(MsQuicStream* stream);
     bool CopyQuicReceiveToEvent(uint64_t relayId, const uint8_t* data, uint32_t length);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
@@ -146,7 +147,7 @@ private:
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
     mutable std::mutex RelayLock;
-    std::deque<std::unique_ptr<RelayState>> Relays;
+    std::deque<std::shared_ptr<RelayState>> Relays;
     uint64_t NextRelayId{1};
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};

@@ -212,14 +212,30 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
         return result;
     }
 
-    auto relay = std::make_unique<RelayState>(registration, Config);
-    relay->Id = NextRelayId++;
-    RelayState* raw = relay.get();
+    auto relay = std::make_shared<RelayState>(registration, Config);
 
     epoll_event event{};
     event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
-    event.data.ptr = raw;
+
+    {
+        std::lock_guard<std::mutex> guard(RelayLock);
+        relay->Id = NextRelayId++;
+        event.data.u64 = relay->Id;
+        Relays.push_back(relay);
+        result.Ok = true;
+        result.RelayId = relay->Id;
+    }
+
     if (::epoll_ctl(EpollFd, EPOLL_CTL_ADD, registration.TcpFd, &event) != 0) {
+        std::lock_guard<std::mutex> guard(RelayLock);
+        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+            if ((*it)->Id == relay->Id) {
+                Relays.erase(it);
+                break;
+            }
+        }
+        result.Ok = false;
+        result.RelayId = 0;
         return result;
     }
 
@@ -228,10 +244,6 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
         registration.Stream->Context = this;
     }
 
-    std::lock_guard<std::mutex> guard(RelayLock);
-    Relays.push_back(std::move(relay));
-    result.Ok = true;
-    result.RelayId = raw->Id;
     return result;
 }
 
@@ -244,12 +256,12 @@ bool TqLinuxRelayWorker::RegisterRelayForTest(const TqLinuxRelayRegistration& re
 }
 
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
-    std::unique_ptr<RelayState> removed;
+    std::shared_ptr<RelayState> removed;
     {
         std::lock_guard<std::mutex> guard(RelayLock);
         for (auto it = Relays.begin(); it != Relays.end(); ++it) {
             if ((*it)->Id == relayId) {
-                removed = std::move(*it);
+                removed = *it;
                 Relays.erase(it);
                 break;
             }
@@ -282,7 +294,7 @@ bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int time
 }
 
 std::vector<uint8_t> TqLinuxRelayWorker::TakeCapturedQuicBytesForTest(int tcpFd) {
-    RelayState* relay = FindRelayByFd(tcpFd);
+    auto relay = FindRelayByFd(tcpFd);
     if (relay == nullptr) {
         return {};
     }
@@ -401,14 +413,19 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
         return true;
     }
 
-    auto buffer = relay->Pool.Acquire();
-    if (!buffer || relay->CompressionOutput.size() > buffer->Capacity()) {
-        Errors.fetch_add(1);
-        return false;
+    size_t offset = 0;
+    while (offset < relay->CompressionOutput.size()) {
+        auto buffer = relay->Pool.Acquire();
+        if (!buffer) {
+            Errors.fetch_add(1);
+            return false;
+        }
+        const size_t chunk = std::min(buffer->Capacity(), relay->CompressionOutput.size() - offset);
+        std::memcpy(buffer->Data(), relay->CompressionOutput.data() + offset, chunk);
+        buffer->SetLength(chunk);
+        output.push_back(TqBufferView{buffer->Data(), chunk, buffer});
+        offset += chunk;
     }
-    std::memcpy(buffer->Data(), relay->CompressionOutput.data(), relay->CompressionOutput.size());
-    buffer->SetLength(relay->CompressionOutput.size());
-    output.push_back(TqBufferView{buffer->Data(), relay->CompressionOutput.size(), buffer});
     CompressedTcpBytes.fetch_add(relay->CompressionOutput.size());
     input.clear();
     return true;
@@ -473,28 +490,28 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
     if (operation == nullptr) {
         return;
     }
-    RelayState* relay = FindRelayById(operation->RelayId);
+    auto relay = FindRelayById(operation->RelayId);
     if (relay != nullptr && relay->OutstandingQuicSends > 0) {
         --relay->OutstandingQuicSends;
     }
     delete operation;
 }
 
-TqLinuxRelayWorker::RelayState* TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
+std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
     std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
         if (relay->Id == relayId) {
-            return relay.get();
+            return relay;
         }
     }
     return nullptr;
 }
 
-TqLinuxRelayWorker::RelayState* TqLinuxRelayWorker::FindRelayByFd(int tcpFd) {
+std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayByFd(int tcpFd) {
     std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
         if (relay->TcpFd == tcpFd) {
-            return relay.get();
+            return relay;
         }
     }
     return nullptr;
@@ -517,7 +534,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveToEvent(
     uint64_t relayId,
     const uint8_t* data,
     uint32_t length) {
-    RelayState* relay = FindRelayById(relayId);
+    auto relay = FindRelayById(relayId);
     if (relay == nullptr || relay->Closing) {
         return false;
     }
@@ -562,14 +579,14 @@ bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
     const uint8_t* data,
     size_t length,
     bool fin) {
-    RelayState* relay = FindRelayByFd(tcpFd);
+    auto relay = FindRelayByFd(tcpFd);
     if (relay == nullptr) {
         return false;
     }
-    if (!EnqueueQuicReceive(relay, data, length, fin)) {
+    if (!EnqueueQuicReceive(relay.get(), data, length, fin)) {
         return false;
     }
-    FlushTcpWrites(relay);
+    FlushTcpWrites(relay.get());
     return true;
 }
 
@@ -682,27 +699,36 @@ void TqLinuxRelayWorker::ArmTcpWritable(RelayState* relay, bool enabled) {
     if (enabled) {
         event.events |= EPOLLOUT;
     }
-    event.data.ptr = relay;
+    event.data.u64 = relay->Id;
     if (::epoll_ctl(EpollFd, EPOLL_CTL_MOD, relay->TcpFd, &event) == 0) {
         relay->TcpWriteArmed = enabled;
     }
 }
 
 void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event) {
-    RelayState* relay = FindRelayById(event.RelayId);
+    auto relay = FindRelayById(event.RelayId);
     if (relay == nullptr || relay->Closing) {
         return;
     }
+    const uint8_t* data = nullptr;
+    size_t length = 0;
     if (event.Buffer) {
-        relay->PendingTcpWrites.push_back(TqBufferView{
-            event.Buffer->Data(),
-            event.Length,
-            event.Buffer});
+        data = event.Buffer->Data();
+        length = event.Length;
     }
-    if (event.Fin) {
-        relay->TcpWriteShutdownQueued = true;
+    if (!EnqueueQuicReceive(relay.get(), data, length, event.Fin)) {
+        if (relay->Handle != nullptr) {
+            relay->Handle->Stop.store(true);
+        }
+        return;
     }
-    FlushTcpWrites(relay);
+    FlushTcpWrites(relay.get());
+}
+
+QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
+    MsQuicStream* stream,
+    QUIC_STREAM_EVENT* event) {
+    return OnStreamEvent(stream, event);
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
@@ -752,12 +778,15 @@ void TqLinuxRelayWorker::Run() {
                 }
                 DrainEvents(Config.EventBudget);
             } else {
-                auto* relay = static_cast<RelayState*>(events[i].data.ptr);
+                auto relay = FindRelayById(events[i].data.u64);
+                if (relay == nullptr || relay->Closing) {
+                    continue;
+                }
                 if ((events[i].events & EPOLLOUT) != 0) {
-                    FlushTcpWrites(relay);
+                    FlushTcpWrites(relay.get());
                 }
                 if ((events[i].events & EPOLLIN) != 0) {
-                    DrainTcpReadable(relay);
+                    DrainTcpReadable(relay.get());
                 }
             }
         }

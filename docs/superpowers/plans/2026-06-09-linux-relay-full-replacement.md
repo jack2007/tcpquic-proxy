@@ -1372,7 +1372,11 @@ rtk git commit -m "docs: record linux relay replacement verification"
 
 ## Code Review Findings - 2026-06-09
 
+> **Status (2026-06-09):** All three high-severity findings below have been addressed. Build and test verification uses the unified `build/` directory.
+
 ### Finding 1: Production QUIC receive callback path bypasses decompression
+
+**Resolution:** `ProcessQuicReceiveEvent()` now routes all receive data through `EnqueueQuicReceive()` (decompression + FIN handling), then `FlushTcpWrites()`. Added a production-path test that constructs `QUIC_STREAM_EVENT_RECEIVE`, invokes `DispatchStreamEventForTest()` → `OnStreamEvent()`, drains the worker queue, and asserts decompressed TCP output.
 
 Severity: High
 
@@ -1397,6 +1401,8 @@ Add a production-path unit test that constructs a fake `QUIC_STREAM_EVENT_RECEIV
 
 ### Finding 2: TCP-to-QUIC compression output is forced into one read-chunk buffer
 
+**Resolution:** `BuildTcpToQuicViews()` splits `CompressionOutput` across multiple pool buffers (each ≤ `ReadChunkSize`) and emits multiple `TqBufferView`s. Added tests for incompressible multi-kilobyte payloads and multi-iov read batches.
+
 Severity: High
 
 Location:
@@ -1416,6 +1422,8 @@ Solution:
 Split `CompressionOutput` across multiple acquired pool buffers and append multiple `TqBufferView`s to `output`, or introduce a separate send-buffer allocation sized for the compressed bound. The multi-buffer solution is closer to the current worker design because `SubmitTcpBatchToQuic()` already accepts multiple views. Add tests using incompressible payloads larger than `ReadChunkSize`, and a test where `ReadBatchBytes` spans several iov entries, then verify the captured QUIC bytes decompress back to the original payload.
 
 ### Finding 3: `RelayState*` lifetime is unsafe across callback/stop concurrency
+
+**Resolution:** `Relays` now stores `std::shared_ptr<RelayState>`; `FindRelayById()` / `FindRelayByFd()` return `shared_ptr`. `NextRelayId++` runs under `RelayLock`. Epoll uses `event.data.u64` (relay id) instead of raw pointers. Added concurrent register/stop stress test.
 
 Severity: High
 
