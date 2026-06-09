@@ -51,6 +51,11 @@ endif()
 
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
+if(WIN32)
+    target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(tcpquic-proxy PRIVATE ws2_32)
+endif()
+
 target_include_directories(tcpquic-proxy PRIVATE ${MSQUIC_SOURCE_DIR}/src/inc)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4)
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
