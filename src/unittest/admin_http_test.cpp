@@ -1,41 +1,43 @@
 #include "admin_http.h"
+#include "platform_socket.h"
 
-#include <arpa/inet.h>
 #include <cstring>
-#include <netinet/in.h>
 #include <string>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 
 namespace {
 
-int TqConnectLocal(uint16_t port) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        return -1;
+TqSocketHandle TqConnectLocal(uint16_t port) {
+    TqSocketHandle fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (!TqSocketValid(fd)) {
+        return TqInvalidSocket;
     }
 
+#if !defined(_WIN32)
     timeval timeout{};
     timeout.tv_sec = 2;
-    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+#else
+    DWORD timeoutMs = 2000;
+    (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#endif
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1 ||
+    if (!TqInetPton(AF_INET, "127.0.0.1", &addr.sin_addr) ||
         ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-        ::close(fd);
-        return -1;
+        TqCloseSocket(fd);
+        return TqInvalidSocket;
     }
 
     return fd;
 }
 
-bool TqSendAll(int fd, const std::string& data) {
+bool TqSendAll(TqSocketHandle fd, const std::string& data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        ssize_t result = ::send(fd, data.data() + sent, data.size() - sent, 0);
+        const int result = TqSend(fd, data.data() + sent, data.size() - sent, TqSendFlags::None);
         if (result <= 0) {
             return false;
         }
@@ -44,10 +46,10 @@ bool TqSendAll(int fd, const std::string& data) {
     return true;
 }
 
-bool TqRecvUntilClosed(int fd, std::string& data) {
+bool TqRecvUntilClosed(TqSocketHandle fd, std::string& data) {
     char buffer[256];
     for (;;) {
-        ssize_t result = ::recv(fd, buffer, sizeof(buffer), 0);
+        const int result = TqRecv(fd, buffer, sizeof(buffer), TqRecvFlags::None);
         if (result < 0) {
             return false;
         }
@@ -69,6 +71,11 @@ uint16_t TqPortFromListenAddress(const std::string& listen) {
 } // namespace
 
 int main() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 1;
+    }
+
     {
         TqHttpRequest req;
         std::string err;
@@ -107,7 +114,7 @@ int main() {
     {
         TqHttpRequest req;
         std::string err;
-        std::string raw = "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 18446744073709551615\r\n\r\n{}";
+        std::string raw = "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200000\r\n\r\n{}";
         if (TqParseHttpRequest(raw, req, err)) return 31;
         if (err.find("too large") == std::string::npos) return 32;
     }
@@ -136,13 +143,13 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 33;
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 27;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 27;
         if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 28;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 29;
-        ::close(fd);
+        TqCloseSocket(fd);
         server.Stop();
         if (response != expected) return 30;
     }
@@ -156,17 +163,17 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 35;
 
-        int stalledFd = TqConnectLocal(port);
-        if (stalledFd < 0) return 36;
+        TqSocketHandle stalledFd = TqConnectLocal(port);
+        if (!TqSocketValid(stalledFd)) return 36;
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 37;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 37;
         if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 38;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 39;
-        ::close(fd);
-        ::close(stalledFd);
+        TqCloseSocket(fd);
+        TqCloseSocket(stalledFd);
         server.Stop();
         if (response != expected) return 40;
     }
@@ -178,11 +185,11 @@ int main() {
         if (!server.Start(err)) return 41;
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 42;
-        int stalledFd = TqConnectLocal(port);
-        if (stalledFd < 0) return 43;
+        TqSocketHandle stalledFd = TqConnectLocal(port);
+        if (!TqSocketValid(stalledFd)) return 43;
         std::thread stopper([&server]() { server.Stop(); });
         stopper.join();
-        ::close(stalledFd);
+        TqCloseSocket(stalledFd);
     }
     {
         std::string err;
@@ -193,13 +200,13 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 45;
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 46;
-        if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 18446744073709551615\r\n\r\n")) return 47;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 46;
+        if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200000\r\n\r\n")) return 47;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 48;
-        ::close(fd);
+        TqCloseSocket(fd);
         server.Stop();
         if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 49;
     }
@@ -212,13 +219,13 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 67;
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 68;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 68;
         if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 500\r\nTransfer-Encoding: chunked\r\n\r\n")) return 69;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 70;
-        ::close(fd);
+        TqCloseSocket(fd);
         server.Stop();
         if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 71;
     }
@@ -231,13 +238,13 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 73;
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 74;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 74;
         if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 500\r\nContent-Length: 1\r\n\r\n")) return 75;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 76;
-        ::close(fd);
+        TqCloseSocket(fd);
         server.Stop();
         if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 77;
     }
@@ -250,23 +257,23 @@ int main() {
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 51;
 
-        int closedFd = TqConnectLocal(port);
-        if (closedFd < 0) return 52;
+        TqSocketHandle closedFd = TqConnectLocal(port);
+        if (!TqSocketValid(closedFd)) return 52;
         if (!TqSendAll(closedFd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 53;
-        ::close(closedFd);
+        TqCloseSocket(closedFd);
 
-        int stalledFd1 = TqConnectLocal(port);
-        int stalledFd2 = TqConnectLocal(port);
-        if (stalledFd1 < 0 || stalledFd2 < 0) return 54;
-        ::close(stalledFd1);
+        TqSocketHandle stalledFd1 = TqConnectLocal(port);
+        TqSocketHandle stalledFd2 = TqConnectLocal(port);
+        if (!TqSocketValid(stalledFd1) || !TqSocketValid(stalledFd2)) return 54;
+        TqCloseSocket(stalledFd1);
 
-        int fd = TqConnectLocal(port);
-        if (fd < 0) return 55;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 55;
         if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 56;
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 57;
-        ::close(fd);
-        ::close(stalledFd2);
+        TqCloseSocket(fd);
+        TqCloseSocket(stalledFd2);
         server.Stop();
         if (response.find("HTTP/1.1 200 OK\r\n") != 0) return 58;
     }
@@ -280,20 +287,20 @@ int main() {
         if (port == 0) return 60;
 
         for (int i = 0; i < 1024; ++i) {
-            int fd = TqConnectLocal(port);
-            if (fd < 0) return 61;
+            TqSocketHandle fd = TqConnectLocal(port);
+            if (!TqSocketValid(fd)) return 61;
             if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 62;
             std::string response;
             if (!TqRecvUntilClosed(fd, response)) return 63;
-            ::close(fd);
+            TqCloseSocket(fd);
             if (response.find("HTTP/1.1 200 OK\r\n") != 0) return 64;
         }
 
-        int stalledFd = TqConnectLocal(port);
-        if (stalledFd < 0) return 65;
+        TqSocketHandle stalledFd = TqConnectLocal(port);
+        if (!TqSocketValid(stalledFd)) return 65;
         std::thread stopper([&server]() { server.Stop(); });
         stopper.join();
-        ::close(stalledFd);
+        TqCloseSocket(stalledFd);
     }
     return 0;
 }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform_socket.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -30,19 +32,19 @@ public:
     std::string ListenAddress() const;
 
 private:
-    void Run(int listenFd);
-    void HandleClient(uint64_t clientId, int clientFd, TqHttpHandler handler);
+    void Run(TqSocketHandle listenFd);
+    void HandleClient(uint64_t clientId, TqSocketHandle clientFd, TqHttpHandler handler);
     void RemoveActiveClientLocked(uint64_t clientId);
     struct ActiveClient {
         uint64_t Id;
-        int Fd;
+        TqSocketHandle Fd{TqInvalidSocket};
     };
     std::string Listen;
     std::string BoundListen;
     TqHttpHandler Handler;
     std::atomic<bool> Stopping{false};
     std::atomic<uint64_t> NextClientId{1};
-    int ListenFd{-1};
+    std::atomic<TqSocketHandle> ListenFd{TqInvalidSocket};
     std::thread Thread;
     mutable std::mutex Lock;
     std::condition_variable ActiveClientsDrained;

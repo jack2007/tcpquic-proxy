@@ -8,7 +8,11 @@
 #include <limits>
 #include <memory>
 #include <new>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <unordered_map>
 
 extern const MsQuicApi* MsQuic;
@@ -666,7 +670,12 @@ void QuicServerSession::Stop() {
 }
 
 void QuicServerSession::Run() {
-    if (isatty(STDIN_FILENO)) {
+#if defined(_WIN32)
+    const bool interactive = _isatty(_fileno(stdin)) != 0;
+#else
+    const bool interactive = isatty(STDIN_FILENO) != 0;
+#endif
+    if (interactive) {
         std::fprintf(stderr, "Press Enter to exit.\n");
         (void)getchar();
     } else {

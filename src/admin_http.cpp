@@ -1,17 +1,17 @@
 #include "admin_http.h"
 
+#include "platform_socket.h"
+
 #include <algorithm>
-#include <arpa/inet.h>
-#include <cerrno>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <limits>
-#include <netinet/in.h>
 #include <string>
 
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 namespace {
 
@@ -106,12 +106,12 @@ const char* TqReasonPhrase(int status) {
     }
 }
 
-bool TqSendAll(int fd, const std::string& data) {
+bool TqSendAll(TqSocketHandle fd, const std::string& data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        const ssize_t result = ::send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        const int result = TqSend(fd, data.data() + sent, data.size() - sent, TqSendFlags::NoSignal);
         if (result < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -124,13 +124,7 @@ bool TqSendAll(int fd, const std::string& data) {
     return true;
 }
 
-void TqCloseFd(int fd) {
-    if (fd >= 0) {
-        ::close(fd);
-    }
-}
-
-bool TqCreateListenSocket(const std::string& listen, int& listenFd, std::string& err) {
+bool TqCreateListenSocket(const std::string& listen, TqSocketHandle& listenFd, std::string& err) {
     TqHostPort hostPort{};
     if (!TqParseHostPort(listen, hostPort, true)) {
         err = "admin listen must be host:port";
@@ -151,29 +145,33 @@ bool TqCreateListenSocket(const std::string& listen, int& listenFd, std::string&
     }
 
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
+        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!TqSocketValid(fd)) {
             continue;
         }
 
-        int enabled = 1;
-        (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+        (void)TqSetReuseAddr(fd);
 
-        if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, SOMAXCONN) == 0) {
+        if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
+            ::listen(fd, SOMAXCONN) == 0) {
             listenFd = fd;
             freeaddrinfo(result);
             return true;
         }
 
-        ::close(fd);
+        TqCloseSocket(fd);
     }
 
     freeaddrinfo(result);
+#if defined(_WIN32)
+    err = "bind failed";
+#else
     err = std::strerror(errno);
+#endif
     return false;
 }
 
-std::string TqGetBoundListenAddress(int fd, const std::string& fallbackHost) {
+std::string TqGetBoundListenAddress(TqSocketHandle fd, const std::string& fallbackHost) {
     sockaddr_storage storage{};
     socklen_t storageLen = sizeof(storage);
     if (::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &storageLen) != 0) {
@@ -183,7 +181,7 @@ std::string TqGetBoundListenAddress(int fd, const std::string& fallbackHost) {
     if (storage.ss_family == AF_INET) {
         const auto* addr = reinterpret_cast<const sockaddr_in*>(&storage);
         char host[INET_ADDRSTRLEN]{};
-        if (::inet_ntop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
+        if (TqInetNtop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
             return {};
         }
         return std::string(host) + ":" + std::to_string(ntohs(addr->sin_port));
@@ -192,7 +190,7 @@ std::string TqGetBoundListenAddress(int fd, const std::string& fallbackHost) {
     if (storage.ss_family == AF_INET6) {
         const auto* addr = reinterpret_cast<const sockaddr_in6*>(&storage);
         char host[INET6_ADDRSTRLEN]{};
-        if (::inet_ntop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
+        if (TqInetNtop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
             return {};
         }
         return std::string(host) + ":" + std::to_string(ntohs(addr->sin6_port));
@@ -258,7 +256,7 @@ TqRequestReadState TqRequestReadStateFor(const std::string& raw, size_t& total) 
     return TqRequestReadState::Complete;
 }
 
-void TqHandleAdminClient(int clientFd, const TqHttpHandler& handler) {
+void TqHandleAdminClient(TqSocketHandle clientFd, const TqHttpHandler& handler) {
     std::string raw;
     raw.reserve(1024);
 
@@ -279,9 +277,9 @@ void TqHandleAdminClient(int clientFd, const TqHttpHandler& handler) {
             return;
         }
 
-        const ssize_t received = ::recv(clientFd, buffer, sizeof(buffer), 0);
+        const int received = TqRecv(clientFd, buffer, sizeof(buffer), TqRecvFlags::None);
         if (received < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return;
@@ -432,28 +430,30 @@ bool TqAdminHttpServer::Start(std::string& err) {
     if (!TqValidateAdminBindListen(Listen, err)) {
         return false;
     }
-    if (!TqCreateListenSocket(Listen, ListenFd, err)) {
+    TqSocketHandle listenFd = TqInvalidSocket;
+    if (!TqCreateListenSocket(Listen, listenFd, err)) {
         return false;
     }
 
-    BoundListen = TqGetBoundListenAddress(ListenFd, Listen);
+    ListenFd.store(listenFd);
+    BoundListen = TqGetBoundListenAddress(listenFd, Listen);
 
     Stopping = false;
-    Thread = std::thread(&TqAdminHttpServer::Run, this, ListenFd);
+    Thread = std::thread(&TqAdminHttpServer::Run, this, listenFd);
     return true;
 }
 
 void TqAdminHttpServer::Stop() {
     Stopping = true;
-    if (ListenFd >= 0) {
-        ::shutdown(ListenFd, SHUT_RDWR);
-        ::close(ListenFd);
-        ListenFd = -1;
+    const TqSocketHandle listenFd = ListenFd.exchange(TqInvalidSocket);
+    if (TqSocketValid(listenFd)) {
+        (void)TqShutdownBoth(listenFd);
+        TqCloseSocket(listenFd);
     }
     {
         std::lock_guard<std::mutex> guard(Lock);
         for (const ActiveClient& client : ActiveClients) {
-            ::shutdown(client.Fd, SHUT_RDWR);
+            (void)TqShutdownBoth(client.Fd);
         }
     }
     if (Thread.joinable()) {
@@ -463,7 +463,7 @@ void TqAdminHttpServer::Stop() {
     {
         std::unique_lock<std::mutex> guard(Lock);
         for (const ActiveClient& client : ActiveClients) {
-            ::shutdown(client.Fd, SHUT_RDWR);
+            (void)TqShutdownBoth(client.Fd);
         }
         ActiveClientsDrained.wait(guard, [this]() { return ActiveClients.empty(); });
         ClientThreadsDrained.wait(guard, [this]() { return ActiveClientThreads == 0; });
@@ -475,17 +475,17 @@ std::string TqAdminHttpServer::ListenAddress() const {
     return BoundListen;
 }
 
-void TqAdminHttpServer::Run(int listenFd) {
+void TqAdminHttpServer::Run(TqSocketHandle listenFd) {
     while (!Stopping) {
-        int clientFd = ::accept(listenFd, nullptr, nullptr);
-        if (clientFd < 0) {
-            if (errno == EINTR) {
+        TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+        if (!TqSocketValid(clientFd)) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             break;
         }
         if (Stopping) {
-            TqCloseFd(clientFd);
+            TqCloseSocket(clientFd);
             break;
         }
         const uint64_t clientId = NextClientId.fetch_add(1);
@@ -500,13 +500,13 @@ void TqAdminHttpServer::Run(int listenFd) {
     }
 }
 
-void TqAdminHttpServer::HandleClient(uint64_t clientId, int clientFd, TqHttpHandler handler) {
+void TqAdminHttpServer::HandleClient(uint64_t clientId, TqSocketHandle clientFd, TqHttpHandler handler) {
     TqHandleAdminClient(clientFd, handler);
     {
         std::lock_guard<std::mutex> guard(Lock);
         RemoveActiveClientLocked(clientId);
     }
-    TqCloseFd(clientFd);
+    TqCloseSocket(clientFd);
 
     std::lock_guard<std::mutex> guard(Lock);
     --ActiveClientThreads;

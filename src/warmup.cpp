@@ -1,17 +1,13 @@
 #include "warmup.h"
 
+#include "platform_socket.h"
 #include "tcp_tunnel.h"
 
-#include <arpa/inet.h>
-#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
-
-#include <sys/socket.h>
-#include <unistd.h>
 
 namespace {
 
@@ -82,12 +78,12 @@ bool TqParseHostPort(const std::string& target, TqHostPort& out) {
 
 uint8_t TqAddrTypeForHost(const std::string& host) {
     in_addr ipv4{};
-    if (inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+    if (TqInetPton(AF_INET, host.c_str(), &ipv4)) {
         return TQ_ADDR_IPV4;
     }
 
     in6_addr ipv6{};
-    if (inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) {
+    if (TqInetPton(AF_INET6, host.c_str(), &ipv6)) {
         return TQ_ADDR_IPV6;
     }
 
@@ -107,12 +103,12 @@ bool TqBuildTunnelRequest(const TqHostPort& hostPort, TunnelRequest& out) {
     return true;
 }
 
-bool TqSendAll(int fd, const char* data, size_t length) {
+bool TqSendAll(TqSocketHandle fd, const char* data, size_t length) {
     size_t sent = 0;
     while (sent < length) {
-        const ssize_t n = ::write(fd, data + sent, length - sent);
+        const int n = TqSend(fd, data + sent, length - sent, TqSendFlags::None);
         if (n < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -125,7 +121,7 @@ bool TqSendAll(int fd, const char* data, size_t length) {
     return true;
 }
 
-bool TqDiscardHttpBody(int fd, uint64_t targetBytes, uint64_t& downloaded) {
+bool TqDiscardHttpBody(TqSocketHandle fd, uint64_t targetBytes, uint64_t& downloaded) {
     constexpr size_t kChunkSize = 64 * 1024;
     constexpr size_t kMaxHeaderBytes = 64 * 1024;
     std::vector<char> chunk(kChunkSize);
@@ -134,9 +130,9 @@ bool TqDiscardHttpBody(int fd, uint64_t targetBytes, uint64_t& downloaded) {
     downloaded = 0;
 
     while (downloaded < targetBytes) {
-        const ssize_t n = ::read(fd, chunk.data(), chunk.size());
+        const int n = TqRecv(fd, chunk.data(), chunk.size(), TqRecvFlags::None);
         if (n < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -205,17 +201,18 @@ bool TqRunClientWarmup(QuicClientSession& quic, const TqConfig& cfg) {
             return false;
         }
 
-        int fds[2]{-1, -1};
-        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) {
-            std::fprintf(stderr, "tcpquic-proxy: warmup socketpair failed: %s\n", std::strerror(errno));
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            std::fprintf(stderr, "tcpquic-proxy: warmup socketpair failed (error=%d)\n", TqLastSocketError());
             return false;
         }
 
-        const int tunnelFd = fds[0];
-        const int pumpFd = fds[1];
+        const TqSocketHandle tunnelFd = pair[0];
+        const TqSocketHandle pumpFd = pair[1];
         const TqTunnelStartResult started = TqStartClientTunnel(conn, req, tunnelFd, cfg);
         if (!started.Ok) {
-            ::close(pumpFd);
+            TqCloseSocket(pumpFd);
+            TqCloseSocket(tunnelFd);
             std::fprintf(stderr,
                 "tcpquic-proxy: warmup tunnel %u/%u failed to open (error=%u)\n",
                 i + 1,
@@ -225,7 +222,7 @@ bool TqRunClientWarmup(QuicClientSession& quic, const TqConfig& cfg) {
         }
 
         if (!TqSendAll(pumpFd, httpRequest.data(), httpRequest.size())) {
-            ::close(pumpFd);
+            TqCloseSocket(pumpFd);
             std::fprintf(stderr, "tcpquic-proxy: warmup failed to send HTTP request on conn %u/%u\n",
                 i + 1, cfg.QuicConnections);
             return false;
@@ -233,13 +230,13 @@ bool TqRunClientWarmup(QuicClientSession& quic, const TqConfig& cfg) {
 
         uint64_t downloaded = 0;
         if (!TqDiscardHttpBody(pumpFd, targetBytes, downloaded)) {
-            ::close(pumpFd);
+            TqCloseSocket(pumpFd);
             std::fprintf(stderr, "tcpquic-proxy: warmup failed reading response on conn %u/%u\n",
                 i + 1, cfg.QuicConnections);
             return false;
         }
 
-        ::close(pumpFd);
+        TqCloseSocket(pumpFd);
 
         const double downloadedMb = static_cast<double>(downloaded) / (1024.0 * 1024.0);
         std::fprintf(stderr,

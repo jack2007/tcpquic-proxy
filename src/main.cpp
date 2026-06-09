@@ -1,5 +1,6 @@
 #include "config.h"
 #include "admin_http.h"
+#include "platform_socket.h"
 #include "quic_session.h"
 #include "acl.h"
 #include "http_connect_server.h"
@@ -321,6 +322,12 @@ int RunServer(const TqConfig& cfg) {
 } // namespace
 
 int main(int argc, char** argv) {
+    TqSocketStartup socketStartup;
+    if (!socketStartup.Ok()) {
+        std::fprintf(stderr, "tcpquic-proxy: failed to initialize socket runtime\n");
+        return 1;
+    }
+
     TqConfig cfg;
     std::string err;
     if (!TqParseArgs(argc, argv, cfg, err)) {
