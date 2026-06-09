@@ -319,7 +319,76 @@ C2220/C2589/C4003  max 宏冲突 (config.cpp:317)                  → 1 处
 
 ---
 
-## 9. 参考
+## 9. 评审意见
+
+### 9.1 总体判断
+
+本文的问题清单基本准确：Windows 构建失败的主要阻塞不在 vendored 依赖，而在 `src/` 生产代码中散落的 POSIX socket / fd 语义。`dup()`、`socketpair()`、`fcntl()`、`poll()`、`MSG_DONTWAIT`、`MSG_NOSIGNAL` 以及 `int fd` 类型假设，都是跨平台移植必须正面处理的问题。
+
+我建议保留本文的架构方向：QUIC 仍由 msquic 负责，TCP 侧通过项目内 `tq_net` 平台层隔离。但实施顺序应更保守：**先做最小 Windows 可构建平台层，再决定是否把 libuv 作为长期后端**。这样可以尽快验证 Windows x64 主程序构建，同时避免第一阶段就承担完整 libuv 事件循环封装风险。
+
+### 9.2 对 libuv 方案的建议
+
+libuv 是合理的长期候选，尤其当目标扩展到 macOS、Android、iOS 时，它比逐平台自研 socket 细节更稳。但当前项目的网络模型是阻塞 socket + 线程池 + 每隧道 relay 线程；libuv 是异步事件循环库。若第一阶段就要求“同步 API 内部封装 libuv”，很容易引入额外复杂度：每个同步调用背后需要事件循环、跨线程唤醒、生命周期管理和错误传播约定。
+
+因此建议：
+
+1. P1 先实现 `tq_net` 的最小同步 API，Linux 后端继续使用 POSIX，Windows 后端使用 WinSock。
+2. 业务模块只依赖 `tq_net`，不直接依赖 POSIX、WinSock 或 libuv。
+3. 当 Windows x64 构建和 Linux 回归稳定后，再评估是否把 `tq_net` 后端替换/扩展为 libuv。
+
+换言之，**`tq_net` 是必须项，libuv 是可替换后端，不应让业务代码直接感知 libuv API**。
+
+### 9.3 应优先消除 `dup()`
+
+`dup()` 是最独立、收益最高的跨平台行为改造。Windows socket 没有 Linux fd 的 `dup()` 语义，继续保留该设计会阻塞后续所有平台层封装。
+
+建议把 `dup()` 消除作为 P1 前置项：
+
+1. SOCKS5 / HTTP CONNECT 先完成请求解析和 ACL 检查。
+2. 调用 `TqStartClientTunnel` 前，确认 QUIC OPEN 成功路径不会读取 TCP socket。
+3. 成功时先发送 SOCKS5 success / HTTP 200，再把原始 socket 所有权移交给 tunnel。
+4. 失败时发送对应错误响应并关闭 socket。
+
+这会改变当前 README 中“HTTP CONNECT 在隧道建立成功之后才返回 200”的描述，需要同步更新文档，并增加 Linux SOCKS5 / HTTP CONNECT 回归测试。
+
+### 9.4 Windows 目标应先聚焦 x64
+
+Win32/x86 构建探测有价值，但不建议作为产品级首要目标。msquic 官方支持矩阵是 Windows x64/arm64 与 Linux x64/arm64/arm32；x86、macOS、iOS、Android 属于可能可用但非官方支持。建议 Windows 阶段优先级调整为：
+
+1. Windows x64 build/link 通过。
+2. Windows x64 基本运行冒烟通过。
+3. 再评估 Win32/x86 是否有实际发布需求。
+
+同时需要区分“构建成功”和“运行可用”：Windows 默认 Schannel 路径依赖系统 TLS 1.3 能力，Windows 10 运行场景可能需要 OpenSSL/quictls 路径或额外运行时约束说明。
+
+### 9.5 CMake 与测试建议
+
+除本文已列出的 `NOMINMAX`、`ws2_32`、RPATH 平台化外，还建议加入以下构建基础项：
+
+1. 顶层 CMake cache 变量避免与子项目冲突，例如将 `LZ4_SOURCE_DIR` / `ZSTD_SOURCE_DIR` 改为 `TCPQUIC_LZ4_SOURCE_DIR` / `TCPQUIC_ZSTD_SOURCE_DIR`。当前 lz4 子项目也使用 `LZ4_SOURCE_DIR`，旧 build 目录重新配置时可能误判子模块缺失。
+2. `BUILD_RPATH "$ORIGIN"` 仅在 Linux/ELF 场景设置，避免 Windows/macOS 上出现无意义配置。
+3. 将现有 `tcpquic_*_test` 可执行目标注册进 CTest。当前 CMake 只构建测试可执行文件，未 `add_test()`，CI 无法通过 `ctest` 发现测试。
+4. 保持测试分级，但先落地 L0：`control`、`compress`、`config_router`、`tuning`、`tunnel_reaper`。这些测试对网络平台层依赖低，适合作为跨平台 CI 的第一批稳定信号。
+
+### 9.6 建议调整后的路线图
+
+| 阶段 | 建议内容 | 验收 |
+|------|----------|------|
+| **P0** | CMake 基础清理：`NOMINMAX`、cache 变量改名、RPATH 平台化、CTest 注册 L0 | Linux GCC10 构建与 L0 测试通过 |
+| **P1** | `tq_net` 最小同步 API；消除 `dup()`；Windows WinSock 后端 | Windows x64 `tcpquic-proxy.exe` build/link 通过 |
+| **P2** | relay/dialer/servers 全部迁移到 `tq_net`；Linux 行为回归 | Linux + Windows x64 CI 双绿 |
+| **P3** | 评估并可选引入 libuv 作为 `tq_net` 后端；macOS 构建 | macOS CI + L0/L1 测试 |
+| **P4** | Android NDK 交叉编译与运行冒烟 | `.so` 或可执行样例冒烟 |
+| **P5** | iOS 与 msquic 移动端 TLS 方案 | 单独方案评审 |
+
+### 9.7 最终建议
+
+本文可以作为跨平台移植主文档，但建议将“libuv + tq_net”表述调整为“`tq_net` 平台层优先，libuv 作为长期候选后端”。短期目标应是快速打通 Windows x64 构建和 Linux 回归；长期多平台再引入 libuv，避免在第一阶段同时承担平台移植和事件模型迁移两类风险。
+
+---
+
+## 10. 参考
 
 | 资源 | 链接 |
 |------|------|
@@ -332,8 +401,9 @@ C2220/C2589/C4003  max 宏冲突 (config.cpp:317)                  → 1 处
 
 ---
 
-## 10. 文档修订记录
+## 11. 文档修订记录
 
 | 日期 | 变更 |
 |------|------|
 | 2026-06-09 | 初版：合并构建探测、Windows 方案、跨平台库调研与最终 libuv 建议 |
+| 2026-06-09 | 增补评审意见：建议先落地 `tq_net` 最小同步平台层，再评估 libuv 后端 |
