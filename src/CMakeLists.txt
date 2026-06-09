@@ -13,6 +13,13 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+set(TCPQUIC_PLATFORM_SOURCES)
+if(WIN32)
+    list(APPEND TCPQUIC_PLATFORM_SOURCES platform_socket_win.cpp)
+else()
+    list(APPEND TCPQUIC_PLATFORM_SOURCES platform_socket_posix.cpp)
+endif()
+
 set(TCPQUIC_PROXY_SOURCES
     main.cpp
     config.cpp
@@ -32,6 +39,7 @@ set(TCPQUIC_PROXY_SOURCES
     admin_http.cpp
     router_runtime.cpp
     server_metrics.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -288,6 +296,18 @@ add_executable(tcpquic_production_linkage_guard_test
 set_property(TARGET tcpquic_production_linkage_guard_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_production_linkage_guard_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_platform_socket_test
+    unittest/platform_socket_test.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+target_include_directories(tcpquic_platform_socket_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+set_property(TARGET tcpquic_platform_socket_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_platform_socket_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(WIN32)
+    target_compile_definitions(tcpquic_platform_socket_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(tcpquic_platform_socket_test ws2_32)
+endif()
+
 set(TCPQUIC_TEST_TARGETS
     tcpquic_tuning_test
     tcpquic_tcp_write_queue_test
@@ -308,6 +328,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_admin_http_test
     tcpquic_router_runtime_test
     tcpquic_production_linkage_guard_test
+    tcpquic_platform_socket_test
 )
 
 foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
