@@ -49,6 +49,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
+if(WIN32)
+    list(APPEND TCPQUIC_PROXY_SOURCES
+        windows_relay_worker.cpp
+    )
+endif()
+
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
 if(WIN32)

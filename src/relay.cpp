@@ -3,6 +3,9 @@
 #if defined(__linux__)
 #include "linux_relay_worker.h"
 #endif
+#if defined(_WIN32)
+#include "windows_relay_worker.h"
+#endif
 
 #include "msquic.hpp"
 #include "tuning.h"
@@ -19,19 +22,20 @@ bool TqRelayStart(
         return false;
     }
 
-#if !defined(__linux__)
-    (void)tcpFd;
-    (void)stream;
-    (void)compressor;
-    (void)decompressor;
-    (void)profileTuning;
-    (void)compressAlgo;
-    return false;
-#else
     const uint32_t activeRelays = TqRelayRegisterActive();
     TqTuningConfig tuning = profileTuning;
     TqApplyRelayPoolBudget(tuning, activeRelays);
 
+#if defined(_WIN32)
+    if (!TqWindowsRelayRuntime::Instance().Start(tuning.LinuxRelayWorkerCount) ||
+        !TqWindowsRelayRuntime::Instance().RegisterRelay(
+            tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo)) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+    handle->Stop.store(false);
+    return true;
+#elif defined(__linux__)
     if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
@@ -63,6 +67,14 @@ bool TqRelayStart(
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
     return true;
+#else
+    (void)tcpFd;
+    (void)stream;
+    (void)compressor;
+    (void)decompressor;
+    (void)compressAlgo;
+    TqRelayUnregisterActive();
+    return false;
 #endif
 }
 
@@ -70,6 +82,18 @@ void TqRelayStop(TqRelayHandle* handle) {
     if (handle == nullptr) {
         return;
     }
+
+#if defined(_WIN32)
+    if (handle->Backend == TqRelayBackendType::WindowsWorker) {
+        TqWindowsRelayRuntime::Instance().StopRelay(handle);
+        handle->Backend = TqRelayBackendType::None;
+        handle->WindowsWorker = nullptr;
+        handle->WindowsRelayId = 0;
+        handle->Stop.store(true);
+        TqRelayUnregisterActive();
+        return;
+    }
+#endif
 
 #if defined(__linux__)
     if (handle->Backend == TqRelayBackendType::LinuxWorker) {
