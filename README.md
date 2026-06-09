@@ -2,7 +2,7 @@
 
 独立仓库实现的 **TCP-over-QUIC 隧道代理**。在 A、B 两节点各运行一个进程，预先建立 QUIC 长连接；本地应用通过 **SOCKS5** 或 **HTTP CONNECT** 接入代理，每个 TCP 连接映射为一条 QUIC 双向 Stream，由 B 侧按动态目标发起 TCP 拨号。
 
-底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，以 Git 子模块形式 vendored 在 [`third_party/msquic`](third_party/msquic)（当前检出：`v2.5.2-24-g0efce2bc9`）。
+底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，压缩库来自 [lz4](https://github.com/lz4/lz4) 与 [zstd](https://github.com/facebook/zstd)，TLS 来自 msquic 内嵌的 [quictls](https://github.com/quictls/openssl)；均以 Git 子模块 vendored（详见下方 [依赖](#依赖)）。
 
 **典型场景：**
 
@@ -31,10 +31,57 @@
 | `client` | A 节点 | SOCKS5 / HTTP CONNECT 入口、压缩、QUIC 客户端、长连接维护 |
 | `server` | B 节点 | QUIC 监听、mTLS、ACL、解压、TCP 拨号 |
 
+## 依赖
+
+### Vendored 库（Git 子模块，无需系统 dev 包）
+
+| 组件 | 路径 | 用途 |
+|------|------|------|
+| [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 栈 |
+| [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS/mTLS（msquic 子模块，**首次构建从源码编译**） |
+| [lz4](https://github.com/lz4/lz4) | `third_party/lz4` | 流式压缩 |
+| [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
+
+当前 pin：msquic `v2.5.2-24-g0efce2bc9`、lz4 `v1.10.0`、zstd `v1.5.7`。
+
+**不需要** 安装 `libzstd-dev`、`liblz4-dev`、`libssl-dev` 等系统库；`git submodule update --init --recursive` 会拉齐上述源码并由 CMake 一并构建。
+
+### 构建工具
+
+| 工具 | 说明 |
+|------|------|
+| CMake ≥ 3.16 | 构建系统 |
+| C/C++ 编译器 | gcc 或 clang |
+| `perl`、`make` | msquic 编译 quictls 时使用（OpenSSL `Configure` + `make install_dev`） |
+| Git | 初始化子模块 |
+
+Debian/Ubuntu 示例（仅工具链，**不含** vendored 库对应的 `-dev` 包）：
+
+```bash
+sudo apt install git cmake build-essential perl
+```
+
+### 运行时
+
+`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread 等），**不依赖** 系统安装的 libzstd / liblz4 / libssl。构建产物与 vendored 静态库、`libmsquic.so` 同目录部署即可（CMake 已设置 `$ORIGIN` RPATH）。
+
+### 测试与脚本（不链接进二进制）
+
+运行 `scripts/` 下集成测试、压测脚本时，宿主机还需：
+
+| 命令 | 用途 |
+|------|------|
+| `openssl` | 生成测试用 mTLS 证书 |
+| `curl` | HTTP CONNECT / SOCKS5 端到端验证 |
+| `python3` | 临时 HTTP 服务、辅助计算 |
+
+### 可选 CMake 开关
+
+| 开关 | 默认 | 说明 |
+|------|------|------|
+| `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF` | 设为 `ON` 时 msquic 使用系统 `libcrypto`，而非 vendored quictls |
+
 ## 构建
-
-**依赖：** libzstd（`pkg-config libzstd`）、CMake 3.16+、C/C++ 编译器、OpenSSL 开发包（由 msquic 构建流程拉取/使用）。
-
 ```bash
 git submodule update --init --recursive
 mkdir -p build && cd build
@@ -214,7 +261,10 @@ src/
 ├── tuning.*                  # 自适应调参
 └── unittest/                 # 单元测试
 
-third_party/msquic/           # msquic 子模块（QUIC 栈）
+third_party/
+├── msquic/                   # msquic 子模块（QUIC 栈；内含 submodules/quictls）
+├── lz4/                      # lz4 子模块（压缩）
+└── zstd/                     # zstd 子模块（压缩）
 scripts/                      # 集成测试与性能脚本
 docs/                         # 设计规格与实现计划
 ```

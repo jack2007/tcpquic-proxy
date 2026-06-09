@@ -11,10 +11,7 @@ function(add_tcpquic_executable target)
     set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 endfunction()
 
-find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
-pkg_check_modules(LIBZSTD REQUIRED libzstd)
-pkg_check_modules(LIBLZ4 liblz4)
 
 set(TCPQUIC_PROXY_SOURCES
     main.cpp
@@ -40,29 +37,18 @@ set(TCPQUIC_PROXY_SOURCES
 
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
-target_include_directories(tcpquic-proxy PRIVATE ${MSQUIC_SOURCE_DIR}/src/inc ${LIBZSTD_INCLUDE_DIRS})
-target_link_libraries(tcpquic-proxy PRIVATE ${LIBZSTD_LIBRARIES})
-target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
-if(LIBLZ4_FOUND)
-    target_include_directories(tcpquic-proxy PRIVATE ${LIBLZ4_INCLUDE_DIRS})
-    target_link_libraries(tcpquic-proxy PRIVATE ${LIBLZ4_LIBRARIES})
-    target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_LZ4=1)
-endif()
+target_include_directories(tcpquic-proxy PRIVATE ${MSQUIC_SOURCE_DIR}/src/inc)
+target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4)
+target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
 
-set(TCPQUIC_TEST_LIBS ${LIBZSTD_LIBRARIES})
-set(TCPQUIC_TEST_INCLUDES ${LIBZSTD_INCLUDE_DIRS})
-set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1)
+set(TCPQUIC_TEST_LIBS libzstd lz4)
+set(TCPQUIC_TEST_INCLUDES)
+set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
 set(TCPQUIC_SERVER_TEST_SOURCES
     thread_pool.cpp
     tcp_dialer.cpp
     tuning.cpp
 )
-if(LIBLZ4_FOUND)
-    list(APPEND TCPQUIC_TEST_LIBS ${LIBLZ4_LIBRARIES})
-    list(APPEND TCPQUIC_TEST_INCLUDES ${LIBLZ4_INCLUDE_DIRS})
-    list(APPEND TCPQUIC_TEST_DEFS TCPQUIC_HAS_LZ4=1)
-endif()
-
 add_executable(tcpquic_tuning_test
     unittest/tuning_test.cpp
     config.cpp

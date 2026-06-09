@@ -31,17 +31,16 @@
 
 ## 构建
 
-**依赖：** libzstd（`pkg-config libzstd`）、msquic 常规构建依赖。
+**依赖：** 见仓库根目录 [`README.md`](../README.md#依赖)。msquic / quictls / lz4 / zstd 均已 vendored，无需系统 `libzstd-dev` 等 dev 包。
 
 ```bash
-cd build-iouring
-cmake .. -DQUIC_BUILD_TOOLS=ON
+git submodule update --init --recursive
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --target tcpquic-proxy -j$(nproc)
 ```
 
-产物：`build-iouring/bin/Release/tcpquic-proxy`
-
-> 若已有 build 目录且 `QUIC_BUILD_TOOLS=OFF`，需重新执行 `cmake .. -DQUIC_BUILD_TOOLS=ON`。
+产物：`build/bin/Release/tcpquic-proxy`
 
 ### 单元测试
 
