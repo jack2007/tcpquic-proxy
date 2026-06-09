@@ -272,6 +272,8 @@ endif()
 
 Append `${TCPQUIC_PLATFORM_SOURCES}` to `TCPQUIC_PROXY_SOURCES`.
 
+Any target that compiles a source file calling `TqCloseSocket`, `TqSend`, `TqRecv`, `TqInetPton`, `TqInetNtop`, or `TqSocketPair` must also compile `${TCPQUIC_PLATFORM_SOURCES}` or it will fail at link time. As later tasks migrate more files, add `${TCPQUIC_PLATFORM_SOURCES}` to the affected unit-test source lists in the same task where the migrated file is introduced.
+
 Add the test target before `set(TCPQUIC_TEST_TARGETS ...)`:
 
 ```cmake
@@ -283,6 +285,7 @@ target_include_directories(tcpquic_platform_socket_test PRIVATE ${CMAKE_CURRENT_
 set_property(TARGET tcpquic_platform_socket_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_platform_socket_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(WIN32)
+    target_compile_definitions(tcpquic_platform_socket_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(tcpquic_platform_socket_test ws2_32)
 endif()
 ```
@@ -577,7 +580,22 @@ if (!TqSocketValid(fd)) {
 }
 ```
 
-Use this platform split for waiting until connect completes:
+Keep a helper that computes the real socket-address length; do not use `sizeof(sockaddr_storage)` for `connect`, because that breaks some Winsock calls and can produce inconsistent behavior across address families:
+
+```cpp
+socklen_t TqSockaddrLength(const sockaddr_storage& addr) {
+    switch (addr.ss_family) {
+    case AF_INET:
+        return sizeof(sockaddr_in);
+    case AF_INET6:
+        return sizeof(sockaddr_in6);
+    default:
+        return 0;
+    }
+}
+```
+
+Use this platform split for waiting until connect completes, including the `SO_ERROR` check after poll readiness:
 
 ```cpp
 #if defined(_WIN32)
@@ -585,6 +603,16 @@ WSAPOLLFD pfd{};
 pfd.fd = fd;
 pfd.events = POLLOUT;
 int pollResult = ::WSAPoll(&pfd, 1, timeoutMs);
+if (pollResult <= 0) {
+    connectErrno = (pollResult == 0) ? WSAETIMEDOUT : TqLastSocketError();
+    return false;
+}
+int error = 0;
+int errorLen = sizeof(error);
+if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &errorLen) != 0) {
+    connectErrno = TqLastSocketError();
+    return false;
+}
 #else
 pollfd pfd{};
 pfd.fd = fd;
@@ -593,13 +621,33 @@ int pollResult;
 do {
     pollResult = ::poll(&pfd, 1, timeoutMs);
 } while (pollResult < 0 && TqSocketInterrupted(TqLastSocketError()));
+if (pollResult <= 0) {
+    connectErrno = (pollResult == 0) ? ETIMEDOUT : TqLastSocketError();
+    return false;
+}
+int error = 0;
+socklen_t errorLen = sizeof(error);
+if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errorLen) != 0) {
+    connectErrno = TqLastSocketError();
+    return false;
+}
 #endif
+if (error != 0) {
+    connectErrno = error;
+    return false;
+}
+connectErrno = 0;
+return true;
 ```
 
 When checking `connect` errors:
 
 ```cpp
-const int connectResult = ::connect(fd, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+const socklen_t addrLen = TqSockaddrLength(addr);
+if (addrLen == 0) {
+    continue;
+}
+const int connectResult = ::connect(fd, reinterpret_cast<const sockaddr*>(&addr), addrLen);
 if (connectResult != 0 && !TqSocketInProgress(TqLastSocketError())) {
     TqCloseSocket(fd);
     continue;
@@ -610,11 +658,19 @@ When tuning:
 
 ```cpp
 void TqTuneTcpForThroughput(TqSocketHandle fd, int bufferBytes) {
+    if (!TqSocketValid(fd)) {
+        return;
+    }
+    if (bufferBytes <= 0) {
+        bufferBytes = TqGetActiveTcpSocketBuffer();
+    }
     (void)TqSetNoDelay(fd);
     (void)TqSetSocketBuffer(fd, SO_RCVBUF, bufferBytes);
     (void)TqSetSocketBuffer(fd, SO_SNDBUF, bufferBytes);
 }
 ```
+
+Modify `src/CMakeLists.txt` in this task so every target that now compiles `tcp_dialer.cpp` or `acl.cpp` also compiles `${TCPQUIC_PLATFORM_SOURCES}`. At this point that includes `tcpquic-proxy`, `tcpquic_acl_test`, `tcpquic_tuning_test`, `tcpquic_config_router_test`, `tcpquic_tunnel_test`, `tcpquic_http_connect_test`, `tcpquic_socks5_test`, and `tcpquic_router_runtime_test`.
 
 - [ ] **Step 3: Replace address conversion in ACL**
 
@@ -749,26 +805,7 @@ and close/shutdown calls with `TqCloseSocket`, `TqShutdownSend`, or `TqShutdownB
 
 - [ ] **Step 3: Remove `dup()` from SOCKS5 success handoff**
 
-In `src/socks5_server.cpp`, make success ownership transfer explicit:
-
-```cpp
-const TqTunnelStartResult result = OnTunnel(request, clientFd);
-if (!result.Ok) {
-    const uint8_t rep = TqSocks5RepForOpenError(result.Error);
-    (void)TqSendSocks5Reply(clientFd, rep);
-    TqCloseSocket(clientFd);
-    return;
-}
-
-if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
-    TqCloseSocket(clientFd);
-    return;
-}
-
-clientFd = TqInvalidSocket;
-```
-
-If the current code sends success after `OnTunnel`, adjust the sequence to send success before `OnTunnel`:
+In `src/socks5_server.cpp`, make success ownership transfer explicit. Send the SOCKS5 success reply before handing the socket to the tunnel, then treat `OnTunnel` success as ownership transfer:
 
 ```cpp
 if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
@@ -783,14 +820,14 @@ if (!result.Ok) {
 clientFd = TqInvalidSocket;
 ```
 
-Use the second sequence when `OnTunnel` only sends QUIC OPEN and does not consume TCP bytes before OPEN_OK, matching the approved spec.
+Do not keep the old failure-reply-after-`OnTunnel` sequence once `dup()` is removed. After the success reply has been sent, a later tunnel-open failure can only close the socket; sending a SOCKS5 failure reply at that point violates the protocol state seen by the client.
 
 - [ ] **Step 4: Remove `dup()` from HTTP CONNECT success handoff**
 
-In `src/http_connect_server.cpp`, use the same ordering:
+In `src/http_connect_server.cpp`, use the same ordering and keep the existing `TqSendHttpStatus` helper name:
 
 ```cpp
-if (!TqSendHttpResponse(clientFd, 200, "Connection Established")) {
+if (!TqSendHttpStatus(clientFd, 200)) {
     TqCloseSocket(clientFd);
     return;
 }
@@ -802,11 +839,11 @@ if (!result.Ok) {
 clientFd = TqInvalidSocket;
 ```
 
-For failure before success, send the existing HTTP error response and close:
+For failure before the 200 response, send the existing HTTP error response and close. Once 200 has been sent, do not send another HTTP error response on later tunnel failure:
 
 ```cpp
 const int status = TqHttpStatusForOpenError(result.Error);
-(void)TqSendHttpResponse(clientFd, status, "Tunnel Failed");
+(void)TqSendHttpStatus(clientFd, status);
 TqCloseSocket(clientFd);
 ```
 
@@ -942,9 +979,10 @@ Keep existing config parsing and mode dispatch after this block.
 
 - [ ] **Step 5: Guard Linux-only tests in CMake**
 
-In `src/CMakeLists.txt`, wrap Linux relay tests:
+In `src/CMakeLists.txt`, wrap all four Linux relay test targets, not only the buffer-pool target. The current file creates `tcpquic_linux_relay_worker_queue_test`, `tcpquic_linux_relay_worker_io_test`, and `tcpquic_relay_backend_selection_test` unconditionally; each of those compiles Linux-only sources and must stay inside the Linux block:
 
 ```cmake
+set(TCPQUIC_LINUX_TEST_TARGETS)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_relay_buffer_pool_test
         unittest/linux_relay_buffer_pool_test.cpp
@@ -953,6 +991,47 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(tcpquic_linux_relay_buffer_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_property(TARGET tcpquic_linux_relay_buffer_pool_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_buffer_pool_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_linux_relay_worker_queue_test
+        unittest/linux_relay_worker_queue_test.cpp
+        linux_relay_worker.cpp
+        linux_relay_buffer_pool.cpp
+    )
+    target_include_directories(tcpquic_linux_relay_worker_queue_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${MSQUIC_SOURCE_DIR}/src/inc)
+    target_link_libraries(tcpquic_linux_relay_worker_queue_test Threads::Threads)
+    set_property(TARGET tcpquic_linux_relay_worker_queue_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_linux_relay_worker_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_linux_relay_worker_io_test
+        unittest/linux_relay_worker_io_test.cpp
+        linux_relay_worker.cpp
+        linux_relay_buffer_pool.cpp
+        compress.cpp
+    )
+    target_include_directories(tcpquic_linux_relay_worker_io_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${MSQUIC_SOURCE_DIR}/src/inc)
+    target_link_libraries(tcpquic_linux_relay_worker_io_test Threads::Threads ${TCPQUIC_TEST_LIBS})
+    target_compile_definitions(tcpquic_linux_relay_worker_io_test PRIVATE ${TCPQUIC_TEST_DEFS})
+    set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_linux_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_relay_backend_selection_test
+        unittest/relay_backend_selection_test.cpp
+        relay.cpp
+        tuning.cpp
+        linux_relay_worker.cpp
+        linux_relay_buffer_pool.cpp
+    )
+    target_include_directories(tcpquic_relay_backend_selection_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${MSQUIC_SOURCE_DIR}/src/inc)
+    target_link_libraries(tcpquic_relay_backend_selection_test Threads::Threads inc warnings msquic logging base_link)
+    target_compile_options(tcpquic_relay_backend_selection_test PRIVATE -UNDEBUG)
+    set_property(TARGET tcpquic_relay_backend_selection_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_relay_backend_selection_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
     list(APPEND TCPQUIC_LINUX_TEST_TARGETS
         tcpquic_linux_relay_buffer_pool_test
@@ -963,7 +1042,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 ```
 
-Add Linux test targets to `TCPQUIC_TEST_TARGETS` only inside the Linux block.
+Append `${TCPQUIC_LINUX_TEST_TARGETS}` to `TCPQUIC_TEST_TARGETS` after the common test-target list is initialized:
+
+```cmake
+list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_LINUX_TEST_TARGETS})
+```
 
 - [ ] **Step 6: Run migrated tests on Linux**
 
@@ -1003,6 +1086,7 @@ Create `src/windows_relay_worker.h`:
 #pragma once
 
 #include "compress.h"
+#include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
 #include "tuning.h"
@@ -1037,13 +1121,14 @@ public:
 
     void StopRelay(uint64_t relayId);
     static QUIC_STATUS QUIC_API StreamCallback(
-        HQUIC stream,
+        MsQuicStream* stream,
         void* context,
         QUIC_STREAM_EVENT* event) noexcept;
 
 private:
     struct RelayContext;
     struct IoOperation;
+    struct CallbackContext;
 
     void Run();
     void PostStop();
@@ -1152,7 +1237,7 @@ bool TqWindowsRelayWorker::RegisterRelay(
 void TqWindowsRelayWorker::StopRelay(uint64_t) {}
 
 QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
-    HQUIC,
+    MsQuicStream*,
     void*,
     QUIC_STREAM_EVENT*) noexcept {
     return QUIC_STATUS_SUCCESS;
@@ -1225,17 +1310,25 @@ In `src/relay.cpp`, include Windows relay under `_WIN32`:
 #endif
 ```
 
-In `TqRelayStart`, add:
+In `TqRelayStart`, compute the active-relay budget before the platform split so both Linux and Windows use a valid `tuning` object:
 
 ```cpp
+const uint32_t activeRelays = TqRelayRegisterActive();
+TqTuningConfig tuning = profileTuning;
+TqApplyRelayPoolBudget(tuning, activeRelays);
+
 #if defined(_WIN32)
-if (!TqWindowsRelayRuntime::Instance().RegisterRelay(
+if (!TqWindowsRelayRuntime::Instance().Start(tuning.LinuxRelayWorkerCount) ||
+    !TqWindowsRelayRuntime::Instance().RegisterRelay(
         tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo)) {
+    TqRelayUnregisterActive();
     return false;
 }
 return true;
 #endif
 ```
+
+Then remove the duplicate Linux-only `activeRelays` and `tuning` declarations from the existing `#else`/Linux branch. Keep the existing Linux failure paths that call `TqRelayUnregisterActive()`.
 
 In `TqRelayStop`, add:
 
@@ -1243,6 +1336,12 @@ In `TqRelayStop`, add:
 #if defined(_WIN32)
 if (handle->Backend == TqRelayBackendType::WindowsWorker) {
     TqWindowsRelayRuntime::Instance().StopRelay(handle);
+    handle->Backend = TqRelayBackendType::None;
+    handle->WindowsWorker = nullptr;
+    handle->WindowsRelayId = 0;
+    handle->Stop.store(true);
+    TqRelayUnregisterActive();
+    return;
 }
 #endif
 ```
@@ -1326,6 +1425,8 @@ int main() {
 In `src/CMakeLists.txt`, add under `if(WIN32)`:
 
 ```cmake
+set(TCPQUIC_WINDOWS_TEST_TARGETS)
+
 add_executable(tcpquic_windows_relay_worker_test
     unittest/windows_relay_worker_test.cpp
     windows_relay_worker.cpp
@@ -1336,7 +1437,13 @@ target_include_directories(tcpquic_windows_relay_worker_test PRIVATE
     ${MSQUIC_SOURCE_DIR}/src/inc)
 target_link_libraries(tcpquic_windows_relay_worker_test PRIVATE ws2_32 inc warnings msquic logging base_link)
 target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-list(APPEND TCPQUIC_TEST_TARGETS tcpquic_windows_relay_worker_test)
+list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
+```
+
+Append `${TCPQUIC_WINDOWS_TEST_TARGETS}` to `TCPQUIC_TEST_TARGETS` after the common test-target list is initialized so it participates in the existing `foreach(target IN LISTS TCPQUIC_TEST_TARGETS)` compile-feature setup:
+
+```cmake
+list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_WINDOWS_TEST_TARGETS})
 ```
 
 - [ ] **Step 2: Define IO operation and relay context**
@@ -1358,6 +1465,7 @@ struct TqWindowsRelayWorker::IoOperation {
     TqWindowsRelayEvent Event{TqWindowsRelayEvent::TcpRecv};
     std::shared_ptr<RelayContext> Relay;
     std::vector<uint8_t> Buffer;
+    size_t Offset{0};
 };
 
 struct TqWindowsRelayWorker::RelayContext {
@@ -1371,6 +1479,16 @@ struct TqWindowsRelayWorker::RelayContext {
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     std::atomic<bool> Closing{false};
     std::atomic<uint32_t> InFlightQuicSends{0};
+    std::shared_ptr<CallbackContext> Callback;
+};
+```
+
+Define `CallbackContext` before `RelayContext` in `windows_relay_worker.cpp` and forward-declare it in `windows_relay_worker.h`:
+
+```cpp
+struct TqWindowsRelayWorker::CallbackContext {
+    TqWindowsRelayWorker* Worker{nullptr};
+    std::weak_ptr<RelayContext> Relay;
 };
 ```
 
@@ -1407,6 +1525,11 @@ bool TqWindowsRelayWorker::RegisterRelay(
     relay->PublicHandle = handle;
     relay->Tuning = tuning;
     relay->CompressAlgo = compressAlgo;
+    relay->Callback = std::make_shared<CallbackContext>();
+    relay->Callback->Worker = this;
+    relay->Callback->Relay = relay;
+    stream->Callback = StreamCallback;
+    stream->Context = relay->Callback.get();
 
     {
         std::lock_guard<std::mutex> guard(Lock_);
@@ -1491,6 +1614,7 @@ Add private declarations:
 void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
 void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
 void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
+bool PostTcpSend(std::unique_ptr<IoOperation> op);
 void CloseRelay(const std::shared_ptr<RelayContext>& relay);
 ```
 
@@ -1505,6 +1629,10 @@ void TqWindowsRelayWorker::CloseRelay(const std::shared_ptr<RelayContext>& relay
     }
     TqCloseSocket(relay->TcpFd);
     relay->TcpFd = TqInvalidSocket;
+    if (relay->Stream != nullptr && relay->Stream->Context == relay->Callback.get()) {
+        relay->Stream->Callback = MsQuicStream::NoOpCallback;
+        relay->Stream->Context = nullptr;
+    }
     {
         std::lock_guard<std::mutex> guard(Lock_);
         Relays_.erase(relay->Id);
@@ -1517,7 +1645,7 @@ void TqWindowsRelayWorker::CloseRelay(const std::shared_ptr<RelayContext>& relay
 
 - [ ] **Step 6: Implement TCP receive handling**
 
-Implement a minimal uncompressed path first:
+Implement TCP receive handling with compression support before constructing the MsQuic send buffer:
 
 ```cpp
 void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes) {
@@ -1531,47 +1659,63 @@ void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD 
         return;
     }
     op->Buffer.resize(bytes);
-    QUIC_BUFFER buffer{};
-    buffer.Buffer = op->Buffer.data();
-    buffer.Length = bytes;
-    relay->InFlightQuicSends.fetch_add(1);
-    const QUIC_STATUS status = relay->Stream->Send(&buffer, 1, QUIC_SEND_FLAG_NONE, op.release());
-    if (QUIC_FAILED(status)) {
-        relay->InFlightQuicSends.fetch_sub(1);
-        CloseRelay(relay);
+    if (relay->Compressor != nullptr) {
+        std::vector<uint8_t> compressed;
+        if (!relay->Compressor->Compress(
+                op->Buffer.data(),
+                static_cast<uint32_t>(op->Buffer.size()),
+                compressed,
+                false)) {
+            CloseRelay(relay);
+            return;
+        }
+        op->Buffer.swap(compressed);
     }
-}
-```
-
-If `relay->Compressor` is non-null, replace the direct `Stream->Send()` payload with this compression block before constructing the `QUIC_BUFFER`:
-
-```cpp
-std::vector<uint8_t> compressed;
-const uint8_t* sendData = op->Buffer.data();
-uint32_t sendLength = static_cast<uint32_t>(op->Buffer.size());
-if (relay->Compressor != nullptr) {
-    if (!relay->Compressor->Compress(
-            op->Buffer.data(),
-            static_cast<uint32_t>(op->Buffer.size()),
-            compressed,
-            false)) {
-        CloseRelay(relay);
+    if (op->Buffer.empty()) {
+        (void)PostTcpRecv(relay);
         return;
     }
-    sendData = compressed.data();
-    sendLength = static_cast<uint32_t>(compressed.size());
+
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = op->Buffer.data();
+    buffer.Length = static_cast<uint32_t>(op->Buffer.size());
+    relay->InFlightQuicSends.fetch_add(1);
+    IoOperation* raw = op.release();
+    const QUIC_STATUS status = relay->Stream->Send(&buffer, 1, QUIC_SEND_FLAG_NONE, raw);
+    if (QUIC_FAILED(status)) {
+        relay->InFlightQuicSends.fetch_sub(1);
+        delete raw;
+        CloseRelay(relay);
+    }
 }
-op->Buffer.assign(sendData, sendData + sendLength);
 ```
 
-Then construct `QUIC_BUFFER` from `op->Buffer`. This keeps the send context alive until MsQuic reports send completion.
+- [ ] **Step 7: Release QUIC send contexts and continue TCP reads**
 
-- [ ] **Step 7: Implement QUIC receive enqueue**
+Handle MsQuic `QUIC_STREAM_EVENT_SEND_COMPLETE` in `StreamCallback` so the send context is released and the next TCP receive is posted:
+
+```cpp
+if (event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
+    std::unique_ptr<IoOperation> completed(
+        static_cast<IoOperation*>(event->SEND_COMPLETE.ClientContext));
+    if (completed && completed->Relay) {
+        completed->Relay->InFlightQuicSends.fetch_sub(1);
+        if (!completed->Relay->Closing.load()) {
+            (void)completed->Relay->Callback->Worker->PostTcpRecv(completed->Relay);
+        }
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+```
+
+This keeps one TCP receive outstanding per relay and avoids leaking `IoOperation` objects passed as MsQuic send contexts.
+
+- [ ] **Step 8: Implement QUIC receive enqueue**
 
 In `StreamCallback`, when receiving `QUIC_STREAM_EVENT_RECEIVE`, allocate an operation, copy buffers, and post:
 
 ```cpp
-auto* callback = static_cast<CallbackContext*>(context);
+auto* callback = static_cast<TqWindowsRelayWorker::CallbackContext*>(context);
 if (callback == nullptr || callback->Worker == nullptr || event == nullptr) {
     return QUIC_STATUS_SUCCESS;
 }
@@ -1588,24 +1732,18 @@ if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         op->Buffer.insert(op->Buffer.end(), buffer.Buffer, buffer.Buffer + buffer.Length);
     }
     IoOperation* raw = op.release();
-    (void)::PostQueuedCompletionStatus(
-        static_cast<HANDLE>(callback->Worker->Iocp_), 0, 0, &raw->Overlapped);
+    if (!::PostQueuedCompletionStatus(
+            static_cast<HANDLE>(callback->Worker->Iocp_), 0, 0, &raw->Overlapped)) {
+        delete raw;
+        callback->Worker->CloseRelay(relay);
+    }
 }
 return QUIC_STATUS_SUCCESS;
 ```
 
-When wiring the stream callback in `RegisterRelay`, create a callback context owned by `RelayContext`:
+Use the `CallbackContext` created in `RegisterRelay`; do not allocate a callback context per event.
 
-```cpp
-struct CallbackContext {
-    TqWindowsRelayWorker* Worker{nullptr};
-    std::weak_ptr<RelayContext> Relay;
-};
-```
-
-Add `std::shared_ptr<CallbackContext> Callback;` to `RelayContext`, initialize it after `relay` is created, and pass `relay->Callback.get()` as the MsQuic callback context. In `StreamCallback`, cast `context` to `CallbackContext*`, lock `Relay`, and store that `std::shared_ptr<RelayContext>` in each queued `IoOperation`.
-
-- [ ] **Step 8: Implement QUIC to TCP send**
+- [ ] **Step 9: Implement QUIC to TCP send**
 
 Implement `HandleQuicReceiveQueued`:
 
@@ -1615,40 +1753,65 @@ void TqWindowsRelayWorker::HandleQuicReceiveQueued(std::unique_ptr<IoOperation> 
     if (!relay || relay->Closing.load() || op->Buffer.empty()) {
         return;
     }
+    if (relay->Decompressor != nullptr) {
+        std::vector<uint8_t> output;
+        if (!relay->Decompressor->Decompress(
+                op->Buffer.data(),
+                static_cast<uint32_t>(op->Buffer.size()),
+                output)) {
+            CloseRelay(relay);
+            return;
+        }
+        op->Buffer.swap(output);
+    }
+    if (op->Buffer.empty()) {
+        return;
+    }
     op->Event = TqWindowsRelayEvent::TcpSend;
+    op->Offset = 0;
+    if (!PostTcpSend(std::move(op))) {
+        CloseRelay(relay);
+    }
+}
+```
+
+Implement `PostTcpSend` and `HandleTcpSend` so partial overlapped sends complete before the operation is released:
+
+```cpp
+bool TqWindowsRelayWorker::PostTcpSend(std::unique_ptr<IoOperation> op) {
+    auto relay = op->Relay;
+    if (!relay || relay->Closing.load() || op->Offset >= op->Buffer.size()) {
+        return false;
+    }
     WSABUF buf{};
-    buf.buf = reinterpret_cast<char*>(op->Buffer.data());
-    buf.len = static_cast<ULONG>(op->Buffer.size());
+    buf.buf = reinterpret_cast<char*>(op->Buffer.data() + op->Offset);
+    buf.len = static_cast<ULONG>(op->Buffer.size() - op->Offset);
     DWORD sent = 0;
     IoOperation* raw = op.release();
     const int rc = ::WSASend(relay->TcpFd, &buf, 1, &sent, 0, &raw->Overlapped, nullptr);
     if (rc != 0 && ::WSAGetLastError() != WSA_IO_PENDING) {
-        auto failedRelay = raw->Relay;
         delete raw;
-        CloseRelay(failedRelay);
+        return false;
     }
+    return true;
 }
-```
 
-If `relay->Decompressor` is non-null, replace `op->Buffer` before `WSASend` with:
-
-```cpp
-std::vector<uint8_t> output;
-if (relay->Decompressor != nullptr) {
-    if (!relay->Decompressor->Decompress(
-            op->Buffer.data(),
-            static_cast<uint32_t>(op->Buffer.size()),
-            output)) {
-        CloseRelay(relay);
+void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes) {
+    auto relay = op->Relay;
+    if (!relay || relay->Closing.load()) {
         return;
     }
-    op->Buffer.swap(output);
+    op->Offset += bytes;
+    if (op->Offset < op->Buffer.size()) {
+        if (!PostTcpSend(std::move(op))) {
+            CloseRelay(relay);
+        }
+        return;
+    }
 }
 ```
 
-If `op->Buffer` is empty after decompression, return without posting `WSASend`.
-
-- [ ] **Step 9: Build and run Windows relay worker test**
+- [ ] **Step 10: Build and run Windows relay worker test**
 
 On Windows x64 Developer PowerShell:
 
@@ -1659,7 +1822,7 @@ cmake --build build-win --target tcpquic_windows_relay_worker_test
 
 Expected: build succeeds and test exits 0.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 11: Commit**
 
 Run:
 
