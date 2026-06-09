@@ -8,6 +8,7 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     (void)connection;
     return 0;
 }
+#include <cassert>
 #include <cstring>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -42,8 +43,11 @@ int main() {
 
     {
         TqRelayHandle handle{};
-        if (TqRelayLinuxFastPathEnabled(&handle)) return 8;
-        if (handle.Backend != TqRelayBackendType::None) return 9;
+        assert(!TqRelayLinuxFastPathEnabled(&handle));
+        handle.Backend = TqRelayBackendType::LinuxWorker;
+        assert(TqRelayLinuxFastPathEnabled(&handle));
+        if (handle.Backend != TqRelayBackendType::LinuxWorker) return 10;
+        handle.Backend = TqRelayBackendType::None;
     }
 
     return 0;

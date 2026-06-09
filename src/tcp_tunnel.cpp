@@ -579,7 +579,10 @@ private:
 };
 
 bool TqTunnelRelayStopped(const TqTunnelContext* ctx) {
-    return ctx != nullptr && ctx->RelayHandle.Stop.load();
+    if (ctx == nullptr) {
+        return true;
+    }
+    return ctx->RelayHandle.Stop.load();
 }
 
 void TqReapTunnelContext(TqTunnelContext* ctx) {
