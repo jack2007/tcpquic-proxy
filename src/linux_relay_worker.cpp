@@ -26,6 +26,11 @@ struct TqLinuxRelayWorker::RelayState {
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
     TqRelayHandle* Handle{nullptr};
+    ITqCompressor* Compressor{nullptr};
+    ITqDecompressor* Decompressor{nullptr};
+    TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
+    std::vector<uint8_t> CompressionOutput;
+    std::vector<uint8_t> DecompressionOutput;
     bool EnableQuicSends{true};
     bool Closing{false};
     uint64_t OutstandingQuicSends{0};
@@ -38,6 +43,9 @@ struct TqLinuxRelayWorker::RelayState {
         : TcpFd(registration.TcpFd),
           Stream(registration.Stream),
           Handle(registration.Handle),
+          Compressor(registration.Compressor),
+          Decompressor(registration.Decompressor),
+          CompressAlgo(registration.CompressAlgo),
           EnableQuicSends(registration.EnableQuicSends),
           Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {}
 };
