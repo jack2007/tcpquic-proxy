@@ -1,10 +1,9 @@
 #include "http_connect_server.h"
 
+#include "platform_socket.h"
 #include "tcp_dialer.h"
 #include "thread_pool.h"
 
-#include <arpa/inet.h>
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -12,9 +11,9 @@
 #include <string>
 #include <utility>
 
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 namespace {
 
@@ -87,24 +86,24 @@ bool TqParseHostPort(const std::string& target, TqHostPort& out) {
 
 uint8_t TqAddrTypeForHost(const std::string& host) {
     in_addr ipv4{};
-    if (inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+    if (TqInetPton(AF_INET, host.c_str(), &ipv4)) {
         return TQ_ADDR_IPV4;
     }
 
     in6_addr ipv6{};
-    if (inet_pton(AF_INET6, host.c_str(), &ipv6) == 1) {
+    if (TqInetPton(AF_INET6, host.c_str(), &ipv6)) {
         return TQ_ADDR_IPV6;
     }
 
     return TQ_ADDR_DOMAIN;
 }
 
-bool TqSendAll(int fd, const char* data, size_t length) {
+bool TqSendAll(TqSocketHandle fd, const char* data, size_t length) {
     size_t sent = 0;
     while (sent < length) {
-        const ssize_t result = ::send(fd, data + sent, length - sent, 0);
+        const int result = TqSend(fd, data + sent, length - sent, TqSendFlags::None);
         if (result < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -117,7 +116,7 @@ bool TqSendAll(int fd, const char* data, size_t length) {
     return true;
 }
 
-bool TqSendHttpStatus(int fd, int status) {
+bool TqSendHttpStatus(TqSocketHandle fd, int status) {
     const char* reason = "Internal Server Error";
     switch (status) {
     case 200:
@@ -154,13 +153,7 @@ bool TqSendHttpStatus(int fd, int status) {
     return TqSendAll(fd, response, static_cast<size_t>(len));
 }
 
-void TqCloseFd(int fd) {
-    if (fd >= 0) {
-        ::close(fd);
-    }
-}
-
-void TqHandleHttpConnectClient(int clientFd, const TunnelStartFn& onTunnel) {
+void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
     std::string request;
     request.reserve(1024);
 
@@ -168,20 +161,20 @@ void TqHandleHttpConnectClient(int clientFd, const TunnelStartFn& onTunnel) {
     while (request.find("\r\n\r\n") == std::string::npos) {
         if (request.size() >= TqMaxHttpHeaderBytes) {
             TqSendHttpStatus(clientFd, 400);
-            TqCloseFd(clientFd);
+            TqCloseSocket(clientFd);
             return;
         }
 
-        const ssize_t received = ::recv(clientFd, buffer, sizeof(buffer), 0);
+        const int received = TqRecv(clientFd, buffer, sizeof(buffer), TqRecvFlags::None);
         if (received < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
-            TqCloseFd(clientFd);
+            TqCloseSocket(clientFd);
             return;
         }
         if (received == 0) {
-            TqCloseFd(clientFd);
+            TqCloseSocket(clientFd);
             return;
         }
 
@@ -191,41 +184,31 @@ void TqHandleHttpConnectClient(int clientFd, const TunnelStartFn& onTunnel) {
     TunnelRequest tunnel{};
     if (!TqParseHttpConnectRequest(request, tunnel)) {
         TqSendHttpStatus(clientFd, 400);
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
     if (!onTunnel) {
         TqSendHttpStatus(clientFd, 500);
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
-    const int tunnelFd = ::dup(clientFd);
-    if (tunnelFd < 0) {
-        TqSendHttpStatus(clientFd, 500);
-        TqCloseFd(clientFd);
-        return;
-    }
-    TqTuneTcpForThroughput(tunnelFd);
-
-    const TqTunnelStartResult result = onTunnel(tunnel, tunnelFd);
-    if (!result.Ok) {
-        TqSendHttpStatus(clientFd, TqHttpStatusForOpenError(result.Error));
-        ::close(tunnelFd);
-        TqCloseFd(clientFd);
-        return;
-    }
+    TqTuneTcpForThroughput(clientFd);
 
     if (!TqSendHttpStatus(clientFd, 200)) {
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
-    TqCloseFd(clientFd);
+    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
+    if (!result.Ok) {
+        TqCloseSocket(clientFd);
+        return;
+    }
 }
 
-bool TqCreateListenSocket(const std::string& listenHostPort, int& listenFd) {
+bool TqCreateListenSocket(const std::string& listenHostPort, TqSocketHandle& listenFd) {
     TqHostPort hostPort{};
     if (!TqParseHostPort(listenHostPort, hostPort)) {
         return false;
@@ -248,21 +231,21 @@ bool TqCreateListenSocket(const std::string& listenHostPort, int& listenFd) {
     }
 
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
+        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!TqSocketValid(fd)) {
             continue;
         }
 
-        int enabled = 1;
-        (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+        (void)TqSetReuseAddr(fd);
 
-        if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, SOMAXCONN) == 0) {
+        if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
+            ::listen(fd, SOMAXCONN) == 0) {
             listenFd = fd;
             freeaddrinfo(result);
             return true;
         }
 
-        ::close(fd);
+        TqCloseSocket(fd);
     }
 
     freeaddrinfo(result);
@@ -341,10 +324,10 @@ TqHttpConnectServer::~TqHttpConnectServer() {
 }
 
 bool TqHttpConnectServer::Start(std::string& err) {
-    if (ListenFd.load() >= 0) {
+    if (TqSocketValid(ListenFd.load())) {
         return true;
     }
-    int listenFd = -1;
+    TqSocketHandle listenFd = TqInvalidSocket;
     if (!TqCreateListenSocket(ListenHostPort, listenFd)) {
         err = "failed to listen on " + ListenHostPort;
         return false;
@@ -357,10 +340,10 @@ bool TqHttpConnectServer::Start(std::string& err) {
 
 void TqHttpConnectServer::Stop() {
     Stopping.store(true);
-    const int fd = ListenFd.exchange(-1);
-    if (fd >= 0) {
-        (void)::shutdown(fd, SHUT_RDWR);
-        ::close(fd);
+    const TqSocketHandle fd = ListenFd.exchange(TqInvalidSocket);
+    if (TqSocketValid(fd)) {
+        (void)TqShutdownBoth(fd);
+        TqCloseSocket(fd);
     }
     if (Worker.joinable()) {
         Worker.join();
@@ -369,26 +352,26 @@ void TqHttpConnectServer::Stop() {
 
 void TqHttpConnectServer::Run() {
     for (;;) {
-        const int listenFd = ListenFd.load();
-        if (listenFd < 0) {
+        const TqSocketHandle listenFd = ListenFd.load();
+        if (!TqSocketValid(listenFd)) {
             break;
         }
-        int clientFd = ::accept(listenFd, nullptr, nullptr);
-        if (clientFd < 0) {
+        TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+        if (!TqSocketValid(clientFd)) {
             if (Stopping.load()) {
                 break;
             }
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
-            std::fprintf(stderr, "tcpquic-proxy: accept failed on %s: %s\n",
+            std::fprintf(stderr, "tcpquic-proxy: accept failed on %s (error=%d)\n",
                 ListenHostPort.c_str(),
-                std::strerror(errno));
+                TqLastSocketError());
             continue;
         }
 
         if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel]() { TqHandleHttpConnectClient(clientFd, onTunnel); })) {
-            ::close(clientFd);
+            TqCloseSocket(clientFd);
         }
     }
 }

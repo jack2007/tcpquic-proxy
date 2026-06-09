@@ -8,7 +8,7 @@
 #include "tuning.h"
 
 bool TqRelayStart(
-    int tcpFd,
+    TqSocketHandle tcpFd,
     MsQuicStream* stream,
     ITqCompressor* compressor,
     ITqDecompressor* decompressor,

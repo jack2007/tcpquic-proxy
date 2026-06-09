@@ -1,3 +1,4 @@
+#include "../platform_socket.h"
 #include "../relay.h"
 #include "../tcp_dialer.h"
 #include "../tcp_tunnel.h"
@@ -32,7 +33,7 @@ int main() {
     if (::close(fds[1]) != 0) return 4;
 
     std::vector<sockaddr_storage> empty;
-    if (TqDialTcp(empty, 1).Fd >= 0) return 5;
+    if (TqSocketValid(TqDialTcp(empty, 1).Fd)) return 5;
 
     TqAcl acl;
     bool completed = false;

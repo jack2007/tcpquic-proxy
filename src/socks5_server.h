@@ -1,10 +1,11 @@
 #pragma once
 
 #include "control_protocol.h"
+#include "platform_socket.h"
 #include "tcp_tunnel.h"
 
-#include <cstdint>
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include <thread>
 #include <vector>
@@ -39,7 +40,7 @@ private:
     TunnelStartFn OnTunnel;
     TqThreadPool* Pool{nullptr};
     std::atomic<bool> Stopping{false};
-    std::atomic<int> ListenFd{-1};
+    std::atomic<TqSocketHandle> ListenFd{TqInvalidSocket};
     std::thread Worker;
 };
 

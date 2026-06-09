@@ -1,11 +1,10 @@
 #include "socks5_server.h"
 
+#include "platform_socket.h"
 #include "tcp_dialer.h"
 #include "tcp_tunnel.h"
 #include "thread_pool.h"
 
-#include <arpa/inet.h>
-#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -13,9 +12,9 @@
 #include <string>
 #include <utility>
 
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 namespace {
 
@@ -93,12 +92,12 @@ bool TqParseHostPort(const std::string& target, TqHostPort& out) {
     return true;
 }
 
-bool TqRecvAll(int fd, uint8_t* data, size_t length) {
+bool TqRecvAll(TqSocketHandle fd, uint8_t* data, size_t length) {
     size_t received = 0;
     while (received < length) {
-        const ssize_t result = ::recv(fd, data + received, length - received, 0);
+        const int result = TqRecv(fd, data + received, length - received, TqRecvFlags::None);
         if (result < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -111,12 +110,12 @@ bool TqRecvAll(int fd, uint8_t* data, size_t length) {
     return true;
 }
 
-bool TqSendAll(int fd, const uint8_t* data, size_t length) {
+bool TqSendAll(TqSocketHandle fd, const uint8_t* data, size_t length) {
     size_t sent = 0;
     while (sent < length) {
-        const ssize_t result = ::send(fd, data + sent, length - sent, 0);
+        const int result = TqSend(fd, data + sent, length - sent, TqSendFlags::None);
         if (result < 0) {
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
             return false;
@@ -129,12 +128,12 @@ bool TqSendAll(int fd, const uint8_t* data, size_t length) {
     return true;
 }
 
-bool TqSendSocks5Method(int fd, uint8_t method) {
+bool TqSendSocks5Method(TqSocketHandle fd, uint8_t method) {
     const uint8_t response[] = {TqSocks5Version, method};
     return TqSendAll(fd, response, sizeof(response));
 }
 
-bool TqSendSocks5Reply(int fd, uint8_t rep) {
+bool TqSendSocks5Reply(TqSocketHandle fd, uint8_t rep) {
     const uint8_t response[] = {
         TqSocks5Version,
         rep,
@@ -145,13 +144,7 @@ bool TqSendSocks5Reply(int fd, uint8_t rep) {
     return TqSendAll(fd, response, sizeof(response));
 }
 
-void TqCloseFd(int fd) {
-    if (fd >= 0) {
-        ::close(fd);
-    }
-}
-
-bool TqCreateListenSocket(const std::string& listenHostPort, int& listenFd) {
+bool TqCreateListenSocket(const std::string& listenHostPort, TqSocketHandle& listenFd) {
     TqHostPort hostPort{};
     if (!TqParseHostPort(listenHostPort, hostPort)) {
         return false;
@@ -174,28 +167,28 @@ bool TqCreateListenSocket(const std::string& listenHostPort, int& listenFd) {
     }
 
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
+        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!TqSocketValid(fd)) {
             continue;
         }
 
-        int enabled = 1;
-        (void)::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+        (void)TqSetReuseAddr(fd);
 
-        if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, SOMAXCONN) == 0) {
+        if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
+            ::listen(fd, SOMAXCONN) == 0) {
             listenFd = fd;
             freeaddrinfo(result);
             return true;
         }
 
-        ::close(fd);
+        TqCloseSocket(fd);
     }
 
     freeaddrinfo(result);
     return false;
 }
 
-bool TqReadSocks5Greeting(int clientFd) {
+bool TqReadSocks5Greeting(TqSocketHandle clientFd) {
     uint8_t header[2]{};
     if (!TqRecvAll(clientFd, header, sizeof(header)) || header[0] != TqSocks5Version || header[1] == 0) {
         return false;
@@ -216,7 +209,7 @@ bool TqReadSocks5Greeting(int clientFd) {
     return false;
 }
 
-bool TqReadSocks5ConnectRequest(int clientFd, TunnelRequest& out, uint8_t& rep) {
+bool TqReadSocks5ConnectRequest(TqSocketHandle clientFd, TunnelRequest& out, uint8_t& rep) {
     uint8_t header[4]{};
     if (!TqRecvAll(clientFd, header, sizeof(header))) {
         return false;
@@ -276,9 +269,9 @@ bool TqReadSocks5ConnectRequest(int clientFd, TunnelRequest& out, uint8_t& rep) 
     return true;
 }
 
-void TqHandleSocks5Client(int clientFd, const TunnelStartFn& onTunnel) {
+void TqHandleSocks5Client(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
     if (!TqReadSocks5Greeting(clientFd)) {
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
@@ -286,38 +279,28 @@ void TqHandleSocks5Client(int clientFd, const TunnelStartFn& onTunnel) {
     uint8_t rep = TQ_SOCKS5_REP_GENERAL_FAILURE;
     if (!TqReadSocks5ConnectRequest(clientFd, tunnel, rep)) {
         (void)TqSendSocks5Reply(clientFd, rep);
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
     if (!onTunnel) {
         (void)TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_GENERAL_FAILURE);
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
-    const int tunnelFd = ::dup(clientFd);
-    if (tunnelFd < 0) {
-        (void)TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_GENERAL_FAILURE);
-        TqCloseFd(clientFd);
-        return;
-    }
-    TqTuneTcpForThroughput(tunnelFd);
-
-    const TqTunnelStartResult result = onTunnel(tunnel, tunnelFd);
-    if (!result.Ok) {
-        (void)TqSendSocks5Reply(clientFd, TqSocks5RepForOpenError(result.Error));
-        ::close(tunnelFd);
-        TqCloseFd(clientFd);
-        return;
-    }
+    TqTuneTcpForThroughput(clientFd);
 
     if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
-        TqCloseFd(clientFd);
+        TqCloseSocket(clientFd);
         return;
     }
 
-    TqCloseFd(clientFd);
+    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
+    if (!result.Ok) {
+        TqCloseSocket(clientFd);
+        return;
+    }
 }
 
 } // namespace
@@ -357,7 +340,7 @@ bool TqParseSocks5ConnectRequest(const std::vector<uint8_t>& request, TunnelRequ
             return false;
         }
         char text[INET_ADDRSTRLEN]{};
-        if (inet_ntop(AF_INET, request.data() + offset, text, sizeof(text)) == nullptr) {
+        if (TqInetNtop(AF_INET, request.data() + offset, text, sizeof(text)) == nullptr) {
             return false;
         }
         host = text;
@@ -380,7 +363,7 @@ bool TqParseSocks5ConnectRequest(const std::vector<uint8_t>& request, TunnelRequ
             return false;
         }
         char text[INET6_ADDRSTRLEN]{};
-        if (inet_ntop(AF_INET6, request.data() + offset, text, sizeof(text)) == nullptr) {
+        if (TqInetNtop(AF_INET6, request.data() + offset, text, sizeof(text)) == nullptr) {
             return false;
         }
         host = text;
@@ -423,10 +406,10 @@ TqSocks5Server::~TqSocks5Server() {
 }
 
 bool TqSocks5Server::Start(std::string& err) {
-    if (ListenFd.load() >= 0) {
+    if (TqSocketValid(ListenFd.load())) {
         return true;
     }
-    int listenFd = -1;
+    TqSocketHandle listenFd = TqInvalidSocket;
     if (!TqCreateListenSocket(ListenHostPort, listenFd)) {
         err = "failed to listen on " + ListenHostPort;
         return false;
@@ -439,10 +422,10 @@ bool TqSocks5Server::Start(std::string& err) {
 
 void TqSocks5Server::Stop() {
     Stopping.store(true);
-    const int fd = ListenFd.exchange(-1);
-    if (fd >= 0) {
-        (void)::shutdown(fd, SHUT_RDWR);
-        ::close(fd);
+    const TqSocketHandle fd = ListenFd.exchange(TqInvalidSocket);
+    if (TqSocketValid(fd)) {
+        (void)TqShutdownBoth(fd);
+        TqCloseSocket(fd);
     }
     if (Worker.joinable()) {
         Worker.join();
@@ -451,26 +434,26 @@ void TqSocks5Server::Stop() {
 
 void TqSocks5Server::Run() {
     for (;;) {
-        const int listenFd = ListenFd.load();
-        if (listenFd < 0) {
+        const TqSocketHandle listenFd = ListenFd.load();
+        if (!TqSocketValid(listenFd)) {
             break;
         }
-        int clientFd = ::accept(listenFd, nullptr, nullptr);
-        if (clientFd < 0) {
+        TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+        if (!TqSocketValid(clientFd)) {
             if (Stopping.load()) {
                 break;
             }
-            if (errno == EINTR) {
+            if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
-            std::fprintf(stderr, "tcpquic-proxy: accept failed on %s: %s\n",
+            std::fprintf(stderr, "tcpquic-proxy: accept failed on %s (error=%d)\n",
                 ListenHostPort.c_str(),
-                std::strerror(errno));
+                TqLastSocketError());
             continue;
         }
 
         if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel]() { TqHandleSocks5Client(clientFd, onTunnel); })) {
-            ::close(clientFd);
+            TqCloseSocket(clientFd);
         }
     }
 }

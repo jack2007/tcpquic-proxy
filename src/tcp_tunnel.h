@@ -7,6 +7,7 @@
 #include "config.h"
 #include "control_protocol.h"
 #include "msquic.hpp"
+#include "platform_socket.h"
 
 struct MsQuicConnection;
 struct MsQuicStream;
@@ -24,14 +25,14 @@ struct TqTunnelStartResult {
 };
 
 using TunnelStartFn =
-    std::function<TqTunnelStartResult(const TunnelRequest&, int clientTcpFd)>;
+    std::function<TqTunnelStartResult(const TunnelRequest&, TqSocketHandle clientTcpFd)>;
 using TqTunnelCompletionFn = std::function<void()>;
 using TqTunnelAclDeniedFn = std::function<void()>;
 
 TqTunnelStartResult TqStartClientTunnel(
     MsQuicConnection* conn,
     const TunnelRequest& req,
-    int clientTcpFd,
+    TqSocketHandle clientTcpFd,
     const TqConfig& cfg);
 
 void TqHandleServerPeerStream(

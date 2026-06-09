@@ -2,12 +2,15 @@
 
 #include "compress.h"
 #include "msquic.hpp"
+#include "platform_socket.h"
 #include "quic_session.h"
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "tunnel_reaper.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
+#endif
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -22,9 +25,9 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 namespace {
 
@@ -118,7 +121,7 @@ bool TqBuildOpenRequest(const TunnelRequest& req, const TqConfig& cfg, TqOpenReq
 
     if (req.AddrType == TQ_ADDR_IPV4) {
         in_addr addr{};
-        if (inet_pton(AF_INET, req.Host, &addr) != 1) {
+        if (!TqInetPton(AF_INET, req.Host, &addr)) {
             return false;
         }
         const auto* bytes = reinterpret_cast<const uint8_t*>(&addr);
@@ -128,7 +131,7 @@ bool TqBuildOpenRequest(const TunnelRequest& req, const TqConfig& cfg, TqOpenReq
 
     if (req.AddrType == TQ_ADDR_IPV6) {
         in6_addr addr{};
-        if (inet_pton(AF_INET6, req.Host, &addr) != 1) {
+        if (!TqInetPton(AF_INET6, req.Host, &addr)) {
             return false;
         }
         const auto* bytes = reinterpret_cast<const uint8_t*>(&addr);
@@ -148,12 +151,12 @@ bool TqHostFromOpenRequest(const TqOpenRequest& req, std::string& host) {
     }
 
     if (req.AddrType == TQ_ADDR_IPV4 && req.Addr.size() == 4) {
-        return inet_ntop(AF_INET, req.Addr.data(), text, sizeof(text)) != nullptr &&
+        return TqInetNtop(AF_INET, req.Addr.data(), text, sizeof(text)) != nullptr &&
             (host = text, true);
     }
 
     if (req.AddrType == TQ_ADDR_IPV6 && req.Addr.size() == 16) {
-        return inet_ntop(AF_INET6, req.Addr.data(), text, sizeof(text)) != nullptr &&
+        return TqInetNtop(AF_INET6, req.Addr.data(), text, sizeof(text)) != nullptr &&
             (host = text, true);
     }
 
@@ -210,7 +213,7 @@ public:
     TqTunnelContext(
         TqTunnelRole role,
         MsQuicStream* stream,
-        int tcpFd,
+        TqSocketHandle tcpFd,
         const TqConfig& cfg,
         const TqAcl* acl,
         MsQuicConnection* quicConn = nullptr,
@@ -311,9 +314,9 @@ public:
     }
 
     void CloseTcp() {
-        if (TcpFd >= 0) {
-            close(TcpFd);
-            TcpFd = -1;
+        if (TqSocketValid(TcpFd)) {
+            TqCloseSocket(TcpFd);
+            TcpFd = TqInvalidSocket;
         }
     }
 
@@ -459,7 +462,7 @@ private:
         TqOpenRequest req,
         std::vector<sockaddr_storage> addrs) {
         const TqDialResult dial = TqDialTcp(addrs, TqTcpDialTimeoutMs);
-        if (dial.Fd < 0) {
+        if (!TqSocketValid(dial.Fd)) {
             SendOpenFailure(dial.Refused ? TqOpenError::TcpRefused : TqOpenError::TcpTimeout);
             return;
         }
@@ -555,7 +558,7 @@ private:
 
     TqTunnelRole Role;
     MsQuicStream* Stream;
-    int TcpFd;
+    TqSocketHandle TcpFd{TqInvalidSocket};
     TqConfig Config;
     const TqAcl* Acl;
     MsQuicConnection* QuicConn;
@@ -597,20 +600,20 @@ void TqReapTunnelContext(TqTunnelContext* ctx) {
 TqTunnelStartResult TqStartClientTunnel(
     MsQuicConnection* conn,
     const TunnelRequest& req,
-    int clientTcpFd,
+    TqSocketHandle clientTcpFd,
     const TqConfig& cfg) {
-    if (clientTcpFd < 0) {
+    if (!TqSocketValid(clientTcpFd)) {
         return {false, TqOpenError::Internal};
     }
 
     if (conn == nullptr || !conn->IsValid()) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
     TqOpenRequest openReq{};
     if (!TqBuildOpenRequest(req, cfg, openReq)) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -621,7 +624,7 @@ TqTunnelStartResult TqStartClientTunnel(
         cfg,
         nullptr);
     if (context == nullptr) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -680,7 +683,7 @@ void TqHandleServerPeerStream(
     auto* context = new (std::nothrow) TqTunnelContext(
         TqTunnelRole::ServerOpen,
         nullptr,
-        -1,
+        TqInvalidSocket,
         cfg,
         &acl,
         conn,
