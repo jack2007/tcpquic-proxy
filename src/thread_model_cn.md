@@ -385,7 +385,14 @@ fast path 会按 tuning 为每条 relay 预分配 send context pool，并按 act
 | 中 | cleanup watcher 合并为集中 reaper | ✅ DONE | `TqTunnelReaper` 全局单线程 |
 | 中 | accept handler 改线程池 | ✅ DONE | `TqThreadPool` handshake pool |
 | 中 | 按 profile 支持 LOW_LATENCY / MAX_THROUGHPUT 切换 | ✅ DONE | `--quic-profile max-throughput\|low-latency` |
-| 低 | relay TCP→QUIC 改 epoll 多路复用 | ⏳ NOT IN SCOPE | 未来工作；可显著减少 per-tunnel 线程，但复杂度高 |
+| 低 | relay TCP→QUIC 改 epoll 多路复用 | ✅ Linux fast path | Linux 无压缩 relay 已走 owner worker + epoll |
+| 低 | relay QUIC→TCP 改 worker writev | ✅ Linux fast path | 池化缓冲 + writev，替代 per-tunnel TcpWriter |
+
+## Linux Phase 5 relay worker status
+
+Linux fast-path relays now use owner workers with `epoll`, `eventfd`, `readv`, pooled buffers, batched `StreamSend`, and worker-owned `writev` for QUIC receive data. Compressed relays keep the previous blocking relay implementation because compression output still uses separate contiguous buffers and requires a later compression-pool design.
+
+Windows remains on the existing path in this phase. IOCP, WSARecv, and WSASend are not part of this Linux implementation.
 
 ## 11. 调试线程角色
 

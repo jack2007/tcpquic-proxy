@@ -240,6 +240,8 @@ Phase A（压缩 profiling + NETEM 多 curl 矩阵）已于 2026-06-07 完成，
 
 当前最值得推进：
 
+- Linux relay Phase E: validate MsQuic receive buffer lifetime and only then consider deferred receive views with explicit `StreamReceiveComplete`; keep copy-into-pool as the safe default until that test exists.
+
 1. **高并发资源模型**（Phase B）：500/1000 隧道阶梯测试、bounded dial pool、writer queue tuning。
 2. **secnetperf CLI 对齐**（Phase 3 Task 5）：`-fcw/-srw/-iw/-initrtt` 与 proxy tuning 对齐。
 3. **全量矩阵复测**（可选）：`run-compression-profiling.sh`（非 QUICK）与 `run-multi-curl-netem-matrix.sh`（`RATE=5gbit`、丢包维度）。
