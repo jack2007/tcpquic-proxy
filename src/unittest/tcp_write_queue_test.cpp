@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#include "../tcp_write_queue.h"
+#include "tcp_write_queue.h"
 
 #include <cassert>
 #include <sys/socket.h>

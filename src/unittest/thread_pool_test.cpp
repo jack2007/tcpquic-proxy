@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#include "../thread_pool.h"
+#include "thread_pool.h"
 
 #include <atomic>
 #include <chrono>

@@ -1,4 +1,4 @@
-#include "../linux_relay_worker.h"
+#include "linux_relay_worker.h"
 
 #include <cassert>
 #include <cstdint>

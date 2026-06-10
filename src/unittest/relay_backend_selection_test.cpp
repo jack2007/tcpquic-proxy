@@ -1,5 +1,5 @@
-#include "../relay.h"
-#include "../tuning.h"
+#include "relay.h"
+#include "tuning.h"
 
 #include <cassert>
 

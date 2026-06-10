@@ -1,5 +1,5 @@
-#include "../config.h"
-#include "../tuning.h"
+#include "config.h"
+#include "tuning.h"
 
 #include <cassert>
 #include <cstring>

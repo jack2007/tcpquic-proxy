@@ -1,4 +1,4 @@
-#include "../control_protocol.h"
+#include "control_protocol.h"
 
 #include <cassert>
 #include <cstring>

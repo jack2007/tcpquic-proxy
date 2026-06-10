@@ -1,5 +1,5 @@
-#include "../tcp_tunnel.h"
-#include "../socks5_server.h"
+#include "tcp_tunnel.h"
+#include "socks5_server.h"
 
 #include <cassert>
 #include <cstring>

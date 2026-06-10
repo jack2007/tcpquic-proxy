@@ -1,4 +1,4 @@
-#include "../compress.h"
+#include "compress.h"
 
 #include <cassert>
 #include <cstring>

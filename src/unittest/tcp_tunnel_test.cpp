@@ -1,7 +1,7 @@
-#include "../platform_socket.h"
-#include "../relay.h"
-#include "../tcp_dialer.h"
-#include "../tcp_tunnel.h"
+#include "platform_socket.h"
+#include "relay.h"
+#include "tcp_dialer.h"
+#include "tcp_tunnel.h"
 
 struct MsQuicConnection;
 

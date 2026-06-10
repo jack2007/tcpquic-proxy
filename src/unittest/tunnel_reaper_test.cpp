@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#include "../tunnel_reaper.h"
+#include "tunnel_reaper.h"
 
 #include <atomic>
 #include <cassert>

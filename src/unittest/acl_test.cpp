@@ -1,5 +1,5 @@
-#include "../acl.h"
-#include "../platform_socket.h"
+#include "acl.h"
+#include "platform_socket.h"
 
 #if !defined(_WIN32)
 #include <arpa/inet.h>

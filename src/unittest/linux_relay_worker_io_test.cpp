@@ -1,5 +1,5 @@
-#include "../compress.h"
-#include "../linux_relay_worker.h"
+#include "compress.h"
+#include "linux_relay_worker.h"
 
 #include <cassert>
 #include <cstdint>
