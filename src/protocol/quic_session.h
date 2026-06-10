@@ -40,6 +40,7 @@ public:
     bool EnsureAnyConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void SetPeerStreamHandler(StreamHandler h);
     void SetConnectionStateHandler(ConnectionStateHandler h);
+    void AbortAllTunnels();
     uint32_t ConnectionCount() const;
     uint32_t ConnectedConnectionCount() const;
 

@@ -9,6 +9,7 @@ public:
     std::vector<std::string> Started;
     std::vector<std::string> Stopped;
     std::vector<std::string> Drained;
+    std::vector<std::string> AbortAll;
     uint32_t FailStarts{0};
     uint32_t ConnectedConnections{0};
 
@@ -28,6 +29,10 @@ public:
 
     void DrainPeer(const std::string& peerId, uint32_t) override {
         Drained.push_back(peerId);
+    }
+
+    void AbortPeerTunnels(const std::string& peerId) override {
+        AbortAll.push_back(peerId);
     }
 
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
@@ -107,6 +112,18 @@ int main() {
         if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-remove") return 92;
         if (!adapterRuntime.ApplyConfig(empty, err)) return 93;
         if (adapter.Drained.size() != 1) return 94;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-cleanup", "127.0.0.1:11014"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 110;
+        cfg.Peers[0].Enabled = false;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 111;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-cleanup") return 112;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-cleanup") return 113;
     }
     {
         FakeAdapter adapter;

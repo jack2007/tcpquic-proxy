@@ -535,6 +535,23 @@ void QuicClientSession::SetConnectionStateHandler(ConnectionStateHandler h) {
     State->ConnectionStateChanged = std::move(h);
 }
 
+void QuicClientSession::AbortAllTunnels() {
+    std::vector<MsQuicConnection*> connections;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        connections.reserve(State->Slots.size());
+        for (auto& slot : State->Slots) {
+            if (slot.Connection) {
+                connections.push_back(slot.Connection.get());
+            }
+        }
+    }
+
+    for (MsQuicConnection* connection : connections) {
+        (void)TqAbortConnectionTunnels(connection);
+    }
+}
+
 void QuicClientSession::NotifyConnectionStateChanged(ConnectionStateNotification notification) {
     if (notification.Handler) {
         notification.Handler(notification.ConnectedCount);

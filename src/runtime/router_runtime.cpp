@@ -390,9 +390,11 @@ bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err
         bool startOk = true;
         if (Adapter != nullptr) {
             if (runningPeer != nullptr && (!peer.Enabled || changedPeer)) {
-                Adapter->StopAccepting(peer.PeerId);
-                Adapter->DrainPeer(peer.PeerId, DrainGraceSeconds);
-                RunningPeers.erase(peer.PeerId);
+                const std::string runningPeerId = runningPeer->PeerId;
+                Adapter->StopAccepting(runningPeerId);
+                Adapter->AbortPeerTunnels(runningPeerId);
+                Adapter->DrainPeer(runningPeerId, DrainGraceSeconds);
+                RunningPeers.erase(runningPeerId);
                 runningPeer = nullptr;
             }
             if (peer.Enabled && (newPeer || changedPeer)) {
@@ -427,8 +429,10 @@ bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err
         if (present.find(item.first) == present.end()) {
             auto runningIt = RunningPeers.find(item.first);
             if (runningIt != RunningPeers.end() && Adapter != nullptr) {
-                Adapter->StopAccepting(item.first);
-                Adapter->DrainPeer(item.first, DrainGraceSeconds);
+                const std::string runningPeerId = runningIt->second.PeerId;
+                Adapter->StopAccepting(runningPeerId);
+                Adapter->AbortPeerTunnels(runningPeerId);
+                Adapter->DrainPeer(runningPeerId, DrainGraceSeconds);
             }
             RunningPeers.erase(item.first);
             item.second.State = "draining";

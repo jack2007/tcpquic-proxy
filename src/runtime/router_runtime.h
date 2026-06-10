@@ -37,6 +37,7 @@ public:
     virtual ~TqPeerRuntimeAdapter() = default;
     virtual bool StartPeer(const TqPeerConfig& peer, std::string& err) = 0;
     virtual void StopAccepting(const std::string& peerId) = 0;
+    virtual void AbortPeerTunnels(const std::string& peerId) { (void)peerId; }
     virtual void DrainPeer(const std::string& peerId, uint32_t graceSeconds) = 0;
     virtual bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) {
         (void)peerId;

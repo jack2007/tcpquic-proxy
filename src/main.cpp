@@ -115,6 +115,13 @@ public:
         }
     }
 
+    void AbortPeerTunnels(const std::string& peerId) override {
+        std::shared_ptr<PeerRuntime> runtime = Find(peerId);
+        if (runtime && runtime->Quic) {
+            runtime->Quic->AbortAllTunnels();
+        }
+    }
+
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
         std::shared_ptr<PeerRuntime> runtime = Find(peerId);
         if (!runtime || !runtime->Quic) {
