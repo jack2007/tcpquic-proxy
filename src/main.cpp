@@ -79,16 +79,13 @@ public:
         };
 
         runtime->Quic->SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
+            (void)connectedCount;
             auto runtime = weakRuntime.lock();
             if (!runtime) {
                 return;
             }
-            if (connectedCount == 0) {
-                runtime->CloseListeners();
-                return;
-            }
             std::string listenerErr;
-            if (!runtime->OpenListeners(listenerErr)) {
+            if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
                 std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
                     runtime->PeerId.c_str(), listenerErr.c_str());
             }
@@ -99,7 +96,7 @@ public:
             runtime->StopAll();
             return false;
         }
-        if (!runtime->OpenListeners(err)) {
+        if (!runtime->ApplyCurrentConnectionState(err, true)) {
             runtime->StopAll();
             return false;
         }
@@ -194,6 +191,19 @@ private:
                     PeerId.c_str(), Config.HttpListen.c_str());
             }
             return true;
+        }
+
+        bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+            const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+            if (connectedCount == 0) {
+                CloseListeners();
+                if (requireConnected) {
+                    err = "no connected QUIC connection";
+                    return false;
+                }
+                return true;
+            }
+            return OpenListeners(err);
         }
 
         void CloseListeners() {
@@ -291,6 +301,19 @@ struct TqSinglePeerClientRuntime {
         return true;
     }
 
+    bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+        const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+        if (connectedCount == 0) {
+            CloseListeners();
+            if (requireConnected) {
+                err = "no connected QUIC connection";
+                return false;
+            }
+            return true;
+        }
+        return OpenListeners(err);
+    }
+
     void CloseListeners() {
         std::lock_guard<std::mutex> guard(ListenerMutex);
         if (Socks) {
@@ -355,16 +378,13 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     });
 
     quic.SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
+        (void)connectedCount;
         auto runtime = weakRuntime.lock();
         if (!runtime) {
             return;
         }
-        if (connectedCount == 0) {
-            runtime->CloseListeners();
-            return;
-        }
         std::string listenerErr;
-        if (!runtime->OpenListeners(listenerErr)) {
+        if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
             std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
         }
     });
@@ -378,7 +398,7 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     }
 
     std::string err;
-    if (!runtime->OpenListeners(err)) {
+    if (!runtime->ApplyCurrentConnectionState(err, true)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
         quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
         runtime->CloseListeners();
