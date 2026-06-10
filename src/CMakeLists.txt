@@ -306,6 +306,7 @@ endif()
 
 add_executable(tcpquic_http_connect_test
     unittest/http_connect_server_test.cpp
+    unittest/trace_proxy_stub.cpp
     ingress/http_connect_server.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
@@ -317,6 +318,7 @@ set_property(TARGET tcpquic_http_connect_test APPEND PROPERTY BUILD_RPATH "$ORIG
 
 add_executable(tcpquic_socks5_test
     unittest/socks5_server_test.cpp
+    unittest/trace_proxy_stub.cpp
     ingress/socks5_server.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
