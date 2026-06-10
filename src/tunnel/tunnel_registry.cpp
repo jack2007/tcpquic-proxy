@@ -2,21 +2,26 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace {
 
 struct TqRegisteredTunnel {
+    uint64_t Id{0};
     void* Context{nullptr};
     TqTunnelAbortFn Abort{nullptr};
     bool Aborting{false};
+    std::thread::id AbortThread{};
 };
 
 std::mutex g_tunnelRegistryLock;
 std::condition_variable g_tunnelRegistryWakeup;
 std::unordered_map<MsQuicConnection*, std::vector<TqRegisteredTunnel>> g_tunnelRegistry;
+uint64_t g_nextTunnelRegistryId{1};
 
 } // namespace
 
@@ -29,24 +34,31 @@ void TqRegisterConnectionTunnel(
     }
 
     std::unique_lock<std::mutex> guard(g_tunnelRegistryLock);
+    const std::thread::id currentThread = std::this_thread::get_id();
     for (;;) {
         auto& tunnels = g_tunnelRegistry[connection];
         bool hasAbortingMatch = false;
+        bool hasSameThreadAbortingMatch = false;
         for (auto& tunnel : tunnels) {
             if (tunnel.Context != tunnelContext) {
                 continue;
             }
             if (tunnel.Aborting) {
-                hasAbortingMatch = true;
-                break;
+                if (tunnel.AbortThread == currentThread) {
+                    hasSameThreadAbortingMatch = true;
+                    continue;
+                } else {
+                    hasAbortingMatch = true;
+                    break;
+                }
             }
 
             tunnel.Abort = abortFn;
             return;
         }
 
-        if (!hasAbortingMatch) {
-            tunnels.push_back({tunnelContext, abortFn, false});
+        if (!hasAbortingMatch || hasSameThreadAbortingMatch) {
+            tunnels.push_back({g_nextTunnelRegistryId++, tunnelContext, abortFn, false, {}});
             return;
         }
 
@@ -60,6 +72,7 @@ void TqUnregisterConnectionTunnel(MsQuicConnection* connection, void* tunnelCont
     }
 
     std::unique_lock<std::mutex> guard(g_tunnelRegistryLock);
+    const std::thread::id currentThread = std::this_thread::get_id();
     for (;;) {
         auto found = g_tunnelRegistry.find(connection);
         if (found == g_tunnelRegistry.end()) {
@@ -72,12 +85,14 @@ void TqUnregisterConnectionTunnel(MsQuicConnection* connection, void* tunnelCont
             std::remove_if(
                 tunnels.begin(),
                 tunnels.end(),
-                [tunnelContext, &hasAbortingMatch](const TqRegisteredTunnel& tunnel) {
+                [tunnelContext, currentThread, &hasAbortingMatch](const TqRegisteredTunnel& tunnel) {
                     if (tunnel.Context != tunnelContext) {
                         return false;
                     }
                     if (tunnel.Aborting) {
-                        hasAbortingMatch = true;
+                        if (tunnel.AbortThread != currentThread) {
+                            hasAbortingMatch = true;
+                        }
                         return false;
                     }
                     return true;
@@ -112,6 +127,7 @@ uint32_t TqAbortConnectionTunnels(MsQuicConnection* connection) {
         for (auto& tunnel : found->second) {
             if (!tunnel.Aborting) {
                 tunnel.Aborting = true;
+                tunnel.AbortThread = std::this_thread::get_id();
                 tunnels.push_back(tunnel);
             }
         }
@@ -138,7 +154,7 @@ uint32_t TqAbortConnectionTunnels(MsQuicConnection* connection) {
                             tunnels.begin(),
                             tunnels.end(),
                             [&tunnel](const TqRegisteredTunnel& aborted) {
-                                return aborted.Context == tunnel.Context;
+                                return aborted.Id == tunnel.Id;
                             });
                     }),
                 registered.end());

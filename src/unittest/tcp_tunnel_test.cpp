@@ -106,6 +106,12 @@ static unsigned g_duplicate_abort_b = 0;
 static unsigned g_reentrant_abort = 0;
 static uint32_t g_reentrant_aborted = 0;
 static MsQuicConnection* g_reentrant_conn = nullptr;
+static unsigned g_self_unregister_abort = 0;
+static unsigned g_self_register_abort = 0;
+static MsQuicConnection* g_self_unregister_conn = nullptr;
+static MsQuicConnection* g_self_register_conn = nullptr;
+static void* g_self_unregister_ctx = nullptr;
+static void* g_self_register_ctx = nullptr;
 
 static void CountAbortA(void*) { ++g_abort_a; }
 static void CountAbortB(void*) { ++g_abort_b; }
@@ -114,6 +120,16 @@ static void CountDuplicateAbortB(void*) { ++g_duplicate_abort_b; }
 static void CountReentrantAbort(void*) {
     ++g_reentrant_abort;
     g_reentrant_aborted = TqAbortConnectionTunnels(g_reentrant_conn);
+}
+static void SelfUnregisterAbort(void*) {
+    ++g_self_unregister_abort;
+    TqUnregisterConnectionTunnel(g_self_unregister_conn, g_self_unregister_ctx);
+}
+static void SelfRegisterAbort(void*) {
+    ++g_self_register_abort;
+    if (g_self_register_abort == 1) {
+        TqRegisterConnectionTunnel(g_self_register_conn, g_self_register_ctx, SelfRegisterAbort);
+    }
 }
 
 static int TestTunnelRegistryAbortsOnlyMatchingConnection() {
@@ -247,11 +263,49 @@ static int TestTunnelRegistryUnregisterWaitsForInFlightAbort() {
     return 0;
 }
 
+static int TestTunnelRegistryAbortCallbackCanUnregisterItself() {
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5001));
+    int ctx = 1;
+    g_self_unregister_abort = 0;
+    g_self_unregister_conn = conn;
+    g_self_unregister_ctx = &ctx;
+
+    TqRegisterConnectionTunnel(conn, &ctx, SelfUnregisterAbort);
+    const uint32_t aborted = TqAbortConnectionTunnels(conn);
+    const uint32_t abortedAgain = TqAbortConnectionTunnels(conn);
+
+    if (aborted != 1) return 213;
+    if (g_self_unregister_abort != 1) return 214;
+    if (abortedAgain != 0) return 215;
+    return 0;
+}
+
+static int TestTunnelRegistryAbortCallbackCanRegisterSameContext() {
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6001));
+    int ctx = 1;
+    g_self_register_abort = 0;
+    g_self_register_conn = conn;
+    g_self_register_ctx = &ctx;
+
+    TqRegisterConnectionTunnel(conn, &ctx, SelfRegisterAbort);
+    const uint32_t aborted = TqAbortConnectionTunnels(conn);
+    const uint32_t abortedAgain = TqAbortConnectionTunnels(conn);
+    const uint32_t abortedThird = TqAbortConnectionTunnels(conn);
+
+    if (aborted != 1) return 216;
+    if (abortedAgain != 1) return 217;
+    if (abortedThird != 0) return 218;
+    if (g_self_register_abort != 2) return 219;
+    return 0;
+}
+
 int main() {
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
     if (int rc = TestTunnelRegistryDuplicateRegistrationIsSingleEntry()) return rc;
     if (int rc = TestTunnelRegistryUnregisterWaitsForInFlightAbort()) return rc;
+    if (int rc = TestTunnelRegistryAbortCallbackCanUnregisterItself()) return rc;
+    if (int rc = TestTunnelRegistryAbortCallbackCanRegisterSameContext()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;
