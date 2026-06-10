@@ -110,8 +110,10 @@ int main() {
         TqRouterConfig empty;
         if (!adapterRuntime.ApplyConfig(empty, err)) return 91;
         if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-remove") return 92;
-        if (!adapterRuntime.ApplyConfig(empty, err)) return 93;
-        if (adapter.Drained.size() != 1) return 94;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-remove") return 93;
+        if (!adapterRuntime.ApplyConfig(empty, err)) return 94;
+        if (adapter.Drained.size() != 1) return 95;
+        if (adapter.AbortAll.size() != 1) return 96;
     }
     {
         FakeAdapter adapter;
@@ -124,6 +126,20 @@ int main() {
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 111;
         if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-cleanup") return 112;
         if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-cleanup") return 113;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-change", "127.0.0.1:11015"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 114;
+        cfg.Peers[0].SocksListen = "127.0.0.1:11016";
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 115;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-change") return 116;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-change") return 117;
+        if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-change") return 118;
+        if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-change") return 119;
     }
     {
         FakeAdapter adapter;
