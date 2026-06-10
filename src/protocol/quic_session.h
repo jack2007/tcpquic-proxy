@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
@@ -27,14 +28,21 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);
 class QuicClientSession {
 public:
     using StreamHandler = std::function<void(MsQuicConnection*, HQUIC)>;
+    using ConnectionStateHandler = std::function<void(uint32_t connectedCount)>;
+
+    ~QuicClientSession();
 
     bool Start(const TqConfig& cfg);
     void Stop();
     MsQuicConnection* GetConnection();
     MsQuicConnection* PickConnection();
     bool EnsureConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
+    bool EnsureAnyConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void SetPeerStreamHandler(StreamHandler h);
+    void SetConnectionStateHandler(ConnectionStateHandler h);
+    void AbortAllTunnels();
     uint32_t ConnectionCount() const;
+    uint32_t ConnectedConnectionCount() const;
 
 private:
     struct ClientSharedState;
@@ -51,6 +59,16 @@ private:
         bool ReconnectNeeded{false};
     };
 
+    struct ConnectionStateNotification {
+        ConnectionStateHandler Handler;
+        uint32_t ConnectedCount{0};
+    };
+
+    struct ClientReconnectGate {
+        std::mutex Lock;
+        QuicClientSession* Session{nullptr};
+    };
+
     static QUIC_STATUS QUIC_API ConnectionCallback(
         MsQuicConnection* connection,
         void* context,
@@ -65,12 +83,24 @@ private:
         std::condition_variable StateChanged;
         std::condition_variable OrphanDrained;
         StreamHandler PeerStreamHandler;
+        ConnectionStateHandler ConnectionStateChanged;
+        std::thread ReconnectThread;
+        std::chrono::milliseconds ReconnectInterval{std::chrono::milliseconds(3000)};
+        std::shared_ptr<ClientReconnectGate> ReconnectGate;
         std::shared_ptr<MsQuicApi> Api;
     };
 
+    void Stop(bool clearHandlers);
     bool StartSlotLocked(size_t index);
-    static void OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
-    static void OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
+    void StartReconnectLoop();
+    void StopReconnectLoop(const std::shared_ptr<ClientSharedState>& state);
+    static void RunReconnectLoop(
+        std::shared_ptr<ClientSharedState> state,
+        std::shared_ptr<ClientReconnectGate> gate);
+    static uint32_t ConnectedCountLocked(const ClientSharedState& state);
+    static void NotifyConnectionStateChanged(ConnectionStateNotification notification);
+    static ConnectionStateNotification OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
+    static ConnectionStateNotification OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);
     static void WaitForOrphanedConnectionsDrain(const std::shared_ptr<ClientSharedState>& state, std::chrono::milliseconds timeout);
 

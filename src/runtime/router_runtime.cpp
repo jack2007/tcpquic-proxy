@@ -52,6 +52,9 @@ void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     if (peer.QuicConnections != 0) {
         out << ",\"quic_connections\":" << peer.QuicConnections;
     }
+    if (peer.QuicReconnectIntervalMs != 0) {
+        out << ",\"quic_reconnect_interval_ms\":" << peer.QuicReconnectIntervalMs;
+    }
     out << ',';
     AppendJsonString(out, "compress", peer.Compress);
     out << ",\"enabled\":" << (peer.Enabled ? "true" : "false");
@@ -70,6 +73,7 @@ void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
     out << ',';
     AppendJsonString(out, "state", peer.State);
     out << ",\"connection_count\":" << peer.ConnectionCount;
+    out << ",\"connected_connections\":" << peer.ConnectedConnections;
     out << ",\"active_streams\":" << peer.ActiveStreams;
     out << ",\"total_streams\":" << peer.TotalStreams;
     out << ",\"reconnects\":" << peer.Reconnects;
@@ -146,6 +150,7 @@ private:
         if (!Consume('{')) return Error("peer must be an object");
         if (Consume('}')) return true;
         bool quicConnectionsSpecified = false;
+        bool quicReconnectIntervalSpecified = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) return Error("malformed peer object");
@@ -160,6 +165,9 @@ private:
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
+            } else if (key == "quic_reconnect_interval_ms") {
+                quicReconnectIntervalSpecified = true;
+                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid quic_reconnect_interval_ms");
             } else if (key == "compress") {
                 if (!ParseStringField(peer.Compress, "invalid compress")) return false;
             } else if (key == "enabled") {
@@ -169,6 +177,7 @@ private:
             }
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
+        if (quicReconnectIntervalSpecified && peer.QuicReconnectIntervalMs == 0) return Error("quic_reconnect_interval_ms out of range");
         return Consume('}') || Error("malformed peer object");
     }
 
@@ -327,6 +336,7 @@ bool SameBridgeActivePeer(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen == b.SocksListen &&
         a.HttpListen == b.HttpListen &&
         a.QuicConnections == b.QuicConnections &&
+        a.QuicReconnectIntervalMs == b.QuicReconnectIntervalMs &&
         a.Compress == b.Compress;
 }
 
@@ -335,6 +345,7 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen != b.SocksListen ||
         a.HttpListen != b.HttpListen ||
         a.QuicConnections != b.QuicConnections ||
+        a.QuicReconnectIntervalMs != b.QuicReconnectIntervalMs ||
         a.Compress != b.Compress;
 }
 
@@ -381,9 +392,11 @@ bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err
         bool startOk = true;
         if (Adapter != nullptr) {
             if (runningPeer != nullptr && (!peer.Enabled || changedPeer)) {
-                Adapter->StopAccepting(peer.PeerId);
-                Adapter->DrainPeer(peer.PeerId, DrainGraceSeconds);
-                RunningPeers.erase(peer.PeerId);
+                const std::string runningPeerId = runningPeer->PeerId;
+                Adapter->StopAccepting(runningPeerId);
+                Adapter->AbortPeerTunnels(runningPeerId);
+                Adapter->DrainPeer(runningPeerId, DrainGraceSeconds);
+                RunningPeers.erase(runningPeerId);
                 runningPeer = nullptr;
             }
             if (peer.Enabled && (newPeer || changedPeer)) {
@@ -418,8 +431,10 @@ bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err
         if (present.find(item.first) == present.end()) {
             auto runningIt = RunningPeers.find(item.first);
             if (runningIt != RunningPeers.end() && Adapter != nullptr) {
-                Adapter->StopAccepting(item.first);
-                Adapter->DrainPeer(item.first, DrainGraceSeconds);
+                const std::string runningPeerId = runningIt->second.PeerId;
+                Adapter->StopAccepting(runningPeerId);
+                Adapter->AbortPeerTunnels(runningPeerId);
+                Adapter->DrainPeer(runningPeerId, DrainGraceSeconds);
             }
             RunningPeers.erase(item.first);
             item.second.State = "draining";
@@ -448,6 +463,7 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
             TqPeerMetrics live;
             if (Adapter->SnapshotPeerMetrics(item.first, live)) {
                 peer.ConnectionCount = live.ConnectionCount;
+                peer.ConnectedConnections = live.ConnectedConnections;
                 peer.ActiveStreams = live.ActiveStreams;
                 peer.TotalStreams = live.TotalStreams;
                 peer.Reconnects = live.Reconnects;

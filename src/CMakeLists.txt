@@ -65,6 +65,7 @@ set(TCPQUIC_PROXY_SOURCES
     protocol/quic_session.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tcp_tunnel.cpp
+    tunnel/tunnel_registry.cpp
     ingress/http_connect_server.cpp
     ingress/socks5_server.cpp
     tunnel/relay.cpp
@@ -253,6 +254,7 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
     unittest/tcp_tunnel_test.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
     config/tuning.cpp
     protocol/control_protocol.cpp
     acl/acl.cpp
@@ -282,7 +284,7 @@ target_link_libraries(tcpquic_tunnel_test ${TCPQUIC_TEST_LIBS} Threads::Threads 
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_tunnel_test msquic_platform)
 endif()
-target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS})
+target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -304,6 +306,7 @@ endif()
 
 add_executable(tcpquic_http_connect_test
     unittest/http_connect_server_test.cpp
+    unittest/trace_proxy_stub.cpp
     ingress/http_connect_server.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
@@ -315,6 +318,7 @@ set_property(TARGET tcpquic_http_connect_test APPEND PROPERTY BUILD_RPATH "$ORIG
 
 add_executable(tcpquic_socks5_test
     unittest/socks5_server_test.cpp
+    unittest/trace_proxy_stub.cpp
     ingress/socks5_server.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}

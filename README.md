@@ -266,11 +266,13 @@ Usage: tcpquic-proxy client|server [options]
 | `--quic-key` | 双方 | （必填） | 本端私钥 PEM |
 | `--quic-ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
 | `--quic-connections` | client | `1` | QUIC 连接池大小（最大 128） |
+| `--quic-reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
 | `--compress` | 双方 | `auto` | `auto` / `zstd` / `lz4` / `off` |
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
 | `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
 | `--deny-targets` | server | 空 | 逗号分隔 CIDR 黑名单 |
 
+- Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
 

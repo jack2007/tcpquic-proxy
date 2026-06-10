@@ -7,6 +7,7 @@
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "trace.h"
+#include "tunnel_registry.h"
 #include "tunnel_reaper.h"
 
 #if !defined(_WIN32)
@@ -232,6 +233,7 @@ public:
     }
 
     ~TqTunnelContext() {
+        UnregisterFromConnection();
         EmitTraceClosed();
         if (OnComplete) {
             OnComplete();
@@ -334,15 +336,30 @@ public:
     }
 
     void ArmSelfDeleteOnShutdown() {
-        std::lock_guard<std::mutex> guard(Lock);
-        SelfDeleteOnShutdown = true;
-        if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
-            StreamShutdownQueued = true;
-            (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            SelfDeleteOnShutdown = true;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
     void CloseTcp() {
+        std::lock_guard<std::mutex> guard(Lock);
+        CloseTcpLocked();
+    }
+
+    void CloseTcpLocked() {
         if (TqSocketValid(TcpFd)) {
             if (Role == TqTunnelRole::ClientOpen && TraceIngressProto != 0) {
                 const TqTraceProxyProto proto =
@@ -360,7 +377,16 @@ public:
     }
 
     void ReleaseTcpWithoutClose() {
+        std::lock_guard<std::mutex> guard(Lock);
         TcpFd = TqInvalidSocket;
+    }
+
+    bool ReleaseClientOpenOwnerAndMaybeDelete() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (Role == TqTunnelRole::ClientOpen) {
+            ClientOpenOwnerActive = false;
+        }
+        return ShouldDeletePreRelayLocked();
     }
 
     bool FinishClientOpenAndStartRelay(uint8_t flags) {
@@ -392,10 +418,62 @@ public:
         TraceIngressProto = proto;
     }
 
+    void RegisterWithConnectionIfNeeded() {
+        if (QuicConn != nullptr && !RegisteredWithConnection) {
+            TqRegisterConnectionTunnel(QuicConn, this, &TqTunnelContext::AbortFromRegistry);
+            RegisteredWithConnection = true;
+        }
+    }
+
+    void UnregisterFromConnection() {
+        if (QuicConn != nullptr && RegisteredWithConnection) {
+            TqUnregisterConnectionTunnel(QuicConn, this);
+            RegisteredWithConnection = false;
+        }
+    }
+
+    static void AbortFromRegistry(void* context) {
+        static_cast<TqTunnelContext*>(context)->AbortForConnectionShutdown();
+    }
+
+    void AbortForConnectionShutdown() {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool stopRelay = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            AbortedByConnection = true;
+            SelfDeleteOnShutdown = true;
+            stopRelay = RelayStarted;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            CloseTcpLocked();
+        }
+        StateChanged.notify_all();
+
+        if (stopRelay) {
+            if (shutdownStream) {
+                (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            }
+            TqRelayStop(&RelayHandle);
+            return;
+        }
+
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+    }
+
 private:
     bool ShouldDeletePreRelayLocked() const {
         return SelfDeleteOnShutdown &&
             !RelayStarted &&
+            !ClientOpenOwnerActive &&
             !PendingServerOpen &&
             (ShutdownComplete || (!StreamShutdownQueued && Stream == nullptr));
     }
@@ -584,13 +662,20 @@ private:
             SendOpenFailure(err);
             return;
         }
-        TcpFd = dial.Fd;
-        if (TraceTunnelId != 0) {
-            TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
-            TraceTargetTcpOpen = true;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            TcpFd = dial.Fd;
+            if (AbortedByConnection || ShutdownComplete) {
+                CloseTcpLocked();
+                return;
+            }
+            if (TraceTunnelId != 0) {
+                TraceTargetTcpOpen = true;
+                TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
+            }
         }
 
-        if (IsShutdownComplete()) {
+        if (IsAbortedOrShutdown()) {
             CloseTcp();
             return;
         }
@@ -598,22 +683,31 @@ private:
         std::vector<uint8_t> encoded;
         const uint32_t connId =
             QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
+        if (IsAbortedOrShutdown()) {
+            CloseTcp();
+            return;
+        }
         const bool encodedOk = TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded);
         const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
         if (!sendOk) {
-            SendOpenFailure(TqOpenError::Internal);
+            if (!IsAbortedOrShutdown()) {
+                SendOpenFailure(TqOpenError::Internal);
+            }
             return;
         }
         {
             std::lock_guard<std::mutex> guard(Lock);
+            if (AbortedByConnection || ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
             PendingServerRelay = true;
             PendingServerRelayFlags = req.Flags;
         }
     }
 
-    bool IsShutdownComplete() {
+    bool IsAbortedOrShutdown() {
         std::lock_guard<std::mutex> guard(Lock);
-        return ShutdownComplete;
+        return AbortedByConnection || ShutdownComplete || StreamShutdownQueued;
     }
 
     void ServerOpenFinished() {
@@ -630,6 +724,10 @@ private:
 
     void SendOpenFailure(TqOpenError error) {
         CloseTcp();
+        if (IsAbortedOrShutdown()) {
+            ArmSelfDeleteOnShutdown();
+            return;
+        }
         std::vector<uint8_t> encoded;
         if (!TqEncodeOpenResponse(TqOpenResponse{false, error, 0}, encoded) ||
             !SendBytes(encoded, QUIC_SEND_FLAG_FIN)) {
@@ -643,11 +741,21 @@ private:
     }
 
     void ShutdownReceiveAfterOpenFailure() {
-        std::lock_guard<std::mutex> guard(Lock);
-        SelfDeleteOnShutdown = true;
-        if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
-            StreamShutdownQueued = true;
-            (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            SelfDeleteOnShutdown = true;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
         }
     }
 
@@ -658,6 +766,8 @@ private:
         }
 
         MsQuicStream* stream = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
         {
             std::lock_guard<std::mutex> guard(Lock);
             if (Stream == nullptr || ShutdownComplete || StreamShutdownQueued) {
@@ -761,6 +871,8 @@ private:
     TqRelayHandle RelayHandle;
     std::unique_ptr<ITqCompressor> Compressor;
     std::unique_ptr<ITqDecompressor> Decompressor;
+    // Serializes MsQuic stream Send/Shutdown after state checks; take before Lock.
+    std::shared_ptr<std::mutex> StreamOpLock{std::make_shared<std::mutex>()};
     std::mutex Lock;
     std::condition_variable StateChanged;
     std::vector<uint8_t> OpeningRx;
@@ -778,6 +890,9 @@ private:
     uint8_t PendingClientRelayFlags{0};
     bool OpenSendComplete{false};
     bool PendingOpenFailureShutdown{false};
+    bool RegisteredWithConnection{false};
+    bool AbortedByConnection{false};
+    bool ClientOpenOwnerActive{Role == TqTunnelRole::ClientOpen};
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
@@ -826,7 +941,8 @@ TqTunnelStartResult TqStartClientTunnel(
         nullptr,
         clientTcpFd,
         cfg,
-        nullptr);
+        nullptr,
+        conn);
     if (context == nullptr) {
         return {false, TqOpenError::Internal};
     }
@@ -844,6 +960,12 @@ TqTunnelStartResult TqStartClientTunnel(
     }
 
     context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
+    auto releaseClientOpenOwner = [context]() {
+        if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
+            delete context;
+        }
+    };
 
     const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
     const uint32_t connId = TqLookupClientTraceConnId(conn);
@@ -855,6 +977,7 @@ TqTunnelStartResult TqStartClientTunnel(
         std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, TqOpenError::Internal, tunnelId};
     }
 
@@ -865,20 +988,24 @@ TqTunnelStartResult TqStartClientTunnel(
             static_cast<unsigned>(response.Error));
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, response.Error, tunnelId};
     }
     if (!response.Ok) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, response.Error, tunnelId};
     }
 
     if (!context->FinishClientOpenAndStartRelay(openReq.Flags)) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, TqOpenError::Internal, tunnelId};
     }
 
+    releaseClientOpenOwner();
     return {true, TqOpenError::Ok, tunnelId};
 }
 
@@ -923,4 +1050,69 @@ void TqHandleServerPeerStream(
     }
 
     context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
 }
+
+#if defined(TCPQUIC_TUNNEL_TESTING)
+TqTunnelContext* TqCreateTestRegisteredTunnel(
+    MsQuicConnection* connection,
+    TqSocketHandle tcpFd) {
+    TqConfig cfg;
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        tcpFd,
+        cfg,
+        nullptr,
+        connection);
+    if (context != nullptr) {
+        context->RegisterWithConnectionIfNeeded();
+    }
+    return context;
+}
+
+void TqDestroyTestRegisteredTunnel(TqTunnelContext* context) {
+    delete context;
+}
+
+TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
+    TqConfig cfg;
+    auto onComplete = [destroyCount]() {
+        if (destroyCount != nullptr) {
+            ++(*destroyCount);
+        }
+    };
+    return new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        TqInvalidSocket,
+        cfg,
+        nullptr,
+        nullptr,
+        std::move(onComplete));
+}
+
+void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context) {
+    if (context != nullptr) {
+        context->ArmSelfDeleteOnShutdown();
+    }
+}
+
+void TqTestDispatchShutdownComplete(TqTunnelContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    (void)TqTunnelContext::Callback(nullptr, context, &event);
+}
+
+void TqReleaseTestClientOpenOwner(TqTunnelContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
+        delete context;
+    }
+}
+#endif

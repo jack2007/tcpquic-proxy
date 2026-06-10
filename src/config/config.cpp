@@ -207,6 +207,7 @@ private:
             return true;
         }
         bool quicConnectionsSpecified = false;
+        bool quicReconnectIntervalSpecified = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) {
@@ -223,6 +224,9 @@ private:
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
+            } else if (key == "quic_reconnect_interval_ms") {
+                quicReconnectIntervalSpecified = true;
+                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid quic_reconnect_interval_ms");
             } else if (key == "compress") {
                 if (!ParseString(peer.Compress)) return Error("invalid compress");
             } else if (key == "enabled") {
@@ -233,6 +237,9 @@ private:
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) {
             return Error("quic_connections out of range");
+        }
+        if (quicReconnectIntervalSpecified && peer.QuicReconnectIntervalMs == 0) {
+            return Error("quic_reconnect_interval_ms out of range");
         }
         return Consume('}') || Error("malformed peer object");
     }
@@ -417,6 +424,7 @@ void TqPrintUsage(FILE* out) {
         "  --quic-key <path>          TLS private key PEM (required)\n"
         "  --quic-ca <path>           CA certificate PEM (required)\n"
         "  --quic-connections <n>     QUIC connection count (default 1)\n"
+        "  --quic-reconnect-interval-ms <n> Client reconnect interval in ms (1000..60000, default 3000)\n"
         "  --warmup-mb <n>            Client startup download warmup per QUIC conn (default 0)\n"
         "  --warmup-target <host:port> Warmup HTTP target (required when --warmup-mb > 0)\n"
         "  --warmup-path <path>       Warmup HTTP GET path (default /)\n"
@@ -566,6 +574,19 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (cfg.QuicConnections == 0) {
                 cfg.QuicConnections = 1;
+            }
+        } else if (GetOptionValue(arg, "--quic-reconnect-interval-ms", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--quic-reconnect-interval-ms", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.QuicReconnectIntervalMs) ||
+                cfg.QuicReconnectIntervalMs < 1000 ||
+                cfg.QuicReconnectIntervalMs > 60000) {
+                err = "invalid value for --quic-reconnect-interval-ms (must be 1000..60000)";
+                return false;
             }
         } else if (GetOptionValue(arg, "--warmup-mb", value)) {
             if (value == nullptr) {
@@ -802,6 +823,11 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {
             return false;
         }
+        for (auto& peer : cfg.Router.Peers) {
+            if (peer.QuicReconnectIntervalMs == 0) {
+                peer.QuicReconnectIntervalMs = cfg.QuicReconnectIntervalMs;
+            }
+        }
     }
 
     if (cfg.Mode == TqMode::Client) {
@@ -876,6 +902,11 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
         if (!peer.HttpListen.empty() && !IsHostPort(peer.HttpListen)) { err = "invalid http_listen for " + peer.PeerId; return false; }
         if (!peer.HttpListen.empty() && !listens.insert(peer.HttpListen).second) { err = "duplicate listen: " + peer.HttpListen; return false; }
         if (peer.QuicConnections > 128) { err = "quic_connections out of range for " + peer.PeerId; return false; }
+        if (peer.QuicReconnectIntervalMs != 0 &&
+            (peer.QuicReconnectIntervalMs < 1000 || peer.QuicReconnectIntervalMs > 60000)) {
+            err = "quic_reconnect_interval_ms out of range for " + peer.PeerId;
+            return false;
+        }
         if (!IsValidCompress(peer.Compress)) { err = "invalid compress for " + peer.PeerId; return false; }
     }
     return true;

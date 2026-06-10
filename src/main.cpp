@@ -20,6 +20,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace {
 
@@ -40,9 +41,13 @@ public:
         peerCfg.SocksListen = peer.SocksListen;
         peerCfg.HttpListen = peer.HttpListen;
         peerCfg.QuicConnections = peer.QuicConnections == 0 ? BaseConfig.QuicConnections : peer.QuicConnections;
+        peerCfg.QuicReconnectIntervalMs = peer.QuicReconnectIntervalMs == 0
+            ? BaseConfig.QuicReconnectIntervalMs
+            : peer.QuicReconnectIntervalMs;
         peerCfg.Compress = peer.Compress.empty() ? BaseConfig.Compress : peer.Compress;
 
         auto runtime = std::make_shared<PeerRuntime>();
+        runtime->PeerId = peer.PeerId;
         runtime->Config = peerCfg;
         runtime->Quic = std::make_unique<QuicClientSession>();
         if (!runtime->Quic->Start(peerCfg)) {
@@ -52,11 +57,16 @@ public:
 
         runtime->Pool = std::make_unique<TqThreadPool>(peerCfg.HandshakeThreads);
         runtime->Pool->Start();
-        TunnelStartFn startTunnel = [runtime = runtime.get(), peerCfg](const TunnelRequest& req, TqSocketHandle fd) {
+        std::weak_ptr<PeerRuntime> weakRuntime = runtime;
+        runtime->StartTunnel = [weakRuntime, peerCfg](const TunnelRequest& req, TqSocketHandle fd) {
+            auto runtime = weakRuntime.lock();
+            if (!runtime || !runtime->Quic) {
+                return TqTunnelStartResult{false, TqOpenError::Internal};
+            }
             MsQuicConnection* conn = nullptr;
             {
                 std::lock_guard<std::mutex> guard(runtime->TunnelStartMutex);
-                if (!runtime->Quic->EnsureConnected()) {
+                if (!runtime->Quic || !runtime->Quic->EnsureAnyConnected()) {
                     std::fprintf(stderr, "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n", peerCfg.QuicPeer.c_str());
                     return TqTunnelStartResult{false, TqOpenError::Internal};
                 }
@@ -68,24 +78,27 @@ public:
             return TqStartClientTunnel(conn, req, fd, peerCfg);
         };
 
-        runtime->Socks = std::make_unique<TqSocks5Server>(peerCfg.SocksListen, startTunnel, runtime->Pool.get());
-        if (!runtime->Socks->Start(err)) {
+        runtime->Quic->SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
+            (void)connectedCount;
+            auto runtime = weakRuntime.lock();
+            if (!runtime) {
+                return;
+            }
+            std::string listenerErr;
+            if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
+                std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
+                    runtime->PeerId.c_str(), listenerErr.c_str());
+            }
+        });
+
+        if (!runtime->Quic->EnsureAnyConnected()) {
+            std::fprintf(stderr,
+                "tcpquic-proxy: peer %s has no connected QUIC connection; listeners remain closed until reconnect\n",
+                peer.PeerId.c_str());
+        }
+        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
             runtime->StopAll();
             return false;
-        }
-        if (!peerCfg.HttpListen.empty()) {
-            runtime->Http = std::make_unique<TqHttpConnectServer>(peerCfg.HttpListen, startTunnel, runtime->Pool.get());
-            if (!runtime->Http->Start(err)) {
-                runtime->StopAll();
-                return false;
-            }
-        }
-
-        std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
-            peer.PeerId.c_str(), peerCfg.SocksListen.c_str());
-        if (!peerCfg.HttpListen.empty()) {
-            std::fprintf(stderr, "tcpquic-proxy: peer %s HTTP CONNECT listening on %s\n",
-                peer.PeerId.c_str(), peerCfg.HttpListen.c_str());
         }
         std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
             peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), runtime->Quic->ConnectionCount());
@@ -102,13 +115,21 @@ public:
         }
     }
 
+    void AbortPeerTunnels(const std::string& peerId) override {
+        std::shared_ptr<PeerRuntime> runtime = Find(peerId);
+        if (runtime && runtime->Quic) {
+            runtime->Quic->AbortAllTunnels();
+        }
+    }
+
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
         std::shared_ptr<PeerRuntime> runtime = Find(peerId);
         if (!runtime || !runtime->Quic) {
             return false;
         }
-        out.State = "healthy";
         out.ConnectionCount = runtime->Quic->ConnectionCount();
+        out.ConnectedConnections = runtime->Quic->ConnectedConnectionCount();
+        out.State = out.ConnectedConnections > 0 ? "healthy" : "connecting";
         return true;
     }
 
@@ -132,16 +153,83 @@ public:
 
 private:
     struct PeerRuntime {
+        std::string PeerId;
         TqConfig Config;
         std::mutex TunnelStartMutex;
+        std::mutex ListenerMutex;
         std::unique_ptr<QuicClientSession> Quic;
         std::unique_ptr<TqThreadPool> Pool;
         std::unique_ptr<TqSocks5Server> Socks;
         std::unique_ptr<TqHttpConnectServer> Http;
+        TunnelStartFn StartTunnel;
+        bool AcceptingEnabled{false};
 
         ~PeerRuntime() { StopAll(); }
 
-        void StopAccepting() {
+        bool OpenListenersLocked(std::string& err) {
+            if (Socks) {
+                return true;
+            }
+            if (!Pool || !StartTunnel) {
+                err = "listener runtime is not initialized";
+                return false;
+            }
+
+            auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, Pool.get());
+            if (!socks->Start(err)) {
+                return false;
+            }
+
+            std::unique_ptr<TqHttpConnectServer> http;
+            if (!Config.HttpListen.empty()) {
+                http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, Pool.get());
+                if (!http->Start(err)) {
+                    socks->Stop();
+                    return false;
+                }
+            }
+
+            Socks = std::move(socks);
+            Http = std::move(http);
+            std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
+                PeerId.c_str(), Config.SocksListen.c_str());
+            if (!Config.HttpListen.empty()) {
+                std::fprintf(stderr, "tcpquic-proxy: peer %s HTTP CONNECT listening on %s\n",
+                    PeerId.c_str(), Config.HttpListen.c_str());
+            }
+            return true;
+        }
+
+        bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            return ApplyCurrentConnectionStateLocked(err, requireConnected);
+        }
+
+        bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            AcceptingEnabled = true;
+            const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
+            if (!applied) {
+                AcceptingEnabled = false;
+                CloseListenersLocked();
+            }
+            return applied;
+        }
+
+        bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
+            const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+            if (!AcceptingEnabled || connectedCount == 0) {
+                CloseListenersLocked();
+                if (requireConnected) {
+                    err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
+                    return false;
+                }
+                return true;
+            }
+            return OpenListenersLocked(err);
+        }
+
+        void CloseListenersLocked() {
             if (Socks) {
                 Socks->Stop();
                 Socks.reset();
@@ -152,8 +240,23 @@ private:
             }
         }
 
+        void CloseListeners() {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            CloseListenersLocked();
+        }
+
+        void DisableAccepting() {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            AcceptingEnabled = false;
+            CloseListenersLocked();
+        }
+
+        void StopAccepting() {
+            DisableAccepting();
+        }
+
         void StopAll() {
-            StopAccepting();
+            DisableAccepting();
             if (Pool) {
                 Pool->Stop();
                 Pool.reset();
@@ -181,62 +284,188 @@ struct TqTraceGuard {
     ~TqTraceGuard() { TqTraceShutdown(); }
 };
 
+struct TqSinglePeerClientRuntime {
+    TqSinglePeerClientRuntime(const TqConfig& config, QuicClientSession& quic)
+        : Config(config), Quic(&quic), Pool(config.HandshakeThreads) {}
+
+    ~TqSinglePeerClientRuntime() {
+        DisableAccepting();
+        Pool.Stop();
+    }
+
+    void Start() {
+        Pool.Start();
+    }
+
+    void SetStartTunnel(TunnelStartFn startTunnel) {
+        StartTunnel = std::move(startTunnel);
+    }
+
+    bool OpenListenersLocked(std::string& err) {
+        if (Socks) {
+            return true;
+        }
+        if (!StartTunnel) {
+            err = "listener runtime is not initialized";
+            return false;
+        }
+
+        auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, &Pool);
+        if (!socks->Start(err)) {
+            return false;
+        }
+
+        std::unique_ptr<TqHttpConnectServer> http;
+        if (!Config.HttpListen.empty()) {
+            http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, &Pool);
+            if (!http->Start(err)) {
+                socks->Stop();
+                return false;
+            }
+        }
+
+        Socks = std::move(socks);
+        Http = std::move(http);
+        std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
+        if (!Config.HttpListen.empty()) {
+            std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", Config.HttpListen.c_str());
+        }
+        return true;
+    }
+
+    bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        return ApplyCurrentConnectionStateLocked(err, requireConnected);
+    }
+
+    bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = true;
+        const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
+        if (!applied) {
+            AcceptingEnabled = false;
+            CloseListenersLocked();
+        }
+        return applied;
+    }
+
+    bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
+        const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+        if (!AcceptingEnabled || connectedCount == 0) {
+            CloseListenersLocked();
+            if (requireConnected) {
+                err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
+                return false;
+            }
+            return true;
+        }
+        return OpenListenersLocked(err);
+    }
+
+    void CloseListenersLocked() {
+        if (Socks) {
+            Socks->Stop();
+            Socks.reset();
+        }
+        if (Http) {
+            Http->Stop();
+            Http.reset();
+        }
+    }
+
+    void CloseListeners() {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        CloseListenersLocked();
+    }
+
+    void DisableAccepting() {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = false;
+        CloseListenersLocked();
+    }
+
+    TqConfig Config;
+    QuicClientSession* Quic{nullptr};
+    TqThreadPool Pool;
+    std::mutex TunnelStartMutex;
+    std::mutex ListenerMutex;
+    TunnelStartFn StartTunnel;
+    std::unique_ptr<TqSocks5Server> Socks;
+    std::unique_ptr<TqHttpConnectServer> Http;
+    bool AcceptingEnabled{false};
+};
+
 int RunSinglePeerClient(const TqConfig& cfg) {
     QuicClientSession quic;
     if (!quic.Start(cfg)) {
         return 1;
     }
 
-    if (cfg.TraceConnectOnStart || cfg.Trace) {
-        if (!quic.EnsureConnected()) {
-            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer at startup\n");
+    if (cfg.WarmupMb > 0) {
+        if (!quic.EnsureAnyConnected()) {
+            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
             return 1;
         }
-    }
-
-    if (cfg.WarmupMb > 0) {
         if (!TqRunClientWarmup(quic, cfg)) {
             std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
             return 1;
         }
     }
 
-    std::mutex clientTunnelStartMutex;
-    TunnelStartFn startTunnel = [&quic, &cfg, &clientTunnelStartMutex](const TunnelRequest& req, TqSocketHandle fd) {
+    auto runtime = std::make_shared<TqSinglePeerClientRuntime>(cfg, quic);
+    runtime->Start();
+    std::weak_ptr<TqSinglePeerClientRuntime> weakRuntime = runtime;
+    runtime->SetStartTunnel([weakRuntime, cfg](const TunnelRequest& req, TqSocketHandle fd) {
+        auto runtime = weakRuntime.lock();
+        if (!runtime || !runtime->Quic) {
+            return TqTunnelStartResult{false, TqOpenError::Internal};
+        }
         MsQuicConnection* conn = nullptr;
         {
-            std::lock_guard<std::mutex> guard(clientTunnelStartMutex);
-            if (!quic.EnsureConnected()) {
+            std::lock_guard<std::mutex> guard(runtime->TunnelStartMutex);
+            if (!runtime->Quic || !runtime->Quic->EnsureAnyConnected()) {
                 std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
                 return TqTunnelStartResult{false, TqOpenError::Internal};
             }
-            conn = quic.PickConnection();
+            conn = runtime->Quic->PickConnection();
             if (conn == nullptr) {
                 return TqTunnelStartResult{false, TqOpenError::Internal};
             }
         }
         return TqStartClientTunnel(conn, req, fd, cfg);
-    };
+    });
 
-    std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", cfg.SocksListen.c_str());
-    if (!cfg.HttpListen.empty()) {
-        std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", cfg.HttpListen.c_str());
+    quic.SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
+        (void)connectedCount;
+        auto runtime = weakRuntime.lock();
+        if (!runtime) {
+            return;
+        }
+        std::string listenerErr;
+        if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
+            std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
+        }
+    });
+
+    if (!quic.EnsureAnyConnected()) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: no connected QUIC peer at startup; listeners remain closed until reconnect\n");
     }
+
+    std::string err;
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
+        std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
+        quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
+        runtime->DisableAccepting();
+        runtime->Pool.Stop();
+        return 1;
+    }
+
     std::fprintf(stderr, "tcpquic-proxy: QUIC peer %s (%u connections)\n",
         cfg.QuicPeer.c_str(), quic.ConnectionCount());
 
-    TqThreadPool handshakePool(cfg.HandshakeThreads);
-    handshakePool.Start();
-
-    std::thread socksThread(RunSocks5Server, cfg.SocksListen, startTunnel, &handshakePool);
-    std::unique_ptr<std::thread> httpThread;
-    if (!cfg.HttpListen.empty()) {
-        httpThread.reset(new std::thread(RunHttpConnectServer, cfg.HttpListen, startTunnel, &handshakePool));
-    }
-
-    socksThread.join();
-    if (httpThread) {
-        httpThread->join();
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::hours(24));
     }
     return 0;
 }

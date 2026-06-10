@@ -9,7 +9,9 @@ public:
     std::vector<std::string> Started;
     std::vector<std::string> Stopped;
     std::vector<std::string> Drained;
+    std::vector<std::string> AbortAll;
     uint32_t FailStarts{0};
+    uint32_t ConnectedConnections{0};
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
@@ -27,6 +29,18 @@ public:
 
     void DrainPeer(const std::string& peerId, uint32_t) override {
         Drained.push_back(peerId);
+    }
+
+    void AbortPeerTunnels(const std::string& peerId) override {
+        AbortAll.push_back(peerId);
+    }
+
+    bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
+        (void)peerId;
+        out.ConnectionCount = 4;
+        out.ConnectedConnections = ConnectedConnections;
+        out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
+        return true;
     }
 };
 
@@ -58,6 +72,19 @@ static TqHttpRequest Request(const std::string& method, const std::string& path,
 int main() {
     {
         FakeAdapter adapter;
+        adapter.ConnectedConnections = 2;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-metrics", "127.0.0.1:11013"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 106;
+        std::string metrics = adapterRuntime.MetricsJson();
+        if (metrics.find("\"connection_count\":4") == std::string::npos) return 107;
+        if (metrics.find("\"connected_connections\":2") == std::string::npos) return 108;
+        if (metrics.find("\"state\":\"healthy\"") == std::string::npos) return 109;
+    }
+    {
+        FakeAdapter adapter;
         adapter.FailStarts = 1;
         TqRouterRuntime adapterRuntime(&adapter);
         TqRouterConfig cfg;
@@ -83,8 +110,51 @@ int main() {
         TqRouterConfig empty;
         if (!adapterRuntime.ApplyConfig(empty, err)) return 91;
         if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-remove") return 92;
-        if (!adapterRuntime.ApplyConfig(empty, err)) return 93;
-        if (adapter.Drained.size() != 1) return 94;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-remove") return 93;
+        if (!adapterRuntime.ApplyConfig(empty, err)) return 94;
+        if (adapter.Drained.size() != 1) return 95;
+        if (adapter.AbortAll.size() != 1) return 96;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-cleanup", "127.0.0.1:11014"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 110;
+        cfg.Peers[0].Enabled = false;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 111;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-cleanup") return 112;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-cleanup") return 113;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-change", "127.0.0.1:11015"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 114;
+        cfg.Peers[0].SocksListen = "127.0.0.1:11016";
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 115;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-change") return 116;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-change") return 117;
+        if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-change") return 118;
+        if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-change") return 119;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-interval", "127.0.0.1:11017"));
+        cfg.Peers[0].QuicReconnectIntervalMs = 3000;
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 120;
+        cfg.Peers[0].QuicReconnectIntervalMs = 5000;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 121;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-interval") return 122;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-interval") return 123;
+        if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-interval") return 124;
+        if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-interval") return 125;
     }
     {
         FakeAdapter adapter;
@@ -166,10 +236,11 @@ int main() {
         std::string health = adminRuntime.HandleAdmin(getHealth);
         if (health.find("HTTP/1.1 200 OK") == std::string::npos) return 20;
         if (health.find("\"status\":\"healthy\"") == std::string::npos) return 21;
-        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
+        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\",\"quic_reconnect_interval_ms\":5000}]}");
         std::string put = adminRuntime.HandleAdmin(putConfig);
         if (put.find("HTTP/1.1 200 OK") == std::string::npos) return 22;
         if (adminRuntime.SnapshotMetrics().Peers.size() != 1) return 23;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicReconnectIntervalMs != 5000) return 95;
         TqHttpRequest getMetrics = Request("GET", "/metrics", "");
         std::string metrics = adminRuntime.HandleAdmin(getMetrics);
         if (metrics.find("HTTP/1.1 200 OK") == std::string::npos) return 25;
@@ -178,9 +249,11 @@ int main() {
         std::string config = adminRuntime.HandleAdmin(getConfig);
         if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 27;
         if (config.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 28;
+        if (config.find("\"quic_reconnect_interval_ms\":5000") == std::string::npos) return 96;
         TqHttpRequest putRoundTrip = Request("PUT", "/config", JsonBody(config));
         std::string roundTrip = adminRuntime.HandleAdmin(putRoundTrip);
         if (roundTrip.find("HTTP/1.1 200 OK") == std::string::npos) return 74;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicReconnectIntervalMs != 5000) return 97;
         TqHttpRequest disable = Request("POST", "/peers/agent-d/disable", "");
         std::string disabled = adminRuntime.HandleAdmin(disable);
         if (disabled.find("HTTP/1.1 200 OK") == std::string::npos) return 29;
