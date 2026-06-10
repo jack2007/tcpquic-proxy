@@ -1,9 +1,16 @@
-# Linux 环境验证记录（Windows IOCP 合并后）
+# Linux 环境验证记录
 
 > **日期：** 2026-06-10  
-> **基线提交：** `59580f6`（Merge PR #1 — Windows IOCP / 跨平台 socket 层）  
+> **基线提交：** `c0d2cfd`（源码目录重组 `source-file-organization` 合并后）  
 > **验证环境：** Linux aarch64，GCC 13.3.0；双机 DGX Spark（本机 `169.254.250.230` ↔ 对端 `169.254.59.196`）  
 > **状态：** ✅ 全部通过
+
+### 历史基线
+
+| 日期 | 提交 | 说明 |
+|------|------|------|
+| 2026-06-10 | `59580f6` | Windows IOCP 合并后首次 Linux 全量验证（含 relay 竞态修复） |
+| 2026-06-10 | `c0d2cfd` | 源码目录重组后回归验证（`src/` 按职责分子目录，行为不变） |
 
 ---
 
@@ -32,7 +39,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 cmake --build build --target tcpquic-proxy -j$(nproc)
 ```
 
-### 2.2 测试 target 链接
+### 2.2 源码目录结构（重组后）
+
+生产代码按职责分布在 `src/` 子目录：`acl/`、`config/`、`protocol/`、`platform/`、`ingress/`、`tunnel/`、`runtime/`。`main.cpp`、`CMakeLists.txt`、`unittest/` 仍在 `src/` 顶层。`src/CMakeLists.txt` 通过 `TCPQUIC_SOURCE_INCLUDE_DIRS` 集中管理 include 路径，源码中的短 include 名无需改动。
+
+### 2.3 测试 target 链接
 
 多个单元测试 target 需链接 `${TCPQUIC_PLATFORM_SOURCES}`，否则 Linux 平台 socket 符号未解析（见 `src/CMakeLists.txt`）。
 
@@ -46,7 +57,7 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 
 **根因：** `TqLinuxRelaySendOperation` 将栈上 `QUIC_BUFFER` 指针交给 MsQuic；回调返回后内存失效。
 
-**修复：** 在 send 操作中持久化 `QuicBuffers` 数组，于 `SEND_COMPLETE` 释放（`src/linux_relay_worker.cpp`）。
+**修复：** 在 send 操作中持久化 `QuicBuffers` 数组，于 `SEND_COMPLETE` 释放（`src/tunnel/linux_relay_worker.cpp`）。
 
 ### 3.2 Linux relay：误消费 tunnel OPEN 的 `SEND_COMPLETE`
 
@@ -56,14 +67,14 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 
 **修复：**
 
-- `TqLinuxRelaySendOperation::MagicValue` 标记 relay 发送；非 magic 的 `SEND_COMPLETE` 直接 `free` 并忽略（`src/linux_relay_worker.h/.cpp`）。
-- 客户端 OPEN 路径：`PendingClientRelay` + `OpenSendComplete` + `FinishClientOpenAndStartRelay()`，仅在 OPEN 发送完成后再 `StartRelay()`（`src/tcp_tunnel.cpp`）。
+- `TqLinuxRelaySendOperation::MagicValue` 标记 relay 发送；非 magic 的 `SEND_COMPLETE` 直接 `free` 并忽略（`src/tunnel/linux_relay_worker.h/.cpp`）。
+- 客户端 OPEN 路径：`PendingClientRelay` + `OpenSendComplete` + `FinishClientOpenAndStartRelay()`，仅在 OPEN 发送完成后再 `StartRelay()`（`src/tunnel/tcp_tunnel.cpp`）。
 
 ### 3.3 MsQuic 回调与锁：潜在死锁
 
 **现象：** 并发隧道建立卡死。
 
-**修复：** `SendBytes` / `StartRelay` 不在持有 `TqTunnelContext::Lock` 时调用 `Stream->Send` 或 `TqRelayStart`（`src/tcp_tunnel.cpp`）。
+**修复：** `SendBytes` / `StartRelay` 不在持有 `TqTunnelContext::Lock` 时调用 `Stream->Send` 或 `TqRelayStart`（`src/tunnel/tcp_tunnel.cpp`）。
 
 ### 3.4 Server OPEN 失败语义与 TCP 生命周期
 
@@ -71,20 +82,20 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 
 **修复：**
 
-- `PendingOpenFailureShutdown`：OPEN_FAIL 发送完成后再 shutdown stream（`src/tcp_tunnel.cpp`）。
-- ACL / 拨号失败路径使用 `ReleaseTcpWithoutClose()`，由 proxy 层发送 HTTP 403 / SOCKS REP（`src/tcp_tunnel.cpp`）。
+- `PendingOpenFailureShutdown`：OPEN_FAIL 发送完成后再 shutdown stream（`src/tunnel/tcp_tunnel.cpp`）。
+- ACL / 拨号失败路径使用 `ReleaseTcpWithoutClose()`，由 proxy 层发送 HTTP 403 / SOCKS REP（`src/tunnel/tcp_tunnel.cpp`）。
 
 ### 3.5 SOCKS5 ACL 负路径
 
 **现象：** ACL 拒绝时仍返回 REP=0（成功）。
 
-**修复：** 先调用 `onTunnel`；失败再发送错误 REP（`src/socks5_server.cpp`）。
+**修复：** 先调用 `onTunnel`；失败再发送错误 REP（`src/ingress/socks5_server.cpp`）。
 
 ### 3.6 并发 QUIC 连接选取竞态
 
 **现象：** 多路 CONNECT 同时建立时偶发失败。
 
-**修复：** `clientTunnelStartMutex` / `PeerRuntime::TunnelStartMutex` **仅**保护 `EnsureConnected()` + `PickConnection()`，不在整个 `TqStartClientTunnel()`（含 OPEN 往返等待）期间持锁，避免双机高延迟下 100 路隧道排队超时（`src/main.cpp`）。
+**修复：** `clientTunnelStartMutex` / `PeerRuntime::TunnelStartMutex` **仅**保护 `EnsureConnected()` + `PickConnection()`，不在整个 `TqStartClientTunnel()`（含 OPEN 往返等待）期间持锁，避免双机高延迟下 100 路隧道排队超时（`src/main.cpp`，未随目录重组移动）。
 
 ### 3.7 测试脚本
 
@@ -105,13 +116,15 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 scripts/test-tcpquic-concurrent.sh
 scripts/test-tcpquic-proxy.sh
 src/CMakeLists.txt
-src/linux_relay_worker.cpp
-src/linux_relay_worker.h
+src/tunnel/linux_relay_worker.cpp
+src/tunnel/linux_relay_worker.h
 src/main.cpp
-src/socks5_server.cpp
-src/tcp_tunnel.cpp
+src/ingress/socks5_server.cpp
+src/tunnel/tcp_tunnel.cpp
 docs/linux-verification-2026-06-10.md   （本文档）
 ```
+
+> 注：上述文件路径已在 `source-file-organization` 重组中迁移至子目录；逻辑未变。
 
 ---
 
