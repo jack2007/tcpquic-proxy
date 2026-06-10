@@ -53,7 +53,7 @@ struct TqLinuxRelayWorker::RelayState {
 
 namespace {
 
-bool TqSetNonBlocking(int fd) {
+bool TqSetFdNonBlocking(int fd) {
     const int flags = ::fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         return false;
@@ -208,7 +208,7 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     if (registration.TcpFd < 0 || EpollFd < 0) {
         return result;
     }
-    if (!TqSetNonBlocking(registration.TcpFd)) {
+    if (!TqSetFdNonBlocking(registration.TcpFd)) {
         return result;
     }
 
