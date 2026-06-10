@@ -60,6 +60,10 @@ struct TqConfig {
     uint32_t TuningOverrideQuicIw{0};
     uint32_t TuningOverrideQuicInitRttMs{0};
     TqTuningConfig Tuning{};
+
+    bool Trace{false};
+    uint32_t TraceIntervalSec{10};
+    bool TraceConnectOnStart{false};
 };
 
 void TqPrintUsage(FILE* out);

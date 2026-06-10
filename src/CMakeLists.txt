@@ -74,6 +74,8 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/admin_http.cpp
     runtime/router_runtime.cpp
     runtime/server_metrics.cpp
+    runtime/trace.cpp
+    platform/exe_path.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 
@@ -99,7 +101,7 @@ if(WIN32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4)
+target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4 spdlog::spdlog)
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
 
 set(TCPQUIC_TEST_LIBS libzstd lz4)

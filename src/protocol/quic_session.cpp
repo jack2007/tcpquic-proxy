@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "trace.h"
 #include "tuning.h"
 #if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
 #include "quic_credentials_win.h"
@@ -254,6 +255,9 @@ std::mutex g_serverConnIdLock;
 std::unordered_map<HQUIC, uint32_t> g_serverConnIds;
 std::atomic<uint32_t> g_nextServerConnId{1};
 
+std::mutex g_clientTraceConnLock;
+std::unordered_map<HQUIC, uint32_t> g_clientTraceConnIds;
+
 void TqSampleConnectionRtt(MsQuicConnection* connection) {
     if (connection == nullptr || !connection->IsValid()) {
         return;
@@ -299,6 +303,31 @@ void TqUnregisterServerConnection(MsQuicConnection* connection) {
     }
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     g_serverConnIds.erase(connection->Handle);
+}
+
+uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(g_clientTraceConnLock);
+    const auto it = g_clientTraceConnIds.find(connection->Handle);
+    return it == g_clientTraceConnIds.end() ? 0 : it->second;
+}
+
+static void TqRegisterClientTraceConnection(MsQuicConnection* connection, size_t slotIndex) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_clientTraceConnLock);
+    g_clientTraceConnIds[connection->Handle] = static_cast<uint32_t>(slotIndex + 1);
+}
+
+static void TqUnregisterClientTraceConnection(MsQuicConnection* connection) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_clientTraceConnLock);
+    g_clientTraceConnIds.erase(connection->Handle);
 }
 
 bool QuicClientSession::Start(const TqConfig& cfg) {
@@ -533,6 +562,11 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
     const QUIC_STATUS startStatus =
         connectionToStart->Start(*Configuration, PeerHost.c_str(), PeerPort);
 
+    if (TqTraceEnabled()) {
+        const std::string peer = PeerHost + ":" + std::to_string(PeerPort);
+        TqTraceQuicConnecting("client", static_cast<uint32_t>(index + 1), peer.c_str());
+    }
+
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         if (index >= state->Slots.size()) {
@@ -600,6 +634,14 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
             QuicClientSession::OnSlotConnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
         }
+        if (TqTraceEnabled()) {
+            TqRegisterClientTraceConnection(connection, slotIndex);
+            TqTraceQuicConnected(
+                connection,
+                static_cast<uint32_t>(slotIndex + 1),
+                "client",
+                static_cast<uint32_t>(slotIndex + 1));
+        }
         break;
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
         if (state) {
@@ -619,6 +661,14 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
         TqSampleConnectionRtt(connection);
+        if (TqTraceEnabled()) {
+            TqTraceQuicShutdownTransport(
+                connection,
+                static_cast<uint32_t>(slotIndex + 1),
+                "client",
+                static_cast<uint32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status),
+                event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+        }
         if (state) {
             QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
@@ -626,12 +676,26 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         TqSampleConnectionRtt(connection);
+        if (TqTraceEnabled()) {
+            TqTraceQuicShutdownPeer(
+                connection,
+                static_cast<uint32_t>(slotIndex + 1),
+                "client",
+                event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+        }
         if (state) {
             QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        if (TqTraceEnabled()) {
+            TqUnregisterClientTraceConnection(connection);
+            TqTraceQuicDisconnected(
+                connection,
+                static_cast<uint32_t>(slotIndex + 1),
+                "client");
+        }
         if (state) {
             QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
             {
@@ -769,6 +833,8 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         return QUIC_STATUS_SUCCESS;
     }
 
+    TqTraceQuicIncoming();
+
     auto* connection = new (std::nothrow) MsQuicConnection(
         event->NEW_CONNECTION.Connection,
         CleanUpAutoDelete,
@@ -808,7 +874,10 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_CONNECTED:
         TqSampleConnectionRtt(connection);
         connection->SendResumptionTicket(QUIC_SEND_RESUMPTION_FLAG_FINAL);
-        TqRegisterServerConnection(connection);
+        {
+            const uint32_t connId = TqRegisterServerConnection(connection);
+            TqTraceQuicConnected(connection, connId, "server", 0);
+        }
         break;
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
         {
@@ -825,10 +894,31 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        if (TqTraceEnabled()) {
+            const uint32_t connId = TqLookupServerConnectionId(connection);
+            TqTraceQuicShutdownTransport(
+                connection,
+                connId,
+                "server",
+                static_cast<uint32_t>(event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status),
+                event->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+        }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        if (TqTraceEnabled()) {
+            const uint32_t connId = TqLookupServerConnectionId(connection);
+            TqTraceQuicShutdownPeer(
+                connection,
+                connId,
+                "server",
+                event->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+        }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        if (TqTraceEnabled()) {
+            const uint32_t connId = TqLookupServerConnectionId(connection);
+            TqTraceQuicDisconnected(connection, connId, "server");
+        }
         TqUnregisterServerConnection(connection);
         break;
     default:

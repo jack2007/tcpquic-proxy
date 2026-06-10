@@ -22,6 +22,7 @@
 uint32_t TqRegisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
 void TqUnregisterServerConnection(MsQuicConnection* connection);
+uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);
 
 class QuicClientSession {
 public:

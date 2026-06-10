@@ -6,6 +6,7 @@
 #include "quic_session.h"
 #include "relay.h"
 #include "tcp_dialer.h"
+#include "trace.h"
 #include "tunnel_reaper.h"
 
 #if !defined(_WIN32)
@@ -227,9 +228,11 @@ public:
         QuicConn(quicConn),
         OnComplete(std::move(onComplete)),
         OnAclDenied(std::move(onAclDenied)) {
+        TraceIngressProto = 0;
     }
 
     ~TqTunnelContext() {
+        EmitTraceClosed();
         if (OnComplete) {
             OnComplete();
         }
@@ -257,6 +260,15 @@ public:
         std::vector<uint8_t> encoded;
         if (!TqEncodeOpenRequest(req, encoded)) {
             return false;
+        }
+        if (TqTraceEnabled()) {
+            uint32_t connId = 0;
+            if (QuicConn != nullptr) {
+                connId = Role == TqTunnelRole::ClientOpen
+                    ? TqLookupClientTraceConnId(QuicConn)
+                    : TqLookupServerConnectionId(QuicConn);
+            }
+            TqTraceIncOpenTx(connId);
         }
         return SendBytes(encoded, QUIC_SEND_FLAG_START);
     }
@@ -314,6 +326,10 @@ public:
         }
         TqTunnelReaper::Instance().Register(this);
         StateChanged.notify_all();
+        if (TraceTunnelId != 0) {
+            TqTraceRelayStarted(TraceTunnelId);
+            TraceRelayStarted = true;
+        }
         return true;
     }
 
@@ -328,6 +344,16 @@ public:
 
     void CloseTcp() {
         if (TqSocketValid(TcpFd)) {
+            if (Role == TqTunnelRole::ClientOpen && TraceIngressProto != 0) {
+                const TqTraceProxyProto proto =
+                    TraceIngressProto == 2 ? TqTraceProxyProto::Http : TqTraceProxyProto::Socks;
+                TqTraceProxyClosed(proto, TcpFd);
+                TraceIngressProto = 0;
+            }
+            if (TraceTunnelId != 0 && Role == TqTunnelRole::ServerOpen && TraceTargetTcpOpen) {
+                TqTraceTargetTcpClosed(TraceTunnelId);
+                TraceTargetTcpOpen = false;
+            }
             TqCloseSocket(TcpFd);
             TcpFd = TqInvalidSocket;
         }
@@ -355,6 +381,15 @@ public:
             return false;
         }
         return RelayStarted;
+    }
+
+    void AssignTrace(uint64_t tunnelId, std::string target) {
+        TraceTunnelId = tunnelId;
+        TraceTarget = std::move(target);
+    }
+
+    void SetIngressTraceProto(uint8_t proto) {
+        TraceIngressProto = proto;
     }
 
 private:
@@ -482,6 +517,19 @@ private:
             return;
         }
 
+        std::string host;
+        if (!TqHostFromOpenRequest(req, host)) {
+            ServerOpenDispatched.store(true, std::memory_order_release);
+            SendOpenFailure(TqOpenError::Internal);
+            return;
+        }
+        TraceTarget = host + ":" + std::to_string(req.Port);
+        if (TraceTunnelId == 0) {
+            const uint32_t connId = QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
+            TraceTunnelId = TqTraceStreamStarted(QuicConn, connId, "server", TraceTarget.c_str(), req.Flags);
+            TqTraceIncOpenRx(connId);
+        }
+
         std::vector<sockaddr_storage> addrs;
         TqOpenError error = TqOpenError::Internal;
         if (Acl == nullptr || !TqResolveAllowedTarget(req, *Acl, addrs, error)) {
@@ -519,12 +567,28 @@ private:
     void FinishServerOpenAfterDial(
         TqOpenRequest req,
         std::vector<sockaddr_storage> addrs) {
+        if (TraceTunnelId != 0) {
+            std::string host;
+            if (TqHostFromOpenRequest(req, host)) {
+                TraceTarget = host + ":" + std::to_string(req.Port);
+            }
+            TqTraceTargetTcpDialing(TraceTunnelId, TraceTarget.c_str());
+        }
+
         const TqDialResult dial = TqDialTcp(addrs, TqTcpDialTimeoutMs);
         if (!TqSocketValid(dial.Fd)) {
-            SendOpenFailure(dial.Refused ? TqOpenError::TcpRefused : TqOpenError::TcpTimeout);
+            const TqOpenError err = dial.Refused ? TqOpenError::TcpRefused : TqOpenError::TcpTimeout;
+            if (TraceTunnelId != 0) {
+                TqTraceTargetTcpFailed(TraceTunnelId, err);
+            }
+            SendOpenFailure(err);
             return;
         }
         TcpFd = dial.Fd;
+        if (TraceTunnelId != 0) {
+            TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
+            TraceTargetTcpOpen = true;
+        }
 
         if (IsShutdownComplete()) {
             CloseTcp();
@@ -622,7 +686,34 @@ private:
             OpenResponse = response;
             OpenDone = true;
         }
+        if (TraceTunnelId != 0) {
+            TqTraceOpenResult(TraceTunnelId, ok && response.Ok, response.Error, response.ConnId);
+        }
         StateChanged.notify_all();
+    }
+
+    void EmitTraceClosed() {
+        if (TraceClosedEmitted || TraceTunnelId == 0) {
+            return;
+        }
+        TraceClosedEmitted = true;
+        const char* role = Role == TqTunnelRole::ClientOpen ? "client" : "server";
+        TqOpenError reason = TqOpenError::Ok;
+        if (!OpenDone) {
+            reason = TqOpenError::Internal;
+        } else if (!OpenOk) {
+            reason = OpenResponse.Error;
+        }
+        TqTraceStreamClosed(
+            TraceTunnelId,
+            role,
+            TraceTarget.c_str(),
+            TraceRelayStarted,
+            reason);
+        if (TraceTargetTcpOpen) {
+            TqTraceTargetTcpClosed(TraceTunnelId);
+            TraceTargetTcpOpen = false;
+        }
     }
 
     void StartPendingServerRelay() {
@@ -688,6 +779,12 @@ private:
     bool OpenSendComplete{false};
     bool PendingOpenFailureShutdown{false};
     std::atomic<bool> ServerOpenDispatched{false};
+    uint64_t TraceTunnelId{0};
+    std::string TraceTarget;
+    bool TraceRelayStarted{false};
+    bool TraceTargetTcpOpen{false};
+    bool TraceClosedEmitted{false};
+    uint8_t TraceIngressProto{0};
 };
 
 bool TqTunnelRelayStopped(const TqTunnelContext* ctx) {
@@ -747,11 +844,18 @@ TqTunnelStartResult TqStartClientTunnel(
     }
 
     context->SetStream(stream);
+
+    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
+    const uint32_t connId = TqLookupClientTraceConnId(conn);
+    const uint64_t tunnelId = TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
+    context->AssignTrace(tunnelId, target);
+    context->SetIngressTraceProto(req.IngressTraceProto);
+
     if (!context->SendOpenRequest(openReq)) {
         std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
-        return {false, TqOpenError::Internal};
+        return {false, TqOpenError::Internal, tunnelId};
     }
 
     TqOpenResponse response{};
@@ -761,21 +865,21 @@ TqTunnelStartResult TqStartClientTunnel(
             static_cast<unsigned>(response.Error));
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
-        return {false, response.Error};
+        return {false, response.Error, tunnelId};
     }
     if (!response.Ok) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
-        return {false, response.Error};
+        return {false, response.Error, tunnelId};
     }
 
     if (!context->FinishClientOpenAndStartRelay(openReq.Flags)) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
-        return {false, TqOpenError::Internal};
+        return {false, TqOpenError::Internal, tunnelId};
     }
 
-    return {true, TqOpenError::Ok};
+    return {true, TqOpenError::Ok, tunnelId};
 }
 
 void TqHandleServerPeerStream(

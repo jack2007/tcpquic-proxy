@@ -12,6 +12,7 @@
 #include "tuning.h"
 #include "tunnel_reaper.h"
 #include "warmup.h"
+#include "trace.h"
 
 #include <chrono>
 #include <cstdio>
@@ -176,10 +177,21 @@ private:
 };
 
 
+struct TqTraceGuard {
+    ~TqTraceGuard() { TqTraceShutdown(); }
+};
+
 int RunSinglePeerClient(const TqConfig& cfg) {
     QuicClientSession quic;
     if (!quic.Start(cfg)) {
         return 1;
+    }
+
+    if (cfg.TraceConnectOnStart || cfg.Trace) {
+        if (!quic.EnsureConnected()) {
+            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer at startup\n");
+            return 1;
+        }
     }
 
     if (cfg.WarmupMb > 0) {
@@ -367,6 +379,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
             "tcpquic-proxy compress auto: probe=%s (ratio samples choose off/lz4/zstd)\n",
             TqResolveAutoCompress(cfg));
+    }
+
+    TqTraceGuard traceGuard;
+    if (cfg.Trace) {
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec)) {
+            std::fprintf(stderr, "tcpquic-proxy: warning: trace log init failed\n");
+        } else {
+            std::fprintf(stderr,
+                "tcpquic-proxy: trace enabled (interval=%us, log under <exe>/log/)\n",
+                cfg.TraceIntervalSec);
+        }
     }
 
     if (cfg.Mode == TqMode::Client) {

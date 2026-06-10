@@ -17,11 +17,13 @@ struct TunnelRequest {
     char Host[256];
     uint16_t Port;
     uint8_t CompressFlags;
+    uint8_t IngressTraceProto{0}; // 1=socks5, 2=http (trace)
 };
 
 struct TqTunnelStartResult {
     bool Ok{false};
     TqOpenError Error{TqOpenError::Internal};
+    uint64_t TraceTunnelId{0};
 };
 
 using TunnelStartFn =

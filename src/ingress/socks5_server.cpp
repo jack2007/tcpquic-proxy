@@ -1,4 +1,5 @@
 #include "socks5_server.h"
+#include "trace.h"
 
 #include "platform_socket.h"
 #include "tcp_dialer.h"
@@ -270,38 +271,50 @@ bool TqReadSocks5ConnectRequest(TqSocketHandle clientFd, TunnelRequest& out, uin
 }
 
 void TqHandleSocks5Client(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
+    TqTraceProxyAccepted(TqTraceProxyProto::Socks, clientFd);
+
     if (!TqReadSocks5Greeting(clientFd)) {
+        TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     TunnelRequest tunnel{};
+    tunnel.IngressTraceProto = 1;
     uint8_t rep = TQ_SOCKS5_REP_GENERAL_FAILURE;
     if (!TqReadSocks5ConnectRequest(clientFd, tunnel, rep)) {
         (void)TqSendSocks5Reply(clientFd, rep);
+        TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     if (!onTunnel) {
         (void)TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_GENERAL_FAILURE);
+        TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     TqTuneTcpForThroughput(clientFd);
 
+    const std::string target = std::string(tunnel.Host) + ":" + std::to_string(tunnel.Port);
     const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
     if (!result.Ok) {
         (void)TqSendSocks5Reply(clientFd, TqSocks5RepForOpenError(result.Error));
+        TqTraceProxyTunnelFail(TqTraceProxyProto::Socks, target.c_str(), result.Error);
+        TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
+        TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
+
+    TqTraceProxyTunnelOk(TqTraceProxyProto::Socks, target.c_str(), result.TraceTunnelId);
 }
 
 } // namespace

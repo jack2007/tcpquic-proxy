@@ -1,4 +1,5 @@
 #include "http_connect_server.h"
+#include "trace.h"
 
 #include "platform_socket.h"
 #include "tcp_dialer.h"
@@ -154,6 +155,8 @@ bool TqSendHttpStatus(TqSocketHandle fd, int status) {
 }
 
 void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
+    TqTraceProxyAccepted(TqTraceProxyProto::Http, clientFd);
+
     std::string request;
     request.reserve(1024);
 
@@ -161,6 +164,7 @@ void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onT
     while (request.find("\r\n\r\n") == std::string::npos) {
         if (request.size() >= TqMaxHttpHeaderBytes) {
             TqSendHttpStatus(clientFd, 400);
+            TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
         }
@@ -170,10 +174,12 @@ void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onT
             if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
+            TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
         }
         if (received == 0) {
+            TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
         }
@@ -182,31 +188,40 @@ void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onT
     }
 
     TunnelRequest tunnel{};
+    tunnel.IngressTraceProto = 2;
     if (!TqParseHttpConnectRequest(request, tunnel)) {
         TqSendHttpStatus(clientFd, 400);
+        TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     if (!onTunnel) {
         TqSendHttpStatus(clientFd, 500);
+        TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     TqTuneTcpForThroughput(clientFd);
 
+    const std::string target = std::string(tunnel.Host) + ":" + std::to_string(tunnel.Port);
     const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
     if (!result.Ok) {
         TqSendHttpStatus(clientFd, TqHttpStatusForOpenError(result.Error));
+        TqTraceProxyTunnelFail(TqTraceProxyProto::Http, target.c_str(), result.Error);
+        TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
     if (!TqSendHttpStatus(clientFd, 200)) {
+        TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
+
+    TqTraceProxyTunnelOk(TqTraceProxyProto::Http, target.c_str(), result.TraceTunnelId);
 }
 
 bool TqCreateListenSocket(const std::string& listenHostPort, TqSocketHandle& listenFd) {

@@ -435,7 +435,10 @@ void TqPrintUsage(FILE* out) {
         "  --quic-iw <packets>        Override QUIC initial window packets\n"
         "  --quic-initrtt-ms <n>      Override QUIC initial RTT\n"
         "  --allow-targets <list>     Allowed CIDR list, comma-separated (server, required)\n"
-        "  --deny-targets <list>      Denied CIDR list, comma-separated\n");
+        "  --deny-targets <list>      Denied CIDR list, comma-separated\n"
+        "  --trace                     Event + periodic debug trace (spdlog file log)\n"
+        "  --trace-interval <sec>      Periodic stats interval when --trace (default 10)\n"
+        "  --trace-connect-on-start    Client: connect QUIC at startup (debug)\n");
 }
 
 void TqFinalizeConfig(TqConfig& cfg) {
@@ -764,6 +767,23 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --quic-initrtt-ms";
                 return false;
             }
+        } else if (std::strcmp(arg, "--trace") == 0) {
+            cfg.Trace = true;
+        } else if (GetOptionValue(arg, "--trace-interval", value)) {
+            cfg.Trace = true;
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--trace-interval", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TraceIntervalSec)) {
+                err = "invalid value for --trace-interval";
+                return false;
+            }
+        } else if (std::strcmp(arg, "--trace-connect-on-start") == 0) {
+            cfg.Trace = true;
+            cfg.TraceConnectOnStart = true;
         } else {
             err = std::string("unknown option: ") + arg;
             return false;
