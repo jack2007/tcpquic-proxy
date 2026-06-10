@@ -1,5 +1,6 @@
 #include "quic_session.h"
 #include "trace.h"
+#include "tunnel_registry.h"
 #include "tuning.h"
 #if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
 #include "quic_credentials_win.h"
@@ -660,6 +661,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        (void)TqAbortConnectionTunnels(connection);
         TqSampleConnectionRtt(connection);
         if (TqTraceEnabled()) {
             TqTraceQuicShutdownTransport(
@@ -675,6 +677,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        (void)TqAbortConnectionTunnels(connection);
         TqSampleConnectionRtt(connection);
         if (TqTraceEnabled()) {
             TqTraceQuicShutdownPeer(
@@ -689,6 +692,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        (void)TqAbortConnectionTunnels(connection);
         if (TqTraceEnabled()) {
             TqUnregisterClientTraceConnection(connection);
             TqTraceQuicDisconnected(
@@ -894,6 +898,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        (void)TqAbortConnectionTunnels(connection);
         if (TqTraceEnabled()) {
             const uint32_t connId = TqLookupServerConnectionId(connection);
             TqTraceQuicShutdownTransport(
@@ -905,6 +910,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        (void)TqAbortConnectionTunnels(connection);
         if (TqTraceEnabled()) {
             const uint32_t connId = TqLookupServerConnectionId(connection);
             TqTraceQuicShutdownPeer(
@@ -915,6 +921,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        (void)TqAbortConnectionTunnels(connection);
         if (TqTraceEnabled()) {
             const uint32_t connId = TqLookupServerConnectionId(connection);
             TqTraceQuicDisconnected(connection, connId, "server");

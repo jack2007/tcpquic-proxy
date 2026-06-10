@@ -6,6 +6,12 @@
 #include "trace.h"
 
 struct MsQuicConnection;
+struct TqTunnelContext;
+
+TqTunnelContext* TqCreateTestRegisteredTunnel(
+    MsQuicConnection* connection,
+    TqSocketHandle tcpFd);
+void TqDestroyTestRegisteredTunnel(TqTunnelContext* context);
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     (void)connection;
@@ -300,6 +306,36 @@ static int TestTunnelRegistryAbortCallbackCanRegisterSameContext() {
     return 0;
 }
 
+static int TestConnectionAbortClosesTunnelTcp() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 220;
+
+    TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(fds)) return 221;
+
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x7001));
+    TqTunnelContext* ctx = TqCreateTestRegisteredTunnel(conn, fds[0]);
+    if (ctx == nullptr) {
+        TqCloseSocket(fds[0]);
+        TqCloseSocket(fds[1]);
+        return 222;
+    }
+
+    const uint32_t aborted = TqAbortConnectionTunnels(conn);
+    if (aborted != 1) {
+        TqDestroyTestRegisteredTunnel(ctx);
+        TqCloseSocket(fds[1]);
+        return 223;
+    }
+
+    char byte = 0;
+    const int received = TqRecv(fds[1], &byte, 1, TqRecvFlags::None);
+    TqCloseSocket(fds[1]);
+    TqDestroyTestRegisteredTunnel(ctx);
+    if (received != 0) return 224;
+    return 0;
+}
+
 int main() {
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
@@ -307,6 +343,7 @@ int main() {
     if (int rc = TestTunnelRegistryUnregisterWaitsForInFlightAbort()) return rc;
     if (int rc = TestTunnelRegistryAbortCallbackCanUnregisterItself()) return rc;
     if (int rc = TestTunnelRegistryAbortCallbackCanRegisterSameContext()) return rc;
+    if (int rc = TestConnectionAbortClosesTunnelTcp()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;

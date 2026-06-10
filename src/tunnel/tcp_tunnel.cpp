@@ -7,6 +7,7 @@
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "trace.h"
+#include "tunnel_registry.h"
 #include "tunnel_reaper.h"
 
 #if !defined(_WIN32)
@@ -232,6 +233,7 @@ public:
     }
 
     ~TqTunnelContext() {
+        UnregisterFromConnection();
         EmitTraceClosed();
         if (OnComplete) {
             OnComplete();
@@ -390,6 +392,39 @@ public:
 
     void SetIngressTraceProto(uint8_t proto) {
         TraceIngressProto = proto;
+    }
+
+    void RegisterWithConnectionIfNeeded() {
+        if (QuicConn != nullptr && !RegisteredWithConnection) {
+            TqRegisterConnectionTunnel(QuicConn, this, &TqTunnelContext::AbortFromRegistry);
+            RegisteredWithConnection = true;
+        }
+    }
+
+    void UnregisterFromConnection() {
+        if (QuicConn != nullptr && RegisteredWithConnection) {
+            TqUnregisterConnectionTunnel(QuicConn, this);
+            RegisteredWithConnection = false;
+        }
+    }
+
+    static void AbortFromRegistry(void* context) {
+        static_cast<TqTunnelContext*>(context)->AbortForConnectionShutdown();
+    }
+
+    void AbortForConnectionShutdown() {
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            AbortedByConnection = true;
+            SelfDeleteOnShutdown = true;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                StreamShutdownQueued = true;
+                (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            }
+        }
+        TqRelayStop(&RelayHandle);
+        CloseTcp();
+        StateChanged.notify_all();
     }
 
 private:
@@ -584,7 +619,16 @@ private:
             SendOpenFailure(err);
             return;
         }
-        TcpFd = dial.Fd;
+        bool closeAfterAbort = false;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            TcpFd = dial.Fd;
+            closeAfterAbort = AbortedByConnection;
+        }
+        if (closeAfterAbort) {
+            CloseTcp();
+            return;
+        }
         if (TraceTunnelId != 0) {
             TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
             TraceTargetTcpOpen = true;
@@ -778,6 +822,8 @@ private:
     uint8_t PendingClientRelayFlags{0};
     bool OpenSendComplete{false};
     bool PendingOpenFailureShutdown{false};
+    bool RegisteredWithConnection{false};
+    bool AbortedByConnection{false};
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
@@ -826,7 +872,8 @@ TqTunnelStartResult TqStartClientTunnel(
         nullptr,
         clientTcpFd,
         cfg,
-        nullptr);
+        nullptr,
+        conn);
     if (context == nullptr) {
         return {false, TqOpenError::Internal};
     }
@@ -844,6 +891,7 @@ TqTunnelStartResult TqStartClientTunnel(
     }
 
     context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
 
     const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
     const uint32_t connId = TqLookupClientTraceConnId(conn);
@@ -923,4 +971,26 @@ void TqHandleServerPeerStream(
     }
 
     context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
+}
+
+TqTunnelContext* TqCreateTestRegisteredTunnel(
+    MsQuicConnection* connection,
+    TqSocketHandle tcpFd) {
+    TqConfig cfg;
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        tcpFd,
+        cfg,
+        nullptr,
+        connection);
+    if (context != nullptr) {
+        context->RegisterWithConnectionIfNeeded();
+    }
+    return context;
+}
+
+void TqDestroyTestRegisteredTunnel(TqTunnelContext* context) {
+    delete context;
 }
