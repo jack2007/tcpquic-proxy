@@ -230,6 +230,7 @@ static int TestTunnelRegistryUnregisterWaitsForInFlightAbort() {
                 guard,
                 std::chrono::seconds(2),
                 [&probe] { return probe.AbortEntered; })) {
+            probe.UnregisterStarted = true;
             probe.ReleaseAbort = true;
             probe.Wakeup.notify_all();
             abortThread.join();
