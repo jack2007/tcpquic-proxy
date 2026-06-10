@@ -336,11 +336,21 @@ public:
     }
 
     void ArmSelfDeleteOnShutdown() {
-        std::lock_guard<std::mutex> guard(Lock);
-        SelfDeleteOnShutdown = true;
-        if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
-            StreamShutdownQueued = true;
-            (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            SelfDeleteOnShutdown = true;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
@@ -430,6 +440,8 @@ public:
         MsQuicStream* stream = nullptr;
         bool shutdownStream = false;
         bool stopRelay = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
         {
             std::lock_guard<std::mutex> guard(Lock);
             AbortedByConnection = true;
@@ -729,11 +741,21 @@ private:
     }
 
     void ShutdownReceiveAfterOpenFailure() {
-        std::lock_guard<std::mutex> guard(Lock);
-        SelfDeleteOnShutdown = true;
-        if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
-            StreamShutdownQueued = true;
-            (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            SelfDeleteOnShutdown = true;
+            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
         }
     }
 
@@ -744,6 +766,8 @@ private:
         }
 
         MsQuicStream* stream = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
         {
             std::lock_guard<std::mutex> guard(Lock);
             if (Stream == nullptr || ShutdownComplete || StreamShutdownQueued) {
@@ -847,6 +871,8 @@ private:
     TqRelayHandle RelayHandle;
     std::unique_ptr<ITqCompressor> Compressor;
     std::unique_ptr<ITqDecompressor> Decompressor;
+    // Serializes MsQuic stream Send/Shutdown after state checks; take before Lock.
+    std::shared_ptr<std::mutex> StreamOpLock{std::make_shared<std::mutex>()};
     std::mutex Lock;
     std::condition_variable StateChanged;
     std::vector<uint8_t> OpeningRx;
