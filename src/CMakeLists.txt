@@ -65,6 +65,7 @@ set(TCPQUIC_PROXY_SOURCES
     protocol/quic_session.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tcp_tunnel.cpp
+    tunnel/tunnel_registry.cpp
     ingress/http_connect_server.cpp
     ingress/socks5_server.cpp
     tunnel/relay.cpp
@@ -253,6 +254,7 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
     unittest/tcp_tunnel_test.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
     config/tuning.cpp
     protocol/control_protocol.cpp
     acl/acl.cpp
