@@ -359,11 +359,14 @@ HEALTHY_PEER_HTTP_PORT=8080
 HEALTHY_PEER_SOCKS_PORT=1080
 DOWN_PEER_HTTP_PORT=8082
 DOWN_PEER_SOCKS_PORT=11882
-DOWN_PEER_QUIC_PORT=4444
-while (exec 3<>"/dev/tcp/127.0.0.1/${DOWN_PEER_QUIC_PORT}") 2>/dev/null; do
-    exec 3>&- 2>/dev/null || true
-    DOWN_PEER_QUIC_PORT=$((DOWN_PEER_QUIC_PORT + 1))
-done
+DOWN_PEER_QUIC_PORT=$(python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)
 
 read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin")
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
@@ -373,10 +376,10 @@ cat > "$TMP_DIR/client-config.json" <<EOF
 EOF
 
 CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")
-wait_for_closed_port 127.0.0.1 "$DOWN_PEER_SOCKS_PORT"
-wait_for_closed_port 127.0.0.1 "$DOWN_PEER_HTTP_PORT"
 wait_for_open_port 127.0.0.1 "$HEALTHY_PEER_SOCKS_PORT"
 wait_for_open_port 127.0.0.1 "$HEALTHY_PEER_HTTP_PORT"
+wait_for_closed_port 127.0.0.1 "$DOWN_PEER_SOCKS_PORT"
+wait_for_closed_port 127.0.0.1 "$DOWN_PEER_HTTP_PORT"
 wait_tcp 127.0.0.1 8080 "HTTP CONNECT listener"
 wait_tcp 127.0.0.1 1080 "SOCKS5 listener"
 
