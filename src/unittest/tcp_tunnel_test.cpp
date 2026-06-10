@@ -1,5 +1,7 @@
 #include "platform_socket.h"
+#define private public
 #include "quic_session.h"
+#undef private
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "tcp_tunnel.h"
@@ -111,6 +113,7 @@ void TqTraceTargetTcpClosed(uint64_t tunnelId) {
 #include <mutex>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 static unsigned g_abort_a = 0;
@@ -177,6 +180,21 @@ static int TestQuicClientSessionReconnectApiSurface() {
         "eager connect API accepts an explicit timeout");
 
     (void)static_cast<void (QuicClientSession::*)(Handler)>(&QuicClientSession::SetConnectionStateHandler);
+    return 0;
+}
+
+static int TestQuicClientSessionDisconnectNoopsWhenAlreadyDisconnected() {
+    using StateArg = const std::shared_ptr<QuicClientSession::ClientSharedState>&;
+    static_assert(std::is_same<decltype(QuicClientSession::OnSlotDisconnected(
+        std::declval<StateArg>(),
+        size_t{},
+        static_cast<MsQuicConnection*>(nullptr))), bool>::value,
+        "disconnect helper reports whether connected slot count changed");
+    static_assert(std::is_same<decltype(QuicClientSession::OnSlotConnected(
+        std::declval<StateArg>(),
+        size_t{},
+        static_cast<MsQuicConnection*>(nullptr))), bool>::value,
+        "connect helper reports whether connected slot count changed");
     return 0;
 }
 
@@ -375,6 +393,7 @@ static int TestClientOpenOwnerDefersShutdownCompleteDelete() {
 
 int main() {
     if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
+    if (int rc = TestQuicClientSessionDisconnectNoopsWhenAlreadyDisconnected()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
     if (int rc = TestTunnelRegistryDuplicateRegistrationIsSingleEntry()) return rc;

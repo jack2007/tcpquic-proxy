@@ -81,8 +81,8 @@ private:
     void StopReconnectLoop(const std::shared_ptr<ClientSharedState>& state);
     static uint32_t ConnectedCountLocked(const ClientSharedState& state);
     static void NotifyConnectionStateChanged(const std::shared_ptr<ClientSharedState>& state);
-    static void OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
-    static void OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
+    static bool OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
+    static bool OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);
     static void WaitForOrphanedConnectionsDrain(const std::shared_ptr<ClientSharedState>& state, std::chrono::milliseconds timeout);
 
