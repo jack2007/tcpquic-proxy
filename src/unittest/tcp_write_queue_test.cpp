@@ -4,15 +4,16 @@
 #include "tcp_write_queue.h"
 
 #include <cassert>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <vector>
 
 int main() {
+    TqSocketStartup startup;
+    assert(startup.Ok());
+
     {
-        int fds[2]{-1, -1};
-        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-        ::close(fds[1]); // peer closed → write fails
+        TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+        assert(TqSocketPair(fds));
+        TqCloseSocket(fds[1]); // peer closed → write fails
 
         std::atomic<bool> stopped{false};
         TqTcpWriteQueue q(fds[0], &stopped, 16, 1 << 20);
@@ -24,12 +25,12 @@ int main() {
 
         assert(stopped.load());
         q.Stop();
-        ::close(fds[0]);
+        TqCloseSocket(fds[0]);
     }
 
     {
-        int fds[2]{-1, -1};
-        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+        assert(TqSocketPair(fds));
 
         std::atomic<bool> stopped{false};
         TqTcpWriteQueue q(fds[0], &stopped, 16, 1 << 20);
@@ -39,8 +40,8 @@ int main() {
         std::vector<uint8_t> payload(16, 0xCD);
         assert(!q.Enqueue(payload.data(), payload.size(), false));
 
-        ::close(fds[0]);
-        ::close(fds[1]);
+        TqCloseSocket(fds[0]);
+        TqCloseSocket(fds[1]);
     }
 
     return 0;

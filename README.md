@@ -84,6 +84,8 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 |------|------|------|
 | `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF` | 设为 `ON` 时 msquic 使用系统 `libcrypto`，而非 vendored quictls |
 
+本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。
+
 ## 构建
 
 本项目统一使用仓库根目录下的 `build/` 作为本地 CMake 构建目录。不要使用旧的
@@ -105,15 +107,15 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 
 ### Windows 10/11 x64
 
-Install Visual Studio 2022 Build Tools with the MSVC C++ workload, CMake, Ninja, Git, OpenSSL, Python, and curl.
+Install Visual Studio 2022 Build Tools with the MSVC C++ workload, CMake, Git, Strawberry Perl, OpenSSL, Python, and curl.
+
+本项目在 Windows 上同样只支持 msquic `quictls` TLS 后端，不支持 Schannel 构建。CMake 会强制设置 `QUIC_TLS_LIB=quictls`，并在 Windows 上使用 `no-asm` 避免额外 NASM 依赖。证书使用 PEM 文件路径，与 Linux/macOS 构建保持一致。
 
 ```powershell
 git submodule update --init --recursive
 cmake -S . -B build-x64 -A x64 -DLZ4_SOURCE_DIR="$PWD/third_party/lz4"
 cmake --build build-x64 --config Release --target tcpquic-proxy
 ```
-
-Windows uses msquic Schannel by default, but Schannel-backed QUIC requires OS TLS 1.3 support. Per `third_party/msquic/docs/Platforms.md`, this means Windows Server 2022, Windows 11, or the latest Windows Insider Preview builds; ordinary Windows 10 releases do not provide Schannel TLS 1.3 cipher suites by default and can fail `ConfigurationLoadCredential` / `AcquireCredentialsHandleW` with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`). On Windows 10, prefer `-DTCPQUIC_WINDOWS_TLS=quictls` with Strawberry Perl, which restores Linux-style PEM CA loading. For Schannel-capable systems, PEM leaf certificates must include `serverAuth` and `clientAuth` EKU, and the CA in `--quic-ca` must be imported into the CurrentUser `Root` store (the loopback script does this automatically).
 
 Run the Windows loopback validation:
 

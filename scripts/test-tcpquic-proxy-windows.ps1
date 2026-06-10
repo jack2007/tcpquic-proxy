@@ -1,8 +1,6 @@
 param(
   [string]$Bin = ".\build-x64\bin\Release\tcpquic-proxy.exe",
   [string]$Compress = "off",
-  [ValidateSet("auto", "schannel", "quictls")]
-  [string]$TlsBackend = "auto",
   [string]$QuicPeerHost = "127.0.0.1"
 )
 
@@ -33,12 +31,6 @@ function Wait-TcpPort {
   return $false
 }
 
-function Resolve-TlsBackend {
-  if ($TlsBackend -ne "auto") { return $TlsBackend }
-  if ($Bin -match "quictls") { return "quictls" }
-  return "schannel"
-}
-
 function Resolve-OpenSslPath {
   if ($env:OPENSSL_BIN -and (Test-Path (Join-Path $env:OPENSSL_BIN "openssl.exe"))) {
     return $env:OPENSSL_BIN
@@ -63,31 +55,6 @@ function Invoke-OpenSsl {
     if ($LASTEXITCODE -ne 0) { throw "openssl failed (exit $LASTEXITCODE): openssl $($OpenSslArgs -join ' ')" }
   } finally {
     $ErrorActionPreference = $prev
-  }
-}
-
-function New-TestCertificate {
-  param(
-    [string]$Subject,
-    [string[]]$DnsName
-  )
-
-  New-SelfSignedCertificate `
-    -Subject $Subject `
-    -DnsName $DnsName `
-    -FriendlyName "MsQuic-Test" `
-    -CertStoreLocation "Cert:\CurrentUser\My" `
-    -HashAlgorithm SHA256 `
-    -Provider "Microsoft Software Key Storage Provider" `
-    -KeyExportPolicy Exportable `
-    -KeyUsageProperty Sign `
-    -KeyUsage DigitalSignature, KeyEncipherment
-}
-
-function Remove-TestCertificate {
-  param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Cert)
-  if ($Cert) {
-    Remove-Item -Path ("Cert:\CurrentUser\My\" + $Cert.Thumbprint) -Force -ErrorAction SilentlyContinue
   }
 }
 
@@ -157,27 +124,16 @@ DNS.1=tcpquic-client
   }
 }
 
-$Backend = Resolve-TlsBackend
 $Work = Join-Path $env:TEMP ("tcpquic-win-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $Work | Out-Null
 
 try {
-  if ($Backend -eq "schannel") {
-    $ServerCertObj = New-TestCertificate -Subject "CN=localhost" -DnsName @("localhost")
-    $ClientCertObj = New-TestCertificate -Subject "CN=tcpquic-client" -DnsName @("tcpquic-client")
-    $ServerCert = $ServerCertObj.Thumbprint
-    $ServerKey = "store"
-    $ClientCert = $ClientCertObj.Thumbprint
-    $ClientKey = "store"
-    $Ca = "store"
-  } else {
-    $Creds = New-OpenSslCredentials -Work $Work
-    $ServerCert = $Creds.ServerCert
-    $ServerKey = $Creds.ServerKey
-    $ClientCert = $Creds.ClientCert
-    $ClientKey = $Creds.ClientKey
-    $Ca = $Creds.Ca
-  }
+  $Creds = New-OpenSslCredentials -Work $Work
+  $ServerCert = $Creds.ServerCert
+  $ServerKey = $Creds.ServerKey
+  $ClientCert = $Creds.ClientCert
+  $ClientKey = $Creds.ClientKey
+  $Ca = $Creds.Ca
 
   $HttpPort = 18080
   $QuicPort = 18443
@@ -248,7 +204,5 @@ finally {
   if ($Client) { Stop-Process -Id $Client.Id -Force -ErrorAction SilentlyContinue }
   if ($Server) { Stop-Process -Id $Server.Id -Force -ErrorAction SilentlyContinue }
   if ($Http) { Stop-Process -Id $Http.Id -Force -ErrorAction SilentlyContinue }
-  Remove-TestCertificate -Cert $ClientCertObj
-  Remove-TestCertificate -Cert $ServerCertObj
   Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 }

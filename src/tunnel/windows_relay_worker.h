@@ -64,6 +64,7 @@ private:
     void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
     void CloseRelay(const std::shared_ptr<RelayContext>& relay);
+    bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
 
     void* Iocp_{nullptr};
     std::thread Thread_;

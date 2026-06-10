@@ -29,16 +29,9 @@ endif()
 set(QUIC_BUILD_TOOLS OFF CACHE BOOL "Build msquic tools" FORCE)
 set(QUIC_ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 
-# Optional: -DTCPQUIC_WINDOWS_TLS=quictls with Strawberry Perl enables PEM CA files without
-# importing --quic-ca into the Windows trust store. Default schannel uses CryptoAPI PFX loading.
-set(TCPQUIC_WINDOWS_TLS "schannel" CACHE STRING "Windows msquic TLS backend: schannel or quictls")
+set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use" FORCE)
 if(WIN32)
-    if(TCPQUIC_WINDOWS_TLS STREQUAL "quictls")
-        set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use" FORCE)
-        set(QUIC_OPENSSL_EXTRA_CONFIG_FLAGS "no-asm" CACHE STRING "Extra OpenSSL/QuicTLS configure flags" FORCE)
-    else()
-        set(QUIC_TLS_LIB "schannel" CACHE STRING "TLS Library to use" FORCE)
-    endif()
+    set(QUIC_OPENSSL_EXTRA_CONFIG_FLAGS "no-asm" CACHE STRING "Extra OpenSSL/QuicTLS configure flags" FORCE)
 endif()
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")

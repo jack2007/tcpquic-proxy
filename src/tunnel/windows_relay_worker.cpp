@@ -41,7 +41,10 @@ struct TqWindowsRelayWorker::RelayContext {
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     std::atomic<bool> Closing{false};
     std::atomic<bool> TcpRecvClosed{false};
+    std::atomic<bool> CloseAfterDrained{false};
     std::atomic<uint32_t> InFlightQuicSends{0};
+    std::atomic<uint32_t> QueuedQuicReceives{0};
+    std::atomic<uint32_t> InFlightTcpSends{0};
     std::shared_ptr<CallbackContext> Callback;
 };
 
@@ -204,6 +207,23 @@ void TqWindowsRelayWorker::CloseRelay(const std::shared_ptr<RelayContext>& relay
     }
 }
 
+bool TqWindowsRelayWorker::CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay) {
+    if (!relay || !relay->CloseAfterDrained.load()) {
+        return false;
+    }
+    if (relay->QueuedQuicReceives.load() != 0 || relay->InFlightTcpSends.load() != 0) {
+        return false;
+    }
+    relay->CloseAfterDrained.store(false);
+    if (TqSocketValid(relay->TcpFd)) {
+        (void)TqShutdownSend(relay->TcpFd);
+    }
+    if (relay->PublicHandle != nullptr) {
+        relay->PublicHandle->Stop.store(true);
+    }
+    return true;
+}
+
 void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes) {
     auto relay = op->Relay;
     if (!relay || relay->Closing.load()) {
@@ -277,7 +297,14 @@ void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD 
 
 void TqWindowsRelayWorker::HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op) {
     auto relay = op->Relay;
-    if (!relay || relay->Closing.load() || op->Buffer.empty()) {
+    if (!relay) {
+        return;
+    }
+    relay->QueuedQuicReceives.fetch_sub(1);
+    if (CloseRelayIfDrained(relay)) {
+        return;
+    }
+    if (relay->Closing.load() || op->Buffer.empty()) {
         return;
     }
     if (relay->Decompressor != nullptr) {
@@ -292,12 +319,14 @@ void TqWindowsRelayWorker::HandleQuicReceiveQueued(std::unique_ptr<IoOperation> 
         op->Buffer.swap(output);
     }
     if (op->Buffer.empty()) {
+        (void)CloseRelayIfDrained(relay);
         return;
     }
     op->Event = TqWindowsRelayEvent::TcpSend;
     op->Offset = 0;
     if (!PostTcpSend(std::move(op))) {
         CloseRelay(relay);
+        return;
     }
 }
 
@@ -310,9 +339,11 @@ bool TqWindowsRelayWorker::PostTcpSend(std::unique_ptr<IoOperation> op) {
     buf.buf = reinterpret_cast<char*>(op->Buffer.data() + op->Offset);
     buf.len = static_cast<ULONG>(op->Buffer.size() - op->Offset);
     DWORD sent = 0;
+    relay->InFlightTcpSends.fetch_add(1);
     IoOperation* raw = op.release();
     const int rc = ::WSASend(relay->TcpFd, &buf, 1, &sent, 0, &raw->Overlapped, nullptr);
     if (rc != 0 && ::WSAGetLastError() != WSA_IO_PENDING) {
+        relay->InFlightTcpSends.fetch_sub(1);
         delete raw;
         return false;
     }
@@ -321,7 +352,14 @@ bool TqWindowsRelayWorker::PostTcpSend(std::unique_ptr<IoOperation> op) {
 
 void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes) {
     auto relay = op->Relay;
-    if (!relay || relay->Closing.load()) {
+    if (!relay) {
+        return;
+    }
+    relay->InFlightTcpSends.fetch_sub(1);
+    if (CloseRelayIfDrained(relay)) {
+        return;
+    }
+    if (relay->Closing.load()) {
         return;
     }
     op->Offset += bytes;
@@ -329,6 +367,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
         if (!PostTcpSend(std::move(op))) {
             CloseRelay(relay);
         }
+        return;
     }
 }
 
@@ -386,24 +425,24 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             const QUIC_BUFFER& buffer = event->RECEIVE.Buffers[i];
             op->Buffer.insert(op->Buffer.end(), buffer.Buffer, buffer.Buffer + buffer.Length);
         }
+        relay->QueuedQuicReceives.fetch_add(1);
         IoOperation* raw = op.release();
         if (!::PostQueuedCompletionStatus(
                 static_cast<HANDLE>(callback->Worker->Iocp_), 0, 0, &raw->Overlapped)) {
+            relay->QueuedQuicReceives.fetch_sub(1);
             delete raw;
             callback->Worker->CloseRelay(relay);
         }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
-        if (TqSocketValid(relay->TcpFd)) {
-            (void)TqShutdownSend(relay->TcpFd);
-        }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-        callback->Worker->CloseRelay(relay);
+        relay->CloseAfterDrained.store(true);
+        (void)callback->Worker->CloseRelayIfDrained(relay);
     }
     return QUIC_STATUS_SUCCESS;
 }

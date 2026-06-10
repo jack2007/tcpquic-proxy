@@ -94,10 +94,7 @@ endif()
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
 if(WIN32)
-    target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    if(TCPQUIC_WINDOWS_TLS STREQUAL "quictls")
-        target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_WINDOWS_TLS_QUICTLS)
-    endif()
+    target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
     target_link_libraries(tcpquic-proxy PRIVATE ws2_32 crypt32)
 endif()
 
@@ -422,7 +419,7 @@ endforeach()
 
 if(WIN32)
     foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
-        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+        target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
         target_link_libraries(${target} ws2_32)
     endforeach()
 

@@ -47,6 +47,14 @@ static std::string JsonBody(const std::string& response) {
     return body == std::string::npos ? std::string{} : response.substr(body + 4);
 }
 
+static TqHttpRequest Request(const std::string& method, const std::string& path, const std::string& body = "") {
+    TqHttpRequest req;
+    req.Method = method;
+    req.Path = path;
+    req.Body = body;
+    return req;
+}
+
 int main() {
     {
         FakeAdapter adapter;
@@ -154,61 +162,61 @@ int main() {
     }
     {
         TqRouterRuntime adminRuntime;
-        TqHttpRequest getHealth{.Method = "GET", .Path = "/health", .Body = ""};
+        TqHttpRequest getHealth = Request("GET", "/health", "");
         std::string health = adminRuntime.HandleAdmin(getHealth);
         if (health.find("HTTP/1.1 200 OK") == std::string::npos) return 20;
         if (health.find("\"status\":\"healthy\"") == std::string::npos) return 21;
-        TqHttpRequest putConfig{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}"};
+        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
         std::string put = adminRuntime.HandleAdmin(putConfig);
         if (put.find("HTTP/1.1 200 OK") == std::string::npos) return 22;
         if (adminRuntime.SnapshotMetrics().Peers.size() != 1) return 23;
-        TqHttpRequest getMetrics{.Method = "GET", .Path = "/metrics", .Body = ""};
+        TqHttpRequest getMetrics = Request("GET", "/metrics", "");
         std::string metrics = adminRuntime.HandleAdmin(getMetrics);
         if (metrics.find("HTTP/1.1 200 OK") == std::string::npos) return 25;
         if (metrics.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 26;
-        TqHttpRequest getConfig{.Method = "GET", .Path = "/config", .Body = ""};
+        TqHttpRequest getConfig = Request("GET", "/config", "");
         std::string config = adminRuntime.HandleAdmin(getConfig);
         if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 27;
         if (config.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 28;
-        TqHttpRequest putRoundTrip{.Method = "PUT", .Path = "/config", .Body = JsonBody(config)};
+        TqHttpRequest putRoundTrip = Request("PUT", "/config", JsonBody(config));
         std::string roundTrip = adminRuntime.HandleAdmin(putRoundTrip);
         if (roundTrip.find("HTTP/1.1 200 OK") == std::string::npos) return 74;
-        TqHttpRequest disable{.Method = "POST", .Path = "/peers/agent-d/disable", .Body = ""};
+        TqHttpRequest disable = Request("POST", "/peers/agent-d/disable", "");
         std::string disabled = adminRuntime.HandleAdmin(disable);
         if (disabled.find("HTTP/1.1 200 OK") == std::string::npos) return 29;
         if (disabled.find("\"enabled\":false") == std::string::npos) return 30;
-        TqHttpRequest enable{.Method = "POST", .Path = "/peers/agent-d/enable", .Body = ""};
+        TqHttpRequest enable = Request("POST", "/peers/agent-d/enable", "");
         std::string enabled = adminRuntime.HandleAdmin(enable);
         if (enabled.find("HTTP/1.1 200 OK") == std::string::npos) return 31;
         if (enabled.find("\"enabled\":true") == std::string::npos) return 32;
-        TqHttpRequest unknown{.Method = "GET", .Path = "/unknown", .Body = ""};
+        TqHttpRequest unknown = Request("GET", "/unknown", "");
         std::string unknownResp = adminRuntime.HandleAdmin(unknown);
         if (unknownResp.find("HTTP/1.1 404") == std::string::npos) return 33;
-        TqHttpRequest bad{.Method = "PUT", .Path = "/config", .Body = "{\"version\":2,\"peers\":[]}"};
+        TqHttpRequest bad = Request("PUT", "/config", "{\"version\":2,\"peers\":[]}");
         std::string badResp = adminRuntime.HandleAdmin(bad);
         if (badResp.find("HTTP/1.1 400") == std::string::npos) return 24;
-        TqHttpRequest zeroConnections{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-zero\",\"quic_peer\":\"127.0.0.1:14447\",\"socks_listen\":\"127.0.0.1:11004\",\"quic_connections\":0}]}"};
+        TqHttpRequest zeroConnections = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-zero\",\"quic_peer\":\"127.0.0.1:14447\",\"socks_listen\":\"127.0.0.1:11004\",\"quic_connections\":0}]}");
         std::string zeroResp = adminRuntime.HandleAdmin(zeroConnections);
         if (zeroResp.find("HTTP/1.1 400") == std::string::npos) return 49;
-        TqHttpRequest leadingZeroConnections{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-leading-zero\",\"quic_peer\":\"127.0.0.1:14448\",\"socks_listen\":\"127.0.0.1:11005\",\"quic_connections\":004}]}"};
+        TqHttpRequest leadingZeroConnections = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-leading-zero\",\"quic_peer\":\"127.0.0.1:14448\",\"socks_listen\":\"127.0.0.1:11005\",\"quic_connections\":004}]}");
         std::string leadingZeroResp = adminRuntime.HandleAdmin(leadingZeroConnections);
         if (leadingZeroResp.find("HTTP/1.1 400") == std::string::npos) return 73;
     }
     {
         TqRouterRuntime unicodeRuntime;
         const std::string escapedPeerId = "\\u" "0061gent-d";
-        TqHttpRequest putConfig{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"" + escapedPeerId + "\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}"};
+        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"" + escapedPeerId + "\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
         if (putConfig.Body.find("\\u0061gent-d") == std::string::npos) return 48;
         std::string put = unicodeRuntime.HandleAdmin(putConfig);
         if (put.find("HTTP/1.1 200 OK") == std::string::npos) return 45;
         auto metrics = unicodeRuntime.SnapshotMetrics();
         if (metrics.Peers.size() != 1) return 46;
         if (metrics.Peers[0].PeerId != "agent-d") return 47;
-        TqHttpRequest surrogatePair{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"\\uD83D\\uDE00\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}"};
+        TqHttpRequest surrogatePair = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"\\uD83D\\uDE00\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
         std::string surrogatePairResp = unicodeRuntime.HandleAdmin(surrogatePair);
         if (surrogatePairResp.find("HTTP/1.1 400") == std::string::npos) return 69;
         if (surrogatePairResp.find("unicode surrogate") == std::string::npos) return 71;
-        TqHttpRequest loneSurrogate{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"\\uD83D\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}"};
+        TqHttpRequest loneSurrogate = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"\\uD83D\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
         std::string loneSurrogateResp = unicodeRuntime.HandleAdmin(loneSurrogate);
         if (loneSurrogateResp.find("HTTP/1.1 400") == std::string::npos) return 70;
         if (loneSurrogateResp.find("unicode surrogate") == std::string::npos) return 72;
@@ -219,7 +227,7 @@ int main() {
         startup.Peers.push_back(Peer("agent-a", "127.0.0.1:11001"));
         std::string err;
         if (!bridgeRuntime.ApplyConfig(startup, err)) return 53;
-        TqHttpRequest putSecond{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-a\",\"quic_peer\":\"127.0.0.1:14444\",\"socks_listen\":\"127.0.0.1:11001\"},{\"peer_id\":\"agent-b\",\"quic_peer\":\"127.0.0.1:14445\",\"socks_listen\":\"127.0.0.1:11002\"}]}"};
+        TqHttpRequest putSecond = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-a\",\"quic_peer\":\"127.0.0.1:14444\",\"socks_listen\":\"127.0.0.1:11001\"},{\"peer_id\":\"agent-b\",\"quic_peer\":\"127.0.0.1:14445\",\"socks_listen\":\"127.0.0.1:11002\"}]}");
         std::string resp = bridgeRuntime.HandleAdmin(putSecond);
         if (resp.find("HTTP/1.1 400") == std::string::npos) return 54;
         if (resp.find("multiple enabled peers") == std::string::npos) return 55;
@@ -232,11 +240,11 @@ int main() {
         startup.Peers.push_back(Peer("agent-b", "127.0.0.1:11002", false));
         std::string err;
         if (!bridgeRuntime.ApplyConfig(startup, err)) return 57;
-        TqHttpRequest disableActive{.Method = "POST", .Path = "/peers/agent-a/disable", .Body = ""};
+        TqHttpRequest disableActive = Request("POST", "/peers/agent-a/disable", "");
         std::string disableResp = bridgeRuntime.HandleAdmin(disableActive);
         if (disableResp.find("HTTP/1.1 400") == std::string::npos) return 58;
         if (disableResp.find("single active peer") == std::string::npos) return 59;
-        TqHttpRequest putChanged{.Method = "PUT", .Path = "/config", .Body = "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-a\",\"quic_peer\":\"127.0.0.1:14444\",\"socks_listen\":\"127.0.0.1:11001\",\"enabled\":false},{\"peer_id\":\"agent-b\",\"quic_peer\":\"127.0.0.1:14445\",\"socks_listen\":\"127.0.0.1:11002\"}]}"};
+        TqHttpRequest putChanged = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-a\",\"quic_peer\":\"127.0.0.1:14444\",\"socks_listen\":\"127.0.0.1:11001\",\"enabled\":false},{\"peer_id\":\"agent-b\",\"quic_peer\":\"127.0.0.1:14445\",\"socks_listen\":\"127.0.0.1:11002\"}]}");
         std::string putResp = bridgeRuntime.HandleAdmin(putChanged);
         if (putResp.find("HTTP/1.1 400") == std::string::npos) return 60;
         if (putResp.find("single active peer") == std::string::npos) return 61;
