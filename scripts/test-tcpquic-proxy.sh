@@ -374,7 +374,9 @@ EOF
 
 CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")
 wait_for_closed_port 127.0.0.1 "$DOWN_PEER_SOCKS_PORT"
+wait_for_closed_port 127.0.0.1 "$DOWN_PEER_HTTP_PORT"
 wait_for_open_port 127.0.0.1 "$HEALTHY_PEER_SOCKS_PORT"
+wait_for_open_port 127.0.0.1 "$HEALTHY_PEER_HTTP_PORT"
 wait_tcp 127.0.0.1 8080 "HTTP CONNECT listener"
 wait_tcp 127.0.0.1 1080 "SOCKS5 listener"
 
