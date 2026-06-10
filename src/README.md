@@ -199,7 +199,7 @@ src/
 └── unittest/                 # 单元测试
 ```
 
-实现参考了 `src/tools/forwarder/` 的 Stream relay 模式。
+早期实现参考了 msquic forwarder tool 的 Stream relay 模式；当前代码已作为独立仓库维护。
 
 ## v1 能力与限制
 
@@ -221,6 +221,5 @@ src/
 | 文档 | 说明 |
 |------|------|
 | [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
-| [`docs/superpowers/plans/2026-06-06-tcpquic-proxy.md`](../../../docs/superpowers/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
-| [`docs/superpowers/delivery.md`](../../../docs/superpowers/delivery.md) | 交付说明与验证结果 |
-| [`docs/superpowers/review_for_delivery.md`](../../../docs/superpowers/review_for_delivery.md) | 评审与修复记录 |
+| [`docs/plans/2026-06-06-tcpquic-proxy.md`](../docs/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
+| [`docs/tcpquic_next_steps.md`](../docs/tcpquic_next_steps.md) | 后续工作 |
