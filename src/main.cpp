@@ -158,8 +158,7 @@ private:
 
         ~PeerRuntime() { StopAll(); }
 
-        bool OpenListeners(std::string& err) {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
+        bool OpenListenersLocked(std::string& err) {
             if (Socks) {
                 return true;
             }
@@ -194,20 +193,20 @@ private:
         }
 
         bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
             const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
             if (connectedCount == 0) {
-                CloseListeners();
+                CloseListenersLocked();
                 if (requireConnected) {
                     err = "no connected QUIC connection";
                     return false;
                 }
                 return true;
             }
-            return OpenListeners(err);
+            return OpenListenersLocked(err);
         }
 
-        void CloseListeners() {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
+        void CloseListenersLocked() {
             if (Socks) {
                 Socks->Stop();
                 Socks.reset();
@@ -216,6 +215,11 @@ private:
                 Http->Stop();
                 Http.reset();
             }
+        }
+
+        void CloseListeners() {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            CloseListenersLocked();
         }
 
         void StopAccepting() {
@@ -268,8 +272,7 @@ struct TqSinglePeerClientRuntime {
         StartTunnel = std::move(startTunnel);
     }
 
-    bool OpenListeners(std::string& err) {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
+    bool OpenListenersLocked(std::string& err) {
         if (Socks) {
             return true;
         }
@@ -302,20 +305,20 @@ struct TqSinglePeerClientRuntime {
     }
 
     bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
         const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
         if (connectedCount == 0) {
-            CloseListeners();
+            CloseListenersLocked();
             if (requireConnected) {
                 err = "no connected QUIC connection";
                 return false;
             }
             return true;
         }
-        return OpenListeners(err);
+        return OpenListenersLocked(err);
     }
 
-    void CloseListeners() {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
+    void CloseListenersLocked() {
         if (Socks) {
             Socks->Stop();
             Socks.reset();
@@ -324,6 +327,11 @@ struct TqSinglePeerClientRuntime {
             Http->Stop();
             Http.reset();
         }
+    }
+
+    void CloseListeners() {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        CloseListenersLocked();
     }
 
     TqConfig Config;
