@@ -1,6 +1,24 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+function(tcpquic_copy_msquic_runtime target)
+    if(NOT WIN32)
+        return()
+    endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:msquic>"
+            "$<TARGET_FILE_DIR:${target}>"
+        COMMENT "Copy msquic.dll next to ${target}")
+    if(BUILD_SHARED_LIBS)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:msquic_platform>"
+                "$<TARGET_FILE_DIR:${target}>"
+            COMMENT "Copy msquic_platform.dll next to ${target}")
+    endif()
+endfunction()
+
 function(add_tcpquic_executable target)
     add_executable(${target} ${ARGN})
     target_link_libraries(${target} PRIVATE inc warnings msquic logging base_link)
@@ -9,6 +27,7 @@ function(add_tcpquic_executable target)
     endif()
     set_property(TARGET ${target} PROPERTY FOLDER "tools")
     set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+    tcpquic_copy_msquic_runtime(${target})
 endfunction()
 
 find_package(Threads REQUIRED)
@@ -52,6 +71,7 @@ endif()
 if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
         windows_relay_worker.cpp
+        quic_credentials_win.cpp
     )
 endif()
 
@@ -59,7 +79,10 @@ add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
 if(WIN32)
     target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(tcpquic-proxy PRIVATE ws2_32)
+    if(TCPQUIC_WINDOWS_TLS STREQUAL "quictls")
+        target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_WINDOWS_TLS_QUICTLS)
+    endif()
+    target_link_libraries(tcpquic-proxy PRIVATE ws2_32 crypt32)
 endif()
 
 target_include_directories(tcpquic-proxy PRIVATE ${MSQUIC_SOURCE_DIR}/src/inc)
@@ -294,6 +317,10 @@ add_executable(tcpquic_admin_http_test
 )
 target_include_directories(tcpquic_admin_http_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(tcpquic_admin_http_test Threads::Threads)
+if(WIN32)
+    target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(tcpquic_admin_http_test ws2_32)
+endif()
 set_property(TARGET tcpquic_admin_http_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -386,5 +413,17 @@ if(WIN32)
     foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
         target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
         target_link_libraries(${target} ws2_32)
+    endforeach()
+
+    set(TCPQUIC_MSQUIC_RUNTIME_TARGETS
+        tcpquic_tunnel_test
+        tcpquic_blocking_relay_demo_test
+        tcpquic_router_runtime_test
+        ${TCPQUIC_WINDOWS_TEST_TARGETS}
+    )
+    foreach(target IN LISTS TCPQUIC_MSQUIC_RUNTIME_TARGETS)
+        if(TARGET ${target})
+            tcpquic_copy_msquic_runtime(${target})
+        endif()
     endforeach()
 endif()

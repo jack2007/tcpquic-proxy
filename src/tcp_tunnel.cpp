@@ -336,6 +336,9 @@ private:
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
             TqTunnelSendContext::Delete(
                 static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            if (Role == TqTunnelRole::ServerOpen) {
+                StartPendingServerRelay();
+            }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
@@ -476,10 +479,16 @@ private:
         std::vector<uint8_t> encoded;
         const uint32_t connId =
             QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
-        if (!TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded) ||
-            !SendBytes(encoded, QUIC_SEND_FLAG_NONE) ||
-            !StartRelay(req.Flags)) {
+        const bool encodedOk = TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded);
+        const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
+        if (!sendOk) {
             SendOpenFailure(TqOpenError::Internal);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingServerRelay = true;
+            PendingServerRelayFlags = req.Flags;
         }
     }
 
@@ -556,6 +565,22 @@ private:
         StateChanged.notify_all();
     }
 
+    void StartPendingServerRelay() {
+        uint8_t flags = 0;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!PendingServerRelay || RelayStarted || ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
+            flags = PendingServerRelayFlags;
+            PendingServerRelay = false;
+        }
+        const bool relayOk = StartRelay(flags);
+        if (!relayOk) {
+            SendOpenFailure(TqOpenError::Internal);
+        }
+    }
+
     TqTunnelRole Role;
     MsQuicStream* Stream;
     TqSocketHandle TcpFd{TqInvalidSocket};
@@ -578,6 +603,8 @@ private:
     bool ShutdownComplete{false};
     bool StreamShutdownQueued{false};
     bool PendingServerOpen{false};
+    bool PendingServerRelay{false};
+    uint8_t PendingServerRelayFlags{0};
     std::atomic<bool> ServerOpenDispatched{false};
 };
 
@@ -643,6 +670,7 @@ TqTunnelStartResult TqStartClientTunnel(
 
     context->SetStream(stream);
     if (!context->SendOpenRequest(openReq)) {
+        std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
         context->CloseTcp();
         context->ArmSelfDeleteOnShutdown();
         return {false, TqOpenError::Internal};
@@ -650,6 +678,9 @@ TqTunnelStartResult TqStartClientTunnel(
 
     TqOpenResponse response{};
     if (!context->WaitForOpenResponse(response)) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: client tunnel open response failed (error=%u)\n",
+            static_cast<unsigned>(response.Error));
         context->CloseTcp();
         context->ArmSelfDeleteOnShutdown();
         return {false, response.Error};

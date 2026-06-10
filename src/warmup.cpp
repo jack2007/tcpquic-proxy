@@ -193,7 +193,9 @@ bool TqRunClientWarmup(QuicClientSession& quic, const TqConfig& cfg) {
     const uint64_t targetBytes = static_cast<uint64_t>(cfg.WarmupMb) * 1024 * 1024;
 
     for (uint32_t i = 0; i < cfg.QuicConnections; ++i) {
-        quic.EnsureConnected();
+        if (!quic.EnsureConnected()) {
+            return false;
+        }
         MsQuicConnection* conn = quic.PickConnection();
         if (conn == nullptr) {
             std::fprintf(stderr, "tcpquic-proxy: warmup failed to pick QUIC connection %u/%u\n",

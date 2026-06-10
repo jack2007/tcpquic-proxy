@@ -88,6 +88,9 @@ void TqThreadPool::WorkerLoop() {
             if (StopRequested && Queue.empty()) {
                 return;
             }
+            if (Queue.empty()) {
+                continue;
+            }
 
             task = std::move(Queue.front());
             Queue.pop();

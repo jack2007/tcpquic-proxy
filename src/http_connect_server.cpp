@@ -196,13 +196,14 @@ void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onT
 
     TqTuneTcpForThroughput(clientFd);
 
-    if (!TqSendHttpStatus(clientFd, 200)) {
+    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
+    if (!result.Ok) {
+        TqSendHttpStatus(clientFd, TqHttpStatusForOpenError(result.Error));
         TqCloseSocket(clientFd);
         return;
     }
 
-    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
-    if (!result.Ok) {
+    if (!TqSendHttpStatus(clientFd, 200)) {
         TqCloseSocket(clientFd);
         return;
     }
