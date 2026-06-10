@@ -1,8 +1,8 @@
 # tcpquic-proxy 后续重点开发方向
 
 > 日期：2026-06-07
-> 范围：`src/tools/tcpquic-proxy/` 当前实现、压测记录、线程模型、性能调优与产品化 backlog。
-> 关联文档：`docs/superpowers/to_be_fixed.md`、`research_progress.md`、`src/tools/tcpquic-proxy/key_parameter.md`、`src/tools/tcpquic-proxy/thread_model_cn.md`。
+> 范围：当前 `src/` 实现、压测记录、线程模型、性能调优与产品化 backlog。
+> 关联文档：`docs/superpowers/to_be_fixed.md`、`research_progress.md`、`src/docs/key_parameter.md`、`src/docs/thread_model_cn.md`。
 
 ## 1. 当前工作情况
 

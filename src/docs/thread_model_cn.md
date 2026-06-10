@@ -1,6 +1,6 @@
 # tcpquic-proxy 运行线程模型
 
-本文档参考 `docs/thread_model_cn.md` 的 msquic 线程模型说明，并结合 `src/tools/tcpquic-proxy/` 当前源码，描述 `tcpquic-proxy` 在 client / server 两种模式下的应用线程、MsQuic worker、隧道 relay 线程以及回调线程边界。
+本文档参考 `docs/thread_model_cn.md` 的 msquic 线程模型说明，并结合当前 `src/` 源码，描述 `tcpquic-proxy` 在 client / server 两种模式下的应用线程、MsQuic worker、隧道 relay 线程以及回调线程边界。
 
 ## 1. 总体结论
 

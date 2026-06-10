@@ -284,17 +284,21 @@ target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
-add_executable(tcpquic_blocking_relay_demo_test
-    unittest/blocking_relay_demo_test.cpp
-    tunnel/relay_blocking_demo.cpp
-    tunnel/tcp_write_queue.cpp
-    config/tuning.cpp
-    ${TCPQUIC_PLATFORM_SOURCES}
-)
-tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
-target_link_libraries(tcpquic_blocking_relay_demo_test Threads::Threads inc warnings msquic logging base_link)
-set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
-set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+set(TCPQUIC_POSIX_TEST_TARGETS)
+if(NOT WIN32)
+    add_executable(tcpquic_blocking_relay_demo_test
+        unittest/blocking_relay_demo_test.cpp
+        tunnel/relay_blocking_demo.cpp
+        tunnel/tcp_write_queue.cpp
+        config/tuning.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
+    target_link_libraries(tcpquic_blocking_relay_demo_test Threads::Threads inc warnings msquic logging base_link)
+    set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+    list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_blocking_relay_demo_test)
+endif()
 
 add_executable(tcpquic_http_connect_test
     unittest/http_connect_server_test.cpp
@@ -398,7 +402,6 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_config_router_test
     tcpquic_compress_test
     tcpquic_tunnel_test
-    tcpquic_blocking_relay_demo_test
     tcpquic_http_connect_test
     tcpquic_socks5_test
     tcpquic_admin_http_test
@@ -407,6 +410,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_platform_socket_test
 )
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_LINUX_TEST_TARGETS})
+list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_POSIX_TEST_TARGETS})
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_WINDOWS_TEST_TARGETS})
 
 foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
@@ -421,7 +425,6 @@ if(WIN32)
 
     set(TCPQUIC_MSQUIC_RUNTIME_TARGETS
         tcpquic_tunnel_test
-        tcpquic_blocking_relay_demo_test
         tcpquic_router_runtime_test
         ${TCPQUIC_WINDOWS_TEST_TARGETS}
     )
