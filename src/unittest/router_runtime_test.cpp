@@ -166,10 +166,11 @@ int main() {
         std::string health = adminRuntime.HandleAdmin(getHealth);
         if (health.find("HTTP/1.1 200 OK") == std::string::npos) return 20;
         if (health.find("\"status\":\"healthy\"") == std::string::npos) return 21;
-        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\"}]}");
+        TqHttpRequest putConfig = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-d\",\"quic_peer\":\"127.0.0.1:14446\",\"socks_listen\":\"127.0.0.1:11003\",\"quic_reconnect_interval_ms\":5000}]}");
         std::string put = adminRuntime.HandleAdmin(putConfig);
         if (put.find("HTTP/1.1 200 OK") == std::string::npos) return 22;
         if (adminRuntime.SnapshotMetrics().Peers.size() != 1) return 23;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicReconnectIntervalMs != 5000) return 95;
         TqHttpRequest getMetrics = Request("GET", "/metrics", "");
         std::string metrics = adminRuntime.HandleAdmin(getMetrics);
         if (metrics.find("HTTP/1.1 200 OK") == std::string::npos) return 25;
@@ -178,9 +179,11 @@ int main() {
         std::string config = adminRuntime.HandleAdmin(getConfig);
         if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 27;
         if (config.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 28;
+        if (config.find("\"quic_reconnect_interval_ms\":5000") == std::string::npos) return 96;
         TqHttpRequest putRoundTrip = Request("PUT", "/config", JsonBody(config));
         std::string roundTrip = adminRuntime.HandleAdmin(putRoundTrip);
         if (roundTrip.find("HTTP/1.1 200 OK") == std::string::npos) return 74;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicReconnectIntervalMs != 5000) return 97;
         TqHttpRequest disable = Request("POST", "/peers/agent-d/disable", "");
         std::string disabled = adminRuntime.HandleAdmin(disable);
         if (disabled.find("HTTP/1.1 200 OK") == std::string::npos) return 29;
