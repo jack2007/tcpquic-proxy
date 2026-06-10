@@ -289,6 +289,7 @@ add_executable(tcpquic_blocking_relay_demo_test
     tunnel/relay_blocking_demo.cpp
     tunnel/tcp_write_queue.cpp
     config/tuning.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
 target_link_libraries(tcpquic_blocking_relay_demo_test Threads::Threads inc warnings msquic logging base_link)
