@@ -292,37 +292,18 @@ HTTP CONNECT 在隧道建立**成功之后**才返回 `200 Connection Establishe
 
 ## 源码结构
 
-```
+```text
 src/
 ├── main.cpp                  # client / server 入口
-├── config.*                  # CLI 解析
-├── control_protocol.*        # OPEN 帧编解码
-├── acl.*                     # CIDR ACL + DNS 候选过滤
-├── compress.*                # zstd / lz4 流式压缩/解压
-├── quic_session.*            # QUIC 会话（mTLS、BBR 参数）
-├── tcp_tunnel.*              # 隧道状态机（OPEN + relay）
-├── tcp_dialer.*              # B 侧非阻塞 TCP 拨号
-├── socks5_server.*           # SOCKS5 CONNECT
-├── http_connect_server.*     # HTTP CONNECT
-├── relay.*                   # 生产 relay 入口，Linux 选择 worker 后端
-├── linux_relay_worker.*      # Linux epoll/readv/writev relay worker（含压缩隧道）
-├── linux_relay_buffer_pool.* # Linux relay 池化缓冲
-├── relay_blocking_demo.*     # demo/legacy blocking relay（非生产链接）
-├── router_runtime.*          # 连接池与路由
-├── server_metrics.*          # 运行时指标与 admin HTTP 序列化
-├── admin_http.*              # admin/metrics HTTP 端点
-├── thread_pool.*             # 工作线程池
-├── tuning.*                  # 自适应调参
-├── tunnel_reaper.*           # 隧道延迟回收
-├── tcp_write_queue.*         # demo/legacy 写队列与独立单测
+├── acl/                      # CIDR ACL + DNS 候选过滤
+├── config/                   # CLI 解析与调优参数
+├── protocol/                 # OPEN 帧、压缩、QUIC 会话封装
+├── platform/                 # POSIX/Windows socket 抽象与 Windows QUIC 凭据
+├── ingress/                  # SOCKS5 / HTTP CONNECT 本地入口
+├── tunnel/                   # TCP ↔ QUIC Stream 隧道与平台 relay worker
+├── runtime/                  # admin、metrics、router runtime、线程池、warmup
+├── docs/                     # 与源码实现紧密相关的说明
 └── unittest/                 # 单元测试
-
-third_party/
-├── msquic/                   # msquic 子模块（QUIC 栈；内含 submodules/quictls）
-├── lz4/                      # lz4 子模块（压缩）
-└── zstd/                     # zstd 子模块（压缩）
-scripts/                      # 集成测试与性能脚本
-docs/                         # 设计规格与实现计划
 ```
 
 ## v1 能力与限制

@@ -8,7 +8,7 @@
 - 高延迟、丢包环境下利用 QUIC + BBR 改善传输
 - 可选 zstd 流式压缩降低有效字节数
 
-详细设计见 [`docs/superpowers/specs/2026-06-06-tcpquic-proxy-design.md`](../../../docs/superpowers/specs/2026-06-06-tcpquic-proxy-design.md)。
+详细设计见 [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/specs/2026-06-06-tcpquic-proxy-design.md)。
 
 ## 架构
 
@@ -185,19 +185,17 @@ HTTP CONNECT 在隧道建立**成功之后**才返回 `200 Connection Establishe
 
 ## 源码结构
 
-```
-src/tools/tcpquic-proxy/
+```text
+src/
 ├── main.cpp                  # client / server 入口
-├── config.*                  # CLI 解析
-├── control_protocol.*        # OPEN 帧编解码
-├── acl.*                     # CIDR ACL + DNS 候选过滤
-├── compress.*                # zstd 流式压缩/解压
-├── quic_session.*            # QUIC 会话（mTLS、BBR 参数）
-├── tcp_tunnel.*              # 隧道状态机（OPEN + relay）
-├── tcp_dialer.*              # B 侧非阻塞 TCP 拨号
-├── socks5_server.*           # SOCKS5 CONNECT
-├── http_connect_server.*     # HTTP CONNECT
-├── relay.*                   # TCP ↔ Stream 双向转发
+├── acl/                      # CIDR ACL + DNS 候选过滤
+├── config/                   # CLI 解析与调优参数
+├── protocol/                 # OPEN 帧、压缩、QUIC 会话封装
+├── platform/                 # POSIX/Windows socket 抽象与 Windows QUIC 凭据
+├── ingress/                  # SOCKS5 / HTTP CONNECT 本地入口
+├── tunnel/                   # TCP ↔ QUIC Stream 隧道与平台 relay worker
+├── runtime/                  # admin、metrics、router runtime、线程池、warmup
+├── docs/                     # 与源码实现紧密相关的说明
 └── unittest/                 # 单元测试
 ```
 
@@ -222,7 +220,7 @@ src/tools/tcpquic-proxy/
 
 | 文档 | 说明 |
 |------|------|
-| [`docs/superpowers/specs/2026-06-06-tcpquic-proxy-design.md`](../../../docs/superpowers/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
+| [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
 | [`docs/superpowers/plans/2026-06-06-tcpquic-proxy.md`](../../../docs/superpowers/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
 | [`docs/superpowers/delivery.md`](../../../docs/superpowers/delivery.md) | 交付说明与验证结果 |
 | [`docs/superpowers/review_for_delivery.md`](../../../docs/superpowers/review_for_delivery.md) | 评审与修复记录 |
