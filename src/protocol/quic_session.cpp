@@ -333,15 +333,18 @@ static void TqUnregisterClientTraceConnection(MsQuicConnection* connection) {
 
 bool QuicClientSession::Start(const TqConfig& cfg) {
     StreamHandler handler;
+    ConnectionStateHandler stateHandler;
     {
         std::lock_guard<std::mutex> guard(State->Lock);
         handler = State->PeerStreamHandler;
+        stateHandler = State->ConnectionStateChanged;
     }
     Stop();
     State = std::make_shared<ClientSharedState>();
     {
         std::lock_guard<std::mutex> guard(State->Lock);
         State->PeerStreamHandler = std::move(handler);
+        State->ConnectionStateChanged = std::move(stateHandler);
     }
 
     TqEndpoint endpoint;
@@ -364,13 +367,16 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         return false;
     }
 
-    std::lock_guard<std::mutex> guard(State->Lock);
-    State->Started = true;
-    State->Stopping = false;
-    State->Api = Api;
-    State->Slots.clear();
-    State->Slots.resize(Config.QuicConnections);
-    PickIndex.store(0);
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        State->Started = true;
+        State->Stopping = false;
+        State->Api = Api;
+        State->Slots.clear();
+        State->Slots.resize(Config.QuicConnections);
+        PickIndex.store(0);
+    }
+    StartReconnectLoop();
     return true;
 }
 
@@ -402,11 +408,14 @@ void QuicClientSession::Stop() {
     std::unique_ptr<MsQuicConfiguration> configurationLocal;
     std::shared_ptr<ClientSharedState> state = State;
 
+    StopReconnectLoop(state);
+
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         state->Started = false;
         state->Stopping = true;
         state->PeerStreamHandler = nullptr;
+        state->ConnectionStateChanged = nullptr;
         for (auto& slot : state->Slots) {
             if (slot.Connection) {
                 slot.Connection->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
@@ -459,6 +468,21 @@ uint32_t QuicClientSession::ConnectionCount() const {
     return static_cast<uint32_t>(Config.QuicConnections);
 }
 
+uint32_t QuicClientSession::ConnectedConnectionCount() const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return ConnectedCountLocked(*State);
+}
+
+uint32_t QuicClientSession::ConnectedCountLocked(const ClientSharedState& state) {
+    uint32_t count = 0;
+    for (const auto& slot : state.Slots) {
+        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::unique_lock<std::mutex> guard(State->Lock);
@@ -487,9 +511,74 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
     return false;
 }
 
+bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds timeout) {
+    return EnsureConnected(timeout);
+}
+
 void QuicClientSession::SetPeerStreamHandler(StreamHandler h) {
     std::lock_guard<std::mutex> guard(State->Lock);
     State->PeerStreamHandler = std::move(h);
+}
+
+void QuicClientSession::SetConnectionStateHandler(ConnectionStateHandler h) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    State->ConnectionStateChanged = std::move(h);
+}
+
+void QuicClientSession::NotifyConnectionStateChanged(const std::shared_ptr<ClientSharedState>& state) {
+    ConnectionStateHandler handler;
+    uint32_t connectedCount = 0;
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        handler = state->ConnectionStateChanged;
+        connectedCount = ConnectedCountLocked(*state);
+    }
+    if (handler) {
+        handler(connectedCount);
+    }
+}
+
+void QuicClientSession::StartReconnectLoop() {
+    std::shared_ptr<ClientSharedState> state = State;
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        state->ReconnectInterval = std::chrono::milliseconds(Config.QuicReconnectIntervalMs);
+    }
+
+    state->ReconnectThread = std::thread([this, state]() {
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> guard(state->Lock);
+                if (state->Stopping || !state->Started) {
+                    return;
+                }
+                state->StateChanged.wait_for(guard, state->ReconnectInterval, [&state] {
+                    return state->Stopping || !state->Started;
+                });
+                if (state->Stopping || !state->Started) {
+                    return;
+                }
+            }
+            (void)EnsureConnected(std::chrono::milliseconds(100));
+        }
+    });
+}
+
+void QuicClientSession::StopReconnectLoop(const std::shared_ptr<ClientSharedState>& state) {
+    if (!state) {
+        return;
+    }
+
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        state->Stopping = true;
+        state->StateChanged.notify_all();
+        worker = std::move(state->ReconnectThread);
+    }
+    if (worker.joinable()) {
+        worker.join();
+    }
 }
 
 bool QuicClientSession::StartSlotLocked(size_t index) {
@@ -634,6 +723,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         if (state) {
             QuicClientSession::OnSlotConnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
+            QuicClientSession::NotifyConnectionStateChanged(state);
         }
         if (TqTraceEnabled()) {
             TqRegisterClientTraceConnection(connection, slotIndex);
@@ -674,6 +764,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         if (state) {
             QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
+            QuicClientSession::NotifyConnectionStateChanged(state);
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
@@ -689,6 +780,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         if (state) {
             QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
+            QuicClientSession::NotifyConnectionStateChanged(state);
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
@@ -710,6 +802,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                 }
             }
             state->StateChanged.notify_all();
+            QuicClientSession::NotifyConnectionStateChanged(state);
         }
         connection->Close();
         if (state) {

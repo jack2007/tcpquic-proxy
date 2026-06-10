@@ -1,4 +1,5 @@
 #include "platform_socket.h"
+#include "quic_session.h"
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "tcp_tunnel.h"
@@ -109,6 +110,7 @@ void TqTraceTargetTcpClosed(uint64_t tunnelId) {
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 static unsigned g_abort_a = 0;
@@ -160,6 +162,21 @@ static int TestTunnelRegistryAbortsOnlyMatchingConnection() {
     if (aborted != 1) return 201;
     if (g_abort_a != 1) return 202;
     if (g_abort_b != 0) return 203;
+    return 0;
+}
+
+static int TestQuicClientSessionReconnectApiSurface() {
+    using Handler = QuicClientSession::ConnectionStateHandler;
+    static_assert(std::is_same<Handler, std::function<void(uint32_t)>>::value,
+        "connection-state callback reports connected slot count");
+    static_assert(std::is_same<decltype(std::declval<const QuicClientSession&>().ConnectedConnectionCount()), uint32_t>::value,
+        "connected count is publicly readable");
+    static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().EnsureAnyConnected()), bool>::value,
+        "eager connect API has a default timeout");
+    static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().EnsureAnyConnected(std::chrono::milliseconds(1))), bool>::value,
+        "eager connect API accepts an explicit timeout");
+
+    (void)static_cast<void (QuicClientSession::*)(Handler)>(&QuicClientSession::SetConnectionStateHandler);
     return 0;
 }
 
@@ -357,6 +374,7 @@ static int TestClientOpenOwnerDefersShutdownCompleteDelete() {
 }
 
 int main() {
+    if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
     if (int rc = TestTunnelRegistryDuplicateRegistrationIsSingleEntry()) return rc;

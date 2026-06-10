@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
@@ -27,14 +28,18 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);
 class QuicClientSession {
 public:
     using StreamHandler = std::function<void(MsQuicConnection*, HQUIC)>;
+    using ConnectionStateHandler = std::function<void(uint32_t connectedCount)>;
 
     bool Start(const TqConfig& cfg);
     void Stop();
     MsQuicConnection* GetConnection();
     MsQuicConnection* PickConnection();
     bool EnsureConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
+    bool EnsureAnyConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void SetPeerStreamHandler(StreamHandler h);
+    void SetConnectionStateHandler(ConnectionStateHandler h);
     uint32_t ConnectionCount() const;
+    uint32_t ConnectedConnectionCount() const;
 
 private:
     struct ClientSharedState;
@@ -65,10 +70,17 @@ private:
         std::condition_variable StateChanged;
         std::condition_variable OrphanDrained;
         StreamHandler PeerStreamHandler;
+        ConnectionStateHandler ConnectionStateChanged;
+        std::thread ReconnectThread;
+        std::chrono::milliseconds ReconnectInterval{std::chrono::milliseconds(3000)};
         std::shared_ptr<MsQuicApi> Api;
     };
 
     bool StartSlotLocked(size_t index);
+    void StartReconnectLoop();
+    void StopReconnectLoop(const std::shared_ptr<ClientSharedState>& state);
+    static uint32_t ConnectedCountLocked(const ClientSharedState& state);
+    static void NotifyConnectionStateChanged(const std::shared_ptr<ClientSharedState>& state);
     static void OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);
