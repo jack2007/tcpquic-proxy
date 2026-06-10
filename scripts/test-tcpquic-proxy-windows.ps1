@@ -1,7 +1,8 @@
 param(
   [string]$Bin = ".\build-x64\bin\Release\tcpquic-proxy.exe",
   [string]$Compress = "off",
-  [string]$QuicPeerHost = "127.0.0.1"
+  [string]$QuicPeerHost = "127.0.0.1",
+  [switch]$Trace
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +30,22 @@ function Wait-TcpPort {
     Start-Sleep -Milliseconds 200
   }
   return $false
+}
+
+function Assert-FileContains {
+  param(
+    [string]$Path,
+    [string]$Pattern,
+    [string]$Description
+  )
+
+  if (-not (Test-Path $Path)) {
+    throw "$Description missing: $Path"
+  }
+  $text = Get-Content -Raw $Path
+  if ($text -notmatch $Pattern) {
+    throw "$Description missing pattern '$Pattern' in $Path`n$text"
+  }
 }
 
 function Resolve-OpenSslPath {
@@ -146,6 +163,15 @@ try {
   $ServerErr = Join-Path $Work "server.err"
   $ClientErr = Join-Path $Work "client.err"
 
+  $BinPath = (Resolve-Path $Bin).Path
+  $BinDir = Split-Path -Parent $BinPath
+  $LogDir = Join-Path $BinDir "log"
+  $ServerLog = Join-Path $LogDir "server.log"
+  $ClientLog = Join-Path $LogDir "client.log"
+  if ($Trace -and (Test-Path $LogDir)) {
+    Remove-Item -Recurse -Force $LogDir
+  }
+
   $ServerArgs = @(
     "server",
     "--quic-listen", "127.0.0.1:$QuicPort",
@@ -155,7 +181,10 @@ try {
     "--allow-targets", "127.0.0.0/8",
     "--compress", $Compress
   )
-  $Server = Start-Process -PassThru -FilePath $Bin -ArgumentList $ServerArgs -RedirectStandardError $ServerErr
+  if ($Trace) {
+    $ServerArgs += @("--trace", "--trace-interval", "1")
+  }
+  $Server = Start-Process -PassThru -FilePath $BinPath -ArgumentList $ServerArgs -RedirectStandardError $ServerErr
   Start-Sleep -Seconds 1
   if ($Server.HasExited) {
     $errText = if (Test-Path $ServerErr) { Get-Content -Raw $ServerErr } else { "" }
@@ -172,7 +201,10 @@ try {
     "--http-listen", "127.0.0.1:$ConnectPort",
     "--compress", $Compress
   )
-  $Client = Start-Process -PassThru -FilePath $Bin -ArgumentList $ClientArgs -RedirectStandardError $ClientErr
+  if ($Trace) {
+    $ClientArgs += @("--trace", "--trace-interval", "1", "--trace-connect-on-start")
+  }
+  $Client = Start-Process -PassThru -FilePath $BinPath -ArgumentList $ClientArgs -RedirectStandardError $ClientErr
   Start-Sleep -Seconds 1
   if ($Client.HasExited) {
     $errText = if (Test-Path $ClientErr) { Get-Content -Raw $ClientErr } else { "" }
@@ -198,6 +230,18 @@ try {
     $serverText = if (Test-Path $ServerErr) { Get-Content -Raw $ServerErr } else { "" }
     $clientText = if (Test-Path $ClientErr) { Get-Content -Raw $ClientErr } else { "" }
     throw "SOCKS5 loopback failed with exit code $LASTEXITCODE`nSERVER:`n$serverText`nCLIENT:`n$clientText"
+  }
+
+  if ($Trace) {
+    Start-Sleep -Seconds 2
+    Assert-FileContains -Path $ClientLog -Pattern "event=trace_started role=client" -Description "client trace startup log"
+    Assert-FileContains -Path $ClientLog -Pattern "event=quic_connected role=client" -Description "client QUIC connected log"
+    Assert-FileContains -Path $ClientLog -Pattern "event=proxy_tunnel_ok proto=http" -Description "client HTTP tunnel log"
+    Assert-FileContains -Path $ClientLog -Pattern "event=proxy_tunnel_ok proto=socks5" -Description "client SOCKS5 tunnel log"
+    Assert-FileContains -Path $ServerLog -Pattern "event=trace_started role=server" -Description "server trace startup log"
+    Assert-FileContains -Path $ServerLog -Pattern "event=quic_connected role=server" -Description "server QUIC connected log"
+    Assert-FileContains -Path $ServerLog -Pattern "event=target_tcp_connected" -Description "server target TCP connected log"
+    Assert-FileContains -Path $ServerLog -Pattern "event=stats_tick" -Description "server periodic stats log"
   }
 }
 finally {
