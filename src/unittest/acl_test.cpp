@@ -1,6 +1,9 @@
 #include "../acl.h"
+#include "../platform_socket.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
+#endif
 #include <cassert>
 #include <cstring>
 #include <string>
@@ -14,7 +17,7 @@ bool SockaddrIpv4Equals(const sockaddr_storage& ss, const char* dotted) {
     }
     const auto* sin = reinterpret_cast<const sockaddr_in*>(&ss);
     in_addr expected{};
-    if (inet_pton(AF_INET, dotted, &expected) != 1) {
+    if (!TqInetPton(AF_INET, dotted, &expected)) {
         return false;
     }
     return std::memcmp(&sin->sin_addr, &expected, sizeof(expected)) == 0;
@@ -23,6 +26,8 @@ bool SockaddrIpv4Equals(const sockaddr_storage& ss, const char* dotted) {
 } // namespace
 
 int main() {
+    TqSocketStartup startup;
+    assert(startup.Ok());
     TqAcl acl;
     acl.AllowCidrs = {"10.0.0.0/8", "192.168.1.0/24"};
     acl.DenyCidrs = {"10.0.0.1/32"};

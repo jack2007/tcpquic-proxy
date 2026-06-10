@@ -47,8 +47,14 @@ int main() {
 
     reaper.Register(reinterpret_cast<TqTunnelContext*>(&tunnel));
     tunnel.stopped.store(true, std::memory_order_relaxed);
-    assert(WaitForReap(1, 2000));
-    assert(g_lastReaped == &tunnel);
+    if (!WaitForReap(1, 2000)) {
+        reaper.Stop();
+        return 100;
+    }
+    if (g_lastReaped != &tunnel) {
+        reaper.Stop();
+        return 101;
+    }
 
     reaper.Stop();
     return 0;

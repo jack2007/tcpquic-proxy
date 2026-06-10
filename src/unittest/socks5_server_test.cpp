@@ -8,7 +8,6 @@
 int main() {
     TunnelRequest domain{};
     const std::vector<uint8_t> domainConnect{
-        0x05, 0x01, 0x00,
         0x05, 0x01, 0x00, 0x03, 0x0c,
         'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 't', 'e', 's', 't',
         0x01, 0xbb};
@@ -19,7 +18,6 @@ int main() {
 
     TunnelRequest ipv4{};
     const std::vector<uint8_t> ipv4Connect{
-        0x05, 0x01, 0x00,
         0x05, 0x01, 0x00, 0x01,
         127, 0, 0, 1,
         0x20, 0xfb};
@@ -30,7 +28,6 @@ int main() {
 
     TunnelRequest ipv6{};
     const std::vector<uint8_t> ipv6Connect{
-        0x05, 0x01, 0x00,
         0x05, 0x01, 0x00, 0x04,
         0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
         0x01, 0xbb};

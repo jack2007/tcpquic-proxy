@@ -1,5 +1,8 @@
 #include "quic_session.h"
 #include "tuning.h"
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+#include "quic_credentials_win.h"
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -8,7 +11,12 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <thread>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <unordered_map>
 
 extern const MsQuicApi* MsQuic;
@@ -189,21 +197,54 @@ bool InitConfiguration(
     const TqConfig& cfg,
     const MsQuicRegistration& registration,
     bool server,
-    std::unique_ptr<MsQuicConfiguration>& configuration) {
+    std::unique_ptr<MsQuicConfiguration>& configuration
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+    ,
+    std::unique_ptr<TqQuicCredentialHolder>& credentials
+#endif
+    ) {
     MsQuicAlpn alpn(TqAlpn);
     MsQuicSettings settings = MakeSettings(cfg, server);
+#if defined(_WIN32) && defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+    const auto flags = server
+        ? QUIC_CREDENTIAL_FLAG_NONE
+        : static_cast<QUIC_CREDENTIAL_FLAGS>(QUIC_CREDENTIAL_FLAG_CLIENT | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
+#else
+#if defined(_WIN32)
+    const auto flags = server
+        ? QUIC_CREDENTIAL_FLAG_NONE
+        : static_cast<QUIC_CREDENTIAL_FLAGS>(QUIC_CREDENTIAL_FLAG_CLIENT | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
+#else
     const auto flags = server
         ? QUIC_CREDENTIAL_FLAG_REQUIRE_CLIENT_AUTHENTICATION
         : QUIC_CREDENTIAL_FLAG_CLIENT;
+#endif
+#endif
+
+    const QUIC_CREDENTIAL_CONFIG* credentialConfig = nullptr;
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+    credentials = std::make_unique<TqQuicCredentialHolder>();
+    if (!credentials->Build(cfg, flags)) {
+        credentials.reset();
+        return false;
+    }
+    credentialConfig = &credentials->Config();
+#else
     TqCredentialConfig credential(cfg, flags);
+    credentialConfig = &credential.Config;
+#endif
+
     configuration = std::make_unique<MsQuicConfiguration>(
         registration,
         alpn,
         settings,
-        MsQuicCredentialConfig(credential.Config));
+        MsQuicCredentialConfig(*credentialConfig));
     if (!configuration || !configuration->IsValid()) {
         std::fprintf(stderr, "ConfigurationOpen/LoadCredential failed, 0x%x\n",
             configuration ? configuration->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+        credentials.reset();
+#endif
         return false;
     }
     return true;
@@ -284,7 +325,11 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
     PeerPort = endpoint.Port;
 
     if (!InitApiAndRegistration(Api, Registration, TqToMsQuicProfile(cfg.QuicProfile)) ||
-        !InitConfiguration(Config, *Registration, false, Configuration)) {
+        !InitConfiguration(Config, *Registration, false, Configuration
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+            , Credentials
+#endif
+            )) {
         Stop();
         return false;
     }
@@ -384,26 +429,32 @@ uint32_t QuicClientSession::ConnectionCount() const {
     return static_cast<uint32_t>(Config.QuicConnections);
 }
 
-void QuicClientSession::EnsureConnected() {
+bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     std::unique_lock<std::mutex> guard(State->Lock);
     while (State->Started && !State->Stopping) {
-        bool allConnected = !State->Slots.empty();
+        bool anyConnected = false;
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             auto& slot = State->Slots[i];
-            if (!slot.Connected) {
-                allConnected = false;
-                if (slot.ReconnectNeeded || !slot.Connection) {
-                    guard.unlock();
-                    StartSlotLocked(i);
-                    guard.lock();
-                }
+            if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+                anyConnected = true;
+                continue;
+            }
+            if (slot.ReconnectNeeded || !slot.Connection) {
+                guard.unlock();
+                StartSlotLocked(i);
+                guard.lock();
             }
         }
-        if (allConnected) {
-            return;
+        if (anyConnected) {
+            return true;
         }
-        State->StateChanged.wait_for(guard, std::chrono::seconds(1));
+        if (State->Slots.empty() || std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        State->StateChanged.wait_until(guard, deadline);
     }
+    return false;
 }
 
 void QuicClientSession::SetPeerStreamHandler(StreamHandler h) {
@@ -439,7 +490,11 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
 
     if (TqRuntimeTuningEnabled(Config)) {
         TqApplyRuntimeObservations(Config);
-        if (!InitConfiguration(Config, *Registration, false, Configuration)) {
+        if (!InitConfiguration(Config, *Registration, false, Configuration
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+                , Credentials
+#endif
+                )) {
             std::fprintf(stderr, "Configuration refresh failed\n");
             return false;
         }
@@ -563,6 +618,12 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        TqSampleConnectionRtt(connection);
+        if (state) {
+            QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
+            state->StateChanged.notify_all();
+        }
+        break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         TqSampleConnectionRtt(connection);
         if (state) {
@@ -605,7 +666,11 @@ bool QuicServerSession::Start(const TqConfig& cfg) {
 
     Config = cfg;
     if (!InitApiAndRegistration(Api, Registration, TqToMsQuicProfile(cfg.QuicProfile)) ||
-        !InitConfiguration(Config, *Registration, true, Configuration)) {
+        !InitConfiguration(Config, *Registration, true, Configuration
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+            , Credentials
+#endif
+            )) {
         Stop();
         return false;
     }
@@ -666,7 +731,12 @@ void QuicServerSession::Stop() {
 }
 
 void QuicServerSession::Run() {
-    if (isatty(STDIN_FILENO)) {
+#if defined(_WIN32)
+    const bool interactive = _isatty(_fileno(stdin)) != 0;
+#else
+    const bool interactive = isatty(STDIN_FILENO) != 0;
+#endif
+    if (interactive) {
         std::fprintf(stderr, "Press Enter to exit.\n");
         (void)getchar();
     } else {
@@ -692,7 +762,10 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
     void* context,
     QUIC_LISTENER_EVENT* event) noexcept {
     auto* session = static_cast<QuicServerSession*>(context);
-    if (session == nullptr || event->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION) {
+    if (session == nullptr) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION) {
         return QUIC_STATUS_SUCCESS;
     }
 
@@ -750,6 +823,10 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
                 MsQuic->StreamClose(event->PEER_STREAM_STARTED.Stream);
             }
         }
+        break;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        break;
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         TqUnregisterServerConnection(connection);

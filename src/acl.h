@@ -4,11 +4,7 @@
 #include <string>
 #include <vector>
 
-#if defined(_WIN32)
-#include <ws2tcpip.h>
-#else
-#include <sys/socket.h>
-#endif
+#include "platform_socket.h"
 
 struct TqAcl {
     std::vector<std::string> AllowCidrs;

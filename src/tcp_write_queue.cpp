@@ -3,12 +3,10 @@
 
 #include "tcp_write_queue.h"
 
-#include <cerrno>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "platform_socket.h"
 
 TqTcpWriteQueue::TqTcpWriteQueue(
-    int tcpFd,
+    TqSocketHandle tcpFd,
     std::atomic<bool>* stopFlag,
     size_t maxChunks,
     size_t maxBytes)
@@ -102,12 +100,12 @@ bool TqTcpWriteQueue::WaitUntilDrainedOrStopped(int timeoutMs) {
 bool TqTcpWriteQueue::WriteAll(const uint8_t* data, size_t length) {
     size_t offset = 0;
     while (offset < length) {
-        const ssize_t sent = ::send(TcpFd, data + offset, length - offset, MSG_NOSIGNAL);
+        const int sent = TqSend(TcpFd, data + offset, length - offset, TqSendFlags::NoSignal);
         if (sent > 0) {
             offset += static_cast<size_t>(sent);
             continue;
         }
-        if (sent < 0 && errno == EINTR) {
+        if (sent < 0 && TqSocketInterrupted(TqLastSocketError())) {
             continue;
         }
         return false;
@@ -133,13 +131,13 @@ void TqTcpWriteQueue::WriterLoop() {
 
         if (!chunk.Data.empty() && !WriteAll(chunk.Data.data(), chunk.Data.size())) {
             StopFlag->store(true);
-            ::shutdown(TcpFd, SHUT_RDWR);
+            (void)TqShutdownBoth(TcpFd);
             Cv.notify_all();
             break;
         }
         if (chunk.Fin) {
             StopFlag->store(true);
-            ::shutdown(TcpFd, SHUT_WR);
+            (void)TqShutdownSend(TcpFd);
             Cv.notify_all();
             break;
         }

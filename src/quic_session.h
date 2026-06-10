@@ -14,6 +14,10 @@
 #include <mutex>
 #include <vector>
 
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+#include "quic_credentials_win.h"
+#endif
+
 // Server-side: assign stable conn_id per accepted QUIC connection (OPEN_OK field).
 uint32_t TqRegisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
@@ -27,7 +31,7 @@ public:
     void Stop();
     MsQuicConnection* GetConnection();
     MsQuicConnection* PickConnection();
-    void EnsureConnected();
+    bool EnsureConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void SetPeerStreamHandler(StreamHandler h);
     uint32_t ConnectionCount() const;
 
@@ -77,6 +81,9 @@ private:
     std::shared_ptr<MsQuicApi> Api;
     std::unique_ptr<MsQuicRegistration> Registration;
     std::unique_ptr<MsQuicConfiguration> Configuration;
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+    std::unique_ptr<TqQuicCredentialHolder> Credentials;
+#endif
 };
 
 class QuicServerSession {
@@ -111,4 +118,7 @@ private:
     std::unique_ptr<MsQuicRegistration> Registration;
     std::unique_ptr<MsQuicConfiguration> Configuration;
     std::unique_ptr<MsQuicListener> Listener;
+#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
+    std::unique_ptr<TqQuicCredentialHolder> Credentials;
+#endif
 };

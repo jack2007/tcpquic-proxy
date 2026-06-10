@@ -1,5 +1,6 @@
 #include "config.h"
 #include "admin_http.h"
+#include "platform_socket.h"
 #include "quic_session.h"
 #include "acl.h"
 #include "http_connect_server.h"
@@ -50,8 +51,11 @@ public:
 
         runtime->Pool = std::make_unique<TqThreadPool>(peerCfg.HandshakeThreads);
         runtime->Pool->Start();
-        TunnelStartFn startTunnel = [quic = runtime->Quic.get(), peerCfg](const TunnelRequest& req, int fd) {
-            quic->EnsureConnected();
+        TunnelStartFn startTunnel = [quic = runtime->Quic.get(), peerCfg](const TunnelRequest& req, TqSocketHandle fd) {
+            if (!quic->EnsureConnected()) {
+                std::fprintf(stderr, "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n", peerCfg.QuicPeer.c_str());
+                return TqTunnelStartResult{false, TqOpenError::Internal};
+            }
             MsQuicConnection* conn = quic->PickConnection();
             if (conn == nullptr) {
                 return TqTunnelStartResult{false, TqOpenError::Internal};
@@ -173,12 +177,6 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return 1;
     }
 
-    quic.EnsureConnected();
-    if (quic.PickConnection() == nullptr) {
-        std::fprintf(stderr, "tcpquic-proxy: failed to establish QUIC connection\n");
-        return 1;
-    }
-
     if (cfg.WarmupMb > 0) {
         if (!TqRunClientWarmup(quic, cfg)) {
             std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
@@ -186,8 +184,11 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         }
     }
 
-    TunnelStartFn startTunnel = [&quic, &cfg](const TunnelRequest& req, int fd) {
-        quic.EnsureConnected();
+    TunnelStartFn startTunnel = [&quic, &cfg](const TunnelRequest& req, TqSocketHandle fd) {
+        if (!quic.EnsureConnected()) {
+            std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
+            return TqTunnelStartResult{false, TqOpenError::Internal};
+        }
         MsQuicConnection* conn = quic.PickConnection();
         if (conn == nullptr) {
             return TqTunnelStartResult{false, TqOpenError::Internal};
@@ -321,6 +322,12 @@ int RunServer(const TqConfig& cfg) {
 } // namespace
 
 int main(int argc, char** argv) {
+    TqSocketStartup socketStartup;
+    if (!socketStartup.Ok()) {
+        std::fprintf(stderr, "tcpquic-proxy: failed to initialize socket runtime\n");
+        return 1;
+    }
+
     TqConfig cfg;
     std::string err;
     if (!TqParseArgs(argc, argv, cfg, err)) {

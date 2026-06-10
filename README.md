@@ -100,6 +100,26 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 
 产物：`build/bin/Release/tcpquic-proxy`
 
+### Windows 10/11 x64
+
+Install Visual Studio 2022 Build Tools with the MSVC C++ workload, CMake, Ninja, Git, OpenSSL, Python, and curl.
+
+```powershell
+git submodule update --init --recursive
+cmake -S . -B build-x64 -A x64 -DLZ4_SOURCE_DIR="$PWD/third_party/lz4"
+cmake --build build-x64 --config Release --target tcpquic-proxy
+```
+
+Windows uses msquic Schannel by default. PEM leaf certificates must include `serverAuth` and `clientAuth` EKU, and the CA in `--quic-ca` must be imported into the CurrentUser `Root` store (the loopback script does this automatically). Optional `-DTCPQUIC_WINDOWS_TLS=quictls` with Strawberry Perl restores Linux-style PEM CA loading.
+
+Run the Windows loopback validation:
+
+```powershell
+.\scripts\test-tcpquic-proxy-windows.ps1 -Compress off
+.\scripts\test-tcpquic-proxy-windows.ps1 -Compress zstd
+.\scripts\test-tcpquic-proxy-windows.ps1 -Compress lz4
+```
+
 ### wdtq 集成
 
 若通过 [wdtq](https://github.com/) 等工具启动代理，可显式指定二进制路径：

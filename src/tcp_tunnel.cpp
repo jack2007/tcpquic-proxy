@@ -2,12 +2,15 @@
 
 #include "compress.h"
 #include "msquic.hpp"
+#include "platform_socket.h"
 #include "quic_session.h"
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "tunnel_reaper.h"
 
+#if !defined(_WIN32)
 #include <arpa/inet.h>
+#endif
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -22,9 +25,9 @@
 #include <utility>
 #include <vector>
 
+#if !defined(_WIN32)
 #include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#endif
 
 namespace {
 
@@ -118,7 +121,7 @@ bool TqBuildOpenRequest(const TunnelRequest& req, const TqConfig& cfg, TqOpenReq
 
     if (req.AddrType == TQ_ADDR_IPV4) {
         in_addr addr{};
-        if (inet_pton(AF_INET, req.Host, &addr) != 1) {
+        if (!TqInetPton(AF_INET, req.Host, &addr)) {
             return false;
         }
         const auto* bytes = reinterpret_cast<const uint8_t*>(&addr);
@@ -128,7 +131,7 @@ bool TqBuildOpenRequest(const TunnelRequest& req, const TqConfig& cfg, TqOpenReq
 
     if (req.AddrType == TQ_ADDR_IPV6) {
         in6_addr addr{};
-        if (inet_pton(AF_INET6, req.Host, &addr) != 1) {
+        if (!TqInetPton(AF_INET6, req.Host, &addr)) {
             return false;
         }
         const auto* bytes = reinterpret_cast<const uint8_t*>(&addr);
@@ -148,12 +151,12 @@ bool TqHostFromOpenRequest(const TqOpenRequest& req, std::string& host) {
     }
 
     if (req.AddrType == TQ_ADDR_IPV4 && req.Addr.size() == 4) {
-        return inet_ntop(AF_INET, req.Addr.data(), text, sizeof(text)) != nullptr &&
+        return TqInetNtop(AF_INET, req.Addr.data(), text, sizeof(text)) != nullptr &&
             (host = text, true);
     }
 
     if (req.AddrType == TQ_ADDR_IPV6 && req.Addr.size() == 16) {
-        return inet_ntop(AF_INET6, req.Addr.data(), text, sizeof(text)) != nullptr &&
+        return TqInetNtop(AF_INET6, req.Addr.data(), text, sizeof(text)) != nullptr &&
             (host = text, true);
     }
 
@@ -201,7 +204,7 @@ bool TqResolveAllowedTarget(
 
 } // namespace
 
-class TqTunnelContext final {
+struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
     friend void TqReapTunnelContext(TqTunnelContext* ctx);
@@ -210,7 +213,7 @@ public:
     TqTunnelContext(
         TqTunnelRole role,
         MsQuicStream* stream,
-        int tcpFd,
+        TqSocketHandle tcpFd,
         const TqConfig& cfg,
         const TqAcl* acl,
         MsQuicConnection* quicConn = nullptr,
@@ -311,9 +314,9 @@ public:
     }
 
     void CloseTcp() {
-        if (TcpFd >= 0) {
-            close(TcpFd);
-            TcpFd = -1;
+        if (TqSocketValid(TcpFd)) {
+            TqCloseSocket(TcpFd);
+            TcpFd = TqInvalidSocket;
         }
     }
 
@@ -333,6 +336,9 @@ private:
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
             TqTunnelSendContext::Delete(
                 static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            if (Role == TqTunnelRole::ServerOpen) {
+                StartPendingServerRelay();
+            }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
@@ -459,7 +465,7 @@ private:
         TqOpenRequest req,
         std::vector<sockaddr_storage> addrs) {
         const TqDialResult dial = TqDialTcp(addrs, TqTcpDialTimeoutMs);
-        if (dial.Fd < 0) {
+        if (!TqSocketValid(dial.Fd)) {
             SendOpenFailure(dial.Refused ? TqOpenError::TcpRefused : TqOpenError::TcpTimeout);
             return;
         }
@@ -473,10 +479,16 @@ private:
         std::vector<uint8_t> encoded;
         const uint32_t connId =
             QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
-        if (!TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded) ||
-            !SendBytes(encoded, QUIC_SEND_FLAG_NONE) ||
-            !StartRelay(req.Flags)) {
+        const bool encodedOk = TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded);
+        const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
+        if (!sendOk) {
             SendOpenFailure(TqOpenError::Internal);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingServerRelay = true;
+            PendingServerRelayFlags = req.Flags;
         }
     }
 
@@ -553,9 +565,25 @@ private:
         StateChanged.notify_all();
     }
 
+    void StartPendingServerRelay() {
+        uint8_t flags = 0;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!PendingServerRelay || RelayStarted || ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
+            flags = PendingServerRelayFlags;
+            PendingServerRelay = false;
+        }
+        const bool relayOk = StartRelay(flags);
+        if (!relayOk) {
+            SendOpenFailure(TqOpenError::Internal);
+        }
+    }
+
     TqTunnelRole Role;
     MsQuicStream* Stream;
-    int TcpFd;
+    TqSocketHandle TcpFd{TqInvalidSocket};
     TqConfig Config;
     const TqAcl* Acl;
     MsQuicConnection* QuicConn;
@@ -575,6 +603,8 @@ private:
     bool ShutdownComplete{false};
     bool StreamShutdownQueued{false};
     bool PendingServerOpen{false};
+    bool PendingServerRelay{false};
+    uint8_t PendingServerRelayFlags{0};
     std::atomic<bool> ServerOpenDispatched{false};
 };
 
@@ -597,20 +627,20 @@ void TqReapTunnelContext(TqTunnelContext* ctx) {
 TqTunnelStartResult TqStartClientTunnel(
     MsQuicConnection* conn,
     const TunnelRequest& req,
-    int clientTcpFd,
+    TqSocketHandle clientTcpFd,
     const TqConfig& cfg) {
-    if (clientTcpFd < 0) {
+    if (!TqSocketValid(clientTcpFd)) {
         return {false, TqOpenError::Internal};
     }
 
     if (conn == nullptr || !conn->IsValid()) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
     TqOpenRequest openReq{};
     if (!TqBuildOpenRequest(req, cfg, openReq)) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -621,7 +651,7 @@ TqTunnelStartResult TqStartClientTunnel(
         cfg,
         nullptr);
     if (context == nullptr) {
-        close(clientTcpFd);
+        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -640,6 +670,7 @@ TqTunnelStartResult TqStartClientTunnel(
 
     context->SetStream(stream);
     if (!context->SendOpenRequest(openReq)) {
+        std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
         context->CloseTcp();
         context->ArmSelfDeleteOnShutdown();
         return {false, TqOpenError::Internal};
@@ -647,6 +678,9 @@ TqTunnelStartResult TqStartClientTunnel(
 
     TqOpenResponse response{};
     if (!context->WaitForOpenResponse(response)) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: client tunnel open response failed (error=%u)\n",
+            static_cast<unsigned>(response.Error));
         context->CloseTcp();
         context->ArmSelfDeleteOnShutdown();
         return {false, response.Error};
@@ -680,7 +714,7 @@ void TqHandleServerPeerStream(
     auto* context = new (std::nothrow) TqTunnelContext(
         TqTunnelRole::ServerOpen,
         nullptr,
-        -1,
+        TqInvalidSocket,
         cfg,
         &acl,
         conn,

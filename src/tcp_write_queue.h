@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "platform_socket.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -22,7 +24,7 @@ struct TqTcpWriteChunk {
 // Enqueue returning false means the caller should abort the stream.
 class TqTcpWriteQueue {
 public:
-    TqTcpWriteQueue(int tcpFd, std::atomic<bool>* stopFlag, size_t maxChunks, size_t maxBytes);
+    TqTcpWriteQueue(TqSocketHandle tcpFd, std::atomic<bool>* stopFlag, size_t maxChunks, size_t maxBytes);
     ~TqTcpWriteQueue();
 
     TqTcpWriteQueue(const TqTcpWriteQueue&) = delete;
@@ -38,7 +40,7 @@ private:
     void WriterLoop();
     bool WriteAll(const uint8_t* data, size_t len);
 
-    int TcpFd;
+    TqSocketHandle TcpFd;
     std::atomic<bool>* StopFlag;
     size_t MaxChunks;
     size_t MaxBytes;

@@ -10,6 +10,101 @@
 
 ---
 
+## Implementation Progress (updated 2026-06-10)
+
+**Branch:** `feature/windows-platform-support`
+
+| Task | Status | Commit / Notes |
+|------|--------|-----------------|
+| Task 1 — Platform socket layer (Linux) | **Done** | `1bb1eb3` |
+| Task 2 — Windows socket + CMake | **Done** | `74f6fb6` |
+| Task 3 — Dialer / ACL migration | **Done** | `466553d` |
+| Task 4 — Tunnel / relay API | **Done** | `2339714` |
+| Task 5 — Admin / warmup / main | **Done** | `93ced8a` |
+| Task 6 — IOCP relay skeleton | **Done** | `73ac646` |
+| Task 7 — IOCP relay data path | **Done** | `dd741ce` |
+| Task 8 — Windows build + unit tests | **Done / awaiting Linux regression** | `quictls` x64 build and key Windows tests pass; `tcpquic_tunnel_test` is ported to platform sockets on Windows |
+| Task 9 — Loopback + interop | **Done for Windows quictls / interop pending** | Windows `quictls` loopback passes `off` / `zstd` / `lz4`; Schannel credential loading remains a hardening item |
+| Task 10 — Final verification | **Pending Linux validation** | Windows `quictls` matrix complete; next step is Linux regression on the new commit |
+
+### Build environment (validated)
+
+Primary Windows target is **x64**, not Win32:
+
+```powershell
+cmake -S . -B build-x64 -A x64 -DLZ4_SOURCE_DIR="$PWD/third_party/lz4"
+cmake --build build-x64 --config Release --target tcpquic-proxy
+```
+
+The plan originally referenced `build-win` + Ninja; on this machine the MSVC multi-config generator (`-A x64`) is the working path. Output binaries live under `build-x64/bin/Release/`.
+
+**Do not use `build-x86` (Win32) as the primary validation directory** — `tcpquic_thread_pool_test` crashes with `0xC0000005` there; x64 passes.
+
+### Task 8 completed in current update
+
+Changes included in the current Windows IOCP/quictls update:
+
+| Area | Change |
+|------|--------|
+| `src/CMakeLists.txt` | `tcpquic_copy_msquic_runtime()` — copy `msquic.dll` next to all msquic-linked test executables (fixes runtime load failures) |
+| `src/main.cpp` | `TunnelStartFn` lambda parameter `int fd` → `TqSocketHandle` |
+| `src/thread_pool.cpp` | WorkerLoop spurious-wakeup guard: `if (Queue.empty()) continue;` |
+| `src/unittest/thread_pool_test.cpp` | Remove POSIX `socketpair`; pure thread-pool coverage |
+| `src/unittest/tunnel_reaper_test.cpp` | Windows socket startup |
+| `CMakeLists.txt` | `TCPQUIC_WINDOWS_TLS` cache (`schannel` default, optional `quictls`) |
+| `src/quic_credentials_win.{h,cpp}` | **New** — Schannel credential bridge (PEM → PFX → CryptoAPI) |
+| `src/quic_session.{cpp,h}` | `_WIN32` path uses `TqQuicCredentialHolder` instead of `QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE` |
+| `README.md` | Windows x64 build + Schannel notes (partial) |
+
+**Current Windows verification:** key x64 targets build and exit 0 from `build-x64-quictls/bin/Release/`: `tcpquic_compress_test`, `tcpquic_tunnel_test`, `tcpquic_windows_relay_worker_test`, and `tcpquic_platform_socket_test`. Windows `quictls` loopback passes `off`, `zstd`, and `lz4` for both HTTP CONNECT and SOCKS5.
+
+**Remaining before final completion:** run Linux regression in a Linux environment (`scripts/test-tcpquic-proxy.sh`, `scripts/test-tcpquic-concurrent.sh`, and Linux unit tests), then run cross-platform interop if Linux/Windows hosts are available.
+
+### Task 9 status — Windows `quictls` loopback passes; Schannel remains a credential-hardening item
+
+MsQuic on Windows defaults to **Schannel**, which does **not** support Linux-style `QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE` or `QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE`. The current implementation therefore supports two Windows TLS modes:
+
+| Mode | Status | Notes |
+|------|--------|-------|
+| `-DTCPQUIC_WINDOWS_TLS=quictls` | **Validated** | Restores PEM/CA-file behavior; `scripts/test-tcpquic-proxy-windows.ps1` passes `off`, `zstd`, and `lz4` for both HTTP CONNECT and SOCKS5 loopback. |
+| default Schannel | **Blocked / hardening** | Credential bridge can find certs and private keys, but `ConfigurationOpen/LoadCredential` still fails with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`) on the current environment. |
+
+**Root causes and fixes completed during `quictls` debugging:**
+
+1. OpenSSL 4.0 rejected the original CA generation syntax; script now creates CSR + signs with explicit extension files.
+2. Test CA/server/client certificates now include proper CA constraints, SAN, and EKU (`serverAuth` / `clientAuth`).
+3. Windows `quictls` client currently uses `QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION` as a compatibility workaround; removing it still prevents a usable QUIC connection in this environment.
+4. The relay data-path failure was not TLS after handshake. Root cause: server-side `OPEN_OK` was sent with the tunnel callback still active, but `StartRelay()` immediately replaced the MsQuic stream callback. The later `OPEN_OK` `SEND_COMPLETE` was then delivered to the relay callback with a `TqTunnelSendContext*` client context, causing callback/context type mismatch. Fix: defer server relay start until `OPEN_OK` `SEND_COMPLETE` has been consumed by the tunnel callback.
+5. Windows relay now treats `QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN` as QUIC receive half-close only: it shuts down TCP send but keeps TCP receive alive so target responses can continue back to QUIC.
+6. Windows relay now flushes compressed output when `Compress(..., false)` produces no bytes and emits compressor end frames on TCP EOF before QUIC FIN. This fixes `zstd`/`lz4` small-request stalls.
+
+**Validated commands:**
+
+```powershell
+cmake --build build-x64-quictls --config Release --target tcpquic-proxy
+.\scripts\test-tcpquic-proxy-windows.ps1 -Bin ".\build-x64-quictls\bin\Release\tcpquic-proxy.exe" -TlsBackend quictls -Compress off -QuicPeerHost 127.0.0.1
+.\scripts\test-tcpquic-proxy-windows.ps1 -Bin ".\build-x64-quictls\bin\Release\tcpquic-proxy.exe" -TlsBackend quictls -Compress zstd -QuicPeerHost 127.0.0.1
+.\scripts\test-tcpquic-proxy-windows.ps1 -Bin ".\build-x64-quictls\bin\Release\tcpquic-proxy.exe" -TlsBackend quictls -Compress lz4 -QuicPeerHost 127.0.0.1
+```
+
+**Current Schannel credential findings:**
+
+- `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH`, `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`, and explicit `CurrentUser\MY` `CERT_CONTEXT` lookup were tried.
+- `CryptAcquireCertificatePrivateKey` confirms the generated CurrentUser cert has an accessible private key.
+- Server `LoadCredential` still fails with `0x80090331`, even after using `Microsoft Software Key Storage Provider`, RSA/SHA256, `DigitalSignature`, and `KeyEncipherment`.
+- Treat Schannel as an independent hardening track; do not block Windows IOCP relay completion on it.
+
+**Interop (Task 9 Step 3):** not attempted; requires `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` env — skip when unset.
+
+### Recommended next steps
+
+1. Push the Windows IOCP/quictls update and use it as the candidate commit for Linux validation.
+2. Run Linux regression in a Linux environment: unit tests, `scripts/test-tcpquic-proxy.sh`, and `scripts/test-tcpquic-concurrent.sh`.
+3. Continue Schannel credential hardening separately (`SEC_E_ALGORITHM_MISMATCH` at `LoadCredential`).
+4. Run Task 9 interop only when `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` hosts are available.
+
+---
+
 ## File Structure
 
 - Create `src/platform_socket.h`: cross-platform socket type, startup RAII, close/send/recv/shutdown, nonblocking, address conversion, socket options, and loopback socket pair declarations.
@@ -26,10 +121,16 @@
 - Modify `src/socks5_server.h/.cpp`, `src/http_connect_server.h/.cpp`, and `src/admin_http.h/.cpp`: replace POSIX calls, migrate listener socket atomics, and remove `dup()` handoff.
 - Modify `src/acl.h/.cpp`: include platform socket header and use platform address conversion.
 - Modify `src/tcp_write_queue.cpp`, `src/warmup.cpp`, and affected tests: use platform socket helpers.
-- Modify `src/quic_session.cpp` and `src/main.cpp`: handle `_isatty` and initialize `TqSocketStartup`.
-- Modify `README.md`: document Windows build, test, runtime, and interoperability commands.
+- Create `src/quic_credentials_win.h` / `src/quic_credentials_win.cpp`: Windows Schannel credential bridge (PEM → PFX → CryptoAPI; used when `QUIC_TLS_LIB=schannel`).
+- Create `scripts/test-tcpquic-proxy-windows.ps1`: Windows loopback validation (HTTP CONNECT + SOCKS5 over QUIC).
+- Modify `CMakeLists.txt`: `TCPQUIC_WINDOWS_TLS` option (`schannel` default, `quictls` optional).
+- Modify `src/quic_session.cpp` and `src/quic_session.h`: `_WIN32` credential path via `TqQuicCredentialHolder`.
+- Modify `src/main.cpp`: handle `_isatty`, initialize `TqSocketStartup`, `TqSocketHandle` in tunnel callbacks.
+- Modify `README.md`: document Windows x64 build, Schannel TLS constraints, test, runtime, and interoperability commands.
 
 ## Task 1: Add Platform Socket Layer on Linux
+
+> **Status: DONE** — `1bb1eb3` on `feature/windows-platform-support`
 
 **Files:**
 - Create: `src/platform_socket.h`
@@ -314,6 +415,8 @@ rtk git commit -m "feat: add platform socket layer"
 
 ## Task 2: Add Windows Socket Implementation and CMake Linkage
 
+> **Status: DONE** — `74f6fb6`
+
 **Files:**
 - Create: `src/platform_socket_win.cpp`
 - Modify: `src/CMakeLists.txt`
@@ -514,6 +617,8 @@ rtk git commit -m "build: add winsock platform socket implementation"
 ```
 
 ## Task 3: Migrate Shared Socket Types and Dialer
+
+> **Status: DONE** — `466553d`
 
 **Files:**
 - Modify: `src/tcp_dialer.h`
@@ -716,6 +821,8 @@ rtk git commit -m "refactor: migrate dialer and acl to platform sockets"
 
 ## Task 4: Migrate Tunnel, Relay API, and Socket Ownership
 
+> **Status: DONE** — `2339714`
+
 **Files:**
 - Modify: `src/relay.h`
 - Modify: `src/relay.cpp`
@@ -887,6 +994,8 @@ rtk git commit -m "refactor: move tunnel sockets to platform handles"
 ```
 
 ## Task 5: Migrate Admin, Warmup, Main Startup, and CMake Guards
+
+> **Status: DONE** — `93ced8a`
 
 **Files:**
 - Modify: `src/admin_http.h`
@@ -1071,6 +1180,8 @@ rtk git commit -m "refactor: finish shared socket migration"
 ```
 
 ## Task 6: Add Windows IOCP Relay Skeleton and Selection
+
+> **Status: DONE** — `73ac646`
 
 **Files:**
 - Create: `src/windows_relay_worker.h`
@@ -1391,6 +1502,8 @@ rtk git commit -m "feat: add windows relay backend skeleton"
 ```
 
 ## Task 7: Implement IOCP Relay Data Path
+
+> **Status: DONE** — `dd741ce`
 
 **Files:**
 - Modify: `src/windows_relay_worker.h`
@@ -1833,33 +1946,32 @@ rtk git commit -m "feat: implement windows iocp relay worker"
 
 ## Task 8: Windows Native Build and Unit Test Pass
 
+> **Status: IN PROGRESS** — build + x64 unit tests pass; changes uncommitted. See [Implementation Progress](#implementation-progress-updated-2026-06-09).
+
 **Files:**
-- Modify: `src/CMakeLists.txt`
-- Modify: `src/admin_http.cpp`
-- Modify: `src/http_connect_server.cpp`
-- Modify: `src/socks5_server.cpp`
-- Modify: `src/tcp_dialer.cpp`
-- Modify: `src/tcp_tunnel.cpp`
-- Modify: `src/tcp_write_queue.cpp`
-- Modify: `src/warmup.cpp`
+- Modify: `CMakeLists.txt` — `TCPQUIC_WINDOWS_TLS` option
+- Modify: `src/CMakeLists.txt` — `tcpquic_copy_msquic_runtime()`, `quic_credentials_win.cpp`, `crypt32`
+- Create: `src/quic_credentials_win.h`, `src/quic_credentials_win.cpp`
+- Modify: `src/quic_session.cpp`, `src/quic_session.h`
+- Modify: `src/main.cpp`, `src/thread_pool.cpp`
+- Modify: `src/unittest/thread_pool_test.cpp`, `src/unittest/tunnel_reaper_test.cpp`
+- Modify: `README.md` (partial — full Windows TLS docs completed in Task 9)
 
-- [ ] **Step 1: Run Windows build**
+- [x] **Step 1: Run Windows build**
 
-On Windows x64 Developer PowerShell:
+On Windows x64 Developer PowerShell (use `build-x64`, not Win32):
 
 ```powershell
-cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-win --target tcpquic-proxy
+cmake -S . -B build-x64 -A x64 -DLZ4_SOURCE_DIR="$PWD/third_party/lz4"
+cmake --build build-x64 --config Release --target tcpquic-proxy
 ```
 
-Expected: build succeeds. If it fails, fix only one of these concrete Windows migration issues and rerun this step before continuing: add missing `platform_socket.h`, replace a remaining socket `close` with `TqCloseSocket`, replace `inet_pton` with `TqInetPton`, replace `MSG_NOSIGNAL` sends with `TqSendFlags::NoSignal`, guard `fcntl` behind `!defined(_WIN32)`, or move a Linux-only test target behind `if(CMAKE_SYSTEM_NAME STREQUAL "Linux")`.
+Result: **pass**. Original plan used `build-win` + Ninja; MSVC `-A x64` multi-config generator is the validated path on this machine.
 
-- [ ] **Step 2: Build Windows unit tests**
-
-Run:
+- [x] **Step 2: Build Windows unit tests**
 
 ```powershell
-cmake --build build-win --target `
+cmake --build build-x64 --config Release --target `
   tcpquic_acl_test `
   tcpquic_control_test `
   tcpquic_compress_test `
@@ -1873,272 +1985,167 @@ cmake --build build-win --target `
   tcpquic_windows_relay_worker_test
 ```
 
-Expected: all listed targets build.
+Result: **pass** on x64. Also builds `tcpquic_tunnel_test`, `tcpquic_blocking_relay_demo_test`, `tcpquic_router_runtime_test`, `tcpquic_production_linkage_guard_test`, `tcpquic_tcp_write_queue_test`, `tcpquic_tuning_test`.
 
-- [ ] **Step 3: Run Windows unit tests**
+**Known issue:** `build-x86` (Win32) `tcpquic_thread_pool_test` crashes (`0xC0000005`). Out of scope for x64 target; do not use as primary CI directory.
 
-Run:
+- [x] **Step 3: Run Windows unit tests**
 
 ```powershell
-.\build-win\bin\Release\tcpquic_acl_test.exe
-.\build-win\bin\Release\tcpquic_control_test.exe
-.\build-win\bin\Release\tcpquic_compress_test.exe
-.\build-win\bin\Release\tcpquic_config_router_test.exe
-.\build-win\bin\Release\tcpquic_thread_pool_test.exe
-.\build-win\bin\Release\tcpquic_tunnel_reaper_test.exe
-.\build-win\bin\Release\tcpquic_http_connect_test.exe
-.\build-win\bin\Release\tcpquic_socks5_test.exe
-.\build-win\bin\Release\tcpquic_admin_http_test.exe
-.\build-win\bin\Release\tcpquic_platform_socket_test.exe
-.\build-win\bin\Release\tcpquic_windows_relay_worker_test.exe
+$bin = ".\build-x64\bin\Release"
+@(
+  tcpquic_acl_test, tcpquic_control_test, tcpquic_compress_test,
+  tcpquic_config_router_test, tcpquic_thread_pool_test, tcpquic_tunnel_reaper_test,
+  tcpquic_http_connect_test, tcpquic_socks5_test, tcpquic_admin_http_test,
+  tcpquic_platform_socket_test, tcpquic_windows_relay_worker_test
+) | ForEach-Object { & "$bin\$_.exe"; if ($LASTEXITCODE -ne 0) { throw "$_ failed" } }
 ```
 
-Expected: every executable exits with status 0.
+Result: **pass** — all 11 listed executables exit 0 on x64.
+
+**Fixes applied during this task:**
+
+| Issue | Fix |
+|-------|-----|
+| Test exes fail to start (`msquic.dll` not found) | `tcpquic_copy_msquic_runtime()` POST_BUILD on proxy + msquic-linked tests |
+| `tcpquic_thread_pool_test` used POSIX `socketpair` | Rewrote test to cover thread pool only |
+| WorkerLoop spurious wakeup | `if (Queue.empty()) continue;` after `wait` |
+| `main.cpp` tunnel callback type mismatch | `int fd` → `TqSocketHandle` |
+| Schannel rejects `CERTIFICATE_FILE` PEM paths | `quic_credentials_win` + `quic_session` Windows credential path |
 
 - [ ] **Step 4: Run Linux regression build**
 
-Run:
-
-```bash
-rtk cmake --build build --target tcpquic-proxy -j$(nproc)
-rtk cmake --build build --target tcpquic_acl_test tcpquic_admin_http_test tcpquic_compress_test tcpquic_config_router_test tcpquic_control_test tcpquic_http_connect_test tcpquic_router_runtime_test tcpquic_socks5_test tcpquic_tcp_write_queue_test tcpquic_thread_pool_test tcpquic_tuning_test tcpquic_tunnel_reaper_test tcpquic_tunnel_test -j$(nproc)
-```
-
-Expected: all listed targets build.
+Not re-run in this Windows session. Required before merge.
 
 - [ ] **Step 5: Run Linux unit regression**
 
-Run:
-
-```bash
-for t in build/bin/Release/tcpquic_*_test; do rtk "$t"; done
-```
-
-Expected: every test exits 0.
+Not re-run in this Windows session. Required before merge.
 
 - [ ] **Step 6: Commit**
 
-Run:
-
 ```bash
-rtk git add src CMakeLists.txt
-rtk git commit -m "build: pass windows native build and unit tests"
+git add CMakeLists.txt README.md src/
+git commit -m "build: pass windows native build and unit tests"
 ```
+
+Pending: commit the uncommitted Task 8 diff listed in [Implementation Progress](#implementation-progress-updated-2026-06-09).
 
 ## Task 9: End-to-End Windows and Interop Validation
 
+> **Status: BLOCKED** — loopback script drafted; server exits on Schannel credential load (`0x80090331`). See [Task 9 blocker](#task-9-blocker--windows-schannel--openssl-pem-credentials) in Implementation Progress.
+
 **Files:**
-- Create: `scripts/test-tcpquic-proxy-windows.ps1`
-- Modify: `README.md`
+- Create: `scripts/test-tcpquic-proxy-windows.ps1` — **draft exists, not committed**
+- Modify: `README.md` — partial Windows section added
+- Modify: `src/quic_credentials_win.cpp` — credential bridge still failing Schannel load
 
-- [ ] **Step 1: Add Windows loopback test script**
+- [x] **Step 1: Add Windows loopback test script**
 
-Create `scripts/test-tcpquic-proxy-windows.ps1`:
+`scripts/test-tcpquic-proxy-windows.ps1` exists locally with these additions beyond the original plan:
 
-```powershell
-param(
-  [string]$Bin = ".\build-win\bin\Release\tcpquic-proxy.exe",
-  [string]$Compress = "off"
-)
+- Default binary path: `.\build-x64\bin\Release\tcpquic-proxy.exe`
+- `Resolve-OpenSslPath` / `OPENSSL_BIN` for OpenSSL discovery
+- `Invoke-OpenSsl` helper (OpenSSL stderr must not terminate PowerShell)
+- `v3.ext` with `serverAuth` + `clientAuth` EKU on server/client leaf certs
+- `certutil -addstore -user Root` for CA trust (Schannel ignores `--quic-ca` PEM)
+- `curl.exe` exit-code checks after HTTP CONNECT and SOCKS5 probes
+- `finally` block removes CA from Root store and cleans temp work dir
 
-$ErrorActionPreference = "Stop"
-$Work = Join-Path $env:TEMP ("tcpquic-win-" + [Guid]::NewGuid().ToString("N"))
-New-Item -ItemType Directory -Path $Work | Out-Null
-
-try {
-  $CaKey = Join-Path $Work "ca.key"
-  $CaCrt = Join-Path $Work "ca.crt"
-  $ServerKey = Join-Path $Work "server.key"
-  $ServerCsr = Join-Path $Work "server.csr"
-  $ServerCrt = Join-Path $Work "server.crt"
-  $ClientKey = Join-Path $Work "client.key"
-  $ClientCsr = Join-Path $Work "client.csr"
-  $ClientCrt = Join-Path $Work "client.crt"
-
-  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=tcpquic-test-ca" -keyout $CaKey -out $CaCrt | Out-Null
-  openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout $ServerKey -out $ServerCsr | Out-Null
-  openssl x509 -req -in $ServerCsr -CA $CaCrt -CAkey $CaKey -CAcreateserial -days 1 -out $ServerCrt | Out-Null
-  openssl req -newkey rsa:2048 -nodes -subj "/CN=tcpquic-client" -keyout $ClientKey -out $ClientCsr | Out-Null
-  openssl x509 -req -in $ClientCsr -CA $CaCrt -CAkey $CaKey -CAcreateserial -days 1 -out $ClientCrt | Out-Null
-
-  $HttpPort = 18080
-  $QuicPort = 18443
-  $SocksPort = 11080
-  $ConnectPort = 18081
-
-  $Http = Start-Process -PassThru python -ArgumentList "-m", "http.server", "$HttpPort", "--bind", "127.0.0.1"
-  Start-Sleep -Seconds 1
-
-  $ServerArgs = @(
-    "server",
-    "--quic-listen", "127.0.0.1:$QuicPort",
-    "--quic-cert", $ServerCrt,
-    "--quic-key", $ServerKey,
-    "--quic-ca", $CaCrt,
-    "--allow-targets", "127.0.0.0/8",
-    "--compress", $Compress
-  )
-  $Server = Start-Process -PassThru $Bin -ArgumentList $ServerArgs
-  Start-Sleep -Seconds 1
-
-  $ClientArgs = @(
-    "client",
-    "--quic-peer", "127.0.0.1:$QuicPort",
-    "--quic-cert", $ClientCrt,
-    "--quic-key", $ClientKey,
-    "--quic-ca", $CaCrt,
-    "--socks-listen", "127.0.0.1:$SocksPort",
-    "--http-listen", "127.0.0.1:$ConnectPort",
-    "--compress", $Compress
-  )
-  $Client = Start-Process -PassThru $Bin -ArgumentList $ClientArgs
-  Start-Sleep -Seconds 2
-
-  curl.exe -f -x "http://127.0.0.1:$ConnectPort" --proxytunnel "http://127.0.0.1:$HttpPort/" | Out-Null
-  curl.exe -f --socks5-hostname "127.0.0.1:$SocksPort" "http://127.0.0.1:$HttpPort/" | Out-Null
-}
-finally {
-  if ($Client) { Stop-Process -Id $Client.Id -Force -ErrorAction SilentlyContinue }
-  if ($Server) { Stop-Process -Id $Server.Id -Force -ErrorAction SilentlyContinue }
-  if ($Http) { Stop-Process -Id $Http.Id -Force -ErrorAction SilentlyContinue }
-  Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
-}
-```
+Original plan snippet omitted EKU and CA store import — both are **required** for Schannel but **insufficient** alone; see blocker section.
 
 - [ ] **Step 2: Run Windows loopback validation**
 
-On Windows x64 Developer PowerShell:
-
 ```powershell
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress off
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress zstd
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress lz4
 ```
 
-Expected: all three commands exit 0.
+Result: **fail** on `-Compress off`. Server stderr:
+
+```text
+ConfigurationOpen/LoadCredential failed, 0x80090331
+```
+
+(`SEC_E_ALGORITHM_MISMATCH` — Schannel rejects OpenSSL-exported PFX private keys even with valid EKU.)
+
+Client never binds `:18081`; curl exits 7 (connection refused).
+
+**Prerequisite before Step 2 can pass:** resolve Schannel credential loading — see resolution options A/B/C in [Implementation Progress](#implementation-progress-updated-2026-06-09).
 
 - [ ] **Step 3: Run interop validation**
 
-Windows client to Linux server. Before running this, set `TCPQUIC_LINUX_SERVER` to the Linux server address and `TCPQUIC_ALLOWED_URL` to an HTTP URL allowed by that server ACL:
+Skipped — requires `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` and matching cert material. Document skip when env unset; run manually when cross-platform hosts are available.
 
-```powershell
-if ([string]::IsNullOrWhiteSpace($env:TCPQUIC_LINUX_SERVER)) { throw "TCPQUIC_LINUX_SERVER is required" }
-if ([string]::IsNullOrWhiteSpace($env:TCPQUIC_ALLOWED_URL)) { throw "TCPQUIC_ALLOWED_URL is required" }
-$Client = Start-Process -PassThru .\build-win\bin\Release\tcpquic-proxy.exe -ArgumentList @(
-  "client", "--quic-peer", "$env:TCPQUIC_LINUX_SERVER`:443",
-  "--quic-cert", "client.crt", "--quic-key", "client.key", "--quic-ca", "ca.crt",
-  "--socks-listen", "127.0.0.1:11080", "--http-listen", "127.0.0.1:18081",
-  "--compress", "off"
-)
-Start-Sleep -Seconds 2
-curl.exe -f --socks5-hostname 127.0.0.1:11080 "$env:TCPQUIC_ALLOWED_URL"
-Stop-Process -Id $Client.Id -Force
-```
-
-Linux client to Windows server. Before running this, export `TCPQUIC_WINDOWS_SERVER` to the Windows server address and `TCPQUIC_ALLOWED_URL` to an HTTP URL allowed by that server ACL:
-
-```bash
-[ -n "$TCPQUIC_WINDOWS_SERVER" ] || { echo "TCPQUIC_WINDOWS_SERVER is required" >&2; exit 1; }
-[ -n "$TCPQUIC_ALLOWED_URL" ] || { echo "TCPQUIC_ALLOWED_URL is required" >&2; exit 1; }
-rtk ./build/bin/Release/tcpquic-proxy client --quic-peer "${TCPQUIC_WINDOWS_SERVER}:443" --quic-cert client.crt --quic-key client.key --quic-ca ca.crt --socks-listen 127.0.0.1:11080 --http-listen 127.0.0.1:18081 --compress off &
-TCPQUIC_CLIENT_PID=$!
-sleep 2
-rtk curl -f --socks5-hostname 127.0.0.1:11080 "$TCPQUIC_ALLOWED_URL"
-kill "$TCPQUIC_CLIENT_PID"
-```
-
-Expected: curl receives the upstream response in both directions.
+Update binary paths from `build-win` to `build-x64` when running interop commands.
 
 - [ ] **Step 4: Document Windows commands**
 
-In `README.md`, add a Windows build section:
+README partially updated. Still needed after Schannel fix:
 
-````markdown
-### Windows 10/11 x64
-
-Install Visual Studio 2022 Build Tools with the MSVC C++ workload, CMake, Ninja, Git, OpenSSL, Python, and curl.
-
-```powershell
-git submodule update --init --recursive
-cmake -S . -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build-win --target tcpquic-proxy
-```
-
-Run the Windows loopback validation:
-
-```powershell
-.\scripts\test-tcpquic-proxy-windows.ps1 -Compress off
-.\scripts\test-tcpquic-proxy-windows.ps1 -Compress zstd
-.\scripts\test-tcpquic-proxy-windows.ps1 -Compress lz4
-```
-````
+- Schannel vs `quictls` trade-offs (`-DTCPQUIC_WINDOWS_TLS=quictls` needs Strawberry Perl)
+- PEM CLI args remain for Linux compatibility; on Schannel, leaf cert must have `serverAuth`/`clientAuth` EKU and CA must be in `CurrentUser\Root`
+- Loopback validation commands (three compress modes)
 
 - [ ] **Step 5: Commit**
 
-Run:
-
 ```bash
-rtk git add scripts/test-tcpquic-proxy-windows.ps1 README.md
-rtk git commit -m "test: add windows loopback validation"
+git add scripts/test-tcpquic-proxy-windows.ps1 README.md
+git commit -m "test: add windows loopback validation"
 ```
 
+Blocked on Step 2 passing.
+
 ## Task 10: Final Verification and Completion
+
+> **Status: NOT STARTED** — blocked on Task 9 Schannel credential fix.
 
 **Files:**
 - Modify only files required by final verification failures.
 
 - [ ] **Step 1: Run Linux full integration test**
 
-Run:
-
 ```bash
-rtk ./scripts/test-tcpquic-proxy.sh
+./scripts/test-tcpquic-proxy.sh
 ```
-
-Expected: script exits 0.
 
 - [ ] **Step 2: Run Linux concurrent test**
 
-Run:
-
 ```bash
-rtk ./scripts/test-tcpquic-concurrent.sh
+./scripts/test-tcpquic-concurrent.sh
 ```
-
-Expected: script exits 0.
 
 - [ ] **Step 3: Run Windows build and loopback tests one final time**
 
-On Windows x64 Developer PowerShell:
-
 ```powershell
-cmake --build build-win --target tcpquic-proxy
+cmake --build build-x64 --config Release --target tcpquic-proxy
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress off
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress zstd
 .\scripts\test-tcpquic-proxy-windows.ps1 -Compress lz4
 ```
 
-Expected: all commands exit 0.
-
 - [ ] **Step 4: Check git status**
 
-Run:
-
 ```bash
-rtk git status --short
+git status --short
 ```
 
-Expected: no output.
+Expected: no output (exclude build dirs from tracking).
 
 - [ ] **Step 5: Record final verification in the task handoff**
 
-In the final response for implementation, include the actual verification commands and pass/fail result, for example:
+Current partial verification state:
 
 ```text
 Verified:
-- Linux unit tests: `for t in build/bin/Release/tcpquic_*_test; do rtk "$t"; done` passed.
-- Linux integration: `rtk ./scripts/test-tcpquic-proxy.sh` passed.
-- Windows unit tests: `.\build-win\bin\Release\tcpquic_platform_socket_test.exe` and the other listed Windows test executables passed.
-- Windows loopback: `.\scripts\test-tcpquic-proxy-windows.ps1 -Compress off`, `zstd`, and `lz4` passed.
-- Interop: Windows client to Linux server and Linux client to Windows server curl checks passed.
+- Windows x64 build: cmake --build build-x64 --config Release --target tcpquic-proxy — PASS
+- Windows x64 unit tests (11 listed targets) — PASS
+- Windows loopback (off/zstd/lz4) — FAIL (Schannel 0x80090331 on server credential load)
+- Linux regression — NOT RUN this session
+- Interop — SKIPPED (env not configured)
+
+Outstanding:
+- Fix Schannel credential bridge or switch to quictls / Windows-native test certs
+- Commit Task 8 + Task 9
+- Re-run Linux integration + Windows loopback + interop
 ```
