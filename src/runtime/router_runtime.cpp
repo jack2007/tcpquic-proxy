@@ -336,6 +336,7 @@ bool SameBridgeActivePeer(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen == b.SocksListen &&
         a.HttpListen == b.HttpListen &&
         a.QuicConnections == b.QuicConnections &&
+        a.QuicReconnectIntervalMs == b.QuicReconnectIntervalMs &&
         a.Compress == b.Compress;
 }
 
@@ -344,6 +345,7 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen != b.SocksListen ||
         a.HttpListen != b.HttpListen ||
         a.QuicConnections != b.QuicConnections ||
+        a.QuicReconnectIntervalMs != b.QuicReconnectIntervalMs ||
         a.Compress != b.Compress;
 }
 

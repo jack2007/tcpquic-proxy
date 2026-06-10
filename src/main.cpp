@@ -92,11 +92,11 @@ public:
         });
 
         if (!runtime->Quic->EnsureAnyConnected()) {
-            err = "failed to connect QUIC client for " + peer.PeerId;
-            runtime->StopAll();
-            return false;
+            std::fprintf(stderr,
+                "tcpquic-proxy: peer %s has no connected QUIC connection; listeners remain closed until reconnect\n",
+                peer.PeerId.c_str());
         }
-        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err)) {
+        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
             runtime->StopAll();
             return false;
         }
@@ -205,10 +205,10 @@ private:
             return ApplyCurrentConnectionStateLocked(err, requireConnected);
         }
 
-        bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err) {
+        bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
             std::lock_guard<std::mutex> guard(ListenerMutex);
             AcceptingEnabled = true;
-            const bool applied = ApplyCurrentConnectionStateLocked(err, true);
+            const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
             if (!applied) {
                 AcceptingEnabled = false;
                 CloseListenersLocked();
@@ -338,10 +338,10 @@ struct TqSinglePeerClientRuntime {
         return ApplyCurrentConnectionStateLocked(err, requireConnected);
     }
 
-    bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err) {
+    bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
         std::lock_guard<std::mutex> guard(ListenerMutex);
         AcceptingEnabled = true;
-        const bool applied = ApplyCurrentConnectionStateLocked(err, true);
+        const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
         if (!applied) {
             AcceptingEnabled = false;
             CloseListenersLocked();
@@ -401,12 +401,11 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return 1;
     }
 
-    if (!quic.EnsureAnyConnected()) {
-        std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer at startup\n");
-        return 1;
-    }
-
     if (cfg.WarmupMb > 0) {
+        if (!quic.EnsureAnyConnected()) {
+            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
+            return 1;
+        }
         if (!TqRunClientWarmup(quic, cfg)) {
             std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
             return 1;
@@ -449,15 +448,12 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     });
 
     if (!quic.EnsureAnyConnected()) {
-        std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer at startup\n");
-        quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-        runtime->DisableAccepting();
-        runtime->Pool.Stop();
-        return 1;
+        std::fprintf(stderr,
+            "tcpquic-proxy: no connected QUIC peer at startup; listeners remain closed until reconnect\n");
     }
 
     std::string err;
-    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err)) {
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
         quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
         runtime->DisableAccepting();

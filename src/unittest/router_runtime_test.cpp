@@ -145,6 +145,21 @@ int main() {
         FakeAdapter adapter;
         TqRouterRuntime adapterRuntime(&adapter);
         TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-interval", "127.0.0.1:11017"));
+        cfg.Peers[0].QuicReconnectIntervalMs = 3000;
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 120;
+        cfg.Peers[0].QuicReconnectIntervalMs = 5000;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 121;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-interval") return 122;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-interval") return 123;
+        if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-interval") return 124;
+        if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-interval") return 125;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
         cfg.Peers.push_back(Peer("agent-a", "127.0.0.1:11001"));
         std::string err;
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 75;
