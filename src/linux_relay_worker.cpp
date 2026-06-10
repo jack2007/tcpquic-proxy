@@ -6,6 +6,7 @@
 #include <chrono>
 #include <climits>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <thread>
@@ -50,18 +51,6 @@ struct TqLinuxRelayWorker::RelayState {
           EnableQuicSends(registration.EnableQuicSends),
           Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {}
 };
-
-namespace {
-
-bool TqSetNonBlocking(int fd) {
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0) {
-        return false;
-    }
-    return ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
-}
-
-} // namespace
 
 TqLinuxRelayWorker::TqLinuxRelayWorker(const TqLinuxRelayWorkerConfig& config)
     : Config(config) {}
@@ -469,10 +458,11 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     }
     operation->RelayId = relay->Id;
     operation->Views = std::move(views);
+    operation->QuicBuffers = std::move(quicBuffers);
 
     const QUIC_STATUS status = relay->Stream->Send(
-        quicBuffers.data(),
-        static_cast<uint32_t>(quicBuffers.size()),
+        operation->QuicBuffers.data(),
+        static_cast<uint32_t>(operation->QuicBuffers.size()),
         QUIC_SEND_FLAG_NONE,
         operation);
     if (QUIC_FAILED(status)) {
@@ -486,8 +476,13 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
 }
 
 void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
+    if (context == nullptr) {
+        return;
+    }
     auto* operation = static_cast<TqLinuxRelaySendOperation*>(context);
-    if (operation == nullptr) {
+    if (operation->Magic != TqLinuxRelaySendOperation::MagicValue) {
+        // Late tunnel-phase send completion after relay replaced the stream callback.
+        std::free(context);
         return;
     }
     auto relay = FindRelayById(operation->RelayId);

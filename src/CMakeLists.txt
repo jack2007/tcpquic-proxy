@@ -133,6 +133,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/linux_relay_worker_queue_test.cpp
         linux_relay_worker.cpp
         linux_relay_buffer_pool.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     target_include_directories(tcpquic_linux_relay_worker_queue_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -146,6 +147,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         linux_relay_worker.cpp
         linux_relay_buffer_pool.cpp
         compress.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     target_include_directories(tcpquic_linux_relay_worker_io_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -161,6 +163,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tuning.cpp
         linux_relay_worker.cpp
         linux_relay_buffer_pool.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     target_include_directories(tcpquic_relay_backend_selection_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -276,6 +279,7 @@ add_executable(tcpquic_blocking_relay_demo_test
     relay_blocking_demo.cpp
     tcp_write_queue.cpp
     tuning.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
 )
 target_include_directories(tcpquic_blocking_relay_demo_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

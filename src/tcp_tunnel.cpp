@@ -282,25 +282,38 @@ public:
             }
         }
 
+        MsQuicStream* stream = nullptr;
+        TqSocketHandle tcpFd = TqInvalidSocket;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (Stream == nullptr || ShutdownComplete || StreamShutdownQueued || RelayStarted) {
+                return false;
+            }
+            stream = Stream;
+            tcpFd = TcpFd;
+        }
+
+        if (!TqRelayStart(
+                tcpFd,
+                stream,
+                Compressor.get(),
+                Decompressor.get(),
+                &RelayHandle,
+                Config.Tuning,
+                algo)) {
+            return false;
+        }
+
         {
             std::lock_guard<std::mutex> guard(Lock);
             if (Stream == nullptr || ShutdownComplete || StreamShutdownQueued) {
+                TqRelayStop(&RelayHandle);
                 return false;
             }
-            if (!TqRelayStart(
-                    TcpFd,
-                    Stream,
-                    Compressor.get(),
-                    Decompressor.get(),
-                    &RelayHandle,
-                    Config.Tuning,
-                    algo)) {
-                return false;
-            }
-
             RelayStarted = true;
         }
         TqTunnelReaper::Instance().Register(this);
+        StateChanged.notify_all();
         return true;
     }
 
@@ -320,6 +333,30 @@ public:
         }
     }
 
+    void ReleaseTcpWithoutClose() {
+        TcpFd = TqInvalidSocket;
+    }
+
+    bool FinishClientOpenAndStartRelay(uint8_t flags) {
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingClientRelay = true;
+            PendingClientRelayFlags = flags;
+        }
+        if (StartPendingClientRelay()) {
+            return true;
+        }
+
+        std::unique_lock<std::mutex> guard(Lock);
+        if (!StateChanged.wait_for(
+                guard,
+                TqOpenTimeout,
+                [this] { return RelayStarted || ShutdownComplete; })) {
+            return false;
+        }
+        return RelayStarted;
+    }
+
 private:
     bool ShouldDeletePreRelayLocked() const {
         return SelfDeleteOnShutdown &&
@@ -337,7 +374,25 @@ private:
             TqTunnelSendContext::Delete(
                 static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
             if (Role == TqTunnelRole::ServerOpen) {
-                StartPendingServerRelay();
+                bool shutdownAfterFailure = false;
+                {
+                    std::lock_guard<std::mutex> guard(Lock);
+                    if (PendingOpenFailureShutdown) {
+                        PendingOpenFailureShutdown = false;
+                        shutdownAfterFailure = true;
+                    }
+                }
+                if (shutdownAfterFailure) {
+                    ShutdownReceiveAfterOpenFailure();
+                } else {
+                    StartPendingServerRelay();
+                }
+            } else if (Role == TqTunnelRole::ClientOpen) {
+                {
+                    std::lock_guard<std::mutex> guard(Lock);
+                    OpenSendComplete = true;
+                }
+                StartPendingClientRelay();
             }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
@@ -517,8 +572,10 @@ private:
             ArmSelfDeleteOnShutdown();
             return;
         }
-        // Graceful FIN so the client receives OPEN_FAIL before the stream ends.
-        ShutdownReceiveAfterOpenFailure();
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingOpenFailureShutdown = true;
+        }
     }
 
     void ShutdownReceiveAfterOpenFailure() {
@@ -536,15 +593,18 @@ private:
             return false;
         }
 
-        QUIC_STATUS status = QUIC_STATUS_INVALID_STATE;
+        MsQuicStream* stream = nullptr;
         {
             std::lock_guard<std::mutex> guard(Lock);
             if (Stream == nullptr || ShutdownComplete || StreamShutdownQueued) {
                 TqTunnelSendContext::Delete(sendContext);
                 return false;
             }
-            status = Stream->Send(&sendContext->Buffer, 1, flags, sendContext);
+            stream = Stream;
         }
+
+        const QUIC_STATUS status =
+            stream->Send(&sendContext->Buffer, 1, flags, sendContext);
         if (QUIC_FAILED(status)) {
             TqTunnelSendContext::Delete(sendContext);
             return false;
@@ -581,6 +641,24 @@ private:
         }
     }
 
+    bool StartPendingClientRelay() {
+        uint8_t flags = 0;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!PendingClientRelay || !OpenSendComplete || RelayStarted ||
+                ShutdownComplete || StreamShutdownQueued) {
+                return RelayStarted;
+            }
+            flags = PendingClientRelayFlags;
+            PendingClientRelay = false;
+        }
+        const bool relayOk = StartRelay(flags);
+        if (relayOk) {
+            StateChanged.notify_all();
+        }
+        return relayOk;
+    }
+
     TqTunnelRole Role;
     MsQuicStream* Stream;
     TqSocketHandle TcpFd{TqInvalidSocket};
@@ -605,6 +683,10 @@ private:
     bool PendingServerOpen{false};
     bool PendingServerRelay{false};
     uint8_t PendingServerRelayFlags{0};
+    bool PendingClientRelay{false};
+    uint8_t PendingClientRelayFlags{0};
+    bool OpenSendComplete{false};
+    bool PendingOpenFailureShutdown{false};
     std::atomic<bool> ServerOpenDispatched{false};
 };
 
@@ -634,13 +716,11 @@ TqTunnelStartResult TqStartClientTunnel(
     }
 
     if (conn == nullptr || !conn->IsValid()) {
-        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
     TqOpenRequest openReq{};
     if (!TqBuildOpenRequest(req, cfg, openReq)) {
-        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -651,7 +731,6 @@ TqTunnelStartResult TqStartClientTunnel(
         cfg,
         nullptr);
     if (context == nullptr) {
-        TqCloseSocket(clientTcpFd);
         return {false, TqOpenError::Internal};
     }
 
@@ -663,7 +742,6 @@ TqTunnelStartResult TqStartClientTunnel(
         context);
     if (stream == nullptr || !stream->IsValid()) {
         delete stream;
-        context->CloseTcp();
         delete context;
         return {false, TqOpenError::Internal};
     }
@@ -671,7 +749,7 @@ TqTunnelStartResult TqStartClientTunnel(
     context->SetStream(stream);
     if (!context->SendOpenRequest(openReq)) {
         std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
-        context->CloseTcp();
+        context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
         return {false, TqOpenError::Internal};
     }
@@ -681,18 +759,18 @@ TqTunnelStartResult TqStartClientTunnel(
         std::fprintf(stderr,
             "tcpquic-proxy: client tunnel open response failed (error=%u)\n",
             static_cast<unsigned>(response.Error));
-        context->CloseTcp();
+        context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
         return {false, response.Error};
     }
     if (!response.Ok) {
-        context->CloseTcp();
+        context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
         return {false, response.Error};
     }
 
-    if (!context->StartRelay(openReq.Flags)) {
-        context->CloseTcp();
+    if (!context->FinishClientOpenAndStartRelay(openReq.Flags)) {
+        context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
         return {false, TqOpenError::Internal};
     }
