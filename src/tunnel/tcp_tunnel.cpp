@@ -345,6 +345,11 @@ public:
     }
 
     void CloseTcp() {
+        std::lock_guard<std::mutex> guard(Lock);
+        CloseTcpLocked();
+    }
+
+    void CloseTcpLocked() {
         if (TqSocketValid(TcpFd)) {
             if (Role == TqTunnelRole::ClientOpen && TraceIngressProto != 0) {
                 const TqTraceProxyProto proto =
@@ -362,7 +367,16 @@ public:
     }
 
     void ReleaseTcpWithoutClose() {
+        std::lock_guard<std::mutex> guard(Lock);
         TcpFd = TqInvalidSocket;
+    }
+
+    bool ReleaseClientOpenOwnerAndMaybeDelete() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (Role == TqTunnelRole::ClientOpen) {
+            ClientOpenOwnerActive = false;
+        }
+        return ShouldDeletePreRelayLocked();
     }
 
     bool FinishClientOpenAndStartRelay(uint8_t flags) {
@@ -426,8 +440,8 @@ public:
                 shutdownStream = true;
                 StreamShutdownQueued = true;
             }
+            CloseTcpLocked();
         }
-        CloseTcp();
         StateChanged.notify_all();
 
         if (stopRelay) {
@@ -447,6 +461,7 @@ private:
     bool ShouldDeletePreRelayLocked() const {
         return SelfDeleteOnShutdown &&
             !RelayStarted &&
+            !ClientOpenOwnerActive &&
             !PendingServerOpen &&
             (ShutdownComplete || (!StreamShutdownQueued && Stream == nullptr));
     }
@@ -635,22 +650,20 @@ private:
             SendOpenFailure(err);
             return;
         }
-        bool closeAfterAbort = false;
         {
             std::lock_guard<std::mutex> guard(Lock);
             TcpFd = dial.Fd;
-            closeAfterAbort = AbortedByConnection;
-        }
-        if (closeAfterAbort) {
-            CloseTcp();
-            return;
-        }
-        if (TraceTunnelId != 0) {
-            TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
-            TraceTargetTcpOpen = true;
+            if (AbortedByConnection || ShutdownComplete) {
+                CloseTcpLocked();
+                return;
+            }
+            if (TraceTunnelId != 0) {
+                TraceTargetTcpOpen = true;
+                TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
+            }
         }
 
-        if (IsShutdownComplete()) {
+        if (IsAbortedOrShutdown()) {
             CloseTcp();
             return;
         }
@@ -658,22 +671,31 @@ private:
         std::vector<uint8_t> encoded;
         const uint32_t connId =
             QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
+        if (IsAbortedOrShutdown()) {
+            CloseTcp();
+            return;
+        }
         const bool encodedOk = TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded);
         const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
         if (!sendOk) {
-            SendOpenFailure(TqOpenError::Internal);
+            if (!IsAbortedOrShutdown()) {
+                SendOpenFailure(TqOpenError::Internal);
+            }
             return;
         }
         {
             std::lock_guard<std::mutex> guard(Lock);
+            if (AbortedByConnection || ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
             PendingServerRelay = true;
             PendingServerRelayFlags = req.Flags;
         }
     }
 
-    bool IsShutdownComplete() {
+    bool IsAbortedOrShutdown() {
         std::lock_guard<std::mutex> guard(Lock);
-        return ShutdownComplete;
+        return AbortedByConnection || ShutdownComplete || StreamShutdownQueued;
     }
 
     void ServerOpenFinished() {
@@ -690,6 +712,10 @@ private:
 
     void SendOpenFailure(TqOpenError error) {
         CloseTcp();
+        if (IsAbortedOrShutdown()) {
+            ArmSelfDeleteOnShutdown();
+            return;
+        }
         std::vector<uint8_t> encoded;
         if (!TqEncodeOpenResponse(TqOpenResponse{false, error, 0}, encoded) ||
             !SendBytes(encoded, QUIC_SEND_FLAG_FIN)) {
@@ -840,6 +866,7 @@ private:
     bool PendingOpenFailureShutdown{false};
     bool RegisteredWithConnection{false};
     bool AbortedByConnection{false};
+    bool ClientOpenOwnerActive{Role == TqTunnelRole::ClientOpen};
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
@@ -908,6 +935,11 @@ TqTunnelStartResult TqStartClientTunnel(
 
     context->SetStream(stream);
     context->RegisterWithConnectionIfNeeded();
+    auto releaseClientOpenOwner = [context]() {
+        if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
+            delete context;
+        }
+    };
 
     const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
     const uint32_t connId = TqLookupClientTraceConnId(conn);
@@ -919,6 +951,7 @@ TqTunnelStartResult TqStartClientTunnel(
         std::fprintf(stderr, "tcpquic-proxy: client tunnel failed to send open request\n");
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, TqOpenError::Internal, tunnelId};
     }
 
@@ -929,20 +962,24 @@ TqTunnelStartResult TqStartClientTunnel(
             static_cast<unsigned>(response.Error));
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, response.Error, tunnelId};
     }
     if (!response.Ok) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, response.Error, tunnelId};
     }
 
     if (!context->FinishClientOpenAndStartRelay(openReq.Flags)) {
         context->ReleaseTcpWithoutClose();
         context->ArmSelfDeleteOnShutdown();
+        releaseClientOpenOwner();
         return {false, TqOpenError::Internal, tunnelId};
     }
 
+    releaseClientOpenOwner();
     return {true, TqOpenError::Ok, tunnelId};
 }
 
@@ -1010,5 +1047,46 @@ TqTunnelContext* TqCreateTestRegisteredTunnel(
 
 void TqDestroyTestRegisteredTunnel(TqTunnelContext* context) {
     delete context;
+}
+
+TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
+    TqConfig cfg;
+    auto onComplete = [destroyCount]() {
+        if (destroyCount != nullptr) {
+            ++(*destroyCount);
+        }
+    };
+    return new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        TqInvalidSocket,
+        cfg,
+        nullptr,
+        nullptr,
+        std::move(onComplete));
+}
+
+void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context) {
+    if (context != nullptr) {
+        context->ArmSelfDeleteOnShutdown();
+    }
+}
+
+void TqTestDispatchShutdownComplete(TqTunnelContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    (void)TqTunnelContext::Callback(nullptr, context, &event);
+}
+
+void TqReleaseTestClientOpenOwner(TqTunnelContext* context) {
+    if (context == nullptr) {
+        return;
+    }
+    if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
+        delete context;
+    }
 }
 #endif

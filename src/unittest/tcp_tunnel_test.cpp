@@ -13,6 +13,10 @@ TqTunnelContext* TqCreateTestRegisteredTunnel(
     MsQuicConnection* connection,
     TqSocketHandle tcpFd);
 void TqDestroyTestRegisteredTunnel(TqTunnelContext* context);
+TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount);
+void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context);
+void TqTestDispatchShutdownComplete(TqTunnelContext* context);
+void TqReleaseTestClientOpenOwner(TqTunnelContext* context);
 #endif
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -338,6 +342,20 @@ static int TestConnectionAbortClosesTunnelTcp() {
     return 0;
 }
 
+static int TestClientOpenOwnerDefersShutdownCompleteDelete() {
+    unsigned destroyCount = 0;
+    TqTunnelContext* ctx = TqCreateTestClientOpenOwnedTunnel(&destroyCount);
+    if (ctx == nullptr) return 225;
+
+    TqTestArmSelfDeleteOnShutdown(ctx);
+    TqTestDispatchShutdownComplete(ctx);
+    if (destroyCount != 0) return 226;
+
+    TqReleaseTestClientOpenOwner(ctx);
+    if (destroyCount != 1) return 227;
+    return 0;
+}
+
 int main() {
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
@@ -346,6 +364,7 @@ int main() {
     if (int rc = TestTunnelRegistryAbortCallbackCanUnregisterItself()) return rc;
     if (int rc = TestTunnelRegistryAbortCallbackCanRegisterSameContext()) return rc;
     if (int rc = TestConnectionAbortClosesTunnelTcp()) return rc;
+    if (int rc = TestClientOpenOwnerDefersShutdownCompleteDelete()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;
