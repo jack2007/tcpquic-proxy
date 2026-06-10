@@ -8,10 +8,12 @@
 struct MsQuicConnection;
 struct TqTunnelContext;
 
+#if defined(TCPQUIC_TUNNEL_TESTING)
 TqTunnelContext* TqCreateTestRegisteredTunnel(
     MsQuicConnection* connection,
     TqSocketHandle tcpFd);
 void TqDestroyTestRegisteredTunnel(TqTunnelContext* context);
+#endif
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     (void)connection;

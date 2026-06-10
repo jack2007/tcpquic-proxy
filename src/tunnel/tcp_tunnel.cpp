@@ -413,18 +413,34 @@ public:
     }
 
     void AbortForConnectionShutdown() {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool stopRelay = false;
         {
             std::lock_guard<std::mutex> guard(Lock);
             AbortedByConnection = true;
             SelfDeleteOnShutdown = true;
+            stopRelay = RelayStarted;
             if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
                 StreamShutdownQueued = true;
-                (void)Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
             }
         }
-        TqRelayStop(&RelayHandle);
         CloseTcp();
         StateChanged.notify_all();
+
+        if (stopRelay) {
+            if (shutdownStream) {
+                (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            }
+            TqRelayStop(&RelayHandle);
+            return;
+        }
+
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
     }
 
 private:
@@ -974,6 +990,7 @@ void TqHandleServerPeerStream(
     context->RegisterWithConnectionIfNeeded();
 }
 
+#if defined(TCPQUIC_TUNNEL_TESTING)
 TqTunnelContext* TqCreateTestRegisteredTunnel(
     MsQuicConnection* connection,
     TqSocketHandle tcpFd) {
@@ -994,3 +1011,4 @@ TqTunnelContext* TqCreateTestRegisteredTunnel(
 void TqDestroyTestRegisteredTunnel(TqTunnelContext* context) {
     delete context;
 }
+#endif

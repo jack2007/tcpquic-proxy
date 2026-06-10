@@ -284,7 +284,7 @@ target_link_libraries(tcpquic_tunnel_test ${TCPQUIC_TEST_LIBS} Threads::Threads 
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_tunnel_test msquic_platform)
 endif()
-target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS})
+target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
