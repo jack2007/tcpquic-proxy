@@ -110,7 +110,7 @@ cmake -S . -B build-x64 -A x64 -DLZ4_SOURCE_DIR="$PWD/third_party/lz4"
 cmake --build build-x64 --config Release --target tcpquic-proxy
 ```
 
-Windows uses msquic Schannel by default. PEM leaf certificates must include `serverAuth` and `clientAuth` EKU, and the CA in `--quic-ca` must be imported into the CurrentUser `Root` store (the loopback script does this automatically). Optional `-DTCPQUIC_WINDOWS_TLS=quictls` with Strawberry Perl restores Linux-style PEM CA loading.
+Windows uses msquic Schannel by default, but Schannel-backed QUIC requires OS TLS 1.3 support. Per `third_party/msquic/docs/Platforms.md`, this means Windows Server 2022, Windows 11, or the latest Windows Insider Preview builds; ordinary Windows 10 releases do not provide Schannel TLS 1.3 cipher suites by default and can fail `ConfigurationLoadCredential` / `AcquireCredentialsHandleW` with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`). On Windows 10, prefer `-DTCPQUIC_WINDOWS_TLS=quictls` with Strawberry Perl, which restores Linux-style PEM CA loading. For Schannel-capable systems, PEM leaf certificates must include `serverAuth` and `clientAuth` EKU, and the CA in `--quic-ca` must be imported into the CurrentUser `Root` store (the loopback script does this automatically).
 
 Run the Windows loopback validation:
 

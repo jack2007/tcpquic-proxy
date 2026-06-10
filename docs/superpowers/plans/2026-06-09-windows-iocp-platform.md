@@ -60,14 +60,14 @@ Changes included in the current Windows IOCP/quictls update:
 
 **Remaining before final completion:** run Linux regression in a Linux environment (`scripts/test-tcpquic-proxy.sh`, `scripts/test-tcpquic-concurrent.sh`, and Linux unit tests), then run cross-platform interop if Linux/Windows hosts are available.
 
-### Task 9 status — Windows `quictls` loopback passes; Schannel remains a credential-hardening item
+### Task 9 status — Windows `quictls` loopback passes; Schannel requires OS TLS 1.3 support
 
 MsQuic on Windows defaults to **Schannel**, which does **not** support Linux-style `QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE` or `QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE`. The current implementation therefore supports two Windows TLS modes:
 
 | Mode | Status | Notes |
 |------|--------|-------|
 | `-DTCPQUIC_WINDOWS_TLS=quictls` | **Validated** | Restores PEM/CA-file behavior; `scripts/test-tcpquic-proxy-windows.ps1` passes `off`, `zstd`, and `lz4` for both HTTP CONNECT and SOCKS5 loopback. |
-| default Schannel | **Blocked / hardening** | Credential bridge can find certs and private keys, but `ConfigurationOpen/LoadCredential` still fails with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`) on the current environment. |
+| default Schannel | **Platform-limited on Windows 10** | MsQuic requires Schannel TLS 1.3 support for QUIC. Per `third_party/msquic/docs/Platforms.md`, Schannel mode requires Windows Server 2022, Windows 11, or the latest Windows Insider Preview builds; ordinary Windows 10 releases can fail credential loading with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`). |
 
 **Root causes and fixes completed during `quictls` debugging:**
 
@@ -89,12 +89,12 @@ cmake --build build-x64-quictls --config Release --target tcpquic-proxy
 
 **Current Schannel credential findings:**
 
-- `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH`, `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`, and explicit `CurrentUser\MY` `CERT_CONTEXT` lookup were tried.
-- `CryptAcquireCertificatePrivateKey` confirms the generated CurrentUser cert has an accessible private key.
-- Server `LoadCredential` still fails with `0x80090331`, even after using `Microsoft Software Key Storage Provider`, RSA/SHA256, `DigitalSignature`, and `KeyEncipherment`.
-- MsQuic's built-in `quicsample` was used to isolate this from `tcpquic-proxy`: building `third_party/msquic` with `-DQUIC_BUILD_TOOLS=ON -DQUIC_TLS_LIB=schannel`, generating the exact certificate recommended in `src/tools/sample/sample.c`, then running `quicsample.exe -server -cert_hash:<thumbprint>` still fails at `ConfigurationLoadCredential` with `0x80090331`.
-- The same machine reports no TLS 1.3 Schannel cipher suites from `Get-TlsCipherSuite | Where-Object { $_.Name -like '*TLS_AES*' -or $_.Name -like '*TLS_CHACHA*' }`. MsQuic's Schannel backend disables all protocols except TLS 1.3 for QUIC, so this points to an OS/Schannel capability/configuration limitation rather than a `tcpquic-proxy` credential bridge bug.
-- Treat Schannel as an independent hardening track; do not block Windows IOCP relay completion on it.
+- Root cause: ordinary Windows 10 releases do not provide Schannel TLS 1.3 support by default. QUIC requires TLS 1.3, and MsQuic's Schannel backend disables every protocol except TLS 1.3 before calling `AcquireCredentialsHandleW`.
+- MsQuic documents this platform requirement in `third_party/msquic/docs/Platforms.md`: Schannel mode requires Windows Server 2022, Windows 11, or the latest Windows Insider Preview builds for Schannel TLS 1.3 support.
+- The current Windows 10 22H2 machine reports no TLS 1.3 Schannel cipher suites from `Get-TlsCipherSuite | Where-Object { $_.Name -like '*TLS_AES*' -or $_.Name -like '*TLS_CHACHA*' }`.
+- MsQuic's built-in `quicsample` was used to isolate this from `tcpquic-proxy`: building `third_party/msquic` with `-DQUIC_BUILD_TOOLS=ON -DQUIC_TLS_LIB=schannel`, generating the exact certificate recommended in `src/tools/sample/sample.c`, then running `quicsample.exe -server -cert_hash:<thumbprint>` still fails at `ConfigurationLoadCredential` with `0x80090331` (`SEC_E_ALGORITHM_MISMATCH`).
+- `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH`, `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`, and explicit `CurrentUser\MY` `CERT_CONTEXT` lookup were tried; `CryptAcquireCertificatePrivateKey` confirms the generated CurrentUser cert has an accessible private key, so this is not a `tcpquic-proxy` credential bridge bug.
+- On Windows 10, use `-DTCPQUIC_WINDOWS_TLS=quictls` for validation and runtime. Re-test Schannel only on Windows Server 2022, Windows 11, or an Insider build with Schannel TLS 1.3 cipher suites available.
 
 **Interop (Task 9 Step 3):** not attempted; requires `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` env — skip when unset.
 
@@ -102,7 +102,7 @@ cmake --build build-x64-quictls --config Release --target tcpquic-proxy
 
 1. Push the Windows IOCP/quictls update and use it as the candidate commit for Linux validation.
 2. Run Linux regression in a Linux environment: unit tests, `scripts/test-tcpquic-proxy.sh`, and `scripts/test-tcpquic-concurrent.sh`.
-3. Continue Schannel credential hardening separately (`SEC_E_ALGORITHM_MISMATCH` at `LoadCredential`).
+3. Keep `quictls` as the Windows 10 validation/runtime path; only re-test Schannel on Windows Server 2022, Windows 11, or a Windows Insider build with Schannel TLS 1.3 support.
 4. Run Task 9 interop only when `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` hosts are available.
 
 ---
