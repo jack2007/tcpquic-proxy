@@ -76,6 +76,34 @@ PY
     fail_with_logs "timed out waiting for $name on $host:$port"
 }
 
+wait_for_open_port() {
+    local host=$1
+    local port=$2
+    local deadline=$((SECONDS + 5))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
+            exec 3>&- 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.2
+    done
+    fail_with_logs "timed out waiting for open port on $host:$port"
+}
+
+wait_for_closed_port() {
+    local host=$1
+    local port=$2
+    local deadline=$((SECONDS + 2))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if (exec 3<>"/dev/tcp/${host}/${port}") 2>/dev/null; then
+            exec 3>&- 2>/dev/null || true
+            fail_with_logs "port is open on $host:$port"
+        fi
+        sleep 0.2
+    done
+    return 0
+}
+
 wait_log() {
     local file=$1
     local pattern=$2
@@ -251,6 +279,20 @@ start_client() {
     echo "$!"
 }
 
+start_configured_client() {
+    local config_file=$1
+    local log_file=$2
+
+    "$BIN" client \
+        --client-config "$config_file" \
+        --quic-cert "$TMP_DIR/client.crt" \
+        --quic-key "$TMP_DIR/client.key" \
+        --quic-ca "$TMP_DIR/ca.crt" \
+        --compress off \
+        >"$log_file" 2>&1 &
+    echo "$!"
+}
+
 require_cmd openssl
 require_cmd python3
 require_cmd curl
@@ -313,10 +355,26 @@ python3 -m http.server 15001 --bind 127.0.0.1 --directory "$TMP_DIR/www" \
 HTTP_PID=$!
 wait_tcp 127.0.0.1 15001 "target HTTP server"
 
+HEALTHY_PEER_HTTP_PORT=8080
+HEALTHY_PEER_SOCKS_PORT=1080
+DOWN_PEER_HTTP_PORT=8082
+DOWN_PEER_SOCKS_PORT=11882
+DOWN_PEER_QUIC_PORT=4444
+while (exec 3<>"/dev/tcp/127.0.0.1/${DOWN_PEER_QUIC_PORT}") 2>/dev/null; do
+    exec 3>&- 2>/dev/null || true
+    DOWN_PEER_QUIC_PORT=$((DOWN_PEER_QUIC_PORT + 1))
+done
+
 read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin")
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
 
-CLIENT_PID=$(start_client 4433 8080 1080 off "$TMP_DIR/proxy-client.log")
+cat > "$TMP_DIR/client-config.json" <<EOF
+{"version":1,"peers":[{"peer_id":"healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","quic_reconnect_interval_ms":1000,"compress":"off"}]}
+EOF
+
+CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")
+wait_for_closed_port 127.0.0.1 "$DOWN_PEER_SOCKS_PORT"
+wait_for_open_port 127.0.0.1 "$HEALTHY_PEER_SOCKS_PORT"
 wait_tcp 127.0.0.1 8080 "HTTP CONNECT listener"
 wait_tcp 127.0.0.1 1080 "SOCKS5 listener"
 
