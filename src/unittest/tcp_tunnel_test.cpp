@@ -91,17 +91,26 @@ void TqTraceTargetTcpClosed(uint64_t tunnelId) {
     (void)tunnelId;
 }
 #include <cassert>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 static unsigned g_abort_a = 0;
 static unsigned g_abort_b = 0;
+static unsigned g_duplicate_abort_a = 0;
+static unsigned g_duplicate_abort_b = 0;
 static unsigned g_reentrant_abort = 0;
 static uint32_t g_reentrant_aborted = 0;
 static MsQuicConnection* g_reentrant_conn = nullptr;
 
 static void CountAbortA(void*) { ++g_abort_a; }
 static void CountAbortB(void*) { ++g_abort_b; }
+static void CountDuplicateAbortA(void*) { ++g_duplicate_abort_a; }
+static void CountDuplicateAbortB(void*) { ++g_duplicate_abort_b; }
 static void CountReentrantAbort(void*) {
     ++g_reentrant_abort;
     g_reentrant_aborted = TqAbortConnectionTunnels(g_reentrant_conn);
@@ -144,9 +153,105 @@ static int TestTunnelRegistryRemovesBeforeCallbacks() {
     return 0;
 }
 
+static int TestTunnelRegistryDuplicateRegistrationIsSingleEntry() {
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x3001));
+    int ctx = 1;
+    g_duplicate_abort_a = 0;
+    g_duplicate_abort_b = 0;
+
+    TqRegisterConnectionTunnel(conn, &ctx, CountDuplicateAbortA);
+    TqRegisterConnectionTunnel(conn, &ctx, CountDuplicateAbortB);
+    const uint32_t aborted = TqAbortConnectionTunnels(conn);
+
+    if (aborted != 1) return 208;
+    if (g_duplicate_abort_a + g_duplicate_abort_b != 1) return 209;
+    return 0;
+}
+
+struct TqAbortWaitProbe {
+    std::mutex Lock;
+    std::condition_variable Wakeup;
+    bool AbortEntered{false};
+    bool UnregisterStarted{false};
+    bool ReleaseAbort{false};
+    bool UnregisterReturnedBeforeRelease{false};
+    std::atomic<bool> UnregisterReturned{false};
+};
+
+static void BlockingAbort(void* context) {
+    auto* probe = static_cast<TqAbortWaitProbe*>(context);
+    {
+        std::lock_guard<std::mutex> guard(probe->Lock);
+        probe->AbortEntered = true;
+    }
+    probe->Wakeup.notify_all();
+
+    std::unique_lock<std::mutex> guard(probe->Lock);
+    probe->Wakeup.wait(guard, [probe] { return probe->UnregisterStarted; });
+    guard.unlock();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    probe->UnregisterReturnedBeforeRelease =
+        probe->UnregisterReturned.load(std::memory_order_acquire);
+
+    guard.lock();
+    probe->Wakeup.wait(guard, [probe] { return probe->ReleaseAbort; });
+}
+
+static int TestTunnelRegistryUnregisterWaitsForInFlightAbort() {
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x4001));
+    TqAbortWaitProbe probe;
+
+    TqRegisterConnectionTunnel(conn, &probe, BlockingAbort);
+
+    std::thread abortThread([conn] {
+        (void)TqAbortConnectionTunnels(conn);
+    });
+
+    {
+        std::unique_lock<std::mutex> guard(probe.Lock);
+        if (!probe.Wakeup.wait_for(
+                guard,
+                std::chrono::seconds(2),
+                [&probe] { return probe.AbortEntered; })) {
+            probe.ReleaseAbort = true;
+            probe.Wakeup.notify_all();
+            abortThread.join();
+            return 210;
+        }
+    }
+
+    std::thread unregisterThread([conn, &probe] {
+        {
+            std::lock_guard<std::mutex> guard(probe.Lock);
+            probe.UnregisterStarted = true;
+        }
+        probe.Wakeup.notify_all();
+        TqUnregisterConnectionTunnel(conn, &probe);
+        probe.UnregisterReturned.store(true, std::memory_order_release);
+        probe.Wakeup.notify_all();
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    {
+        std::lock_guard<std::mutex> guard(probe.Lock);
+        probe.ReleaseAbort = true;
+    }
+    probe.Wakeup.notify_all();
+
+    abortThread.join();
+    unregisterThread.join();
+
+    if (probe.UnregisterReturnedBeforeRelease) return 211;
+    if (!probe.UnregisterReturned.load(std::memory_order_acquire)) return 212;
+    return 0;
+}
+
 int main() {
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;
+    if (int rc = TestTunnelRegistryDuplicateRegistrationIsSingleEntry()) return rc;
+    if (int rc = TestTunnelRegistryUnregisterWaitsForInFlightAbort()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;
