@@ -50,6 +50,8 @@ wait_log() {
 mkdir -p "$TMP_DIR"
 build_if_missing
 pkill -9 -f "$BIN" 2>/dev/null || true
+pkill -9 -f "127.0.0.1:17001" 2>/dev/null || true
+pkill -9 -f "ThreadingHTTPServer.*17001" 2>/dev/null || true
 sleep 0.5
 
 openssl req -x509 -newkey rsa:2048 -nodes \

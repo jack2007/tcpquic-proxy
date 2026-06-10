@@ -93,10 +93,13 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 ```bash
 git submodule update --init --recursive
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DLZ4_SOURCE_DIR="$PWD/third_party/lz4" \
   -DCMAKE_C_COMPILER=/usr/bin/gcc10-gcc \
   -DCMAKE_CXX_COMPILER=/usr/bin/gcc10-g++
 cmake --build build --target tcpquic-proxy -j$(nproc)
 ```
+
+若 CMake 缓存中 `LZ4_SOURCE_DIR` 不正确，请删除 `build/` 后重新配置，或始终传入 `-DLZ4_SOURCE_DIR`。
 
 产物：`build/bin/Release/tcpquic-proxy`
 
@@ -175,6 +178,17 @@ done
 # 128 隧道 + 8 条 QUIC 连接 + lz4
 TUNNELS=128 QUIC_CONNECTIONS=8 COMPRESS=lz4 ./scripts/test-tcpquic-concurrent.sh
 ```
+
+### 双机冒烟（DGX / 直连链路）
+
+在对端可 SSH 的前提下，于本机构建二进制后运行：
+
+```bash
+./scripts/test-tcpquic-proxy-dgx.sh
+TUNNELS=100 COMPRESS=lz4 ./scripts/test-tcpquic-proxy-dgx.sh
+```
+
+默认对端 `jack@169.254.59.196`，本机出口 `169.254.250.230`；可通过 `PEER`、`TARGET`、`BIND` 覆盖。2026-06-10 Linux 验证记录见 [`docs/linux-verification-2026-06-10.md`](docs/linux-verification-2026-06-10.md)。
 
 ### 性能基线
 

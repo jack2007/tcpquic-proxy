@@ -62,8 +62,12 @@ struct TqLinuxRelayRegistrationResult {
 };
 
 struct TqLinuxRelaySendOperation {
+    static constexpr uint64_t MagicValue = 0x5451524c59534e44ULL; // 'TQRLYSND'
+
+    uint64_t Magic{MagicValue};
     uint64_t RelayId{0};
     std::vector<TqBufferView> Views;
+    std::vector<QUIC_BUFFER> QuicBuffers;
 };
 
 struct TqLinuxRelayWorkerSnapshot {

@@ -51,14 +51,18 @@ public:
 
         runtime->Pool = std::make_unique<TqThreadPool>(peerCfg.HandshakeThreads);
         runtime->Pool->Start();
-        TunnelStartFn startTunnel = [quic = runtime->Quic.get(), peerCfg](const TunnelRequest& req, TqSocketHandle fd) {
-            if (!quic->EnsureConnected()) {
-                std::fprintf(stderr, "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n", peerCfg.QuicPeer.c_str());
-                return TqTunnelStartResult{false, TqOpenError::Internal};
-            }
-            MsQuicConnection* conn = quic->PickConnection();
-            if (conn == nullptr) {
-                return TqTunnelStartResult{false, TqOpenError::Internal};
+        TunnelStartFn startTunnel = [runtime = runtime.get(), peerCfg](const TunnelRequest& req, TqSocketHandle fd) {
+            MsQuicConnection* conn = nullptr;
+            {
+                std::lock_guard<std::mutex> guard(runtime->TunnelStartMutex);
+                if (!runtime->Quic->EnsureConnected()) {
+                    std::fprintf(stderr, "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n", peerCfg.QuicPeer.c_str());
+                    return TqTunnelStartResult{false, TqOpenError::Internal};
+                }
+                conn = runtime->Quic->PickConnection();
+                if (conn == nullptr) {
+                    return TqTunnelStartResult{false, TqOpenError::Internal};
+                }
             }
             return TqStartClientTunnel(conn, req, fd, peerCfg);
         };
@@ -128,6 +132,7 @@ public:
 private:
     struct PeerRuntime {
         TqConfig Config;
+        std::mutex TunnelStartMutex;
         std::unique_ptr<QuicClientSession> Quic;
         std::unique_ptr<TqThreadPool> Pool;
         std::unique_ptr<TqSocks5Server> Socks;
@@ -184,14 +189,19 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         }
     }
 
-    TunnelStartFn startTunnel = [&quic, &cfg](const TunnelRequest& req, TqSocketHandle fd) {
-        if (!quic.EnsureConnected()) {
-            std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
-            return TqTunnelStartResult{false, TqOpenError::Internal};
-        }
-        MsQuicConnection* conn = quic.PickConnection();
-        if (conn == nullptr) {
-            return TqTunnelStartResult{false, TqOpenError::Internal};
+    std::mutex clientTunnelStartMutex;
+    TunnelStartFn startTunnel = [&quic, &cfg, &clientTunnelStartMutex](const TunnelRequest& req, TqSocketHandle fd) {
+        MsQuicConnection* conn = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(clientTunnelStartMutex);
+            if (!quic.EnsureConnected()) {
+                std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
+                return TqTunnelStartResult{false, TqOpenError::Internal};
+            }
+            conn = quic.PickConnection();
+            if (conn == nullptr) {
+                return TqTunnelStartResult{false, TqOpenError::Internal};
+            }
         }
         return TqStartClientTunnel(conn, req, fd, cfg);
     };

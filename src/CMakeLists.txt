@@ -149,6 +149,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/linux_relay_worker_queue_test.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/linux_relay_buffer_pool.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_linux_relay_worker_queue_test)
     target_link_libraries(tcpquic_linux_relay_worker_queue_test Threads::Threads)
@@ -160,6 +161,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/linux_relay_worker.cpp
         tunnel/linux_relay_buffer_pool.cpp
         protocol/compress.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_linux_relay_worker_io_test)
     target_link_libraries(tcpquic_linux_relay_worker_io_test Threads::Threads ${TCPQUIC_TEST_LIBS})
@@ -173,6 +175,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         config/tuning.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/linux_relay_buffer_pool.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_relay_backend_selection_test)
     target_link_libraries(tcpquic_relay_backend_selection_test Threads::Threads inc warnings msquic logging base_link)

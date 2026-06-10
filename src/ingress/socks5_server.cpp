@@ -291,13 +291,14 @@ void TqHandleSocks5Client(TqSocketHandle clientFd, const TunnelStartFn& onTunnel
 
     TqTuneTcpForThroughput(clientFd);
 
-    if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
+    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
+    if (!result.Ok) {
+        (void)TqSendSocks5Reply(clientFd, TqSocks5RepForOpenError(result.Error));
         TqCloseSocket(clientFd);
         return;
     }
 
-    const TqTunnelStartResult result = onTunnel(tunnel, clientFd);
-    if (!result.Ok) {
+    if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
         TqCloseSocket(clientFd);
         return;
     }

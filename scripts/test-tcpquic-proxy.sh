@@ -362,9 +362,9 @@ status=$(http_connect_status 127.0.0.1 8080 127.0.0.1 15001)
 
 read -r NEG_SERVER_PID NEG_SERVER_STDIN_FD < <(start_server 4434 "10.0.0.0/8" off "$TMP_DIR/neg-server.log" "$TMP_DIR/neg-server.stdin")
 wait_log "$TMP_DIR/neg-server.log" "QUIC server listening" "restrictive server"
-NEG_CLIENT_PID=$(start_client 4434 8081 1081 off "$TMP_DIR/neg-client.log")
+NEG_CLIENT_PID=$(start_client 4434 8081 11881 off "$TMP_DIR/neg-client.log")
 wait_tcp 127.0.0.1 8081 "negative HTTP listener"
-wait_tcp 127.0.0.1 1081 "negative SOCKS5 listener"
+wait_tcp 127.0.0.1 11881 "negative SOCKS5 listener"
 
 status=$(http_connect_status 127.0.0.1 8081 127.0.0.1 15001)
 [ "$status" = "403" ] || fail_with_logs "ACL deny expected HTTP 403, got $status"
@@ -376,7 +376,7 @@ status=$(http_connect_status 127.0.0.1 8080 127.0.0.1 "$REFUSED_PORT")
 [ "$status" = "502" ] || fail_with_logs "TCP refused expected HTTP 502, got $status"
 
 log "testing SOCKS5 negative paths"
-rep=$(socks5_connect_rep 127.0.0.1 1081 127.0.0.1 15001)
+rep=$(socks5_connect_rep 127.0.0.1 11881 127.0.0.1 15001)
 [ "$rep" = "2" ] || fail_with_logs "ACL deny expected SOCKS5 REP 0x02, got $rep"
 
 rep=$(socks5_connect_rep 127.0.0.1 1080 "tcpquic-nonexistent.invalid" 80)
