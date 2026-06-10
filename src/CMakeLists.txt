@@ -32,6 +32,22 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+set(TCPQUIC_SOURCE_INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/acl
+    ${CMAKE_CURRENT_SOURCE_DIR}/config
+    ${CMAKE_CURRENT_SOURCE_DIR}/protocol
+    ${CMAKE_CURRENT_SOURCE_DIR}/platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/ingress
+    ${CMAKE_CURRENT_SOURCE_DIR}/tunnel
+    ${CMAKE_CURRENT_SOURCE_DIR}/runtime
+    ${MSQUIC_SOURCE_DIR}/src/inc
+)
+
+function(tcpquic_target_include_dirs target)
+    target_include_directories(${target} PRIVATE ${TCPQUIC_SOURCE_INCLUDE_DIRS})
+endfunction()
+
 set(TCPQUIC_PLATFORM_SOURCES)
 if(WIN32)
     list(APPEND TCPQUIC_PLATFORM_SOURCES platform_socket_win.cpp)
@@ -85,7 +101,7 @@ if(WIN32)
     target_link_libraries(tcpquic-proxy PRIVATE ws2_32 crypt32)
 endif()
 
-target_include_directories(tcpquic-proxy PRIVATE ${MSQUIC_SOURCE_DIR}/src/inc)
+tcpquic_target_include_dirs(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4)
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
 
@@ -105,7 +121,7 @@ add_executable(tcpquic_tuning_test
     acl.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_tuning_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_tuning_test)
 set_property(TARGET tcpquic_tuning_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tuning_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -114,7 +130,7 @@ add_executable(tcpquic_tcp_write_queue_test
     tcp_write_queue.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_tcp_write_queue_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_tcp_write_queue_test)
 target_link_libraries(tcpquic_tcp_write_queue_test Threads::Threads)
 set_property(TARGET tcpquic_tcp_write_queue_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tcp_write_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -125,7 +141,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/linux_relay_buffer_pool_test.cpp
         linux_relay_buffer_pool.cpp
     )
-    target_include_directories(tcpquic_linux_relay_buffer_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    tcpquic_target_include_dirs(tcpquic_linux_relay_buffer_pool_test)
     set_property(TARGET tcpquic_linux_relay_buffer_pool_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_buffer_pool_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -134,9 +150,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         linux_relay_worker.cpp
         linux_relay_buffer_pool.cpp
     )
-    target_include_directories(tcpquic_linux_relay_worker_queue_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${MSQUIC_SOURCE_DIR}/src/inc)
+    tcpquic_target_include_dirs(tcpquic_linux_relay_worker_queue_test)
     target_link_libraries(tcpquic_linux_relay_worker_queue_test Threads::Threads)
     set_property(TARGET tcpquic_linux_relay_worker_queue_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_worker_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -147,9 +161,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         linux_relay_buffer_pool.cpp
         compress.cpp
     )
-    target_include_directories(tcpquic_linux_relay_worker_io_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${MSQUIC_SOURCE_DIR}/src/inc)
+    tcpquic_target_include_dirs(tcpquic_linux_relay_worker_io_test)
     target_link_libraries(tcpquic_linux_relay_worker_io_test Threads::Threads ${TCPQUIC_TEST_LIBS})
     target_compile_definitions(tcpquic_linux_relay_worker_io_test PRIVATE ${TCPQUIC_TEST_DEFS})
     set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
@@ -162,9 +174,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         linux_relay_worker.cpp
         linux_relay_buffer_pool.cpp
     )
-    target_include_directories(tcpquic_relay_backend_selection_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${MSQUIC_SOURCE_DIR}/src/inc)
+    tcpquic_target_include_dirs(tcpquic_relay_backend_selection_test)
     target_link_libraries(tcpquic_relay_backend_selection_test Threads::Threads inc warnings msquic logging base_link)
     target_compile_options(tcpquic_relay_backend_selection_test PRIVATE -UNDEBUG)
     set_property(TARGET tcpquic_relay_backend_selection_test PROPERTY FOLDER "tools")
@@ -182,7 +192,7 @@ add_executable(tcpquic_thread_pool_test
     unittest/thread_pool_test.cpp
     thread_pool.cpp
 )
-target_include_directories(tcpquic_thread_pool_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_thread_pool_test)
 target_link_libraries(tcpquic_thread_pool_test Threads::Threads)
 set_property(TARGET tcpquic_thread_pool_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_thread_pool_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -191,7 +201,7 @@ add_executable(tcpquic_tunnel_reaper_test
     unittest/tunnel_reaper_test.cpp
     tunnel_reaper.cpp
 )
-target_include_directories(tcpquic_tunnel_reaper_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_tunnel_reaper_test)
 target_link_libraries(tcpquic_tunnel_reaper_test Threads::Threads)
 set_property(TARGET tcpquic_tunnel_reaper_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_reaper_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -200,7 +210,7 @@ add_executable(tcpquic_control_test
     unittest/control_protocol_test.cpp
     control_protocol.cpp
 )
-target_include_directories(tcpquic_control_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_control_test)
 set_property(TARGET tcpquic_control_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_control_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -209,7 +219,7 @@ add_executable(tcpquic_acl_test
     acl.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_acl_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_acl_test)
 set_property(TARGET tcpquic_acl_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_acl_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -220,7 +230,7 @@ add_executable(tcpquic_config_router_test
     acl.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_config_router_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_config_router_test)
 set_property(TARGET tcpquic_config_router_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_config_router_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -228,7 +238,10 @@ add_executable(tcpquic_compress_test
     unittest/compress_test.cpp
     compress.cpp
 )
-target_include_directories(tcpquic_compress_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${TCPQUIC_TEST_INCLUDES})
+tcpquic_target_include_dirs(tcpquic_compress_test)
+if(TCPQUIC_TEST_INCLUDES)
+    target_include_directories(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
+endif()
 target_link_libraries(tcpquic_compress_test ${TCPQUIC_TEST_LIBS})
 target_compile_definitions(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_compress_test PROPERTY FOLDER "tools")
@@ -259,10 +272,10 @@ if(WIN32)
     )
 endif()
 add_executable(tcpquic_tunnel_test ${TCPQUIC_TUNNEL_TEST_SOURCES})
-target_include_directories(tcpquic_tunnel_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MSQUIC_SOURCE_DIR}/src/inc
-    ${TCPQUIC_TEST_INCLUDES})
+tcpquic_target_include_dirs(tcpquic_tunnel_test)
+if(TCPQUIC_TEST_INCLUDES)
+    target_include_directories(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
+endif()
 target_link_libraries(tcpquic_tunnel_test ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_tunnel_test msquic_platform)
@@ -277,9 +290,7 @@ add_executable(tcpquic_blocking_relay_demo_test
     tcp_write_queue.cpp
     tuning.cpp
 )
-target_include_directories(tcpquic_blocking_relay_demo_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MSQUIC_SOURCE_DIR}/src/inc)
+tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
 target_link_libraries(tcpquic_blocking_relay_demo_test Threads::Threads inc warnings msquic logging base_link)
 set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -290,9 +301,7 @@ add_executable(tcpquic_http_connect_test
     control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
-target_include_directories(tcpquic_http_connect_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MSQUIC_SOURCE_DIR}/src/inc)
+tcpquic_target_include_dirs(tcpquic_http_connect_test)
 target_link_libraries(tcpquic_http_connect_test Threads::Threads)
 set_property(TARGET tcpquic_http_connect_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_http_connect_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -303,9 +312,7 @@ add_executable(tcpquic_socks5_test
     control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
-target_include_directories(tcpquic_socks5_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MSQUIC_SOURCE_DIR}/src/inc)
+tcpquic_target_include_dirs(tcpquic_socks5_test)
 target_link_libraries(tcpquic_socks5_test Threads::Threads)
 set_property(TARGET tcpquic_socks5_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_socks5_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -315,7 +322,7 @@ add_executable(tcpquic_admin_http_test
     admin_http.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_admin_http_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_admin_http_test)
 target_link_libraries(tcpquic_admin_http_test Threads::Threads)
 if(WIN32)
     target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -341,9 +348,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES})
-target_include_directories(tcpquic_router_runtime_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${MSQUIC_SOURCE_DIR}/src/inc)
+tcpquic_target_include_dirs(tcpquic_router_runtime_test)
 target_link_libraries(tcpquic_router_runtime_test Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_router_runtime_test msquic_platform)
@@ -361,7 +366,7 @@ add_executable(tcpquic_platform_socket_test
     unittest/platform_socket_test.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
-target_include_directories(tcpquic_platform_socket_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+tcpquic_target_include_dirs(tcpquic_platform_socket_test)
 set_property(TARGET tcpquic_platform_socket_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_platform_socket_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(WIN32)
@@ -376,9 +381,7 @@ if(WIN32)
         windows_relay_worker.cpp
         platform_socket_win.cpp
     )
-    target_include_directories(tcpquic_windows_relay_worker_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${MSQUIC_SOURCE_DIR}/src/inc)
+    tcpquic_target_include_dirs(tcpquic_windows_relay_worker_test)
     target_link_libraries(tcpquic_windows_relay_worker_test ws2_32 inc warnings msquic logging base_link)
     target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
