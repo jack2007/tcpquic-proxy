@@ -96,7 +96,7 @@ public:
             runtime->StopAll();
             return false;
         }
-        if (!runtime->ApplyCurrentConnectionState(err, true)) {
+        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err)) {
             runtime->StopAll();
             return false;
         }
@@ -155,6 +155,7 @@ private:
         std::unique_ptr<TqSocks5Server> Socks;
         std::unique_ptr<TqHttpConnectServer> Http;
         TunnelStartFn StartTunnel;
+        bool AcceptingEnabled{false};
 
         ~PeerRuntime() { StopAll(); }
 
@@ -194,11 +195,26 @@ private:
 
         bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
             std::lock_guard<std::mutex> guard(ListenerMutex);
+            return ApplyCurrentConnectionStateLocked(err, requireConnected);
+        }
+
+        bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err) {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            AcceptingEnabled = true;
+            const bool applied = ApplyCurrentConnectionStateLocked(err, true);
+            if (!applied) {
+                AcceptingEnabled = false;
+                CloseListenersLocked();
+            }
+            return applied;
+        }
+
+        bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
             const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
-            if (connectedCount == 0) {
+            if (!AcceptingEnabled || connectedCount == 0) {
                 CloseListenersLocked();
                 if (requireConnected) {
-                    err = "no connected QUIC connection";
+                    err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
                     return false;
                 }
                 return true;
@@ -222,12 +238,18 @@ private:
             CloseListenersLocked();
         }
 
+        void DisableAccepting() {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            AcceptingEnabled = false;
+            CloseListenersLocked();
+        }
+
         void StopAccepting() {
-            CloseListeners();
+            DisableAccepting();
         }
 
         void StopAll() {
-            CloseListeners();
+            DisableAccepting();
             if (Pool) {
                 Pool->Stop();
                 Pool.reset();
@@ -260,7 +282,7 @@ struct TqSinglePeerClientRuntime {
         : Config(config), Quic(&quic), Pool(config.HandshakeThreads) {}
 
     ~TqSinglePeerClientRuntime() {
-        CloseListeners();
+        DisableAccepting();
         Pool.Stop();
     }
 
@@ -306,11 +328,26 @@ struct TqSinglePeerClientRuntime {
 
     bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
         std::lock_guard<std::mutex> guard(ListenerMutex);
+        return ApplyCurrentConnectionStateLocked(err, requireConnected);
+    }
+
+    bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err) {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = true;
+        const bool applied = ApplyCurrentConnectionStateLocked(err, true);
+        if (!applied) {
+            AcceptingEnabled = false;
+            CloseListenersLocked();
+        }
+        return applied;
+    }
+
+    bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
         const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
-        if (connectedCount == 0) {
+        if (!AcceptingEnabled || connectedCount == 0) {
             CloseListenersLocked();
             if (requireConnected) {
-                err = "no connected QUIC connection";
+                err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
                 return false;
             }
             return true;
@@ -334,6 +371,12 @@ struct TqSinglePeerClientRuntime {
         CloseListenersLocked();
     }
 
+    void DisableAccepting() {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = false;
+        CloseListenersLocked();
+    }
+
     TqConfig Config;
     QuicClientSession* Quic{nullptr};
     TqThreadPool Pool;
@@ -342,6 +385,7 @@ struct TqSinglePeerClientRuntime {
     TunnelStartFn StartTunnel;
     std::unique_ptr<TqSocks5Server> Socks;
     std::unique_ptr<TqHttpConnectServer> Http;
+    bool AcceptingEnabled{false};
 };
 
 int RunSinglePeerClient(const TqConfig& cfg) {
@@ -400,16 +444,16 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     if (!quic.EnsureAnyConnected()) {
         std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer at startup\n");
         quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-        runtime->CloseListeners();
+        runtime->DisableAccepting();
         runtime->Pool.Stop();
         return 1;
     }
 
     std::string err;
-    if (!runtime->ApplyCurrentConnectionState(err, true)) {
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
         quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-        runtime->CloseListeners();
+        runtime->DisableAccepting();
         runtime->Pool.Stop();
         return 1;
     }
