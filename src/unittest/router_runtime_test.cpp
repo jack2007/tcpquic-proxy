@@ -10,6 +10,7 @@ public:
     std::vector<std::string> Stopped;
     std::vector<std::string> Drained;
     uint32_t FailStarts{0};
+    uint32_t ConnectedConnections{0};
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
@@ -27,6 +28,14 @@ public:
 
     void DrainPeer(const std::string& peerId, uint32_t) override {
         Drained.push_back(peerId);
+    }
+
+    bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
+        (void)peerId;
+        out.ConnectionCount = 4;
+        out.ConnectedConnections = ConnectedConnections;
+        out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
+        return true;
     }
 };
 
@@ -56,6 +65,19 @@ static TqHttpRequest Request(const std::string& method, const std::string& path,
 }
 
 int main() {
+    {
+        FakeAdapter adapter;
+        adapter.ConnectedConnections = 2;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-metrics", "127.0.0.1:11013"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 106;
+        std::string metrics = adapterRuntime.MetricsJson();
+        if (metrics.find("\"connection_count\":4") == std::string::npos) return 107;
+        if (metrics.find("\"connected_connections\":2") == std::string::npos) return 108;
+        if (metrics.find("\"state\":\"healthy\"") == std::string::npos) return 109;
+    }
     {
         FakeAdapter adapter;
         adapter.FailStarts = 1;

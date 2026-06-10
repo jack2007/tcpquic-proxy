@@ -17,6 +17,7 @@ struct TqPeerMetrics {
     std::string HttpListen;
     std::string State{"starting"};
     uint32_t ConnectionCount{0};
+    uint32_t ConnectedConnections{0};
     uint64_t ActiveStreams{0};
     uint64_t TotalStreams{0};
     uint64_t Reconnects{0};

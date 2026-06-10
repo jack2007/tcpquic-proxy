@@ -73,6 +73,7 @@ void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
     out << ',';
     AppendJsonString(out, "state", peer.State);
     out << ",\"connection_count\":" << peer.ConnectionCount;
+    out << ",\"connected_connections\":" << peer.ConnectedConnections;
     out << ",\"active_streams\":" << peer.ActiveStreams;
     out << ",\"total_streams\":" << peer.TotalStreams;
     out << ",\"reconnects\":" << peer.Reconnects;
@@ -456,6 +457,7 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
             TqPeerMetrics live;
             if (Adapter->SnapshotPeerMetrics(item.first, live)) {
                 peer.ConnectionCount = live.ConnectionCount;
+                peer.ConnectedConnections = live.ConnectedConnections;
                 peer.ActiveStreams = live.ActiveStreams;
                 peer.TotalStreams = live.TotalStreams;
                 peer.Reconnects = live.Reconnects;
