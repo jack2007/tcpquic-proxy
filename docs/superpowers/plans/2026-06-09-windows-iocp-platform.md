@@ -92,6 +92,8 @@ cmake --build build-x64-quictls --config Release --target tcpquic-proxy
 - `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH`, `QUIC_CREDENTIAL_TYPE_CERTIFICATE_HASH_STORE`, and explicit `CurrentUser\MY` `CERT_CONTEXT` lookup were tried.
 - `CryptAcquireCertificatePrivateKey` confirms the generated CurrentUser cert has an accessible private key.
 - Server `LoadCredential` still fails with `0x80090331`, even after using `Microsoft Software Key Storage Provider`, RSA/SHA256, `DigitalSignature`, and `KeyEncipherment`.
+- MsQuic's built-in `quicsample` was used to isolate this from `tcpquic-proxy`: building `third_party/msquic` with `-DQUIC_BUILD_TOOLS=ON -DQUIC_TLS_LIB=schannel`, generating the exact certificate recommended in `src/tools/sample/sample.c`, then running `quicsample.exe -server -cert_hash:<thumbprint>` still fails at `ConfigurationLoadCredential` with `0x80090331`.
+- The same machine reports no TLS 1.3 Schannel cipher suites from `Get-TlsCipherSuite | Where-Object { $_.Name -like '*TLS_AES*' -or $_.Name -like '*TLS_CHACHA*' }`. MsQuic's Schannel backend disables all protocols except TLS 1.3 for QUIC, so this points to an OS/Schannel capability/configuration limitation rather than a `tcpquic-proxy` credential bridge bug.
 - Treat Schannel as an independent hardening track; do not block Windows IOCP relay completion on it.
 
 **Interop (Task 9 Step 3):** not attempted; requires `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` env — skip when unset.
