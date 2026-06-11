@@ -403,3 +403,45 @@ malloc_printerr("corrupted double-linked list")
 | relay 单元测试 | PASS |
 
 独立 bench 吞吐仍以 `dgx-msquic-vs-proxy-bench.sh` 为准；perf 尾 curl 仅作采样窗口内参考。
+
+---
+
+## Phase 4 DGX 验证结果（2026-06-11）
+
+Deferred receive view（`QuicReceiveView` + `StreamReceiveComplete`）+ `StreamMultiReceiveEnabled` 完整 bench 与 perf 复测。
+
+- 时间：2026-06-11 23:22–23:27
+- 代码：`016ae01`
+- 节点：169.254.250.230 ↔ 169.254.59.196（`enp1s0f0np0`，无时延 LAN）
+- Perf 摘要：`docs/dgx-perf-profile-phase4/`
+- 吞吐 bench：`/tmp/dgx-msquic-vs-proxy-phase4-20260611-232155.md`
+
+### 吞吐（30s bench + 25s perf 尾 curl）
+
+| 指标 | Phase 3 Rerun | **Phase 4** |
+|------|---------------|-------------|
+| 裸 TCP | 28.18 Gbps | **18.52 Gbps** |
+| proxy-1x1 | **11.36 Gbps** | **5.23 Gbps** |
+| proxy / 裸 TCP | 40.3% | **28.2%** |
+| proxy-16×16 | — | **16.19 Gbps** |
+| proxy-4×16 | — | **19.61 Gbps** |
+| perf 尾 curl | 1.42 GB/s | **0.99 GB/s** |
+
+### Perf 热点变化
+
+| 热点 / 指标 | Phase 3 Rerun | **Phase 4** |
+|-------------|---------------|-------------|
+| client `CopyQuicReceiveBatch` / receive `memcpy` | ~3.6% | **未进 Top** |
+| client `aes_gcm_dec` | 32.6% | **~0.25%** |
+| client `FlushDeferredQuicReceives` | — | **~0.01%** |
+| server buffer 池 `ldadd8` | ~5% 量级 | **~22.8%** |
+| server `DrainTcpReadable` | 9.3% | **~7.6%** |
+| client core dump（perf 期间） | 无 | **无** |
+
+### 结论
+
+1. **零拷贝 receive 生效**：`CopyQuicReceiveBatchToEvent` / receive 侧 `memcpy` 从 client 热点消失，符合 Phase 4 设计目标。
+2. **单流吞吐回退**：proxy-1x1 从 Phase 3 Rerun 的 11.36 Gbps 降至 5.23 Gbps；归一化比值 40.3% → 28.2%，不能全归因于裸 TCP 波动（18.5 vs 28.2 Gbps）。
+3. **多流仍可用**：16×16 / 4×16 达 16–20 Gbps，说明 always-pending 串行化主要伤害单流。
+4. **稳定性保持**：perf 采样无 client core dump（Task 8.1 修复在 Phase 4 上仍有效）。
+5. **下一步**：实施 callback 内同步 `writev` fast path，仅 partial write / `EAGAIN` 才进入 deferred view（见计划 Task 10「Phase 4 后续正确方向」）。

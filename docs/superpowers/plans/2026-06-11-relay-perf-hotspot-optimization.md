@@ -1104,6 +1104,71 @@ TCP→QUIC 的公平性边界：
 
 结论：启用 `ReceiveMultiple` 后，always-pending 模型的核心串行化问题被解除，proxy-1x1 从 0.052 Gbps 恢复到 5.013 Gbps，说明前一次低吞吐的主因确实是默认非 multi receive 下 `QUIC_STATUS_PENDING` 暂停后续 receive callback。该模型可以继续评估，但仍需重点关注多 pending receive 的内存占用、水位暂停/恢复、公平性以及关闭路径。后续是否继续优化，应用新的 bench 基线与“callback 同步 write fast path + partial/EAGAIN 才 pending”方案做投入产出对比。
 
+### Task 10.1: Phase 4 完整 DGX 验证（2026-06-11 23:22）
+
+代码：`016ae01`（deferred receive view + `StreamMultiReceiveEnabled` + 背压/关闭路径单测）。
+
+```bash
+# 编译 + 单测
+cmake --build build --target tcpquic-proxy \
+  tcpquic_linux_relay_buffer_pool_test \
+  tcpquic_linux_relay_worker_io_test \
+  tcpquic_linux_relay_worker_queue_test \
+  tcpquic_quic_settings_test -j$(nproc)
+for t in build/bin/Release/tcpquic_linux_relay_*_test build/bin/Release/tcpquic_quic_settings_test; do "$t"; done
+
+# 吞吐（内置 deploy）
+DURATION_SEC=30 REPORT=/tmp/dgx-msquic-vs-proxy-phase4-20260611-232155.md \
+  ./scripts/dgx-msquic-vs-proxy-bench.sh
+
+# Perf
+CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase4 ./scripts/dgx-perf-profile.sh
+```
+
+**吞吐（proxy-1x1，30s，无时延）**
+
+基线：Phase 3 Rerun（`docs/dgx-perf-profile-rerun-20260611/` + **11.36 Gbps** proxy-1x1）。
+
+| 指标 | Phase 3 Rerun | Phase 4 短 bench（multi-receive） | **Phase 4 完整 bench** |
+|------|---------------|-----------------------------------|------------------------|
+| 裸 TCP | 28.18 Gbps | 22.37 Gbps | **18.52 Gbps** |
+| proxy-1x1 | **11.36 Gbps** | 5.01 Gbps | **5.23 Gbps** |
+| proxy / 裸 TCP | 40.3% | 22.4% | **28.2%** |
+| proxy-16×16 | — | 12.23 Gbps | **16.19 Gbps** |
+| proxy-4×16 | — | 14.91 Gbps | **19.61 Gbps** |
+
+**Perf 热点（proxy-1x1，25s @ 999Hz）**
+
+| 热点 / 指标 | Phase 3 Rerun | **Phase 4** |
+|-------------|---------------|-------------|
+| client core dump | 无 | **无** |
+| perf curl `speed_download` | 1.42 GB/s | **0.99 GB/s**（非 0） |
+| client `CopyQuicReceiveBatch` / receive `memcpy` | ~3.6% | **未进 Top** |
+| client `aes_gcm_dec` | 32.6% | **~0.25%**（采样线程分布变化） |
+| client `FlushDeferredQuicReceives` | — | **~0.01%** |
+| client relay 主路径 | UDP recv + TLS 解密 | **DrainTcpReadable + Acquire/ReleaseWorker** |
+| server `ldadd8`（buffer 池原子） | ~5% 量级 | **~22.8%** |
+| server `DrainTcpReadable` | 9.3% | **~7.6%** |
+| `TryPush` / `TryPop` / `QueueLock` | 未出现 | **未出现** |
+
+验收项：
+
+| 标准 | 结果 |
+|------|------|
+| 单测全 PASS | ✅ |
+| perf 采样无 client core dump | ✅ |
+| receive 侧 `memcpy` 消除（`CopyQuicReceiveBatch` 不进 Top） | ✅ |
+| 单流吞吐 ≥ Phase 3 Rerun（11.36 Gbps） | ❌ **5.23 Gbps** |
+| 单流归一化（proxy/裸 TCP）不低于 Phase 3 | ❌ 28.2% vs 40.3% |
+| 多流吞吐可用 | ✅ 16–20 Gbps |
+
+**结论**：Phase 4 deferred receive 在功能与稳定性上达标（零拷贝 receive、无 coredump、关闭/背压单测 PASS），但 **单流吞吐相对 Phase 3 明显回退**（~5.2 Gbps vs ~11.4 Gbps），与短 bench 启用 multi-receive 后的 ~5 Gbps 一致；多流场景不受影响。Perf 显示 receive 拷贝热点已消失，但 always-pending 异步 complete 链路仍限制单流并行度。下一步应实施计划中的 **callback 同步 write fast path + partial/EAGAIN 才 pending**，而非继续扩展当前 always-pending 模型。
+
+原始数据：`docs/dgx-perf-profile-phase4/`；吞吐报告：`/tmp/dgx-msquic-vs-proxy-phase4-20260611-232155.md`。
+
+- [x] **Step 1: 完整 bench + perf 复测**
+- [x] **Step 2: 对比 Phase 3 并记录结论**
+
 ---
 
 ## 完成检查清单
@@ -1114,3 +1179,4 @@ TCP→QUIC 的公平性边界：
 - [x] `src/docs/thread_model_cn.md` 更新数据路径描述
 - [x] `docs/dgx-perf-profile-analysis.md` 追加 Phase 1–3 优化结果章节
 - [x] perf 采样 client core dump 已修复（Task 8.1；`RetiredRelays` + ingress 池同步）
+- [x] Phase 4 deferred receive DGX 验证已记录（Task 10.1；单流 ~5.2 Gbps，receive 零拷贝生效，待 fast path）
