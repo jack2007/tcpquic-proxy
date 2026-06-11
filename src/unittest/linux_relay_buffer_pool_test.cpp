@@ -32,6 +32,27 @@ int main() {
         assert(pool.FreeCount() == 4);
     }
 
+    {
+        TqLinuxRelayBufferPool pool(64, 4, 512);
+        pool.Reserve(4);
+
+        auto ingress = pool.AcquireIngress();
+        assert(ingress);
+        std::memset(ingress->Data(), 0xCD, ingress->Capacity());
+        ingress->SetLength(17);
+        assert(pool.PendingBytes() == 64);
+
+        auto worker = pool.TransferToWorker(std::move(ingress));
+        assert(worker);
+        assert(!ingress);
+        assert(pool.PendingBytes() == 64);
+        assert(worker->Length() == 17);
+        assert(worker->Data()[0] == 0xCD);
+
+        worker.reset();
+        assert(pool.PendingBytes() == 0);
+    }
+
     TqLinuxRelayBufferPool pool(64, 2, 128);
     assert(pool.PendingBytes() == 0);
     assert(pool.FreeCount() == 0);

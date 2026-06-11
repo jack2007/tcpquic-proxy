@@ -607,7 +607,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 
         size_t offset = 0;
         while (offset < length) {
-            auto buffer = relay->Pool.AcquireWorker();
+            auto buffer = relay->Pool.AcquireIngress();
             if (!buffer) {
                 Errors.fetch_add(1);
                 return false;
@@ -779,12 +779,19 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
     if (needsDecompress) {
         if (!event.Buffers.empty()) {
             for (size_t i = 0; i < event.Buffers.size(); ++i) {
-                const auto& buffer = event.Buffers[i];
+                auto& buffer = event.Buffers[i];
                 if (!buffer) {
                     continue;
                 }
+                auto workerBuffer = relay->Pool.TransferToWorker(std::move(buffer));
+                if (!workerBuffer) {
+                    if (relay->Handle != nullptr) {
+                        relay->Handle->Stop.store(true);
+                    }
+                    return;
+                }
                 const bool fin = event.Fin && i + 1 == event.Buffers.size();
-                if (!EnqueueQuicReceive(relay.get(), buffer->Data(), buffer->Length(), fin)) {
+                if (!EnqueueQuicReceive(relay.get(), workerBuffer->Data(), workerBuffer->Length(), fin)) {
                     if (relay->Handle != nullptr) {
                         relay->Handle->Stop.store(true);
                     }
@@ -814,8 +821,15 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
                 if (buffer && buffer->Length() > 0) {
                     uint8_t* data = buffer->Data();
                     const size_t length = buffer->Length();
+                    auto workerBuffer = relay->Pool.TransferToWorker(std::move(buffer));
+                    if (!workerBuffer) {
+                        if (relay->Handle != nullptr) {
+                            relay->Handle->Stop.store(true);
+                        }
+                        return;
+                    }
                     relay->PendingTcpWrites.push_back(
-                        TqBufferView{data, length, std::move(buffer)});
+                        TqBufferView{data, length, std::move(workerBuffer)});
                 }
             }
         } else if (event.Buffer && event.Length > 0) {

@@ -229,3 +229,31 @@ rtk cmake --build build -j2
 结果：以上本地编译与单元测试均通过。
 
 DGX 吞吐测试未在当前系统执行：当前系统不具备 DGX 测试环境。吞吐是否达到 `proxy-1x1 >= 8.5 Gbps` 需在 DGX 环境补跑 `CASE=proxy-1x1 ./scripts/dgx-throughput-matrix.sh` 后确认。
+
+---
+
+## Phase 2 优化结果（2026-06-11）
+
+已完成 Phase 2 buffer 池低锁化：
+
+1. `TqBufferRef` 从 `std::shared_ptr` 改为 move-only `TqBufferHandle`，移除 relay buffer 热路径上的 shared_ptr 控制块分配。
+2. worker 线程路径使用 `AcquireWorker()` / `ReleaseWorker()` 无 mutex free-list，并在 relay 注册时预分配 worker slots。
+3. QUIC callback receive 路径使用 `AcquireIngress()` 分配 ingress slot；worker 消费事件时通过 `TransferToWorker()` 转移归还域，不复制 payload，也不提前释放 TCP pending write 使用中的 buffer。
+
+本地验证：
+
+```bash
+rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test tcpquic_relay_backend_selection_test -j2
+rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test
+rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test
+rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test
+rtk ./build/bin/Release/tcpquic_relay_backend_selection_test
+rtk cmake --build build -j2
+```
+
+结果：以上本地编译与单元测试均通过。
+
+DGX perf 未在当前系统执行：当前系统不具备 DGX 测试环境。以下 Phase 2 验收项需在 DGX 环境补跑 `CASE=proxy-1x1 DURATION_SEC=25 ./scripts/dgx-perf-profile.sh` 后确认：
+
+- `TqLinuxRelayBufferPool::Acquire` 不在 Top 10。
+- mutex/原子符号合计 < 15%（目标 < 10%）。

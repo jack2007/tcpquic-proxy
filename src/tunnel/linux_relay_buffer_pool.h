@@ -8,6 +8,7 @@ class TqLinuxRelayBufferPool;
 
 enum class TqBufferDomain {
     Worker,
+    Ingress,
 };
 
 class TqRelayBufferSlot final {
@@ -51,6 +52,8 @@ public:
     void reset();
 
 private:
+    friend class TqLinuxRelayBufferPool;
+
     TqLinuxRelayBufferPool* Pool{nullptr};
     TqRelayBufferSlot* Slot{nullptr};
     TqBufferDomain Domain{TqBufferDomain::Worker};
@@ -82,6 +85,8 @@ public:
 
     void Reserve(size_t slotCount);
     TqBufferRef AcquireWorker();
+    TqBufferRef AcquireIngress();
+    TqBufferRef TransferToWorker(TqBufferRef ingress);
     TqBufferRef Acquire();
     size_t ChunkSize() const;
     size_t FreeCount() const;
@@ -93,12 +98,18 @@ private:
     friend class TqBufferHandle;
 
     void ReleaseWorker(TqRelayBufferSlot* slot);
+    void ReleaseIngress(TqRelayBufferSlot* slot);
 
     size_t ChunkBytes;
     size_t MaxBuffers;
     uint64_t MaxBytes;
     std::vector<TqRelayBufferSlot*> WorkerFree;
+    std::vector<TqRelayBufferSlot*> IngressFree;
+    size_t WorkerMaxSlots;
+    size_t IngressMaxSlots{0};
     size_t WorkerAllocated{0};
-    uint64_t Pending{0};
+    size_t IngressAllocated{0};
+    uint64_t WorkerPending{0};
+    uint64_t IngressPending{0};
     uint64_t Acquires{0};
 };
