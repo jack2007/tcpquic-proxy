@@ -1,0 +1,16 @@
+# Phase 4 always-pending — DGX throughput (2026-06-12)
+# branch: master @ efcedd6 (deferred receive + StreamMultiReceiveEnabled)
+# BIN: build/bin/Release/tcpquic-proxy
+# DURATION_SEC=30, dgx-msquic-vs-proxy-bench.sh
+
+direct_tcp_gbps=18.875
+secnetperf_1conn_gbps=0.735
+secnetperf_16conn_gbps=32.633
+secnetperf_1conn_16stream_gbps=1.515
+proxy_1x1_gbps=4.374
+proxy_16x16_gbps=16.602
+proxy_4x16_gbps=23.178
+proxy_1x1_over_direct_tcp_pct=23.2
+
+report=docs/dgx-perf-profile-phase4-comparison-20260612/report-always-pending.md
+time=2026-06-12T01:20:01+08:00

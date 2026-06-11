@@ -445,3 +445,30 @@ Deferred receive view（`QuicReceiveView` + `StreamReceiveComplete`）+ `StreamM
 3. **多流仍可用**：16×16 / 4×16 达 16–20 Gbps，说明 always-pending 串行化主要伤害单流。
 4. **稳定性保持**：perf 采样无 client core dump（Task 8.1 修复在 Phase 4 上仍有效）。
 5. **下一步**：实施 callback 内同步 `writev` fast path，仅 partial write / `EAGAIN` 才进入 deferred view（见计划 Task 10「Phase 4 后续正确方向」）。
+
+---
+
+## Phase 3 专用基线 vs Phase 4 双方案（2026-06-12）
+
+在 `phase3-event-queue-baseline` worktree（`18f5f58`）上复现 Phase 3，与 `master`（always-pending，`efcedd6`）和 `phase4-callback-sync-write`（sync-write，`115eb06`）同晚连续三轮 30s bench。
+
+- 摘要：`docs/dgx-perf-profile-phase4-comparison-20260612/summary.md`
+- Phase 3 原始：`docs/dgx-perf-profile-phase3-baseline-20260612/throughput.txt`
+- Phase 4 原始：`docs/dgx-perf-profile-phase4-comparison-20260612/throughput-*.txt`
+
+### 吞吐对比
+
+| 指标 | Phase 3 baseline | Phase 4 always-pending | Phase 4 sync-write |
+|------|------------------|------------------------|---------------------|
+| 裸 TCP | **22.47 Gbps** | 18.88 Gbps | 19.28 Gbps |
+| proxy-1×1 | **14.09 Gbps** | 4.37 Gbps | 4.83 Gbps |
+| proxy / 裸 TCP | **62.7%** | 23.2% | 25.1% |
+| proxy-16×16 | 8.25 Gbps | **16.60 Gbps** | 2.51 Gbps |
+| proxy-4×16 | 10.18 Gbps | **23.18 Gbps** | 4.87 Gbps |
+
+### 结论
+
+1. Phase 3 单流路径在本轮链路下达到 **14.1 Gbps**（归一化 **63%**），仍约为 Phase 4 单流的 **3×**。
+2. always-pending 在多流场景反超 Phase 3（4×16 **23.2 vs 10.2 Gbps**），与零拷贝 + multi-receive 一致。
+3. sync-write 修复 flow-control 后单流可用（~4.8 Gbps），但多流崩溃至 **2.5–4.9 Gbps**，callback 同步写阻塞是主要嫌疑；应作为混合 fast path 而非独立 Phase 4 方案。
+4. 详见计划文档 **Task 11**。

@@ -1169,6 +1169,61 @@ CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase4 ./scripts/dg
 - [x] **Step 1: 完整 bench + perf 复测**
 - [x] **Step 2: 对比 Phase 3 并记录结论**
 
+### Task 11: Phase 3 专用基线 vs Phase 4 双方案 DGX 对比（2026-06-12）
+
+在独立 worktree `phase3-event-queue-baseline`（`18f5f58`）上复现 Phase 3 代码基线，与 Phase 4 两种实现同晚连续 bench，消除跨日链路差异。
+
+**代码基线**
+
+| 标签 | 分支 / commit | worktree |
+|------|---------------|----------|
+| Phase 3 | `phase3-event-queue-baseline` @ `18f5f58` | `.worktrees/phase3-event-queue-baseline` |
+| Phase 4 always-pending | `master` @ `efcedd6` | 主仓库 |
+| Phase 4 sync-write | `phase4-callback-sync-write` @ `115eb06` | `.worktrees/phase4-callback-sync-write` |
+
+```bash
+export SECNETPERF=$PWD/build/msquic/bin/Release/secnetperf
+export MSQUIC_LIB_DIR=$PWD/build/msquic/bin/Release
+export DURATION_SEC=30
+
+# Phase 3
+export BIN=$PWD/.worktrees/phase3-event-queue-baseline/build/bin/Release/tcpquic-proxy
+REPORT=/tmp/dgx-phase3-event-queue-baseline-$(date +%Y%m%d-%H%M%S).md \
+  .worktrees/phase3-event-queue-baseline/scripts/dgx-msquic-vs-proxy-bench.sh
+
+# Phase 4 always-pending
+export BIN=$PWD/build/bin/Release/tcpquic-proxy
+REPORT=/tmp/dgx-phase4-always-pending-$(date +%Y%m%d-%H%M%S).md \
+  ./scripts/dgx-msquic-vs-proxy-bench.sh
+
+# Phase 4 sync-write
+export BIN=$PWD/.worktrees/phase4-callback-sync-write/build/bin/Release/tcpquic-proxy
+REPORT=/tmp/dgx-phase4-sync-write-$(date +%Y%m%d-%H%M%S).md \
+  .worktrees/phase4-callback-sync-write/scripts/dgx-msquic-vs-proxy-bench.sh
+```
+
+**吞吐（30s，无时延 LAN，2026-06-12 01:18–01:24）**
+
+| 指标 | **Phase 3 baseline** | Phase 4 always-pending | Phase 4 sync-write |
+|------|----------------------|------------------------|---------------------|
+| 裸 TCP | **22.47 Gbps** | 18.88 Gbps | 19.28 Gbps |
+| proxy-1×1 | **14.09 Gbps** | 4.37 Gbps | 4.83 Gbps |
+| proxy / 裸 TCP | **62.7%** | 23.2% | 25.1% |
+| proxy-16×16 | 8.25 Gbps | **16.60 Gbps** | 2.51 Gbps |
+| proxy-4×16 | 10.18 Gbps | **23.18 Gbps** | 4.87 Gbps |
+
+**结论**
+
+1. **单流**：Phase 3 专用基线仍显著优于两种 Phase 4（~14 Gbps vs ~4–5 Gbps）；相对早前 Phase 3 Rerun（11.36 Gbps）本轮更高，但 **Phase 3 > Phase 4 单流** 的排序稳定。
+2. **多流**：always-pending 在本轮大幅领先 Phase 3（4×16 **23.2** vs **10.2** Gbps）；sync-write 多流严重回退（**2.5–4.9 Gbps**），callback 内同步写不宜直接替代 always-pending。
+3. **sync-write 定位**：修复 `QUIC_STATUS_SUCCESS` 路径 double-complete 后单流与 always-pending 同量级，适合作为 **混合 fast path**（全量写出 → SUCCESS；partial/EAGAIN → pending），而非 standalone Phase 4 方案。
+4. **下一步**：在 Phase 3 事件队列路径上叠加 selective 零拷贝；多流继续 always-pending + multi-receive；调查 sync-write 多流下 MsQuic callback 线程阻塞。
+
+原始数据：`docs/dgx-perf-profile-phase3-baseline-20260612/`、`docs/dgx-perf-profile-phase4-comparison-20260612/`。
+
+- [x] **Step 1: 三轮连续 bench**
+- [x] **Step 2: 对比表与结论写入文档**
+
 ---
 
 ## 完成检查清单
@@ -1180,3 +1235,4 @@ CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase4 ./scripts/dg
 - [x] `docs/dgx-perf-profile-analysis.md` 追加 Phase 1–3 优化结果章节
 - [x] perf 采样 client core dump 已修复（Task 8.1；`RetiredRelays` + ingress 池同步）
 - [x] Phase 4 deferred receive DGX 验证已记录（Task 10.1；单流 ~5.2 Gbps，receive 零拷贝生效，待 fast path）
+- [x] Phase 3 专用基线 vs Phase 4 双方案同晚对比已记录（Task 11；Phase 3 单流 ~14 Gbps，always-pending 多流 ~23 Gbps）

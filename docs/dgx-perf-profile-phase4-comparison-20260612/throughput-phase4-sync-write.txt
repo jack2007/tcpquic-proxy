@@ -1,0 +1,16 @@
+# Phase 4 callback sync-write — DGX throughput (2026-06-12)
+# branch: phase4-callback-sync-write @ 115eb06 (fix: no StreamReceiveComplete on QUIC_STATUS_SUCCESS)
+# BIN: .worktrees/phase4-callback-sync-write/build/bin/Release/tcpquic-proxy
+# DURATION_SEC=30, dgx-msquic-vs-proxy-bench.sh
+
+direct_tcp_gbps=19.279
+secnetperf_1conn_gbps=0.760
+secnetperf_16conn_gbps=45.149
+secnetperf_1conn_16stream_gbps=1.033
+proxy_1x1_gbps=4.834
+proxy_16x16_gbps=2.512
+proxy_4x16_gbps=4.871
+proxy_1x1_over_direct_tcp_pct=25.1
+
+report=docs/dgx-perf-profile-phase4-comparison-20260612/report-sync-write.md
+time=2026-06-12T01:23:30+08:00

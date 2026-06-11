@@ -1,0 +1,16 @@
+# Phase 3 event-queue baseline — DGX throughput (2026-06-12)
+# branch: phase3-event-queue-baseline @ 18f5f58
+# BIN: .worktrees/phase3-event-queue-baseline/build/bin/Release/tcpquic-proxy
+# DURATION_SEC=30, dgx-msquic-vs-proxy-bench.sh
+
+direct_tcp_gbps=22.467
+secnetperf_1conn_gbps=1.371
+secnetperf_16conn_gbps=44.419
+secnetperf_1conn_16stream_gbps=0.874
+proxy_1x1_gbps=14.087
+proxy_16x16_gbps=8.249
+proxy_4x16_gbps=10.176
+proxy_1x1_over_direct_tcp_pct=62.7
+
+report=docs/dgx-perf-profile-phase3-baseline-20260612/report.md
+time=2026-06-12T01:18:01+08:00
