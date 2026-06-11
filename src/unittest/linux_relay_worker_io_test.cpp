@@ -126,16 +126,14 @@ int main() {
         receiveEvent.RECEIVE.BufferCount = 1;
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
 
-        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING) {
+        const QUIC_STATUS partialStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
+        if (partialStatus != QUIC_STATUS_PENDING) {
+            std::fprintf(stderr, "expected partial receive PENDING, got %d\n", partialStatus);
             worker.Stop();
             ::close(fds[1]);
             return 1;
         }
-        if (worker.DrainForTest(config.EventBudget) != 1) {
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
+        (void)worker.DrainForTest(config.EventBudget);
 
         TqLinuxRelayWorkerSnapshot partial = worker.Snapshot();
         if (partial.DeferredReceiveCompleteBytes == 0 ||
@@ -199,6 +197,103 @@ int main() {
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
         config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingQuicReceiveBytesPerRelay = 32 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+        int sendBuffer = 4096;
+        (void)::setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        worker.Stop();
+
+        const std::vector<uint8_t> first(2 * 1024 * 1024, 0x71);
+        QUIC_BUFFER firstBuffer{};
+        firstBuffer.Buffer = const_cast<uint8_t*>(first.data());
+        firstBuffer.Length = static_cast<uint32_t>(first.size());
+
+        QUIC_STREAM_EVENT firstEvent{};
+        firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        firstEvent.RECEIVE.BufferCount = 1;
+        firstEvent.RECEIVE.Buffers = &firstBuffer;
+
+        if (worker.DispatchStreamEventForTest(fakeStream, &firstEvent) != QUIC_STATUS_PENDING) {
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot paused = worker.Snapshot();
+        if (paused.DeferredReceiveCompleteBytes == 0 ||
+            paused.DeferredReceiveCompleteBytes >= first.size() ||
+            paused.PendingEvents != 1 ||
+            paused.QuicReceivePausedCount != 1) {
+            std::fprintf(stderr, "expected first partial receive to pause, complete=%llu events=%llu pauses=%llu\n",
+                static_cast<unsigned long long>(paused.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(paused.PendingEvents),
+                static_cast<unsigned long long>(paused.QuicReceivePausedCount));
+            ::close(fds[1]);
+            return 1;
+        }
+
+        uint8_t drainBuffer[8192];
+        while (::recv(fds[1], drainBuffer, sizeof(drainBuffer), MSG_DONTWAIT) > 0) {
+        }
+
+        const std::vector<uint8_t> second(1024, 0x72);
+        QUIC_BUFFER secondBuffer{};
+        secondBuffer.Buffer = const_cast<uint8_t*>(second.data());
+        secondBuffer.Length = static_cast<uint32_t>(second.size());
+
+        QUIC_STREAM_EVENT secondEvent{};
+        secondEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        secondEvent.RECEIVE.BufferCount = 1;
+        secondEvent.RECEIVE.Buffers = &secondBuffer;
+
+        if (worker.DispatchStreamEventForTest(fakeStream, &secondEvent) != QUIC_STATUS_PENDING) {
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot queued = worker.Snapshot();
+        if (queued.DeferredReceiveCompleteBytes != paused.DeferredReceiveCompleteBytes ||
+            queued.PendingEvents != 2 ||
+            queued.QuicReceivePausedCount != 1) {
+            std::fprintf(stderr, "expected paused in-flight receive to queue only, complete=%llu:%llu events=%llu pauses=%llu\n",
+                static_cast<unsigned long long>(queued.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(paused.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(queued.PendingEvents),
+                static_cast<unsigned long long>(queued.QuicReceivePausedCount));
+            ::close(fds[1]);
+            return 1;
+        }
+
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -239,7 +334,11 @@ int main() {
         receiveEvent.RECEIVE.BufferCount = 1;
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
 
-        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING) {
+        const QUIC_STATUS hardErrorStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
+        if (hardErrorStatus != QUIC_STATUS_PENDING) {
+            std::fprintf(stderr, "expected hard-error receive PENDING, got %d stop=%d\n",
+                hardErrorStatus,
+                handle.Stop.load() ? 1 : 0);
             worker.Stop();
             return 1;
         }
@@ -431,9 +530,18 @@ int main() {
         TqRelayHandle handle{};
 
         TqLinuxRelayRegistration registration{};
+        auto decompressor = TqCreateDecompressor(TqCompressAlgo::Zstd);
+        if (!decompressor) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
         registration.TcpFd = fds[0];
         registration.Stream = fakeStream;
         registration.Handle = &handle;
+        registration.Decompressor = decompressor.get();
+        registration.CompressAlgo = TqCompressAlgo::Zstd;
         registration.EnableQuicSends = false;
         if (!worker.RegisterRelayForTest(registration)) {
             worker.Stop();
@@ -759,13 +867,8 @@ int main() {
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
 
         const QUIC_STATUS receiveStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
-        if (receiveStatus != QUIC_STATUS_PENDING) {
-            std::fprintf(stderr, "expected deferred receive status PENDING, got %d\n", receiveStatus);
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-        if (worker.DrainForTest(config.EventBudget) < 1) {
+        if (receiveStatus != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr, "expected synchronous receive status SUCCESS, got %d\n", receiveStatus);
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -778,7 +881,7 @@ int main() {
             if (received <= 0) {
                 worker.Stop();
                 ::close(fds[1]);
-                return 1;
+            return 1;
             }
             offset += static_cast<size_t>(received);
         }
@@ -866,22 +969,18 @@ int main() {
         receiveEvent.RECEIVE.BufferCount = 3;
         receiveEvent.RECEIVE.Buffers = quicBuffers;
 
-        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &receiveEvent))) {
+        const QUIC_STATUS receiveStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
+        if (receiveStatus != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr, "expected synchronous multi-buffer receive SUCCESS, got %d\n", receiveStatus);
             worker.Stop();
             ::close(fds[1]);
             return 1;
         }
 
         const TqLinuxRelayWorkerSnapshot queued = worker.Snapshot();
-        if (queued.PendingEvents != 1) {
-            std::fprintf(stderr, "expected 1 batched receive event, got %llu\n",
+        if (queued.PendingEvents != 0) {
+            std::fprintf(stderr, "expected synchronous multi-buffer receive to skip event queue, got %llu\n",
                 static_cast<unsigned long long>(queued.PendingEvents));
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-
-        if (worker.DrainForTest(config.EventBudget) != 1) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -899,7 +998,7 @@ int main() {
             if (received <= 0) {
                 worker.Stop();
                 ::close(fds[1]);
-                return 1;
+            return 1;
             }
             offset += static_cast<size_t>(received);
         }

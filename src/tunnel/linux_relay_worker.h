@@ -136,12 +136,18 @@ private:
         MsQuicStream* stream,
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
+        uint64_t skipBytes,
         bool fin);
+    QUIC_STATUS TryCompleteQuicReceiveInline(
+        RelayState* relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin,
+        bool& handled);
     void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
     void FlushDeferredQuicReceives(RelayState* relay);
     void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
-    uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
-    uint64_t LowPendingQuicReceiveBytesPerRelay() const;
     void MaybePauseQuicReceive(RelayState* relay);
     void MaybeResumeQuicReceive(RelayState* relay);
     void SetQuicReceiveEnabled(RelayState* relay, bool enabled);
