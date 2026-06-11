@@ -2,6 +2,7 @@
 
 #include "compress.h"
 #include "linux_relay_buffer_pool.h"
+#include "linux_relay_event_queue.h"
 #include "relay.h"
 #include "tuning.h"
 
@@ -18,27 +19,6 @@
 struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 
-enum class TqLinuxRelayEventType {
-    TestMarker,
-    TcpWritable,
-    QuicReceive,
-    QuicSendComplete,
-    QuicIdealSendBuffer,
-    Shutdown,
-};
-
-struct TqLinuxRelayEvent {
-    TqLinuxRelayEventType Type{TqLinuxRelayEventType::Shutdown};
-    uint64_t Value{0};
-    uint64_t RelayId{0};
-    void* Relay{nullptr};
-    TqBufferRef Buffer;
-    std::vector<TqBufferRef> Buffers;
-    size_t Length{0};
-    size_t TotalLength{0};
-    bool Fin{false};
-};
-
 struct TqLinuxRelayWorkerConfig {
     uint32_t EventBudget{4096};
     uint64_t ByteBudgetPerTick{64ull * 1024 * 1024};
@@ -46,6 +26,8 @@ struct TqLinuxRelayWorkerConfig {
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
+    size_t EventQueueCapacity{4096};
+    bool TrackEventProducers{false};
 };
 
 struct TqLinuxRelayRegistration {
@@ -90,6 +72,8 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
     uint64_t Errors{0};
+    uint64_t EventProducerThreadsObserved{0};
+    bool MultipleEventProducerThreadsObserved{false};
 };
 
 class TqLinuxRelayWorker final {
@@ -103,8 +87,8 @@ public:
     bool Start();
     bool StartForTest();
     void Stop();
-    void Enqueue(TqLinuxRelayEvent event);
-    void EnqueueForTest(TqLinuxRelayEvent event);
+    bool Enqueue(TqLinuxRelayEvent event);
+    bool EnqueueForTest(TqLinuxRelayEvent event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
     TqLinuxRelayRegistrationResult RegisterRelayWithId(const TqLinuxRelayRegistration& registration);
@@ -125,6 +109,7 @@ private:
     struct RelayState;
     struct StreamRelayBinding;
     void Wake();
+    void RecordEventProducer();
     size_t DrainEvents(size_t budget);
     void DrainTcpReadable(RelayState* relay);
     bool BuildTcpToQuicViews(
@@ -158,8 +143,10 @@ private:
     int EpollFd{-1};
     std::atomic<bool> Running{false};
     std::atomic<bool> WakeArmed{false};
-    mutable std::mutex QueueLock;
-    std::deque<TqLinuxRelayEvent> Queue;
+    TqLinuxRelayEventQueue EventQueue;
+    std::atomic<size_t> FirstEventProducerHash{0};
+    std::atomic<uint64_t> EventProducerThreadCount{0};
+    std::atomic<bool> MultipleEventProducerThreadsObserved{false};
     std::thread Thread;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};

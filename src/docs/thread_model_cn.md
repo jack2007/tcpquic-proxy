@@ -11,7 +11,7 @@
 - client 模式额外创建 2 个监听线程：SOCKS5 listener 和 HTTP CONNECT listener。
 - 每个 accepted 本地 TCP 连接由固定大小的 **handshake 线程池**（`TqThreadPool`，默认 8 worker，`--handshake-threads` 可配）处理 SOCKS5 / HTTP CONNECT 握手和 OPEN 阶段，不再为每个连接 detached 一个 handler 线程。
 - Linux 生产路径不再为每条隧道创建 relay TCP 线程。所有 relay TCP fd 由 `TqLinuxRelayWorker` 分片持有，通过 `epoll`、`readv`、`writev` 处理。旧 `TqBlockingDemoRelay` 仅用于 demo/legacy 对比，不属于生产线程模型。
-- **QUIC Stream → TCP** 方向：MsQuic stream 回调将 receive 数据拷贝到 worker 池化缓冲，由 owner worker 通过 `writev` 写出，避免慢 TCP 写阻塞 `quic_worker`。
+- **QUIC Stream → TCP** 方向：MsQuic stream 回调将 receive 数据拷贝到 ingress 池化缓冲，并通过 bounded `TqLinuxRelayEventQueue` 投递给 owner worker；owner worker 消费事件后转移到 worker 缓冲域并通过 `writev` 写出，避免慢 TCP 写阻塞 `quic_worker`。
 - 隧道清理由进程级 **全局 reaper**（`TqTunnelReaper`，单线程轮询）统一回收 context，不再为每条隧道创建 cleanup watcher。
 - server 模式没有 SOCKS5 / HTTP CONNECT 监听线程，但每条入站 QUIC stream 会创建拨号线程；relay 注册到 Linux worker 分片。
 - 同一 QUIC connection / stream 的 MsQuic 回调仍遵守 msquic 串行语义：不会对同一连接并行回调应用。
@@ -125,7 +125,7 @@ handler thread
 | 方向 | 线程 | 路径 |
 |------|------|------|
 | 本地 TCP → QUIC | Linux relay worker | `epoll` 就绪 → `readv(tunnelFd)` → 可选压缩 → 多缓冲 `Stream->Send()` |
-| QUIC → 本地 TCP | Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入池 → 可选解压 → `writev(tunnelFd)` |
+| QUIC → 本地 TCP | MsQuic callback + Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入 ingress 池 → bounded event queue → worker 可选解压 → `writev(tunnelFd)` |
 
 ## 4. Server 模式线程模型
 
@@ -192,7 +192,7 @@ relay 成功后，server 的数据路径与 client 对称：
 | 方向 | 线程 | 路径 |
 |------|------|------|
 | 目标 TCP → QUIC | Linux relay worker | `epoll` 就绪 → `readv(targetFd)` → 可选压缩 → 多缓冲 `Stream->Send()` |
-| QUIC → 目标 TCP | Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入池 → 可选解压 → `writev(targetFd)` |
+| QUIC → 目标 TCP | MsQuic callback + Linux relay worker | `QUIC_STREAM_EVENT_RECEIVE` → 拷贝入 ingress 池 → bounded event queue → worker 可选解压 → `writev(targetFd)` |
 
 ## 5. 每条隧道的线程与对象生命周期
 

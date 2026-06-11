@@ -642,53 +642,19 @@ git commit -m "docs: Phase 2 relay buffer pool perf results"
 - Modify: `src/tunnel/linux_relay_worker.h/.cpp`
 - Test: `src/unittest/linux_relay_worker_queue_test.cpp`
 
-- [ ] **Step 1: 证明生产者模型**
+- [x] **Step 1: 证明生产者模型**
 
 添加 trace/instrumentation 或引用 MsQuic 文档，确认同一 `TqLinuxRelayWorker` 队列是否只有一个 producer thread。至少覆盖多个并发 stream。若观察到多个 producer thread，禁止使用 SPSC。
 
-- [ ] **Step 2: 选择队列实现**
+- [x] **Step 2: 选择队列实现**
 
 若 Step 1 证明单生产者，使用 SPSC；否则使用 MPSC ring/queue。公共 API 命名为 `TqLinuxRelayEventQueue`，避免把实现细节泄漏到 worker。
 
-- [ ] **Step 3: SPSC 环实现（仅在 Step 1 证明单生产者后）**
+- [x] **Step 3: MPMC bounded ring 实现（Step 1 未证明单生产者，禁止 SPSC）**
 
-```cpp
-// linux_relay_event_queue.h
-#pragma once
-#include "linux_relay_worker.h"
-#include <atomic>
-#include <cstddef>
-#include <optional>
-#include <vector>
+实际实现：`src/tunnel/linux_relay_event_queue.h` 使用 Dmitry Vyukov 风格的 bounded MPMC sequence ring。每个 cell 持有独立 `Sequence`，producer 通过 `EnqueuePos.compare_exchange_weak` 认领槽位，consumer 通过 `DequeuePos.compare_exchange_weak` 认领可读槽位；队列满时 `TryPush` 返回 `false`，不丢弃已入队事件。
 
-class TqLinuxRelayEventQueue {
-public:
-    explicit TqLinuxRelayEventQueue(size_t capacity);
-    bool TryPush(TqLinuxRelayEvent&& event);
-    std::optional<TqLinuxRelayEvent> TryPop();
-    size_t SizeApprox() const;
-private:
-    std::vector<TqLinuxRelayEvent> Slots;
-    size_t Mask;
-    alignas(64) std::atomic<uint32_t> Head{0};
-    alignas(64) std::atomic<uint32_t> Tail{0};
-};
-```
-
-```cpp
-bool TqLinuxRelayEventQueue::TryPush(TqLinuxRelayEvent&& event) {
-    const uint32_t head = Head.load(std::memory_order_relaxed);
-    const uint32_t next = head + 1;
-    if (next - Tail.load(std::memory_order_acquire) > Slots.size()) {
-        return false;
-    }
-    Slots[head & Mask] = std::move(event);
-    Head.store(next, std::memory_order_release);
-    return true;
-}
-```
-
-- [ ] **Step 4: 替换 Enqueue/DrainEvents 中的 QueueLock deque**
+- [x] **Step 4: 替换 Enqueue/DrainEvents 中的 QueueLock deque**
 
 `TqLinuxRelayWorker` 成员：
 
@@ -700,13 +666,27 @@ TqLinuxRelayEventQueue EventQueue;
 
 `DrainEvents`：`while (auto ev = EventQueue.TryPop()) { ... }`
 
-- [ ] **Step 5: 队列满背压测试**
+- [x] **Step 5: 队列满背压测试**
 
 单测：填满环，断言 `TryPush` 返回 false，worker drain 后恢复。
 
-- [ ] **Step 6: 删除 QueueLock 与 std::deque Queue**（Snapshot 改用 `EventQueue.SizeApprox()`）
+- [x] **Step 6: 删除 QueueLock 与 std::deque Queue**（Snapshot 改用 `EventQueue.SizeApprox()`）
 
 - [ ] **Step 7: 测试 + DGX perf + 提交**
+
+Verification:
+- RED: `rtk cmake --build build --target tcpquic_linux_relay_worker_queue_test -j2` failed on missing `EventQueueCapacity` and `TrackEventProducers`.
+- GREEN: `rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test tcpquic_relay_backend_selection_test -j2` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_relay_backend_selection_test` PASS.
+
+Actual:
+- Public test path demonstrated concurrent producer threads, so Phase 3 used a bounded MPMC ring rather than SPSC.
+- Queue full returns false and increments `Errors`; RECEIVE callback propagates `QUIC_STATUS_OUT_OF_MEMORY` after attempting shutdown enqueue.
+- `QueueLock` and `std::deque<TqLinuxRelayEvent>` were removed from `TqLinuxRelayWorker`.
+- DGX perf not run in this local environment.
 
 ```bash
 git commit -m "perf(relay): replace mutex deque with verified relay event queue"
@@ -736,5 +716,5 @@ git commit -m "perf(relay): replace mutex deque with verified relay event queue"
 - [ ] `make test` 全通过
 - [ ] `compress off` DGX proxy-1x1 吞吐不低于基线
 - [ ] perf 中 buffer 池与 mutex 热点显著下降（见 Task 7 验收）
-- [ ] `src/docs/thread_model_cn.md` 更新数据路径描述
+- [x] `src/docs/thread_model_cn.md` 更新数据路径描述
 - [ ] `docs/dgx-perf-profile-analysis.md` 追加优化结果章节

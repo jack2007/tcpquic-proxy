@@ -7,6 +7,7 @@
 #include <climits>
 #include <cerrno>
 #include <cstdlib>
+#include <functional>
 #include <cstring>
 #include <new>
 #include <thread>
@@ -63,7 +64,8 @@ struct TqLinuxRelayWorker::RelayState {
 };
 
 TqLinuxRelayWorker::TqLinuxRelayWorker(const TqLinuxRelayWorkerConfig& config)
-    : Config(config) {}
+    : Config(config),
+      EventQueue(config.EventQueueCapacity) {}
 
 TqLinuxRelayWorker::~TqLinuxRelayWorker() {
     Stop();
@@ -128,16 +130,44 @@ void TqLinuxRelayWorker::Stop() {
     }
 }
 
-void TqLinuxRelayWorker::Enqueue(TqLinuxRelayEvent event) {
-    {
-        std::lock_guard<std::mutex> guard(QueueLock);
-        Queue.push_back(std::move(event));
+bool TqLinuxRelayWorker::Enqueue(TqLinuxRelayEvent event) {
+    RecordEventProducer();
+    if (!EventQueue.TryPush(std::move(event))) {
+        Errors.fetch_add(1);
+        return false;
     }
     Wake();
+    return true;
 }
 
-void TqLinuxRelayWorker::EnqueueForTest(TqLinuxRelayEvent event) {
-    Enqueue(std::move(event));
+bool TqLinuxRelayWorker::EnqueueForTest(TqLinuxRelayEvent event) {
+    return Enqueue(std::move(event));
+}
+
+void TqLinuxRelayWorker::RecordEventProducer() {
+    if (!Config.TrackEventProducers) {
+        return;
+    }
+    size_t hash = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    if (hash == 0) {
+        hash = 1;
+    }
+    size_t expected = 0;
+    if (FirstEventProducerHash.compare_exchange_strong(
+            expected, hash, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        uint64_t count = EventProducerThreadCount.load(std::memory_order_acquire);
+        while (count < 1 && !EventProducerThreadCount.compare_exchange_weak(
+                                count, 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
+        return;
+    }
+    if (expected != hash && FirstEventProducerHash.load(std::memory_order_acquire) != hash) {
+        MultipleEventProducerThreadsObserved.store(true, std::memory_order_release);
+        uint64_t count = EventProducerThreadCount.load(std::memory_order_acquire);
+        while (count < 2 && !EventProducerThreadCount.compare_exchange_weak(
+                               count, 2, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        }
+    }
 }
 
 void TqLinuxRelayWorker::Wake() {
@@ -166,13 +196,8 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
     size_t processed = 0;
     while (processed < budget) {
         TqLinuxRelayEvent event{};
-        {
-            std::lock_guard<std::mutex> guard(QueueLock);
-            if (Queue.empty()) {
-                break;
-            }
-            event = std::move(Queue.front());
-            Queue.pop_front();
+        if (!EventQueue.TryPop(event)) {
+            break;
         }
         switch (event.Type) {
         case TqLinuxRelayEventType::QuicReceive:
@@ -192,11 +217,8 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
     EventsProcessed.fetch_add(processed);
 
     WakeArmed.store(false, std::memory_order_release);
-    {
-        std::lock_guard<std::mutex> guard(QueueLock);
-        if (!Queue.empty()) {
-            Wake();
-        }
+    if (EventQueue.SizeApprox() != 0) {
+        Wake();
     }
     return processed;
 }
@@ -583,7 +605,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
             event.Type = TqLinuxRelayEventType::QuicReceive;
             event.RelayId = relayId;
             event.Fin = true;
-            Enqueue(std::move(event));
+            return Enqueue(std::move(event));
         }
         return true;
     }
@@ -625,8 +647,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
         return true;
     }
     event.Fin = fin;
-    Enqueue(std::move(event));
-    return true;
+    return Enqueue(std::move(event));
 }
 
 void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream) {
@@ -634,7 +655,7 @@ void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* 
     TqLinuxRelayEvent shutdown{};
     shutdown.Type = TqLinuxRelayEventType::Shutdown;
     shutdown.RelayId = relayId;
-    Enqueue(std::move(shutdown));
+    (void)Enqueue(std::move(shutdown));
 }
 
 bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
@@ -851,11 +872,10 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
-    std::lock_guard<std::mutex> queueGuard(QueueLock);
     TqLinuxRelayWorkerSnapshot snapshot{};
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
-    snapshot.PendingEvents = Queue.size();
+    snapshot.PendingEvents = EventQueue.SizeApprox();
     snapshot.TcpReadBatches = TcpReadBatches.load();
     snapshot.TcpReadBytes = TcpReadBytes.load();
     snapshot.QuicSendOperations = QuicSendOperations.load();
@@ -868,6 +888,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
     snapshot.Errors = Errors.load();
+    snapshot.EventProducerThreadsObserved = EventProducerThreadCount.load();
+    snapshot.MultipleEventProducerThreadsObserved =
+        MultipleEventProducerThreadsObserved.load(std::memory_order_acquire);
 
     {
         std::lock_guard<std::mutex> relayGuard(RelayLock);
@@ -943,7 +966,9 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         TqLinuxRelayEvent queued{};
         queued.Type = TqLinuxRelayEventType::QuicSendComplete;
         queued.Value = reinterpret_cast<uintptr_t>(event->SEND_COMPLETE.ClientContext);
-        Enqueue(std::move(queued));
+        if (!Enqueue(std::move(queued))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        }
         return QUIC_STATUS_SUCCESS;
     }
     if (binding == nullptr || binding->Worker != this) {
@@ -972,7 +997,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 event->RECEIVE.BufferCount,
                 fin)) {
             AbortRelayFromCallback(relayId, stream);
-            return QUIC_STATUS_SUCCESS;
+            return QUIC_STATUS_OUT_OF_MEMORY;
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -982,7 +1007,9 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         TqLinuxRelayEvent shutdown{};
         shutdown.Type = TqLinuxRelayEventType::Shutdown;
         shutdown.RelayId = relayId;
-        Enqueue(std::move(shutdown));
+        if (!Enqueue(std::move(shutdown))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        }
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;
