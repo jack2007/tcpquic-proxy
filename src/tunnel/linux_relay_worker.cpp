@@ -57,7 +57,9 @@ struct TqLinuxRelayWorker::RelayState {
           Decompressor(registration.Decompressor),
           CompressAlgo(registration.CompressAlgo),
           EnableQuicSends(registration.EnableQuicSends),
-          Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {}
+          Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {
+        Pool.Reserve(config.MaxIov * 4);
+    }
 };
 
 TqLinuxRelayWorker::TqLinuxRelayWorker(const TqLinuxRelayWorkerConfig& config)
@@ -134,8 +136,8 @@ void TqLinuxRelayWorker::Enqueue(TqLinuxRelayEvent event) {
     Wake();
 }
 
-void TqLinuxRelayWorker::EnqueueForTest(const TqLinuxRelayEvent& event) {
-    Enqueue(event);
+void TqLinuxRelayWorker::EnqueueForTest(TqLinuxRelayEvent event) {
+    Enqueue(std::move(event));
 }
 
 void TqLinuxRelayWorker::Wake() {
@@ -350,7 +352,7 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
         iov.reserve(maxIov);
 
         for (size_t i = 0; i < maxIov && readBytes + Config.ReadChunkSize <= tickBudget; ++i) {
-            auto buffer = relay->Pool.Acquire();
+            auto buffer = relay->Pool.AcquireWorker();
             if (!buffer) {
                 Errors.fetch_add(1);
                 break;
@@ -376,7 +378,8 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
                 }
                 const size_t len = std::min(ref->Capacity(), remaining);
                 ref->SetLength(len);
-                views.push_back(TqBufferView{ref->Data(), len, ref});
+                uint8_t* data = ref->Data();
+                views.push_back(TqBufferView{data, len, std::move(ref)});
                 remaining -= len;
             }
 
@@ -442,7 +445,7 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
 
     size_t offset = 0;
     while (offset < relay->CompressionOutput.size()) {
-        auto buffer = relay->Pool.Acquire();
+        auto buffer = relay->Pool.AcquireWorker();
         if (!buffer) {
             Errors.fetch_add(1);
             return false;
@@ -450,7 +453,8 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
         const size_t chunk = std::min(buffer->Capacity(), relay->CompressionOutput.size() - offset);
         std::memcpy(buffer->Data(), relay->CompressionOutput.data() + offset, chunk);
         buffer->SetLength(chunk);
-        output.push_back(TqBufferView{buffer->Data(), chunk, buffer});
+        uint8_t* data = buffer->Data();
+        output.push_back(TqBufferView{data, chunk, std::move(buffer)});
         offset += chunk;
     }
     CompressedTcpBytes.fetch_add(relay->CompressionOutput.size());
@@ -603,7 +607,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 
         size_t offset = 0;
         while (offset < length) {
-            auto buffer = relay->Pool.Acquire();
+            auto buffer = relay->Pool.AcquireWorker();
             if (!buffer) {
                 Errors.fetch_add(1);
                 return false;
@@ -611,11 +615,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
             const size_t chunk = std::min(buffer->Capacity(), static_cast<size_t>(length - offset));
             std::memcpy(buffer->Data(), data + offset, chunk);
             buffer->SetLength(chunk);
-            if (!event.Buffer) {
-                event.Buffer = buffer;
-                event.Length = chunk;
-            }
-            event.Buffers.push_back(buffer);
+            event.Buffers.push_back(std::move(buffer));
             event.TotalLength += chunk;
             offset += chunk;
         }
@@ -634,7 +634,7 @@ void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* 
     TqLinuxRelayEvent shutdown{};
     shutdown.Type = TqLinuxRelayEventType::Shutdown;
     shutdown.RelayId = relayId;
-    Enqueue(shutdown);
+    Enqueue(std::move(shutdown));
 }
 
 bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
@@ -677,7 +677,7 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
 
     size_t offset = 0;
     while (offset < writeLength) {
-        auto buffer = relay->Pool.Acquire();
+        auto buffer = relay->Pool.AcquireWorker();
         if (!buffer) {
             Errors.fetch_add(1);
             return false;
@@ -685,7 +685,8 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
         const size_t chunk = std::min(buffer->Capacity(), writeLength - offset);
         std::memcpy(buffer->Data(), writeData + offset, chunk);
         buffer->SetLength(chunk);
-        relay->PendingTcpWrites.push_back(TqBufferView{buffer->Data(), chunk, buffer});
+        uint8_t* data = buffer->Data();
+        relay->PendingTcpWrites.push_back(TqBufferView{data, chunk, std::move(buffer)});
         offset += chunk;
     }
     if (fin) {
@@ -768,7 +769,7 @@ void TqLinuxRelayWorker::ArmTcpWritable(RelayState* relay, bool enabled) {
     }
 }
 
-void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event) {
+void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
     auto relay = FindRelayById(event.RelayId);
     if (relay == nullptr || relay->Closing) {
         return;
@@ -809,15 +810,18 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event)
         }
     } else {
         if (!event.Buffers.empty()) {
-            for (const auto& buffer : event.Buffers) {
+            for (auto& buffer : event.Buffers) {
                 if (buffer && buffer->Length() > 0) {
+                    uint8_t* data = buffer->Data();
+                    const size_t length = buffer->Length();
                     relay->PendingTcpWrites.push_back(
-                        TqBufferView{buffer->Data(), buffer->Length(), buffer});
+                        TqBufferView{data, length, std::move(buffer)});
                 }
             }
         } else if (event.Buffer && event.Length > 0) {
+            uint8_t* data = event.Buffer->Data();
             relay->PendingTcpWrites.push_back(
-                TqBufferView{event.Buffer->Data(), event.Length, event.Buffer});
+                TqBufferView{data, event.Length, std::move(event.Buffer)});
         }
         if (event.Fin) {
             relay->TcpWriteShutdownQueued = true;
@@ -925,7 +929,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         TqLinuxRelayEvent queued{};
         queued.Type = TqLinuxRelayEventType::QuicSendComplete;
         queued.Value = reinterpret_cast<uintptr_t>(event->SEND_COMPLETE.ClientContext);
-        Enqueue(queued);
+        Enqueue(std::move(queued));
         return QUIC_STATUS_SUCCESS;
     }
     if (binding == nullptr || binding->Worker != this) {
@@ -964,7 +968,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         TqLinuxRelayEvent shutdown{};
         shutdown.Type = TqLinuxRelayEventType::Shutdown;
         shutdown.RelayId = relayId;
-        Enqueue(shutdown);
+        Enqueue(std::move(shutdown));
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;

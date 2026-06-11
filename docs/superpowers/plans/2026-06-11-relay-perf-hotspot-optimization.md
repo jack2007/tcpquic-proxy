@@ -401,7 +401,7 @@ git commit -m "docs: record Phase 1 relay fast-path optimization results"
 - Modify: `src/tunnel/linux_relay_buffer_pool.h/.cpp`
 - Modify: `src/unittest/linux_relay_buffer_pool_test.cpp`
 
-- [ ] **Step 1: 重写池 API（worker 线程专用）**
+- [x] **Step 1: 重写池 API（worker 线程专用）**
 
 ```cpp
 // linux_relay_buffer_pool.h 核心 API
@@ -444,7 +444,7 @@ public:
 };
 ```
 
-- [ ] **Step 2: AcquireWorker/ReleaseWorker 无 mutex 实现**
+- [x] **Step 2: AcquireWorker/ReleaseWorker 无 mutex 实现**
 
 ```cpp
 TqBufferRef TqLinuxRelayBufferPool::AcquireWorker() {
@@ -475,7 +475,7 @@ void TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot* slot) {
 }
 ```
 
-- [ ] **Step 3: 更新单元测试**
+- [x] **Step 3: 更新单元测试**
 
 ```cpp
 TqLinuxRelayBufferPool pool(64, 4, 512);
@@ -487,15 +487,23 @@ a.reset();
 assert(pool.PendingBytes() == 64);
 ```
 
-- [ ] **Step 4: 将 DrainTcpReadable / SubmitTcpBatchToQuic 改用 AcquireWorker**
+- [x] **Step 4: 将 DrainTcpReadable / SubmitTcpBatchToQuic 改用 AcquireWorker**
 
 全局替换 `relay->Pool.Acquire()` → `relay->Pool.AcquireWorker()`（worker 线程路径）。
 
-- [ ] **Step 5: 验证无 `shared_ptr` 热路径**
+- [x] **Step 5: 验证无 `shared_ptr` 热路径**
 
 构建后检查 `linux_relay_buffer_pool.h` 中 `TqBufferRef` 不再是 `std::shared_ptr`，`AcquireWorker` 不分配 shared_ptr 控制块。`malloc/free` 热点验收依赖这个条件。
 
-- [ ] **Step 6: 测试 + 提交**
+- [x] **Step 6: 测试 + 提交**
+
+Verification:
+- RED: `rtk cmake --build build --target tcpquic_linux_relay_buffer_pool_test -j2` failed on missing `TqRelayBufferSlot`, `Reserve`, `AcquireWorker`, and copyable `TqBufferRef`.
+- GREEN: `rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test tcpquic_relay_backend_selection_test -j2` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_relay_backend_selection_test` PASS.
 
 ```bash
 git commit -m "perf(relay): lock-free worker-side buffer pool with pre-reserve"

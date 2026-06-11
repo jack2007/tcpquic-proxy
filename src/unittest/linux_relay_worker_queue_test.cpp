@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 int main() {
@@ -12,7 +13,7 @@ int main() {
         TqLinuxRelayEvent event{};
         event.Type = TqLinuxRelayEventType::TestMarker;
         event.Value = i + 1;
-        worker.EnqueueForTest(event);
+        worker.EnqueueForTest(std::move(event));
     }
 
     assert(worker.DrainForTest(1000) == 1000);

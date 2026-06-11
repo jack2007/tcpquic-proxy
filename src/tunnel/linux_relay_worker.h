@@ -104,7 +104,7 @@ public:
     bool StartForTest();
     void Stop();
     void Enqueue(TqLinuxRelayEvent event);
-    void EnqueueForTest(const TqLinuxRelayEvent& event);
+    void EnqueueForTest(TqLinuxRelayEvent event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
     TqLinuxRelayRegistrationResult RegisterRelayWithId(const TqLinuxRelayRegistration& registration);
@@ -142,7 +142,7 @@ private:
         uint32_t bufferCount,
         bool fin);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
-    void ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event);
+    void ProcessQuicReceiveEvent(TqLinuxRelayEvent& event);
     bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);
     void FlushTcpWrites(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
