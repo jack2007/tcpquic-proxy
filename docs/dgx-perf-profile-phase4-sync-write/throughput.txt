@@ -1,0 +1,6 @@
+# dgx-msquic-vs-proxy-bench.sh DURATION_SEC=30 (2026-06-12T01:05:07+08:00)
+# branch: phase4-callback-sync-write (ReceiveComplete+SUCCESS fix)
+# proxy-1x1=7676.16 Mbps (7.676 Gbps), bare_tcp=24633.89 Mbps (24.634 Gbps)
+# proxy-16x16=3396.68 Mbps, proxy-4x16=2378.94 Mbps
+# same-session always-pending (master): proxy-1x1=4939.01 Mbps, bare_tcp=21990.29 Mbps
+speed_download=959520000

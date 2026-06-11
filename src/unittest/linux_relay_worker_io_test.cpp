@@ -899,10 +899,9 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
-        if (snapshot.DeferredReceiveCompleteBytes != plain.size() ||
-            snapshot.DeferredReceiveCompletes != 1) {
-            std::fprintf(stderr, "expected one deferred complete for %zu bytes, got %llu/%llu\n",
-                plain.size(),
+        if (snapshot.DeferredReceiveCompleteBytes != 0 ||
+            snapshot.DeferredReceiveCompletes != 0) {
+            std::fprintf(stderr, "expected no deferred complete on synchronous receive, got %llu/%llu\n",
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompletes));
             worker.Stop();

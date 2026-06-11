@@ -445,3 +445,32 @@ Deferred receive view（`QuicReceiveView` + `StreamReceiveComplete`）+ `StreamM
 3. **多流仍可用**：16×16 / 4×16 达 16–20 Gbps，说明 always-pending 串行化主要伤害单流。
 4. **稳定性保持**：perf 采样无 client core dump（Task 8.1 修复在 Phase 4 上仍有效）。
 5. **下一步**：实施 callback 内同步 `writev` fast path，仅 partial write / `EAGAIN` 才进入 deferred view（见计划 Task 10「Phase 4 后续正确方向」）。
+
+---
+
+## Phase 4 callback sync-write DGX 验证（2026-06-12）
+
+分支 `phase4-callback-sync-write`：`TryCompleteQuicReceiveInline()` callback 内同步 `writev`，partial/`EAGAIN` 才 deferred pending。
+
+- 时间：2026-06-12 01:05
+- 修复：同步写满 payload 时 **仅** 返回 `QUIC_STATUS_SUCCESS`，不调用 `StreamReceiveComplete`（避免 double-complete 导致 ~12KB 卡死）
+- 节点：169.254.250.230 ↔ 169.254.59.196
+- 摘要：`docs/dgx-perf-profile-phase4-sync-write/`
+- 报告：`/tmp/dgx-bench-phase4-syncwrite-v3.md`
+
+### 吞吐（30s bench）
+
+| 指标 | Phase 3 Rerun | Phase 4 always-pending | always-pending 同晚 | **sync-write 修复** |
+|------|---------------|------------------------|---------------------|---------------------|
+| 裸 TCP | 28.18 Gbps | 18.52 Gbps | 21.99 Gbps | **24.63 Gbps** |
+| proxy-1x1 | **11.36 Gbps** | 5.23 Gbps | 4.94 Gbps | **7.68 Gbps** |
+| proxy / 裸 TCP | **40.3%** | 28.2% | 22.5% | **31.2%** |
+| proxy-16×16 | — | 16.19 Gbps | 10.75 Gbps | **3.40 Gbps** |
+| proxy-4×16 | — | 19.61 Gbps | 12.41 Gbps | **2.38 Gbps** |
+
+### 结论
+
+1. **修复后单流优于 always-pending**：7.68 vs 4.94 Gbps（同晚会话 +55%），验证 sync fast path 方向正确。
+2. **仍低于 Phase 3 Rerun**：7.68 vs 11.36 Gbps（归一化 31.2% vs 40.3%）。
+3. **多流明显回退**：16×16 / 4×16 仅 3.4 / 2.4 Gbps，callback 线程阻塞或 receive 恢复时序待查。
+4. **坏 run 仍可能 ~0 Gbps**：QUIC 建连/ listener 未就绪或修复前 double-complete；bench 需确认 HTTP CONNECT listening。

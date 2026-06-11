@@ -860,15 +860,17 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
         return QUIC_STATUS_PENDING;
     }
 
-    if (completed > 0) {
-        CompleteDeferredQuicReceive(stream, completed);
-    }
     if (completed == totalLength) {
+        // Synchronous receive: MsQuic advances flow control on SUCCESS without
+        // StreamReceiveComplete. Calling both double-consumes and stalls the stream.
         if (fin) {
             (void)::shutdown(relay->TcpFd, SHUT_WR);
         }
         handled = true;
         return QUIC_STATUS_SUCCESS;
+    }
+    if (completed > 0) {
+        CompleteDeferredQuicReceive(stream, completed);
     }
     if (!QueueDeferredQuicReceive(relay, stream, buffers, bufferCount, completed, fin)) {
         handled = true;

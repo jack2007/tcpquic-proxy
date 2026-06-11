@@ -1169,6 +1169,47 @@ CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase4 ./scripts/dg
 - [x] **Step 1: 完整 bench + perf 复测**
 - [x] **Step 2: 对比 Phase 3 并记录结论**
 
+### Task 10.2: Phase 4 callback sync-write DGX 验证（2026-06-12）
+
+代码：`phase4-callback-sync-write` 分支（`91d9820` fast path + **ReceiveComplete 语义修复**）。
+
+**修复**：`TryCompleteQuicReceiveInline()` 在 payload 全部同步写满时只返回 `QUIC_STATUS_SUCCESS`，不再调用 `StreamReceiveComplete`（MsQuic 同步路径已推进流控；二者并用会在 ~12KB 后卡死）。
+
+```bash
+cmake --build build --target tcpquic-proxy tcpquic_linux_relay_worker_io_test -j$(nproc)
+./build/bin/Release/tcpquic_linux_relay_worker_io_test
+
+DURATION_SEC=30 REPORT=/tmp/dgx-bench-phase4-syncwrite-v3.md \
+  ./scripts/dgx-msquic-vs-proxy-bench.sh
+```
+
+**吞吐（proxy-1x1，30s；同晚会话对比 always-pending）**
+
+| 指标 | Phase 3 Rerun | Phase 4 always-pending（Task 10.1） | always-pending 同晚 | **sync-write 修复 v3** |
+|------|---------------|-------------------------------------|---------------------|------------------------|
+| 裸 TCP | 28.18 Gbps | 18.52 Gbps | 21.99 Gbps | **24.63 Gbps** |
+| proxy-1x1 | **11.36 Gbps** | 5.23 Gbps | 4.94 Gbps | **7.68 Gbps** |
+| proxy / 裸 TCP | **40.3%** | 28.2% | 22.5% | **31.2%** |
+| proxy-16×16 | — | 16.19 Gbps | 10.75 Gbps | **3.40 Gbps** |
+| proxy-4×16 | — | 19.61 Gbps | 12.41 Gbps | **2.38 Gbps** |
+
+验收项：
+
+| 标准 | 结果 |
+|------|------|
+| 单测 PASS（含 sync receive 不调用 ReceiveComplete） | ✅ |
+| 单流功能（32MB 下载不断流） | ✅ |
+| 单流吞吐 ≥ always-pending 同晚会话 | ✅ **7.68 vs 4.94 Gbps** |
+| 单流吞吐 ≥ Phase 3 Rerun（11.36 Gbps） | ❌ **7.68 Gbps** |
+| 多流吞吐 ≥ always-pending | ❌ 3.4 / 2.4 vs 10.8 / 12.4 Gbps |
+
+**结论**：callback 同步 write fast path 在修复 MsQuic 完成语义后，**单流优于 always-pending**（同链路 +55%），但仍低于 Phase 3 Rerun；多流回退明显，不宜直接替换 always-pending。建议以 sync-write 作为单流 fast path、partial/EAGAIN 走 deferred 的混合方案继续迭代，并调查多流 callback 阻塞。
+
+原始数据：`docs/dgx-perf-profile-phase4-sync-write/`；报告：`/tmp/dgx-bench-phase4-syncwrite-v3.md`。
+
+- [x] **Step 1: ReceiveComplete+SUCCESS 修复 + 单测**
+- [x] **Step 2: DGX bench 对比 always-pending / Phase 3**
+
 ---
 
 ## 完成检查清单
@@ -1180,3 +1221,4 @@ CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase4 ./scripts/dg
 - [x] `docs/dgx-perf-profile-analysis.md` 追加 Phase 1–3 优化结果章节
 - [x] perf 采样 client core dump 已修复（Task 8.1；`RetiredRelays` + ingress 池同步）
 - [x] Phase 4 deferred receive DGX 验证已记录（Task 10.1；单流 ~5.2 Gbps，receive 零拷贝生效，待 fast path）
+- [x] Phase 4 callback sync-write DGX 验证已记录（Task 10.2；修复后单流 ~7.7 Gbps，优于 always-pending，多流待优化）
