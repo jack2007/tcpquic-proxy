@@ -1,0 +1,4 @@
+# dgx-msquic-vs-proxy-bench.sh DURATION_SEC=30 (2026-06-11T18:47:10+08:00)
+# proxy-1x1=11364.16 Mbps (11.364 Gbps), bare_tcp=28176.28 Mbps (28.176 Gbps)
+# perf curl during sampling failed (client core dump); bench throughput used as reference
+speed_download=1420520000

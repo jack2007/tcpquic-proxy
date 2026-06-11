@@ -320,3 +320,35 @@ DGX perf 未在当前系统执行：当前系统不具备 DGX 测试环境。以
 **验收**：`QueueLock` 消除 ✅；MPMC 无可见 CAS 热点 ✅；归一化吞吐与 Phase 2 持平 ✅；绝对 Gbps ≥ 9（9.40）✅。
 
 **结论**：Phase 3 以无锁 MPMC 环替换 mutex 事件队列，完成三阶段 relay 热点优化。锁竞争消除后 server 侧 `DrainTcpReadable` / `AcquireWorker` 占比上升属预期（CPU 转向真实 relay 工作）。可选 Phase 4（deferred receive view）不在本阶段范围。
+
+---
+
+## Phase 3 Rerun 复测（链路恢复后）
+
+- 时间：2026-06-11 18:47–18:50
+- 代码：`2ce6e60`
+- 节点：169.254.250.230 ↔ 169.254.59.196（`enp1s0f0np0`，无时延 LAN）
+- Perf 摘要：`docs/dgx-perf-profile-rerun-20260611/`
+- 吞吐 bench：`/tmp/dgx-msquic-vs-proxy-20260611-184710.md`
+
+### 吞吐（proxy-1x1，30s）
+
+| 指标 | Phase 2 | Phase 3（早前） | **Rerun** |
+|------|---------|----------------|-----------|
+| 裸 TCP | 29.0 Gbps | 20.5 Gbps | **28.2 Gbps** |
+| proxy-1x1 | **13.38 Gbps** | 9.40 Gbps | **11.36 Gbps** |
+| proxy / 裸 TCP | 46.1% | 45.8% | 40.3% |
+
+### Perf 热点（全量 `perf report --comm tcpquic-proxy`）
+
+| 热点 / 指标 | Phase 2 | Phase 3（早前） | **Rerun** |
+|-------------|---------|----------------|-----------|
+| Server mutex 合计 | 3.7% | — | **3.8%** |
+| Client mutex 合计 | 2.6% | — | **2.9%** |
+| `DrainTcpReadable`（server） | 9.3% | 11.1% | **9.3%** |
+| `AcquireWorker`（server） | 5.2% | 7.9% | **5.2%** |
+| `ReleaseWorker`（server） | — | 4.3% | **4.2%** |
+| `TryPush` / `TryPop` / `QueueLock` | — | 未进 Top | **未出现** |
+| Client `aes_gcm_dec` | 26.5% | 7.4% | **32.6%** |
+
+**结论**：Rerun 在链路恢复至 ~28 Gbps 裸 TCP 后，Phase 3 server perf 与 Phase 2 对齐；早前 Phase 3 偏高的 relay 占比系链路波动所致。瓶颈仍为 Client TLS/UDP 栈 + Server `DrainTcpReadable` 真实 I/O，mutex 竞争已非主要因素。

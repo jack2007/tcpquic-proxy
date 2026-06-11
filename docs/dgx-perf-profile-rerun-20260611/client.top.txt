@@ -1,0 +1,150 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 7108140605
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                        IPC   [IPC Coverage]
+# ........  ............  ............................................................................................................................................................................................................................................................  ....................
+#
+    23.98%           711  [k] __arch_copy_to_user                                                                                                                                                                                                                                       -      -            
+            |          
+             --23.92%--simple_copy_to_iter
+                       __skb_datagram_iter
+                       |          
+                       |--23.26%--__skb_datagram_iter
+                       |          skb_copy_datagram_iter
+                       |          udpv6_recvmsg
+                       |          inet6_recvmsg
+                       |          sock_recvmsg
+                       |          ____sys_recvmsg
+                       |          ___sys_recvmsg
+                       |          do_recvmmsg
+                       |          __arm64_sys_recvmmsg
+                       |          invoke_syscall
+                       |          el0_svc_common.constprop.0
+                       |          do_el0_svc
+                       |          el0_svc
+                       |          el0t_64_sync_handler
+                       |          el0t_64_sync
+                       |          recvmmsg_syscall (inlined)
+                       |          __recvmmsg
+                       |          CxPlatSocketReceiveCoalesced
+                       |          CxPlatSocketContextIoEventComplete
+                       |          CxPlatProcessEvents
+                       |          CxPlatWorkerThread
+                       |          start_thread
+                       |          thread_start
+                       |          
+                        --0.66%--skb_copy_datagram_iter
+                                  udpv6_recvmsg
+                                  inet6_recvmsg
+                                  sock_recvmsg
+                                  ____sys_recvmsg
+                                  ___sys_recvmsg
+                                  do_recvmmsg
+                                  __arm64_sys_recvmmsg
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  recvmmsg_syscall (inlined)
+                                  __recvmmsg
+                                  CxPlatSocketReceiveCoalesced
+                                  CxPlatSocketContextIoEventComplete
+                                  CxPlatProcessEvents
+                                  CxPlatWorkerThread
+                                  start_thread
+                                  thread_start
+
+    13.26%           384  [k] __slab_free                                                                                                                                                                                                                                               -      -            
+            |          
+            |--12.18%--kmem_cache_free
+            |          |          
+            |           --11.96%--skb_free_head
+            |                     skb_release_data
+            |                     |          
+            |                      --11.69%--kfree_skb_list_reason
+            |                                skb_release_data
+            |                                __consume_stateless_skb
+            |                                skb_consume_udp
+            |                                udpv6_recvmsg
+            |                                inet6_recvmsg
+            |                                sock_recvmsg
+            |                                ____sys_recvmsg
+            |                                ___sys_recvmsg
+            |                                do_recvmmsg
+            |                                __arm64_sys_recvmmsg
+            |                                invoke_syscall
+            |                                el0_svc_common.constprop.0
+            |                                do_el0_svc
+            |                                el0_svc
+            |                                el0t_64_sync_handler
+            |                                el0t_64_sync
+            |                                recvmmsg_syscall (inlined)
+            |                                __recvmmsg
+            |                                CxPlatSocketReceiveCoalesced
+            |                                CxPlatSocketContextIoEventComplete
+            |                                CxPlatProcessEvents
+            |                                CxPlatWorkerThread
+            |                                start_thread
+            |                                thread_start
+            |          
+             --1.02%--kmem_cache_free_bulk.part.0
+                       kmem_cache_free_bulk
+                       kfree_skb_list_reason
+                       skb_release_data
+                       __consume_stateless_skb
+                       skb_consume_udp
+                       udpv6_recvmsg
+                       inet6_recvmsg
+                       sock_recvmsg
+                       ____sys_recvmsg
+                       ___sys_recvmsg
+                       do_recvmmsg
+                       __arm64_sys_recvmmsg
+                       invoke_syscall
+                       el0_svc_common.constprop.0
+                       do_el0_svc
+                       el0_svc
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       recvmmsg_syscall (inlined)
+                       __recvmmsg
+                       CxPlatSocketReceiveCoalesced
+                       CxPlatSocketContextIoEventComplete
+                       CxPlatProcessEvents
+                       CxPlatWorkerThread
+                       start_thread
+                       thread_start
+
+     7.25%           215  [k] __skb_datagram_iter                                                                                                                                                                                                                                       -      -            
+            |          
+            |--5.04%--skb_copy_datagram_iter
+            |          udpv6_recvmsg
+            |          inet6_recvmsg
+            |          sock_recvmsg
+            |          ____sys_recvmsg
+            |          ___sys_recvmsg
+            |          do_recvmmsg
+            |          __arm64_sys_recvmmsg
+            |          invoke_syscall
+            |          el0_svc_common.constprop.0
+            |          do_el0_svc
+            |          el0_svc
+            |          el0t_64_sync_handler
+            |          el0t_64_sync
+            |          recvmmsg_syscall (inlined)
+            |          __recvmmsg
+            |          CxPlatSocketReceiveCoalesced
+            |          CxPlatSocketContextIoEventComplete
+            |          CxPlatProcessEvents
+            |          CxPlatWorkerThread
+            |          start_thread
+            |          thread_start
+            |          
+             --2.21%--__skb_datagram_iter

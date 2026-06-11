@@ -739,6 +739,36 @@ Actual（2026-06-11，spark-1619 ↔ spark-1b6f，无时延 200G LAN）：
 
 **结论**：Phase 3 消除事件队列 `QueueLock`，以 MPMC 无锁环替换 mutex deque，未引入可见 CAS 热点，归一化吞吐与 Phase 2 持平。设计文档预期的 3–5% 边际 CPU 回收在 Phase 2 已将 mutex 压至 ~3–4% 后难以单独量化。三阶段优化（Phase 1–3）目标已达成；可选 Phase 4（deferred receive view）见 Task 9。
 
+**Rerun 复测**（2026-06-11 18:47，链路恢复后再次经网卡跑分，代码 `2ce6e60`）：
+
+```bash
+DURATION_SEC=30 ./scripts/dgx-msquic-vs-proxy-bench.sh
+CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-rerun-20260611 ./scripts/dgx-perf-profile.sh
+```
+
+| 指标 | Phase 2 | Phase 3（早前） | **Rerun** |
+|------|---------|----------------|-----------|
+| 裸 TCP | 29.0 Gbps | 20.5 Gbps | **28.2 Gbps** |
+| proxy-1x1 | **13.38 Gbps** | 9.40 Gbps | **11.36 Gbps** |
+| proxy / 裸 TCP | 46.1% | 45.8% | 40.3% |
+
+Perf（全量 `perf report --comm tcpquic-proxy`，25s @ 999Hz）：
+
+| 热点 / 指标 | Phase 2 | Phase 3（早前） | **Rerun** |
+|-------------|---------|----------------|-----------|
+| Server mutex 合计 | 3.7% | — | **3.8%** |
+| Client mutex 合计 | 2.6% | — | **2.9%** |
+| `DrainTcpReadable`（server） | 9.3% | 11.1% | **9.3%** |
+| `AcquireWorker`（server） | 5.2% | 7.9% | **5.2%** |
+| `ReleaseWorker`（server） | — | 4.3% | **4.2%** |
+| `FindRelayById`（server） | — | — | **1.6%** |
+| `TryPush` / `TryPop` / `QueueLock` | — | 未进 Top | **未出现** |
+| Client `aes_gcm_dec` | 26.5% | 7.4%* | **32.6%** |
+
+\* Phase 3 早前 client 采样因 perf 期间进程崩溃仅 964 samples；Rerun client 5830 samples，与 Phase 2 可比。
+
+**Rerun 结论**：链路恢复至 ~28 Gbps 裸 TCP 后，Phase 3 的 server perf 画像与 Phase 2 **高度一致**（mutex ~3–4%，`DrainTcpReadable`/`AcquireWorker` 持平）；早前 Phase 3 server 热点偏高系链路慢导致 UDP/TLS 占比下降、relay 符号相对上升，非回归。Perf 原始摘要：`docs/dgx-perf-profile-rerun-20260611/`；吞吐报告：`/tmp/dgx-msquic-vs-proxy-20260611-184710.md`。
+
 ```bash
 git commit -m "docs: record Phase 3 DGX perf verification results"
 ```
