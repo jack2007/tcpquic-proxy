@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 class TqLinuxRelayBufferPool;
@@ -50,6 +52,7 @@ public:
     TqRelayBufferSlot& operator*() const;
     explicit operator bool() const;
     void reset();
+    void abandon();
 
 private:
     friend class TqLinuxRelayBufferPool;
@@ -109,7 +112,11 @@ private:
     size_t IngressMaxSlots{0};
     size_t WorkerAllocated{0};
     size_t IngressAllocated{0};
-    uint64_t WorkerPending{0};
-    uint64_t IngressPending{0};
+    std::atomic<uint64_t> WorkerPending{0};
+    std::atomic<uint64_t> IngressPending{0};
     uint64_t Acquires{0};
+    // Ingress free-list is touched from MsQuic callback thread(s) and the relay
+    // worker when receive events are dropped after dequeue; worker slots stay
+    // worker-thread-only.
+    mutable std::mutex IngressLock;
 };

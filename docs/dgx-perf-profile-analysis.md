@@ -352,3 +352,54 @@ DGX perf 未在当前系统执行：当前系统不具备 DGX 测试环境。以
 | Client `aes_gcm_dec` | 26.5% | 7.4% | **32.6%** |
 
 **结论**：Rerun 在链路恢复至 ~28 Gbps 裸 TCP 后，Phase 3 server perf 与 Phase 2 对齐；早前 Phase 3 偏高的 relay 占比系链路波动所致。瓶颈仍为 Client TLS/UDP 栈 + Server `DrainTcpReadable` 真实 I/O，mutex 竞争已非主要因素。
+
+---
+
+## perf 采样 client core dump 修复（2026-06-11）
+
+### 现象
+
+- `dgx-perf-profile.sh` 运行期间 **client** 进程 abort，日志末尾：`corrupted double-linked list`
+- 采样结束尾 curl 报告 `speed_download=0`；**server** 侧 `perf.data` 仍可用
+- 独立吞吐 bench（`dgx-msquic-vs-proxy-bench.sh`）结果正常（例：11.36 Gbps），说明崩溃与 perf 叠加高压 / 隧道频繁创建销毁相关，而非纯吞吐回归
+
+### 采集与 GDB
+
+```bash
+ulimit -c unlimited
+sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p.%t
+CASE=proxy-1x1 DURATION_SEC=25 ./scripts/dgx-perf-profile.sh
+gdb -batch -ex 'thread 1' -ex bt build/bin/Release/tcpquic-proxy /tmp/core.tcpquic-proxy.*
+```
+
+崩溃栈（典型）：
+
+```text
+malloc_printerr("corrupted double-linked list")
+  -> TqStartClientTunnel() -> operator new()
+```
+
+堆在更早的 relay 路径已损坏；崩溃出现在 HTTP CONNECT 线程池新建隧道时。
+
+### 根因
+
+1. **Ingress buffer 池数据竞争**：MsQuic 多回调线程并发 `AcquireIngress()`，与 worker 侧 `TransferToWorker()` / 事件析构 `ReleaseIngress()` 同时修改 `IngressFree`（`std::vector` 非线程安全）。
+2. **Relay 注销 use-after-free**：`UnregisterRelay()` 销毁 relay（含 pool）后，MPMC 队列仍可能有带 `TqBufferRef` 的 `QuicReceive` 事件；`relay == nullptr` 时 `TqBufferHandle::~TqBufferHandle` 调用已释放 pool 的 `Release*`。
+
+### 修复摘要
+
+| 组件 | 改动 |
+|------|------|
+| `TqLinuxRelayBufferPool` | `IngressLock`；atomic pending 计数；`TqBufferRef::abandon()` |
+| `TqLinuxRelayWorker` | `RetiredRelays` 延迟释放；`PurgeRetiredRelaysIfIdle()`；孤儿 buffer `abandon()` |
+| `dgx-perf-profile.sh` | 入口默认开启 coredump（`ulimit -c` + `core_pattern`） |
+
+### 修复后验证
+
+| 检查项 | 结果 |
+|--------|------|
+| perf 采样 20–25s × 2 次 | client **无** coredump |
+| `speed_download` | **非 0** |
+| relay 单元测试 | PASS |
+
+独立 bench 吞吐仍以 `dgx-msquic-vs-proxy-bench.sh` 为准；perf 尾 curl 仅作采样窗口内参考。

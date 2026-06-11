@@ -128,6 +128,7 @@ private:
         bool fin);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
     void ProcessQuicReceiveEvent(TqLinuxRelayEvent& event);
+    void PurgeRetiredRelaysIfIdle();
     bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);
     void FlushTcpWrites(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
@@ -152,6 +153,7 @@ private:
     std::atomic<uint64_t> WakeupWrites{0};
     mutable std::mutex RelayLock;
     std::deque<std::shared_ptr<RelayState>> Relays;
+    std::deque<std::shared_ptr<RelayState>> RetiredRelays;
     uint64_t NextRelayId{1};
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};

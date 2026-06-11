@@ -86,6 +86,17 @@ void TqBufferHandle::reset() {
     }
 }
 
+void TqBufferHandle::abandon() {
+    if (Slot == nullptr) {
+        Pool = nullptr;
+        return;
+    }
+    auto* slot = Slot;
+    Pool = nullptr;
+    Slot = nullptr;
+    delete slot;
+}
+
 TqBufferView::TqBufferView(uint8_t* data, size_t len, TqBufferRef owner) noexcept
     : Data(data), Len(len), Owner(std::move(owner)) {}
 
@@ -103,6 +114,7 @@ TqLinuxRelayBufferPool::~TqLinuxRelayBufferPool() {
         delete buffer;
     }
     WorkerFree.clear();
+    std::lock_guard<std::mutex> guard(IngressLock);
     for (auto* buffer : IngressFree) {
         delete buffer;
     }
@@ -125,13 +137,16 @@ void TqLinuxRelayBufferPool::Reserve(size_t slotCount) {
         WorkerFree.push_back(buffer);
         ++WorkerAllocated;
     }
-    while (IngressAllocated < IngressMaxSlots) {
-        auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
-        if (buffer == nullptr) {
-            return;
+    {
+        std::lock_guard<std::mutex> guard(IngressLock);
+        while (IngressAllocated < IngressMaxSlots) {
+            auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
+            if (buffer == nullptr) {
+                return;
+            }
+            IngressFree.push_back(buffer);
+            ++IngressAllocated;
         }
-        IngressFree.push_back(buffer);
-        ++IngressAllocated;
     }
 }
 
@@ -156,7 +171,7 @@ TqBufferRef TqLinuxRelayBufferPool::AcquireWorker() {
     }
 
     buffer->UsedLength = 0;
-    WorkerPending += ChunkBytes;
+    WorkerPending.fetch_add(ChunkBytes, std::memory_order_relaxed);
     ++Acquires;
     return TqBufferRef(this, buffer, TqBufferDomain::Worker);
 }
@@ -167,22 +182,25 @@ TqBufferRef TqLinuxRelayBufferPool::AcquireIngress() {
     }
 
     TqRelayBufferSlot* buffer = nullptr;
-    if (!IngressFree.empty()) {
-        buffer = IngressFree.back();
-        IngressFree.pop_back();
-    } else {
-        if (IngressAllocated >= IngressMaxSlots) {
-            return {};
+    {
+        std::lock_guard<std::mutex> guard(IngressLock);
+        if (!IngressFree.empty()) {
+            buffer = IngressFree.back();
+            IngressFree.pop_back();
+        } else {
+            if (IngressAllocated >= IngressMaxSlots) {
+                return {};
+            }
+            buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
+            if (buffer == nullptr) {
+                return {};
+            }
+            ++IngressAllocated;
         }
-        buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
-        if (buffer == nullptr) {
-            return {};
-        }
-        ++IngressAllocated;
     }
 
     buffer->UsedLength = 0;
-    IngressPending += ChunkBytes;
+    IngressPending.fetch_add(ChunkBytes, std::memory_order_relaxed);
     ++Acquires;
     return TqBufferRef(this, buffer, TqBufferDomain::Ingress);
 }
@@ -194,8 +212,13 @@ TqBufferRef TqLinuxRelayBufferPool::TransferToWorker(TqBufferRef ingress) {
     auto* buffer = ingress.Slot;
     ingress.Pool = nullptr;
     ingress.Slot = nullptr;
-    IngressPending -= std::min<uint64_t>(IngressPending, ChunkBytes);
-    WorkerPending += ChunkBytes;
+    const uint64_t ingressBefore = IngressPending.load(std::memory_order_relaxed);
+    if (ingressBefore >= ChunkBytes) {
+        IngressPending.fetch_sub(ChunkBytes, std::memory_order_relaxed);
+    } else {
+        IngressPending.store(0, std::memory_order_relaxed);
+    }
+    WorkerPending.fetch_add(ChunkBytes, std::memory_order_relaxed);
     return TqBufferRef(this, buffer, TqBufferDomain::Worker);
 }
 
@@ -212,7 +235,8 @@ size_t TqLinuxRelayBufferPool::FreeCount() const {
 }
 
 uint64_t TqLinuxRelayBufferPool::PendingBytes() const {
-    return WorkerPending + IngressPending;
+    return WorkerPending.load(std::memory_order_relaxed) +
+        IngressPending.load(std::memory_order_relaxed);
 }
 
 uint64_t TqLinuxRelayBufferPool::AcquireCount() const {
@@ -228,7 +252,12 @@ void TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot* buffer) {
         return;
     }
     buffer->UsedLength = 0;
-    WorkerPending -= std::min<uint64_t>(WorkerPending, ChunkBytes);
+    const uint64_t workerBefore = WorkerPending.load(std::memory_order_relaxed);
+    if (workerBefore >= ChunkBytes) {
+        WorkerPending.fetch_sub(ChunkBytes, std::memory_order_relaxed);
+    } else {
+        WorkerPending.store(0, std::memory_order_relaxed);
+    }
     WorkerFree.push_back(buffer);
 }
 
@@ -237,6 +266,12 @@ void TqLinuxRelayBufferPool::ReleaseIngress(TqRelayBufferSlot* buffer) {
         return;
     }
     buffer->UsedLength = 0;
-    IngressPending -= std::min<uint64_t>(IngressPending, ChunkBytes);
+    const uint64_t ingressBefore = IngressPending.load(std::memory_order_relaxed);
+    if (ingressBefore >= ChunkBytes) {
+        IngressPending.fetch_sub(ChunkBytes, std::memory_order_relaxed);
+    } else {
+        IngressPending.store(0, std::memory_order_relaxed);
+    }
+    std::lock_guard<std::mutex> guard(IngressLock);
     IngressFree.push_back(buffer);
 }

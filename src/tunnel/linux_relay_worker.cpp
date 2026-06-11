@@ -23,6 +23,18 @@
 __attribute__((weak)) const MsQuicApi* MsQuic = nullptr;
 #endif
 
+namespace {
+
+void AbandonOrphanedEventBuffers(TqLinuxRelayEvent& event) {
+    event.Buffer.abandon();
+    for (auto& buffer : event.Buffers) {
+        buffer.abandon();
+    }
+    event.Buffers.clear();
+}
+
+}  // namespace
+
 struct TqLinuxRelayWorker::StreamRelayBinding {
     TqLinuxRelayWorker* Worker{nullptr};
     std::atomic<RelayState*> Relay{nullptr};
@@ -216,11 +228,21 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
     }
     EventsProcessed.fetch_add(processed);
 
+    PurgeRetiredRelaysIfIdle();
+
     WakeArmed.store(false, std::memory_order_release);
     if (EventQueue.SizeApprox() != 0) {
         Wake();
     }
     return processed;
+}
+
+void TqLinuxRelayWorker::PurgeRetiredRelaysIfIdle() {
+    if (EventQueue.SizeApprox() != 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(RelayLock);
+    RetiredRelays.clear();
 }
 
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
@@ -331,6 +353,10 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
         RetiredStreamBindings.emplace_back(binding);
     }
     removed->PendingTcpWrites.clear();
+    {
+        std::lock_guard<std::mutex> guard(RelayLock);
+        RetiredRelays.push_back(removed);
+    }
 }
 
 bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs) {
@@ -559,6 +585,11 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
     std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
+        if (relay->Id == relayId) {
+            return relay;
+        }
+    }
+    for (const auto& relay : RetiredRelays) {
         if (relay->Id == relayId) {
             return relay;
         }
@@ -792,7 +823,11 @@ void TqLinuxRelayWorker::ArmTcpWritable(RelayState* relay, bool enabled) {
 
 void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
     auto relay = FindRelayById(event.RelayId);
-    if (relay == nullptr || relay->Closing) {
+    if (relay == nullptr) {
+        AbandonOrphanedEventBuffers(event);
+        return;
+    }
+    if (relay->Closing) {
         return;
     }
     const bool needsDecompress =

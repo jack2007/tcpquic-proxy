@@ -45,6 +45,18 @@ SERVER_PERF_PID=""
 
 log() { printf '[dgx-perf] %s\n' "$*" >&2; }
 
+# 便于 perf 期间 client 崩溃时用 gdb 分析：core 写到 /tmp/core.<exe>.<pid>.<ts>
+ensure_coredump() {
+    ulimit -c unlimited 2>/dev/null || true
+    local pattern="${CORE_PATTERN:-/tmp/core.%e.%p.%t}"
+    if [[ -w /proc/sys/kernel/core_pattern ]]; then
+        echo "${pattern}" > /proc/sys/kernel/core_pattern 2>/dev/null || \
+            sudo sysctl -w "kernel.core_pattern=${pattern}" >/dev/null 2>&1 || true
+    else
+        sudo sysctl -w "kernel.core_pattern=${pattern}" >/dev/null 2>&1 || true
+    fi
+}
+
 ensure_routes() {
     sudo ip route replace "${TARGET}" dev "${LOCAL_IFACE}" src "${BIND}" 2>/dev/null || true
     ssh -o BatchMode=yes "$PEER" "sudo ip route replace ${BIND} dev ${PEER_IFACE} src ${TARGET} 2>/dev/null; true"
@@ -279,6 +291,7 @@ trap cleanup EXIT INT TERM
 
 [[ -x "$BIN" ]] || { log "missing $BIN"; exit 1; }
 mkdir -p "$OUT_DIR" "$TMP"
+ensure_coredump
 ensure_routes
 deploy_binaries
 start_busybox_http

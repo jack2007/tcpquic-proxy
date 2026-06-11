@@ -773,22 +773,180 @@ Perf（全量 `perf report --comm tcpquic-proxy`，25s @ 999Hz）：
 git commit -m "docs: record Phase 3 DGX perf verification results"
 ```
 
+### Task 8.1: 修复 perf 采样期间 client core dump（2026-06-11）
+
+**现象**：`dgx-perf-profile.sh` 采样窗口内 client 进程 abort，日志 `corrupted double-linked list`，`throughput.txt` 中 `speed_download=0`；server 侧 perf 仍有效，独立 bench（`dgx-msquic-vs-proxy-bench.sh`）吞吐正常。
+
+**采集 coredump**：
+
+```bash
+ulimit -c unlimited
+sudo sysctl -w kernel.core_pattern=/tmp/core.%e.%p.%t
+CASE=proxy-1x1 DURATION_SEC=25 ./scripts/dgx-perf-profile.sh
+gdb -batch -ex 'thread apply all bt' build/bin/Release/tcpquic-proxy /tmp/core.tcpquic-proxy.<pid>.<ts>
+```
+
+**GDB 结论**：崩溃线程在 `TqStartClientTunnel` → `operator new` → `malloc_printerr("corrupted double-linked list")`，属**堆元数据已损坏后的二次崩溃**，非隧道创建逻辑本身。
+
+**根因（两处）**：
+
+| # | 问题 | 机制 |
+|---|------|------|
+| 1 | Ingress buffer 池数据竞争 | 多个 MsQuic 回调线程并发 `AcquireIngress()`，worker 线程 `TransferToWorker()` / 事件析构 `ReleaseIngress()` 同时改 `IngressFree` / `IngressPending`，无同步 |
+| 2 | Relay 注销后 use-after-free | `UnregisterRelay()` 销毁 pool 后，队列中仍残留带 `TqBufferRef` 的 `QuicReceive` 事件；`FindRelayById` 返回 null 时事件析构调用已释放 pool 的 `Release*` |
+
+**修复**（`linux_relay_buffer_pool.*` + `linux_relay_worker.*`）：
+
+- `IngressLock` 保护 ingress free-list（`AcquireIngress` / `ReleaseIngress` / `Reserve` / 析构）
+- `WorkerPending` / `IngressPending` 改为 `std::atomic<uint64_t>`
+- `RetiredRelays`：注销后暂存 relay，直至事件队列排空再释放 pool
+- `TqBufferRef::abandon()`：relay 已不存在时直接 `delete` slot，避免 UAF
+
+**验证**（修复后连续两次 `DURATION_SEC=20/25` perf 采样）：
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| client core dump | 有（`speed_download=0`） | **无** |
+| client 日志 | `corrupted double-linked list` | 正常结束 |
+| perf 尾 curl `speed_download` | 0 | **非 0**（例：110801630 B/s） |
+| 单元测试 | — | `tcpquic_linux_relay_buffer_pool_test` / `linux_relay_worker_*_test` PASS |
+
+`scripts/dgx-perf-profile.sh` 已在脚本入口默认 `ulimit -c unlimited` 并设置 `core_pattern=/tmp/core.%e.%p.%t`，便于后续自动采集。
+
+- [x] **Step 1: 配置 coredump + GDB 定位**
+- [x] **Step 2: 修复 ingress 池竞争 + relay 生命周期**
+- [x] **Step 3: perf 采样复测无崩溃**
+
 ---
 
-## Phase 4（可选）：Deferred Receive View
+## Phase 4（可选）：Deferred Receive View / QUIC→TCP zero-copy 尝试
 
-> 仅在 `docs/tcpquic_next_steps.md` Phase E 生命周期测试通过后执行。
+> 目标：QUIC→TCP 方向不再把 MsQuic receive payload 拷贝到 relay buffer，而是在 MsQuic receive callback 中返回 `QUIC_STATUS_PENDING`，由 relay worker 直接用 receive buffer 指针 `writev()` 到 TCP socket；TCP 实际写出多少字节，就调用 `StreamReceiveComplete(bytes)` 释放多少 MsQuic receive buffer。
 
-### Task 9: MsQuic receive buffer 生命周期验证
+### Task 9: MsQuic receive buffer 生命周期源码审计
 
 **Files:**
-- Create: `src/unittest/msquic_receive_lifetime_test.cpp`
+- Read: `third_party/msquic/src/core/stream_recv.c`
+- Read: `third_party/msquic/src/core/recv_buffer.c`
+- Read: `third_party/msquic/src/core/recv_buffer.h`
+- Read: `third_party/msquic/src/core/api.c`
+- Optional test: `src/unittest/msquic_receive_lifetime_test.cpp`
 
-- [ ] **Step 1: 编写生命周期探测测试**（需真实 MsQuic 连接，可标记为 integration test）
+**已确认的源码事实：**
 
-- [ ] **Step 2: 若通过，设计 `StreamReceiveComplete` 与 TCP 部分写映射**
+- `QUIC_STREAM_EVENT_RECEIVE` 的 `event->RECEIVE.Buffers` 数组本身不能异步保存：`stream_recv.c` 优先使用栈上的 `StackRecvBuffers[3]`，超过 3 个 buffer 才临时 heap 分配，并在 receive flush 结束前释放 heap 版本。
+- `QUIC_BUFFER.Buffer` 指向 MsQuic recv buffer 内部 chunk。`recv_buffer.h` 注释明确：`QuicRecvBufferRead` 返回 internal pointer，调用方必须在 `QuicRecvBufferDrain` 前保持独占访问。
+- 若 receive callback 不返回 `QUIC_STATUS_PENDING`，MsQuic 会把 receive 长度计入完成长度，并调用 `QuicStreamReceiveComplete`，后者继续调用 `QuicRecvBufferDrain` 推进 `BaseOffset`，并可能释放或复用 chunk。
+- 因此 Phase 4 的第一步不应是“探测测试验证回调返回后指针是否还活着”，而应是源码审计 `QUIC_STATUS_PENDING`、`StreamReceiveComplete`、`StreamReceiveSetEnabled`、`ReceiveMultiple` 的精确语义。测试最多作为防回归或验证当前 MsQuic 版本理解的 integration test。
 
-- [ ] **Step 3: 实现并单独 bench**
+- [ ] **Step 1: 源码审计 `QUIC_STATUS_PENDING` receive 语义**
+
+确认 callback 返回 `QUIC_STATUS_PENDING` 后，MsQuic 不会自动 drain 当前 receive buffer；只有应用后续调用 `StreamReceiveComplete(bytes)` 后，才会释放对应字节的内部 receive buffer。
+
+- [ ] **Step 2: 源码审计部分完成语义**
+
+确认 `StreamReceiveComplete(stream, N)` 支持按字节部分完成，且可与 TCP partial write 一一对应。重点确认重复 complete、超额 complete、stream shutdown、`ReceiveMultiple` 模式下的行为。
+
+- [ ] **Step 3: 源码审计 receive 暂停/恢复语义**
+
+确认 `StreamReceiveSetEnabled(FALSE/TRUE)` 能用于 relay queue 或 per-relay pending bytes 高低水位背压，避免慢 TCP 下应用层无限持有 MsQuic receive buffer。
+
+### Task 10: Deferred Receive View POC 设计
+
+**Files:**
+- Modify: `src/tunnel/linux_relay_worker.h`
+- Modify: `src/tunnel/linux_relay_worker.cpp`
+- Modify: `src/tunnel/linux_relay_event_queue.h`
+- Test: `src/unittest/linux_relay_worker_io_test.cpp`
+- Test: `src/unittest/linux_relay_worker_queue_test.cpp`
+
+**核心设计：**
+
+不能保存 `event->RECEIVE.Buffers` 指针；只能在 callback 内按值拷贝 `QUIC_BUFFER` 元数据，不拷贝 payload：
+
+```cpp
+struct TqQuicReceiveSlice {
+    const uint8_t* Data;
+    uint32_t Length;
+};
+
+struct TqPendingQuicReceive {
+    MsQuicStream* Stream;
+    uint64_t RelayId;
+    std::vector<TqQuicReceiveSlice> Slices;
+    uint64_t TotalLength;
+    uint64_t CompletedLength;
+    bool Fin;
+};
+```
+
+receive callback 流程：
+
+1. 收到 `QUIC_STREAM_EVENT_RECEIVE`。
+2. 检查 relay 是否 closing。
+3. 检查 per-relay / per-worker pending receive bytes 高水位。
+4. 创建 `TqPendingQuicReceive`，只保存 slice 指针和长度。
+5. 入队 `TqLinuxRelayEventType::QuicReceiveView`。
+6. 返回 `QUIC_STATUS_PENDING`。
+
+worker 写 TCP 流程：
+
+1. relay worker 消费 `QuicReceiveView`。
+2. 将 slices 映射为 `iovec`。
+3. 调用 `writev(tcpFd, ...)`。
+4. 若实际写出 `N` 字节，立即调用 `StreamReceiveComplete(stream, N)`。
+5. pending view cursor 跳过已完成的 `N` 字节。
+6. 如果 partial write，剩余 slices 留在 relay pending write queue，等待 epoll writable 后继续。
+7. 全部 payload 写完后释放 `TqPendingQuicReceive`；若带 FIN，再处理 TCP half-close。
+
+**背压模型：**
+
+```text
+TCP 慢
+-> relay pending receive views 增多
+-> StreamReceiveComplete 调用变慢
+-> MsQuic recv buffer 不 drain
+-> QUIC stream receive window 不继续放大
+-> 对端 QUIC send 被 flow control 限制
+```
+
+需要新增水位配置：
+
+- `MaxPendingQuicReceiveBytesPerRelay`
+- `MaxPendingQuicReceiveBytesPerWorker`
+
+超过高水位时，暂停接收或保持 pending；低于低水位后恢复 `StreamReceiveSetEnabled(TRUE)`。
+
+**错误与关闭路径要求：**
+
+- TCP 写失败：abort stream，并确保所有尚未 `StreamReceiveComplete` 的 pending receive 有明确处理策略。
+- QUIC stream shutdown：停止继续写 TCP，释放 relay，但不能让 worker 访问已释放的 stream/binding。
+- relay closing 但仍有 pending receive：pending receive 必须持有足够的 owner/ref，避免 use-after-free。
+- event queue 满或内存分配失败：不能简单返回普通失败状态，因为 MsQuic receive callback 的失败状态可能被当作 success 处理并 drain；安全策略应是 fallback 到现有 copy 路径，或 abort stream 并保证没有未跟踪 borrowed buffer。
+
+- [ ] **Step 1: POC 限制范围**
+
+先只支持 plain receive、无压缩、单 relay 单 pending receive、TCP 可立即写出或可通过 epoll writable 继续写出。保留现有 copy 路径作为 fallback。
+
+- [ ] **Step 2: 实现 `QuicReceiveView` 事件类型**
+
+新增只持有 slice 元数据的事件，不拷贝 payload。事件入队成功后 callback 返回 `QUIC_STATUS_PENDING`。
+
+- [ ] **Step 3: 实现 TCP partial write cursor**
+
+按 `writev()` 返回值推进 slice cursor，并对每次成功写出的字节调用 `StreamReceiveComplete(stream, written)`。
+
+- [ ] **Step 4: 加 pending bytes 水位和 receive enable/disable**
+
+慢 TCP 下不要让应用层无限持有 MsQuic 内部 receive buffer。高水位 disable receive，低水位恢复。
+
+- [ ] **Step 5: 补齐关闭路径测试**
+
+覆盖 TCP close、QUIC close、queue full、abort、FIN、partial write、重复 writable 等场景。
+
+- [ ] **Step 6: 单独 bench**
+
+对比 Phase 3 的 QUIC→TCP plain 路径，重点看 callback copy 消失后 CPU 是否下降、吞吐是否提升、MsQuic flow control 是否能稳定背压。
 
 ---
 
@@ -799,3 +957,4 @@ git commit -m "docs: record Phase 3 DGX perf verification results"
 - [x] perf 中 buffer 池与 mutex 热点显著下降（见 Task 7 / Task 8 验收）
 - [x] `src/docs/thread_model_cn.md` 更新数据路径描述
 - [x] `docs/dgx-perf-profile-analysis.md` 追加 Phase 1–3 优化结果章节
+- [x] perf 采样 client core dump 已修复（Task 8.1；`RetiredRelays` + ingress 池同步）
