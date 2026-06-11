@@ -2,6 +2,7 @@
 #include "linux_relay_worker.h"
 
 #include <cassert>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <sys/socket.h>
@@ -301,6 +302,89 @@ int main() {
             offset += static_cast<size_t>(received);
         }
         assert(output == plain);
+
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        int fakeStreamToken = 0;
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(&fakeStreamToken);
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const std::vector<uint8_t> plain(8192, 0x5A);
+        QUIC_BUFFER quicBuffer{};
+        quicBuffer.Buffer = const_cast<uint8_t*>(plain.data());
+        quicBuffer.Length = static_cast<uint32_t>(plain.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 1;
+        receiveEvent.RECEIVE.Buffers = &quicBuffer;
+
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &receiveEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        if (worker.DrainForTest(config.EventBudget) < 1) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        std::vector<uint8_t> output(plain.size());
+        size_t offset = 0;
+        while (offset < output.size()) {
+            const ssize_t received = ::read(fds[1], output.data() + offset, output.size() - offset);
+            if (received <= 0) {
+                worker.Stop();
+                ::close(fds[1]);
+                return 1;
+            }
+            offset += static_cast<size_t>(received);
+        }
+        if (output != plain) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.BufferAcquireCount != 2) {
+            std::fprintf(stderr, "expected 2 buffer acquires, got %llu\n",
+                static_cast<unsigned long long>(snapshot.BufferAcquireCount));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
 
         worker.Stop();
         ::close(fds[1]);

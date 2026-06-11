@@ -103,8 +103,8 @@ TqBufferRef TqLinuxRelayBufferPool::Acquire() {
 | 阶段 | 内容 | 风险 | 预期收益 |
 |------|------|------|----------|
 | **Phase 1** | 消除 QUIC→TCP 二次拷贝；合并 receive 事件；stream 上下文 O(1) 查找 | 低 | 10–15% CPU |
-| **Phase 2** | per-relay 预分配 + worker 无锁池 + 去 shared_ptr；SPSC 事件环 | 中 | 再回收 20–30% CPU |
-| **Phase 3** | 回调侧 ingress 槽位（双缓冲域），彻底分离跨线程池访问 | 中 | 收尾 3–5% |
+| **Phase 2** | per-relay 预分配 + worker 无锁池 + 去 shared_ptr + 回调侧 ingress 槽位（双缓冲域） | 中 | 再回收 20–30% CPU |
+| **Phase 3** | 事件队列无锁/低锁化：先证明单生产者；不能证明则使用 MPSC | 中 | 收尾 3–5% |
 
 **优点**：与现有 `2026-06-09-high-performance-threading-and-batching-design.md` v1 copy-into-pool 策略一致；每步可回滚。  
 **缺点**：Phase 2 前回调路径仍需一次拷贝。
@@ -173,14 +173,18 @@ struct TqLinuxRelayEvent {
 ```cpp
 struct TqStreamRelayBinding {
     TqLinuxRelayWorker* Worker;
-    RelayState* Relay;  // 生命周期由 Relays deque 的 shared_ptr 保证
+    RelayState* Relay;
+    std::atomic<uint32_t> CallbackRefs{0};
+    std::atomic<bool> Closing{false};
 };
 ```
 
 - `RegisterRelayWithId`：`binding = new TqStreamRelayBinding{this, relay.get()}`；`Stream->Context = binding`。
-- `OnStreamEvent`：`auto* b = static_cast<TqStreamRelayBinding*>(stream->Context)`；直接使用 `b->Relay->Id`。
-- `UnregisterRelay` / stream 替换：释放 binding，恢复 `NoOpCallback`。
+- `OnStreamEvent`：`auto* b = static_cast<TqStreamRelayBinding*>(stream->Context)`；若 `Closing=false`，先递增 `CallbackRefs`，再读取 `Relay`/`RelayId`。
+- `UnregisterRelay` / stream 替换：先设置 `Closing=true` 并恢复 `NoOpCallback`，等待或延迟到 `CallbackRefs==0` 后再释放 binding；禁止在仍可能有 MsQuic callback 读取 `Context` 时 `delete binding`。
 - **删除** 热路径上的 `FindRelayIdByStream`。
+
+> 生命周期约束：裸 `RelayState*` 不是生命周期所有权。Phase 1 只能在上述 in-flight callback 保护落地后引入 binding；否则继续使用现有 `RelayLock` 查找，避免 UAF。
 
 #### 5.1.4 SendComplete 携带 RelayId
 
@@ -214,7 +218,7 @@ class TqLinuxRelayBufferPool {
 **规则**：
 - `AcquireWorker()` / `ReleaseWorker()`：**仅** relay worker 线程调用，无 mutex。
 - 预分配：`RegisterRelayWithId` 时 `ReserveSlots(MaxIov * 4)`，避免热路径 `new`。
-- `TqBufferView::Owner` 改为 `TqRelayBufferSlot*` + 显式 `Retain/Release`，或 `TqBufferHandle` 轻量 RAII。
+- `TqBufferView::Owner` 改为 `TqBufferHandle` 轻量 RAII（或等价 intrusive refcount）。Phase 2 验收必须删除热路径 `std::shared_ptr` 控制块分配；只把 deleter 改名为 `ReleaseWorker` 不算完成。
 
 #### 5.2.2 回调线程 ingress 策略
 
@@ -239,7 +243,7 @@ Option 2b（备选）：thread_local 批量缓存
 - Ingress 路径：使用独立 `IngressPendingBytes` 计数，移交时一次性转入 worker 账本。
 - `DrainTcpReadable` 背压检查读 worker 侧计数，包含已移交但未释放的 buffer。
 
-### 5.3 Phase 3：SPSC 事件环（P2）
+### 5.3 Phase 3：事件队列低锁化（P2）
 
 替换 `std::deque<TqLinuxRelayEvent> + QueueLock`：
 
@@ -251,7 +255,9 @@ class TqSpscEventRing {
 };
 ```
 
-- **单生产者**：MsQuic 回调线程（每 stream 绑定一个 worker，回调仅入该 worker 队列）。
+- **默认假设不得写死为单生产者**：一个 relay worker 可能绑定多个 stream，MsQuic 是否保证这些 stream 的回调由同一个线程串行执行需要实测或文档证据。
+- 若证据证明每个 worker 队列只有一个生产线程，使用 SPSC ring。
+- 若不能证明，使用 MPSC ring/queue，或 per-producer SPSC + worker 合并消费。
 - **单消费者**：relay worker `DrainEvents`。
 - 队列满时：回调返回 `QUIC_STATUS_OUT_OF_MEMORY` 或暂停 `StreamReceiveSetEnabled`（需与 MsQuic 流控对齐）——**必须实现背压，禁止丢事件**。
 
@@ -312,9 +318,9 @@ relay worker (epoll EPOLLIN)
 |------|------|--------|
 | 无二次拷贝 | `linux_relay_worker_io_test.cpp` | receive 后 `Pool.PendingBytes` 不翻倍；`FreeCount` 符合预期 |
 | 合并事件 | 新增 | 多 buffer RECEIVE 仅 1 次 queue depth 增加 |
-| Stream binding | 新增 | 注销后 callback 不再访问已释放 relay |
-| 无锁池 | `linux_relay_buffer_pool_test.cpp` | 预分配、Retain/Release、上限拒绝 |
-| SPSC 背压 | 新增 | 环满时生产者阻塞/错误，不丢事件 |
+| Stream binding | 新增 | 注销和 callback 并发时不访问已释放 binding/relay |
+| 无锁池 | `linux_relay_buffer_pool_test.cpp` | 预分配、`TqBufferHandle`/intrusive refcount、上限拒绝、无 `shared_ptr` 热路径 |
+| 队列背压 | 新增 | 环满时生产者收到可处理的背压结果，不丢事件；SPSC/MPSC 选择有线程模型证据 |
 
 ### 7.2 性能验证
 
@@ -340,9 +346,10 @@ CASE=proxy-1x1 DURATION_SEC=25 ./scripts/dgx-perf-profile.sh
 
 | 风险 | 缓解 |
 |------|------|
-| Ingress ring 与 worker ring 槽位耗尽 | 按 `MaxIov * 4` 预分配；背压时禁用 stream receive |
+| Ingress ring 与 worker ring 槽位耗尽 | 按 `MaxIov * 4` 预分配；背压时禁用 stream receive；定义 ingress->worker 转移失败回滚 |
+| Stream binding UAF | binding 带 `Closing` + `CallbackRefs`；注销只在无 in-flight callback 后释放 |
 | 去掉 shared_ptr 后 UAF | `TqBufferHandle` RAII + relay 注销时 drain 所有 pending |
-| SPSC 环大小不足 | 默认 `EventBudget * 2`；高吞吐可调 `LinuxRelayWorkerEventBudget` |
+| 事件环生产者模型错误 | Phase 3 前必须证明单生产者；否则采用 MPSC |
 | 压缩路径回归 | 压缩仍走独立路径；专项测试保留 |
 | Windows 平台漂移 | Linux 改动限定在 `linux_relay_*`；Windows 不改 |
 
@@ -364,7 +371,7 @@ M2 (Phase 2, ~2-3 天)
   └─ perf 复测
 
 M3 (Phase 3, ~1-2 天)
-  ├─ SPSC 事件环
+  ├─ 验证生产者模型并实现 SPSC/MPSC 事件队列
   └─ 背压与流控联调
 
 M4 (Phase 4, 可选)

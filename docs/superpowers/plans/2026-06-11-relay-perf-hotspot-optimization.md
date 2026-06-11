@@ -4,7 +4,7 @@
 
 **Goal:** 消除 DGX perf 中占 ~40% CPU 的 relay 层 mutex/池/拷贝开销，使单连接吞吐接近 secnetperf 同 CPU 预算。
 
-**Architecture:** 分三阶段渐进优化——Phase 1 消除 QUIC→TCP 二次拷贝与冗余查找；Phase 2 per-relay 预分配双域 buffer（ingress + worker 无锁）；Phase 3 SPSC 事件环替换 mutex deque。详见 `docs/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md`。
+**Architecture:** 分三阶段渐进优化——Phase 1 消除 QUIC→TCP 二次拷贝与冗余查找；Phase 2 per-relay 预分配双域 buffer（ingress + worker 无锁）并移除热路径 `shared_ptr`；Phase 3 在证明生产者模型后用 SPSC 或 MPSC 事件队列替换 mutex deque。详见 `docs/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md`。
 
 **Tech Stack:** C++17、MsQuic C++ API、Linux epoll/readv/writev、现有 unit test（`make test`）、DGX bench 脚本。
 
@@ -15,11 +15,11 @@
 | 文件 | 职责 |
 |------|------|
 | `src/tunnel/linux_relay_buffer_pool.h/.cpp` | buffer slot、ingress/worker 双域池、Retain/Release |
-| `src/tunnel/linux_relay_worker.h/.cpp` | 事件结构、SPSC 环、ProcessQuicReceiveEvent、StreamRelayBinding |
-| `src/tunnel/linux_relay_spsc_ring.h` | Phase 3：无锁 SPSC 事件环（新文件） |
+| `src/tunnel/linux_relay_worker.h/.cpp` | 事件结构、事件队列接入、ProcessQuicReceiveEvent、StreamRelayBinding |
+| `src/tunnel/linux_relay_event_queue.h` | Phase 3：SPSC/MPSC 事件队列（新文件，取决于线程模型证据） |
 | `src/unittest/linux_relay_buffer_pool_test.cpp` | 池行为单测 |
 | `src/unittest/linux_relay_worker_io_test.cpp` | 生产路径 receive 单测 |
-| `src/unittest/linux_relay_worker_queue_test.cpp` | 队列/SPSC 单测 |
+| `src/unittest/linux_relay_worker_queue_test.cpp` | 队列背压与生产者模型单测 |
 
 ---
 
@@ -33,7 +33,7 @@
 
 - [ ] **Step 1: 添加无压缩直通测试**
 
-在 `linux_relay_worker_io_test.cpp` 增加用例：plain data（非压缩），走 `DispatchStreamEventForTest` 生产路径，断言输出正确且 `relay->Pool.PendingBytes()` 在 receive 处理后不超过 `received_bytes`（不允许双倍记账）。
+在 `linux_relay_worker_io_test.cpp` 增加用例：plain data（非压缩），走 `DispatchStreamEventForTest` 生产路径，断言输出正确，并通过 `TqLinuxRelayWorkerSnapshot::BufferAcquireCount` 锁定池 acquire 次数。8192 字节、4096 chunk 的 RECEIVE 事件，优化前 acquire 4 次（callback 拷贝 2 次 + worker 二次拷贝 2 次），优化后应为 2 次。
 
 ```cpp
 // 在 linux_relay_worker_io_test.cpp 新增块
@@ -83,6 +83,11 @@
     }
     assert(output == plain);
 
+    const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+    if (snapshot.BufferAcquireCount != 2) {
+        return 1;
+    }
+
     worker.Stop();
     ::close(fds[1]);
 }
@@ -91,7 +96,7 @@
 - [ ] **Step 2: 运行测试确认基线通过**
 
 Run: `make -C /home/jack/src/tcpquic-proxy test`  
-Expected: PASS（新测试在改动前也应 PASS，用于锁定行为）
+Expected: FAIL（`BufferAcquireCount` 字段/计数尚不存在，或旧实现计数为 4）。这是本任务的红灯测试。
 
 - [ ] **Step 3: 修改 ProcessQuicReceiveEvent 消除二次拷贝**
 
@@ -151,18 +156,18 @@ git commit -m "perf(relay): skip second memcpy on QUIC-to-TCP plain path"
 
 - [ ] **Step 1: 定义 TqStreamRelayBinding**
 
-在 `linux_relay_worker.h` 的 `TqLinuxRelayWorker` 私有区域前添加：
+在 `linux_relay_worker.cpp` 添加内部 binding 结构；不要把裸 `RelayState*` 暴露到 public header：
 
 ```cpp
 struct TqStreamRelayBinding {
     TqLinuxRelayWorker* Worker{nullptr};
     TqLinuxRelayWorker::RelayState* Relay{nullptr};
+    std::atomic<uint32_t> CallbackRefs{0};
+    std::atomic<bool> Closing{false};
 };
 ```
 
-将 `RelayState` 前向声明改为在 binding 中可用的嵌套类型访问（`RelayState` 已是 private nested struct，binding 作为 friend 或 binding 定义在 .cpp）。
-
-**实现选择**：将 `TqStreamRelayBinding` 和 `RelayState` 定义保留在 `.cpp`，`OnStreamEvent` 通过 binding 访问。
+`OnStreamEvent` 必须先检查 `Closing` 并递增 `CallbackRefs`，退出时递减。该任务不得只实现裸指针快路径。
 
 - [ ] **Step 2: RegisterRelayWithId 设置 binding**
 
@@ -224,12 +229,15 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
 
 ```cpp
 if (removed->Stream != nullptr) {
-    delete removed->StreamBinding;
+    removed->StreamBinding->Closing.store(true, std::memory_order_release);
+    // 恢复 callback 后，等待或延迟到 CallbackRefs==0 再释放 binding。
     removed->StreamBinding = nullptr;
     removed->Stream->Callback = MsQuicStream::NoOpCallback;
     removed->Stream->Context = nullptr;
 }
 ```
+
+新增并发单测：一个线程持续 `DispatchStreamEventForTest`，另一个线程 `UnregisterRelay`；断言无崩溃、无 use-after-free（ASAN 构建下必须通过）。
 
 - [ ] **Step 5: 运行测试并提交**
 
@@ -391,7 +399,22 @@ private:
     size_t UsedLength{0};
 };
 
-using TqBufferRef = std::shared_ptr<TqRelayBufferSlot>;  // Phase 2 末尾再替换为 TqBufferHandle
+class TqBufferHandle {
+public:
+    TqBufferHandle() = default;
+    TqBufferHandle(TqLinuxRelayBufferPool* pool, TqRelayBufferSlot* slot, TqBufferDomain domain);
+    TqBufferHandle(TqBufferHandle&& other) noexcept;
+    TqBufferHandle& operator=(TqBufferHandle&& other) noexcept;
+    ~TqBufferHandle();
+    TqRelayBufferSlot* operator->() const;
+    explicit operator bool() const;
+private:
+    TqLinuxRelayBufferPool* Pool{nullptr};
+    TqRelayBufferSlot* Slot{nullptr};
+    TqBufferDomain Domain{TqBufferDomain::Worker};
+};
+
+using TqBufferRef = TqBufferHandle;
 
 class TqLinuxRelayBufferPool {
 public:
@@ -450,7 +473,11 @@ assert(pool.PendingBytes() == 64);
 
 全局替换 `relay->Pool.Acquire()` → `relay->Pool.AcquireWorker()`（worker 线程路径）。
 
-- [ ] **Step 5: 测试 + 提交**
+- [ ] **Step 5: 验证无 `shared_ptr` 热路径**
+
+构建后检查 `linux_relay_buffer_pool.h` 中 `TqBufferRef` 不再是 `std::shared_ptr`，`AcquireWorker` 不分配 shared_ptr 控制块。`malloc/free` 热点验收依赖这个条件。
+
+- [ ] **Step 6: 测试 + 提交**
 
 ```bash
 git commit -m "perf(relay): lock-free worker-side buffer pool with pre-reserve"
@@ -518,19 +545,27 @@ git commit -m "docs: Phase 2 relay buffer pool perf results"
 
 ---
 
-## Phase 3：SPSC 事件环
+## Phase 3：事件队列低锁化
 
-### Task 8: 实现 TqSpscEventRing
+### Task 8: 证明生产者模型并实现事件队列
 
 **Files:**
-- Create: `src/tunnel/linux_relay_spsc_ring.h`
+- Create: `src/tunnel/linux_relay_event_queue.h`
 - Modify: `src/tunnel/linux_relay_worker.h/.cpp`
 - Test: `src/unittest/linux_relay_worker_queue_test.cpp`
 
-- [ ] **Step 1: SPSC 环实现**
+- [ ] **Step 1: 证明生产者模型**
+
+添加 trace/instrumentation 或引用 MsQuic 文档，确认同一 `TqLinuxRelayWorker` 队列是否只有一个 producer thread。至少覆盖多个并发 stream。若观察到多个 producer thread，禁止使用 SPSC。
+
+- [ ] **Step 2: 选择队列实现**
+
+若 Step 1 证明单生产者，使用 SPSC；否则使用 MPSC ring/queue。公共 API 命名为 `TqLinuxRelayEventQueue`，避免把实现细节泄漏到 worker。
+
+- [ ] **Step 3: SPSC 环实现（仅在 Step 1 证明单生产者后）**
 
 ```cpp
-// linux_relay_spsc_ring.h
+// linux_relay_event_queue.h
 #pragma once
 #include "linux_relay_worker.h"
 #include <atomic>
@@ -538,9 +573,9 @@ git commit -m "docs: Phase 2 relay buffer pool perf results"
 #include <optional>
 #include <vector>
 
-class TqSpscEventRing {
+class TqLinuxRelayEventQueue {
 public:
-    explicit TqSpscEventRing(size_t capacity);
+    explicit TqLinuxRelayEventQueue(size_t capacity);
     bool TryPush(TqLinuxRelayEvent&& event);
     std::optional<TqLinuxRelayEvent> TryPop();
     size_t SizeApprox() const;
@@ -553,7 +588,7 @@ private:
 ```
 
 ```cpp
-bool TqSpscEventRing::TryPush(TqLinuxRelayEvent&& event) {
+bool TqLinuxRelayEventQueue::TryPush(TqLinuxRelayEvent&& event) {
     const uint32_t head = Head.load(std::memory_order_relaxed);
     const uint32_t next = head + 1;
     if (next - Tail.load(std::memory_order_acquire) > Slots.size()) {
@@ -565,28 +600,28 @@ bool TqSpscEventRing::TryPush(TqLinuxRelayEvent&& event) {
 }
 ```
 
-- [ ] **Step 2: 替换 Enqueue/DrainEvents 中的 QueueLock deque**
+- [ ] **Step 4: 替换 Enqueue/DrainEvents 中的 QueueLock deque**
 
 `TqLinuxRelayWorker` 成员：
 
 ```cpp
-TqSpscEventRing EventRing;
+TqLinuxRelayEventQueue EventQueue;
 ```
 
-`Enqueue`：`if (!EventRing.TryPush(event)) { Errors++; /* 或触发 receive 背压 */ }`
+`Enqueue`：`if (!EventQueue.TryPush(event)) { Errors++; /* 或触发 receive 背压 */ }`
 
-`DrainEvents`：`while (auto ev = EventRing.TryPop()) { ... }`
+`DrainEvents`：`while (auto ev = EventQueue.TryPop()) { ... }`
 
-- [ ] **Step 3: 队列满背压测试**
+- [ ] **Step 5: 队列满背压测试**
 
 单测：填满环，断言 `TryPush` 返回 false，worker drain 后恢复。
 
-- [ ] **Step 4: 删除 QueueLock 与 std::deque Queue**（Snapshot 改用 `EventRing.SizeApprox()`）
+- [ ] **Step 6: 删除 QueueLock 与 std::deque Queue**（Snapshot 改用 `EventQueue.SizeApprox()`）
 
-- [ ] **Step 5: 测试 + DGX perf + 提交**
+- [ ] **Step 7: 测试 + DGX perf + 提交**
 
 ```bash
-git commit -m "perf(relay): SPSC event ring replaces mutex deque"
+git commit -m "perf(relay): replace mutex deque with verified relay event queue"
 ```
 
 ---

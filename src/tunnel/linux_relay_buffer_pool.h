@@ -50,6 +50,7 @@ public:
     size_t ChunkSize() const;
     size_t FreeCount() const;
     uint64_t PendingBytes() const;
+    uint64_t AcquireCount() const;
     uint64_t MaxPendingBytes() const;
 
 private:
@@ -64,4 +65,5 @@ private:
     std::vector<TqRelayBuffer*> Free;
     size_t AllocatedBuffers{0};
     uint64_t Pending{0};
+    uint64_t Acquires{0};
 };

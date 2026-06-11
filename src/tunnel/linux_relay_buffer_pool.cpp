@@ -64,6 +64,7 @@ TqBufferRef TqLinuxRelayBufferPool::Acquire() {
 
     buffer->UsedLength = 0;
     Pending += ChunkBytes;
+    ++Acquires;
     return TqBufferRef(buffer, [this](TqRelayBuffer* released) {
         Release(released);
     });
@@ -81,6 +82,11 @@ size_t TqLinuxRelayBufferPool::FreeCount() const {
 uint64_t TqLinuxRelayBufferPool::PendingBytes() const {
     std::lock_guard<std::mutex> guard(Lock);
     return Pending;
+}
+
+uint64_t TqLinuxRelayBufferPool::AcquireCount() const {
+    std::lock_guard<std::mutex> guard(Lock);
+    return Acquires;
 }
 
 uint64_t TqLinuxRelayBufferPool::MaxPendingBytes() const {

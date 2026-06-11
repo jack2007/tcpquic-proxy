@@ -83,6 +83,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpWriteBytes{0};
     uint64_t MaxTcpWriteIovUsed{0};
     uint64_t ReadDisabledCount{0};
+    uint64_t BufferAcquireCount{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
     uint64_t Errors{0};

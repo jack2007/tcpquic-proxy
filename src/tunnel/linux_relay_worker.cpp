@@ -705,17 +705,29 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event)
     if (relay == nullptr || relay->Closing) {
         return;
     }
-    const uint8_t* data = nullptr;
-    size_t length = 0;
-    if (event.Buffer) {
-        data = event.Buffer->Data();
-        length = event.Length;
-    }
-    if (!EnqueueQuicReceive(relay.get(), data, length, event.Fin)) {
-        if (relay->Handle != nullptr) {
-            relay->Handle->Stop.store(true);
+    const bool needsDecompress =
+        relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None;
+    if (needsDecompress) {
+        const uint8_t* data = nullptr;
+        size_t length = 0;
+        if (event.Buffer) {
+            data = event.Buffer->Data();
+            length = event.Length;
         }
-        return;
+        if (!EnqueueQuicReceive(relay.get(), data, length, event.Fin)) {
+            if (relay->Handle != nullptr) {
+                relay->Handle->Stop.store(true);
+            }
+            return;
+        }
+    } else {
+        if (event.Buffer && event.Length > 0) {
+            relay->PendingTcpWrites.push_back(
+                TqBufferView{event.Buffer->Data(), event.Length, event.Buffer});
+        }
+        if (event.Fin) {
+            relay->TcpWriteShutdownQueued = true;
+        }
     }
     FlushTcpWrites(relay.get());
 }
@@ -747,6 +759,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     {
         std::lock_guard<std::mutex> relayGuard(RelayLock);
         for (const auto& relay : Relays) {
+            snapshot.BufferAcquireCount += relay->Pool.AcquireCount();
             snapshot.PendingBytes += relay->Pool.PendingBytes();
             for (const auto& view : relay->PendingTcpWrites) {
                 snapshot.PendingBytes += view.Len;
