@@ -1,0 +1,80 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 24K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 19062811229
+#
+# Overhead       Samples  Symbol                                                                                                                                   IPC   [IPC Coverage]
+# ........  ............  .......................................................................................................................................  ....................
+#
+     1.88%           402  [k] finish_task_switch.isra.0                                                                                                            -      -            
+            |          
+             --1.85%--__schedule
+                       schedule
+                       |          
+                        --1.82%--schedule_hrtimeout_range_clock
+                                  schedule_hrtimeout_range
+                                  ep_poll
+                                  do_epoll_wait
+                                  do_epoll_pwait.part.0
+                                  __arm64_sys_epoll_pwait
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  __GI_epoll_pwait (inlined)
+                                  CxPlatProcessEvents
+                                  CxPlatWorkerThread
+                                  start_thread
+                                  thread_start
+
+     0.41%            88  [k] fdget                                                                                                                                -      -            
+
+
+# Samples: 196K of event 'armv8_pmuv3_1/cycles/P'
+# Event count (approx.): 752893162769
+#
+# Overhead       Samples  Symbol                                                                                                                                                                       IPC   [IPC Coverage]
+# ........  ............  ...........................................................................................................................................................................  ....................
+#
+    19.19%         37094  [.] __aarch64_swp4_rel                                                                                                                                                       -      -            
+            |          
+            |--18.27%--lll_mutex_unlock_optimized (inlined)
+            |          __GI___pthread_mutex_unlock_usercnt
+            |          |          
+            |          |--9.21%--TqLinuxRelayBufferPool::Acquire()
+            |          |          TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+            |          |          TqLinuxRelayWorker::Run()
+            |          |          0xe5f62d3d1adf
+            |          |          |          
+            |          |          |--2.28%--0x47e5f62d17595b
+            |          |          |          0x47e5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |          |--1.20%--0x7e5f62d17595b
+            |          |          |          0x7e5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |          |--1.18%--0x43e5f62d17595b
+            |          |          |          0x43e5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |          |--1.16%--0x5e5f62d17595b
+            |          |          |          0x5e5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |          |--1.15%--0x3ee5f62d17595b
+            |          |          |          0x3ee5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |          |--1.13%--0x69e5f62d17595b
+            |          |          |          0x69e5f62d17595b
+            |          |          |          thread_start
+            |          |          |          
+            |          |           --1.12%--0x6ce5f62d17595b
+            |          |                     0x6ce5f62d17595b
+            |          |                     thread_start

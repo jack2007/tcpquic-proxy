@@ -5,3 +5,5 @@ build/
 *.a
 *.so
 .DS_Store
+build.tar.gz
+*.perf.data

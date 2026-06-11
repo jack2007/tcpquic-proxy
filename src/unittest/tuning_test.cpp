@@ -69,6 +69,20 @@ int main() {
 
     {
         TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Custom;
+        cfg.TuningOverrideRelayIoSize = 1024 * 1024;
+        cfg.TuningOverrideRelayInflightBytes = 1073741824;
+        cfg.TuningOverrideQuicInitRttMs = 200;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        assert(cfg.Tuning.RelayMaxInFlightSends == 1024);
+        assert(cfg.Tuning.RelayDefaultIdealSend == 1073741824ull);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 512ull * 1024 * 1024);
+        assert(cfg.Tuning.TcpSocketBufferBytes >= 16 * 1024 * 1024);
+    }
+
+    {
+        TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
 

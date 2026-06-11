@@ -1,0 +1,120 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 22K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 55847676066
+#
+# Overhead  Shared Object        Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ...................  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    15.93%  libmsquic.so.2.5.9   [.] aes_gcm_dec_256_kernel                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---aes_gcm_dec_256_kernel
+               armv8_aes_gcm_decrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+     9.06%  [kernel.kallsyms]    [k] __arch_copy_to_user                                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |
+            ---__arch_copy_to_user
+               simple_copy_to_iter
+               __skb_datagram_iter
+               |          
+                --8.61%--__skb_datagram_iter
+                          skb_copy_datagram_iter
+                          udpv6_recvmsg
+                          inet6_recvmsg
+                          sock_recvmsg
+                          ____sys_recvmsg
+                          ___sys_recvmsg
+                          do_recvmmsg
+                          __arm64_sys_recvmmsg
+                          invoke_syscall
+                          el0_svc_common.constprop.0
+                          do_el0_svc
+                          el0_svc
+                          el0t_64_sync_handler
+                          el0t_64_sync
+                          recvmmsg_syscall (inlined)
+                          __recvmmsg
+                          CxPlatSocketReceiveCoalesced
+                          CxPlatSocketContextIoEventComplete
+                          CxPlatProcessEvents
+                          CxPlatWorkerThread
+                          start_thread
+                          thread_start
+
+     4.30%  libmsquic.so.2.5.9   [.] CxPlatHashtableEnumerateNext                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---CxPlatHashtableEnumerateNext
+               QuicStreamSetGetFlowControlSummary
+               BbrCongestionControlUpdateBlockedState
+               |          
+               |--2.17%--QuicLossDetectionOnPacketSent
+               |          QuicPacketBuilderFinalize
+               |          QuicSendFlush
+               |          QuicConnDrainOperations
+               |          QuicWorkerProcessConnection
+               |          QuicWorkerLoop
+               |          QuicWorkerThread
+               |          start_thread
+               |          thread_start
+               |          
+                --2.13%--QuicLossDetectionProcessAckBlocks
+                          QuicLossDetectionProcessAckFrame
+                          QuicConnRecvFrames
+                          QuicConnRecvDatagramBatch
+                          QuicConnRecvDatagrams
+                          QuicConnFlushRecv
+                          QuicConnDrainOperations
+                          QuicWorkerProcessConnection
+                          QuicWorkerLoop
+                          QuicWorkerThread
+                          start_thread
+                          thread_start
+
+     4.16%  libc.so.6            [.] __GI___pthread_mutex_unlock_usercnt                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |          
+             --3.99%--__GI___pthread_mutex_unlock_usercnt
+                       |          
+                       |--2.08%--TqLinuxRelayBufferPool::Acquire()
+                       |          |          
+                       |           --1.97%--TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                       |                     TqLinuxRelayWorker::Run()
+                       |                     0xf31f91101adf
+                       |                     |          
+                       |                     |--1.07%--0x68f31f90ea595b
+                       |                     |          0x68f31f90ea595b
+                       |                     |          thread_start
+                       |                     |          
+                       |                      --0.63%--0xff31f90ea595b
+                       |                                0xff31f90ea595b
+                       |                                thread_start
+                       |          
+                        --1.56%--TqLinuxRelayBufferPool::Release(TqRelayBuffer*)
+                                  std::_Sp_counted_deleter<TqRelayBuffer*, TqLinuxRelayBufferPool::Acquire()::{lambda(TqRelayBuffer*)#1}, std::allocator<void>, (__gnu_cxx::_Lock_policy)2>::_M_dispose()
+                                  TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                                  TqLinuxRelayWorker::Run()
+                                  0xf31f91101adf
+                                  |          
+                                  |--0.81%--0x68f31f90ea595b
+                                  |          0x68f31f90ea595b
+                                  |          thread_start
+                                  |          
+                                   --0.57%--0xff31f90ea595b
+                                             0xff31f90ea595b
+                                             thread_start
+
+     4.11%  libc.so.6            [.] __aarch64_cas4_acq                                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---__aarch64_cas4_acq
+               |          
+                --3.59%--lll_mutex_lock_optimized (inlined)
+                          ___pthread_mutex_lock (inlined)
+                          |          
+                          |--1.50%--TqLinuxRelayBufferPool::Acquire()
+                          |          |          
+                          |           --1.46%--TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                          |                     TqLinuxRelayWorker::Run()

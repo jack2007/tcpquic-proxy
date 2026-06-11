@@ -38,6 +38,8 @@
 #   QUIC_PORT         QUIC UDP 端口（默认 4433）
 #   PROXY_PORT        本机 HTTP CONNECT 代理端口（默认 18080）
 #   SKIP_APPEND       1 时不写入 research_progress.md
+#   TUNING_20GBPS     1 时启用 docs/20gbps-paramenter.md 高 BDP 参数
+#   HTTP_BACKEND      busybox|python（双机默认 python ThreadingHTTPServer）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -66,6 +68,8 @@ HTTP_PORT="${HTTP_PORT:-16001}"
 QUIC_PORT="${QUIC_PORT:-4433}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 SKIP_APPEND="${SKIP_APPEND:-0}"
+TUNING_20GBPS="${TUNING_20GBPS:-0}"
+HTTP_BACKEND="${HTTP_BACKEND:-python}"
 LOG_FILE="${ROOT}/research_progress.md"
 
 TMP_DIR="/tmp/tcpquic-multi-curl-$$"
@@ -80,6 +84,23 @@ SERVER_STDIN_FD=""
 MODE="dual"
 
 log() { printf '[tcpquic-multi-curl] %s\n' "$*" >&2; }
+
+proxy_tuning_args() {
+    local -a args=()
+    if [[ "$TUNING_20GBPS" == "1" ]]; then
+        args+=(
+            --tuning custom
+            --quic-fcw 1073741824
+            --quic-srw 1073741824
+            --quic-iw 4000
+            --quic-initrtt-ms 200
+            --relay-io-size 1048576
+            --relay-inflight-bytes 1073741824
+            --max-memory-mb 4096
+        )
+    fi
+    printf '%s\n' "${args[@]}"
+}
 
 netem_tc_args() {
     local args
@@ -356,7 +377,19 @@ wait_log() {
 
 start_http_target() {
     if [[ "$MODE" == "dual" ]]; then
-        ssh "$PEER" "python3 -m http.server ${HTTP_PORT} --bind ${TARGET} --directory . >/tmp/tcpquic-dgx-http.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-http.pid"
+        if [[ "$HTTP_BACKEND" == "busybox" ]]; then
+            ssh "$PEER" "fuser -k ${HTTP_PORT}/tcp 2>/dev/null || true"
+            ssh "$PEER" "nohup busybox httpd -f -p ${TARGET}:${HTTP_PORT} -h /home/jack >/tmp/tcpquic-dgx-http.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-http.pid"
+        else
+            ssh "$PEER" "python3 - ${HTTP_PORT} ${TARGET} <<'PY' >/tmp/tcpquic-dgx-http.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-http.pid
+import sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+bind = sys.argv[2]
+ThreadingHTTPServer((bind, port), SimpleHTTPRequestHandler).serve_forever()
+PY"
+        fi
         sleep 1
         return 0
     fi
@@ -377,6 +410,8 @@ PY
 }
 
 start_server() {
+    local -a tuning_args=()
+    mapfile -t tuning_args < <(proxy_tuning_args)
     if [[ "$MODE" == "dual" ]]; then
         ssh "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
             --quic-listen ${TARGET}:${QUIC_PORT} \
@@ -385,6 +420,7 @@ start_server() {
             --quic-key ~/tcpquic-dgx-certs/server.key \
             --quic-ca ~/tcpquic-dgx-certs/ca.crt \
             --compress ${COMPRESS} \
+            ${tuning_args[*]} \
             </dev/null >/tmp/tcpquic-dgx-server.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-server.pid"
         REMOTE_SERVER_PID=$(ssh "$PEER" "cat /tmp/tcpquic-dgx-server.pid 2>/dev/null || true")
         for _ in $(seq 1 20); do
@@ -433,6 +469,8 @@ start_client() {
         )
         log "warmup enabled: ${WARMUP_MB} MB/conn -> ${http_host}:${HTTP_PORT}/tcpquic-dgx-payload.bin"
     fi
+    local -a tuning_args=()
+    mapfile -t tuning_args < <(proxy_tuning_args)
     "$BIN" client \
         --quic-peer "$quic_peer" \
         --http-listen "127.0.0.1:${PROXY_PORT}" \
@@ -442,6 +480,7 @@ start_client() {
         --quic-ca "$CERT_DIR/ca.crt" \
         --quic-connections "$QUIC_CONNECTIONS" \
         --compress "$COMPRESS" \
+        "${tuning_args[@]}" \
         "${warmup_args[@]}" \
         >"$TMP_DIR/client.log" 2>&1 &
     CLIENT_PID=$!

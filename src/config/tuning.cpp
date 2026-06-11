@@ -104,6 +104,32 @@ void ApplyBdpTuning(uint32_t bandwidthMbps, uint32_t rttMs, TqTuningConfig& out)
     out.TcpSocketBufferBytes = static_cast<int>(tcpBuf);
 }
 
+void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
+    constexpr uint64_t kHighBdpThreshold = 64ull * 1024 * 1024;
+    if (out.RelayDefaultIdealSend < kHighBdpThreshold) {
+        return;
+    }
+
+    const uint64_t pendingBytes =
+        std::min<uint64_t>(out.RelayDefaultIdealSend, 512ull * 1024 * 1024);
+    out.LinuxRelayPerTunnelPendingBytes = pendingBytes;
+    out.LinuxRelayPerWorkerPendingBytes = std::max<uint64_t>(
+        pendingBytes,
+        out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1u));
+    out.LinuxRelayWorkerByteBudgetPerTick =
+        std::min<uint64_t>(pendingBytes, 512ull * 1024 * 1024);
+    out.LinuxRelayReadBatchBytes =
+        std::max<uint64_t>(out.LinuxRelayReadBatchBytes, 4ull * 1024 * 1024);
+    out.LinuxRelayQuicRecvBatchBytes =
+        std::max<uint64_t>(out.LinuxRelayQuicRecvBatchBytes, 4ull * 1024 * 1024);
+    out.LinuxRelayMaxIov = std::max<uint32_t>(out.LinuxRelayMaxIov, 32);
+
+    const uint64_t tcpBuf = std::min<uint64_t>(pendingBytes / 4, 64ull * 1024 * 1024);
+    if (static_cast<uint64_t>(out.TcpSocketBufferBytes) < tcpBuf) {
+        out.TcpSocketBufferBytes = static_cast<int>(std::max<uint64_t>(tcpBuf, 16ull * 1024 * 1024));
+    }
+}
+
 void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
@@ -114,7 +140,7 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
             out.RelayMaxInFlightSends = ClampU32(
                 (cfg.TuningOverrideRelayInflightBytes + out.RelayIoSize - 1) / out.RelayIoSize,
                 8,
-                64);
+                2048);
             out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
         }
     }
@@ -298,6 +324,9 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         break;
     }
     TqApplyLinuxRelayDefaults(out, cfg.TuningMode);
+    if (cfg.TuningMode == TqTuningMode::Custom) {
+        ApplyHighBdpPipelineScaling(out);
+    }
 }
 
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb) {
@@ -531,7 +560,8 @@ void TqResetCompressionObservations() {
 void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
     std::fprintf(out,
         "tcpquic-proxy tuning: srw=%u fcw=%u iw=%u initrtt=%ums "
-        "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d\n",
+        "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
+        "relay_pending=%llu tick_budget=%llu read_batch=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -539,7 +569,10 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         tuning.RelayIoSize,
         static_cast<unsigned long long>(tuning.RelayDefaultIdealSend),
         tuning.RelayMaxInFlightSends,
-        tuning.TcpSocketBufferBytes);
+        tuning.TcpSocketBufferBytes,
+        static_cast<unsigned long long>(tuning.LinuxRelayPerTunnelPendingBytes),
+        static_cast<unsigned long long>(tuning.LinuxRelayWorkerByteBudgetPerTick),
+        static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes));
 }
 
 void TqSetActiveTcpSocketBuffer(int bytes) {

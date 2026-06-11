@@ -32,6 +32,8 @@ NETEM_LIMIT="${NETEM_LIMIT:-1000000}"
 #   RATE          netem 带宽上限，如 1gbit（需对端 sudo tc）；NETEM=1 且未设置时默认 1gbit；RATE= 显式空值则不限速
 #   ITERATIONS    每模式重复次数（默认 2）
 #   QUIC_CONNECTIONS  client 侧 QUIC 连接池（默认 4）
+#   TUNING_20GBPS     1 时启用 docs/20gbps-paramenter.md 推荐单连接参数
+#   EXTRA_PROXY_ARGS  追加到 client/server 的额外 CLI 参数
 #   HTTP_PORT     对端 HTTP 目标端口（默认 16001）
 #   QUIC_PORT     对端 QUIC UDP 端口（默认 4433）
 #   PROXY_PORT    本机 HTTP CONNECT 代理端口（默认 18080）
@@ -57,6 +59,8 @@ PAYLOAD_KIND="${PAYLOAD_KIND:-repeat}"
 DURATION_SEC="${DURATION_SEC:-0}"
 ITERATIONS="${ITERATIONS:-2}"
 QUIC_CONNECTIONS="${QUIC_CONNECTIONS:-4}"
+TUNING_20GBPS="${TUNING_20GBPS:-0}"
+EXTRA_PROXY_ARGS="${EXTRA_PROXY_ARGS:-}"
 HTTP_PORT="${HTTP_PORT:-16001}"
 QUIC_PORT="${QUIC_PORT:-4433}"
 PROXY_PORT="${PROXY_PORT:-18080}"
@@ -70,6 +74,27 @@ TMP_DIR="/tmp/tcpquic-dgx-bench-$$"
 CERT_DIR="${TMP_DIR}/certs"
 
 log() { printf '[tcpquic-dgx-bench] %s\n' "$*" >&2; }
+
+proxy_tuning_args() {
+    local -a args=()
+    if [[ "$TUNING_20GBPS" == "1" ]]; then
+        args+=(
+            --tuning custom
+            --quic-fcw 1073741824
+            --quic-srw 1073741824
+            --quic-iw 4000
+            --quic-initrtt-ms 200
+            --relay-io-size 1048576
+            --relay-inflight-bytes 1073741824
+            --max-memory-mb 4096
+        )
+    fi
+    if [[ -n "$EXTRA_PROXY_ARGS" ]]; then
+        # shellcheck disable=SC2206
+        args+=($EXTRA_PROXY_ARGS)
+    fi
+    printf '%s\n' "${args[@]}"
+}
 
 netem_tc_args() {
     local args
@@ -237,12 +262,21 @@ PY
 }
 
 start_remote_http() {
-    ssh "$PEER" "python3 -m http.server ${HTTP_PORT} --bind ${TARGET} --directory . >/tmp/tcpquic-dgx-http.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-http.pid"
+    ssh "$PEER" "python3 - ${HTTP_PORT} ${TARGET} <<'PY' >/tmp/tcpquic-dgx-http.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-http.pid
+import sys
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+port = int(sys.argv[1])
+bind = sys.argv[2]
+ThreadingHTTPServer((bind, port), SimpleHTTPRequestHandler).serve_forever()
+PY"
     sleep 1
 }
 
 start_remote_server() {
     local compress=$1
+    local -a tuning_args=()
+    mapfile -t tuning_args < <(proxy_tuning_args)
     ssh "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
         --quic-listen ${TARGET}:${QUIC_PORT} \
         --allow-targets ${TARGET}/32,127.0.0.0/8 \
@@ -250,6 +284,7 @@ start_remote_server() {
         --quic-key ~/tcpquic-dgx-certs/server.key \
         --quic-ca ~/tcpquic-dgx-certs/ca.crt \
         --compress ${compress} \
+        ${tuning_args[*]} \
         </dev/null >/tmp/tcpquic-dgx-server.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-server.pid"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         sleep 0.5
@@ -275,6 +310,8 @@ start_local_client() {
         )
         log "warmup enabled: ${WARMUP_MB} MB/conn -> ${TARGET}:${HTTP_PORT}/tcpquic-dgx-payload.bin"
     fi
+    local -a tuning_args=()
+    mapfile -t tuning_args < <(proxy_tuning_args)
     "$BIN" client \
         --quic-peer "${TARGET}:${QUIC_PORT}" \
         --http-listen "127.0.0.1:${PROXY_PORT}" \
@@ -284,6 +321,7 @@ start_local_client() {
         --quic-ca "$CERT_DIR/ca.crt" \
         --quic-connections "$QUIC_CONNECTIONS" \
         --compress "$compress" \
+        "${tuning_args[@]}" \
         "${warmup_args[@]}" \
         >/tmp/tcpquic-dgx-client.log 2>&1 &
     CLIENT_PID=$!
@@ -400,7 +438,11 @@ append_log() {
         echo "| 网络 | ${netem_label} |"
         echo "| 载荷 | ${PAYLOAD_KIND} ${SIZE_MB} MB × ${ITERATIONS}$([ "${DURATION_SEC}" -gt 0 ] && echo ", 持续 ${DURATION_SEC}s") |"
         echo "| QUIC 连接池 | ${QUIC_CONNECTIONS} |"
-        echo "| QUIC 调优 | BBR, fcw=500MB, srw=512MB, iw=2000, initrtt=100ms |"
+        if [[ "$TUNING_20GBPS" == "1" ]]; then
+            echo "| QUIC 调优 | 20Gbps preset: BBR, fcw=1GiB, srw=1GiB, iw=4000, initrtt=200ms, relay-io=1MiB, inflight=1GiB |"
+        else
+            echo "| QUIC 调优 | BBR, fcw=500MB, srw=512MB, iw=2000, initrtt=100ms |"
+        fi
         echo "| 指标口径 | ${METRIC_MODE} |"
         if [[ -n "${RATE}" ]]; then
             echo "| netem rate | ${RATE} |"
