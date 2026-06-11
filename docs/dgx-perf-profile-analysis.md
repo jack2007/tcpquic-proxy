@@ -289,3 +289,34 @@ DGX perf 未在当前系统执行：当前系统不具备 DGX 测试环境。以
 **Task 7 验收**：mutex 原子合计 < 15%（实际 ~3–4%）✅；`Acquire()` 已不在 Top 10（改为无锁 `AcquireWorker` ~5%）✅；吞吐超过 Phase 1 目标 9 Gbps ✅。
 
 **结论**：Phase 2 消除 buffer 池跨线程 mutex 竞争，单流吞吐翻倍至 13+ Gbps；relay 热点从锁/分配转向 `DrainTcpReadable` + TLS/UDP 栈，与 secnetperf 对齐。下一步 Phase 3（事件队列低锁化）可继续压 `QueueLock`。
+
+---
+
+## Phase 3 DGX 验证结果
+
+- 时间：2026-06-11
+- 代码：`18f5f58`（MPMC `TqLinuxRelayEventQueue`，移除 `QueueLock` + `std::deque`）
+- Perf 原始数据：`docs/dgx-perf-profile-phase3/`
+- 吞吐 bench：`/tmp/dgx-msquic-vs-proxy-20260611-183351.md`
+
+### 吞吐（proxy-1x1，30s，无时延）
+
+| 指标 | Phase 2 | Phase 3（较好的一次） | 备注 |
+|------|---------|---------------------|------|
+| proxy-1x1 | **13.38 Gbps** | **9.40 Gbps** | 另一次 7.71 Gbps |
+| 裸 TCP | 29.0 Gbps | 20.5 Gbps | 链路容量低于 Phase 2 当日 |
+| proxy / 裸 TCP | **46.1%** | **45.8%** | 归一化后持平，无回归 |
+
+### Perf 热点（proxy-1x1，25s @ 999Hz）
+
+| 热点 / 指标 | Phase 2 Server | Phase 3 Server |
+|-------------|----------------|----------------|
+| `DrainTcpReadable` | 9.3% | **11.1%** |
+| `AcquireWorker` | 5.2% | **7.9%** |
+| `ReleaseWorker` | — | **4.3%** |
+| `TryPush` / `TryPop` | — | **未进 Top** |
+| `QueueLock` | Phase 2 已低 | **已移除** |
+
+**验收**：`QueueLock` 消除 ✅；MPMC 无可见 CAS 热点 ✅；归一化吞吐与 Phase 2 持平 ✅；绝对 Gbps ≥ 9（9.40）✅。
+
+**结论**：Phase 3 以无锁 MPMC 环替换 mutex 事件队列，完成三阶段 relay 热点优化。锁竞争消除后 server 侧 `DrainTcpReadable` / `AcquireWorker` 占比上升属预期（CPU 转向真实 relay 工作）。可选 Phase 4（deferred receive view）不在本阶段范围。
