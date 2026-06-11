@@ -257,3 +257,35 @@ DGX perf 未在当前系统执行：当前系统不具备 DGX 测试环境。以
 
 - `TqLinuxRelayBufferPool::Acquire` 不在 Top 10。
 - mutex/原子符号合计 < 15%（目标 < 10%）。
+
+---
+
+## Phase 2 DGX 验证结果（2026-06-11 补测）
+
+**代码**：`c74ac09` + `0f7260a`（worker 无锁 handle + ingress/worker 双域分离）
+
+**注意**：`dgx-throughput-matrix.sh` 不会 rsync 二进制到对端；未先 deploy 时 Step2 仅 ~0.7 Gbps（curl_exit=18）。以下数据来自先 deploy 的 `dgx-msquic-vs-proxy-bench.sh` 与 `dgx-perf-profile.sh`。
+
+### 吞吐（proxy-1x1，30s，无时延）
+
+| 指标 | Phase 1 完整 | **Phase 2** | 变化 |
+|------|-------------|-------------|------|
+| msquic-vs-proxy proxy-1x1 | ~6.24 Gbps | **13.38 Gbps** | **+114%** |
+| matrix Step2（需 deploy） | 6.29 Gbps | — | matrix 脚本需先 rsync |
+
+### Perf 热点（proxy-1x1，25s @ 999Hz）
+
+原始数据：`docs/dgx-perf-profile-phase2/`
+
+| 热点 / 指标 | Phase 1 Client | Phase 2 Client | Phase 1 Server | Phase 2 Server |
+|-------------|----------------|----------------|----------------|----------------|
+| mutex 原子合计 (`swp4`+`cas4`+pthread) | **43.4%** | **2.6%** | **39.7%** | **3.7%** |
+| `Acquire()` / `AcquireWorker()` | 8.2% / — | **0%** / — | 7.2% / — | — / **5.2%** |
+| `__aarch64_swp4_rel` | 20.4% | 0.9% | **18.6%** | **0%** |
+| `shared_ptr` deleter | 有 | **无** | 有（~8.3% 栈） | **无** |
+| `aes_gcm_dec`（client） | 32.0% | 26.5% | — | — |
+| `DrainTcpReadable`（server） | 3.5% | — | 3.5% | **9.3%** |
+
+**Task 7 验收**：mutex 原子合计 < 15%（实际 ~3–4%）✅；`Acquire()` 已不在 Top 10（改为无锁 `AcquireWorker` ~5%）✅；吞吐超过 Phase 1 目标 9 Gbps ✅。
+
+**结论**：Phase 2 消除 buffer 池跨线程 mutex 竞争，单流吞吐翻倍至 13+ Gbps；relay 热点从锁/分配转向 `DrainTcpReadable` + TLS/UDP 栈，与 secnetperf 对齐。下一步 Phase 3（事件队列低锁化）可继续压 `QueueLock`。

@@ -565,17 +565,67 @@ git commit -m "perf(relay): split ingress/worker buffer domains to eliminate cro
 Run: `CASE=proxy-1x1 DURATION_SEC=25 ./scripts/dgx-perf-profile.sh`  
 Output: `docs/dgx-perf-profile-phase2/`
 
-Actual: SKIPPED. 当前系统不具备 DGX 测试环境；本阶段交付门槛限定为基本编译与本地单元测试。
+前置：须先 rsync 二进制到对端（`dgx-perf-profile.sh` / `dgx-msquic-vs-proxy-bench.sh` 内置 `deploy_binaries`；`dgx-throughput-matrix.sh` **不会**自动 deploy，未同步时对端仍为旧二进制）。
+
+```bash
+# 编译 + 单测
+cmake --build build --target tcpquic-proxy \
+  tcpquic_linux_relay_buffer_pool_test \
+  tcpquic_linux_relay_worker_io_test \
+  tcpquic_linux_relay_worker_queue_test -j$(nproc)
+for t in build/bin/Release/tcpquic_linux_relay_*_test; do "$t"; done
+
+# 吞吐（先 deploy）
+DURATION_SEC=30 ./scripts/dgx-msquic-vs-proxy-bench.sh
+
+# Perf
+CASE=proxy-1x1 DURATION_SEC=25 OUT_DIR=docs/dgx-perf-profile-phase2 ./scripts/dgx-perf-profile.sh
+```
+
+Actual（2026-06-11，spark-1619 ↔ spark-1b6f，无时延 200G LAN）：
+- 代码：`c74ac09` + `0f7260a`
+- Perf 原始数据：`docs/dgx-perf-profile-phase2/`
+- 吞吐 bench 报告：`/tmp/dgx-msquic-vs-proxy-20260611-165242.md`
 
 - [x] **Step 2: 对比验收**
 
-检查 `client.top.txt` / `server.top.txt`：
-- `TqLinuxRelayBufferPool::Acquire` 不在 Top 10
-- mutex 原子符号合计 < 15%（目标 <10%）
+基线：Phase 1 完整（`docs/dgx-perf-profile-phase1/` + msquic-vs-proxy ~6.24 Gbps）。
 
-Actual: SKIPPED. 需在 DGX 环境补跑 perf 后确认。
+**吞吐（proxy-1x1，30s，无时延）**
+
+| 指标 | Phase 1 完整 | Phase 2 | 变化 |
+|------|-------------|---------|------|
+| msquic-vs-proxy proxy-1x1 | ~6.24 Gbps | **13.38 Gbps** | **+114%** |
+| matrix Step2（需先 deploy） | 6.29 Gbps | — | matrix 脚本需先 rsync |
+| 计划目标（Phase 2 后 ≥9 Gbps） | 未达标 | **达标** | — |
+| 裸 TCP 基线（本次） | — | 29.0 Gbps | 链路正常 |
+
+**注意**：未 deploy 时 `dgx-throughput-matrix.sh` Step2 仅 ~0.7 Gbps（curl_exit=18）；以上吞吐以 deploy 后的 bench 为准。
+
+**Perf 热点（proxy-1x1，25s @ 999Hz）**
+
+| 热点 / 指标 | Phase 1 Client | Phase 2 Client | Phase 1 Server | Phase 2 Server |
+|-------------|----------------|----------------|----------------|----------------|
+| mutex 原子合计 (`swp4`+`cas4`+pthread) | **43.4%** | **2.6%** | **39.7%** | **3.7%** |
+| `Acquire()` / `AcquireWorker()` | 8.2% / — | **0%** / — | 7.2% / — | — / **5.2%** |
+| `__aarch64_swp4_rel` | 20.4% | 0.9% | **18.6%** | **0%** |
+| `shared_ptr` deleter | 有 | **无** | 有（~8.3% 栈） | **无** |
+| `aes_gcm_dec`（client） | 32.0% | 26.5% | — | — |
+| `DrainTcpReadable`（server） | 3.5% | — | 3.5% | **9.3%** |
+
+验收项：
+
+| 标准 | 结果 |
+|------|------|
+| `TqLinuxRelayBufferPool::Acquire` 不在 Top 10 | ✅ 已消失，改为无锁 `AcquireWorker` ~5.2% |
+| mutex 原子符号合计 < 15%（目标 <10%） | ✅ Client 2.6% / Server 3.7% |
+| 吞吐 ≥ Phase 1 目标 9 Gbps | ✅ 13.38 Gbps |
+
+**结论**：Phase 2 消除 buffer 池跨线程 mutex 竞争，单流吞吐翻倍至 13+ Gbps；relay 热点从锁/分配转向 `DrainTcpReadable` + TLS/UDP 栈。`AcquireWorker` ~5% 为无锁栈操作本身开销，不再伴随 mutex 等待。下一步 Phase 3 可继续压 `QueueLock` / `RelayLock`。
 
 - [x] **Step 3: 更新分析文档**
+
+在 `docs/dgx-perf-profile-analysis.md` 追加 `## Phase 2 DGX 验证结果` 小节（与上表一致）。
 
 ```bash
 git commit -m "docs: Phase 2 relay buffer pool perf results"
