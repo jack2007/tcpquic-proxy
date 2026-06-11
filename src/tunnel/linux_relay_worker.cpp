@@ -22,6 +22,13 @@
 __attribute__((weak)) const MsQuicApi* MsQuic = nullptr;
 #endif
 
+struct TqLinuxRelayWorker::StreamRelayBinding {
+    TqLinuxRelayWorker* Worker{nullptr};
+    std::atomic<RelayState*> Relay{nullptr};
+    std::atomic<uint32_t> CallbackRefs{0};
+    std::atomic<bool> Closing{false};
+};
+
 struct TqLinuxRelayWorker::RelayState {
     uint64_t Id{0};
     int TcpFd{-1};
@@ -39,6 +46,7 @@ struct TqLinuxRelayWorker::RelayState {
     std::deque<TqBufferView> PendingTcpWrites;
     bool TcpWriteShutdownQueued{false};
     bool TcpWriteArmed{false};
+    StreamRelayBinding* StreamBinding{nullptr};
     TqLinuxRelayBufferPool Pool;
 
     RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
@@ -229,8 +237,25 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     }
 
     if (registration.Stream != nullptr) {
+        std::unique_ptr<StreamRelayBinding> binding(new (std::nothrow) StreamRelayBinding{});
+        if (!binding) {
+            ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, registration.TcpFd, nullptr);
+            std::lock_guard<std::mutex> guard(RelayLock);
+            for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+                if ((*it)->Id == relay->Id) {
+                    Relays.erase(it);
+                    break;
+                }
+            }
+            result.Ok = false;
+            result.RelayId = 0;
+            return result;
+        }
+        binding->Worker = this;
+        binding->Relay.store(relay.get(), std::memory_order_release);
+        relay->StreamBinding = binding.get();
         registration.Stream->Callback = TqLinuxRelayWorker::StreamCallback;
-        registration.Stream->Context = this;
+        registration.Stream->Context = binding.release();
     }
 
     return result;
@@ -264,9 +289,22 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
         ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, removed->TcpFd, nullptr);
         ::shutdown(removed->TcpFd, SHUT_RDWR);
     }
-    if (removed->Stream != nullptr && removed->Stream->Context == this) {
+    auto* binding = removed->StreamBinding;
+    if (binding != nullptr) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+    }
+    if (removed->Stream != nullptr && removed->Stream->Context == binding) {
         removed->Stream->Callback = MsQuicStream::NoOpCallback;
         removed->Stream->Context = nullptr;
+    }
+    removed->StreamBinding = nullptr;
+    if (binding != nullptr) {
+        while (binding->CallbackRefs.load(std::memory_order_acquire) != 0) {
+            std::this_thread::yield();
+        }
+        std::lock_guard<std::mutex> guard(RetiredBindingLock);
+        RetiredStreamBindings.emplace_back(binding);
     }
     removed->PendingTcpWrites.clear();
 }
@@ -516,6 +554,7 @@ uint64_t TqLinuxRelayWorker::FindRelayIdByStream(MsQuicStream* stream) {
     if (stream == nullptr) {
         return 0;
     }
+    StreamLookupScanCount.fetch_add(1);
     std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
         if (relay->Stream == stream) {
@@ -752,6 +791,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpWriteBytes = TcpWriteBytes.load();
     snapshot.MaxTcpWriteIovUsed = MaxTcpWriteIovUsed.load();
     snapshot.ReadDisabledCount = ReadDisabledCount.load();
+    snapshot.StreamLookupScanCount = StreamLookupScanCount.load();
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
     snapshot.Errors = Errors.load();
@@ -805,16 +845,27 @@ QUIC_STATUS QUIC_API TqLinuxRelayWorker::StreamCallback(
     _In_ MsQuicStream* stream,
     _In_opt_ void* context,
     _Inout_ QUIC_STREAM_EVENT* event) noexcept {
-    auto* worker = static_cast<TqLinuxRelayWorker*>(context);
-    if (worker == nullptr) {
+    auto* binding = static_cast<StreamRelayBinding*>(context);
+    if (binding == nullptr || binding->Worker == nullptr) {
         return QUIC_STATUS_SUCCESS;
     }
-    return worker->OnStreamEvent(stream, event);
+    return binding->Worker->OnStreamEventWithBinding(stream, event, binding);
 }
 
 QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
     MsQuicStream* stream,
     QUIC_STREAM_EVENT* event) noexcept {
+    auto* binding = static_cast<StreamRelayBinding*>(stream != nullptr ? stream->Context : nullptr);
+    return OnStreamEventWithBinding(stream, event, binding);
+}
+
+QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
+    MsQuicStream* stream,
+    QUIC_STREAM_EVENT* event,
+    StreamRelayBinding* binding) noexcept {
+    if (event == nullptr) {
+        return QUIC_STATUS_SUCCESS;
+    }
     if (event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
         TqLinuxRelayEvent queued{};
         queued.Type = TqLinuxRelayEventType::QuicSendComplete;
@@ -822,9 +873,23 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
         Enqueue(queued);
         return QUIC_STATUS_SUCCESS;
     }
+    if (binding == nullptr || binding->Worker != this) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    binding->CallbackRefs.fetch_add(1, std::memory_order_acq_rel);
+    struct CallbackRefGuard {
+        StreamRelayBinding* Binding{nullptr};
+        ~CallbackRefGuard() {
+            Binding->CallbackRefs.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    } guard{binding};
+    RelayState* relay = binding->Relay.load(std::memory_order_acquire);
+    if (binding->Closing.load(std::memory_order_acquire) || relay == nullptr) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    const uint64_t relayId = relay->Id;
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
-        const uint64_t relayId = FindRelayIdByStream(stream);
-        if (relayId == 0) {
+        if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
         }
         for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
@@ -846,13 +911,10 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE ||
         event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
-        const uint64_t relayId = FindRelayIdByStream(stream);
-        if (relayId != 0) {
-            TqLinuxRelayEvent shutdown{};
-            shutdown.Type = TqLinuxRelayEventType::Shutdown;
-            shutdown.RelayId = relayId;
-            Enqueue(shutdown);
-        }
+        TqLinuxRelayEvent shutdown{};
+        shutdown.Type = TqLinuxRelayEventType::Shutdown;
+        shutdown.RelayId = relayId;
+        Enqueue(shutdown);
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;

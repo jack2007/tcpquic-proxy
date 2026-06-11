@@ -84,6 +84,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t MaxTcpWriteIovUsed{0};
     uint64_t ReadDisabledCount{0};
     uint64_t BufferAcquireCount{0};
+    uint64_t StreamLookupScanCount{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
     uint64_t Errors{0};
@@ -120,6 +121,7 @@ public:
 
 private:
     struct RelayState;
+    struct StreamRelayBinding;
     void Wake();
     size_t DrainEvents(size_t budget);
     void DrainTcpReadable(RelayState* relay);
@@ -139,6 +141,10 @@ private:
     void FlushTcpWrites(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
     QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
+    QUIC_STATUS OnStreamEventWithBinding(
+        MsQuicStream* stream,
+        QUIC_STREAM_EVENT* event,
+        StreamRelayBinding* binding) noexcept;
     void Run();
 
     TqLinuxRelayWorkerConfig Config;
@@ -162,9 +168,12 @@ private:
     std::atomic<uint64_t> TcpWriteBytes{0};
     std::atomic<uint64_t> MaxTcpWriteIovUsed{0};
     std::atomic<uint64_t> ReadDisabledCount{0};
+    std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
     std::atomic<uint64_t> DecompressedTcpBytes{0};
     std::atomic<uint64_t> Errors{0};
+    mutable std::mutex RetiredBindingLock;
+    std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;
 };
 
 class TqLinuxRelayRuntime final {

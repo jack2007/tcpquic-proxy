@@ -154,7 +154,7 @@ git commit -m "perf(relay): skip second memcpy on QUIC-to-TCP plain path"
 - Modify: `src/tunnel/linux_relay_worker.cpp` — Register/Unregister/OnStreamEvent/StreamCallback
 - Test: `src/unittest/linux_relay_worker_queue_test.cpp`
 
-- [ ] **Step 1: 定义 TqStreamRelayBinding**
+- [x] **Step 1: 定义 TqStreamRelayBinding**
 
 在 `linux_relay_worker.cpp` 添加内部 binding 结构；不要把裸 `RelayState*` 暴露到 public header：
 
@@ -169,7 +169,7 @@ struct TqStreamRelayBinding {
 
 `OnStreamEvent` 必须先检查 `Closing` 并递增 `CallbackRefs`，退出时递减。该任务不得只实现裸指针快路径。
 
-- [ ] **Step 2: RegisterRelayWithId 设置 binding**
+- [x] **Step 2: RegisterRelayWithId 设置 binding**
 
 ```cpp
 // RegisterRelayWithId 末尾，替换：
@@ -189,7 +189,7 @@ relay->StreamBinding = binding;  // RelayState 新增字段记录，便于注销
 
 `RelayState` 新增：`TqStreamRelayBinding* StreamBinding{nullptr};`
 
-- [ ] **Step 3: OnStreamEvent 使用 binding，删除 FindRelayIdByStream 热路径调用**
+- [x] **Step 3: OnStreamEvent 使用 binding，删除 FindRelayIdByStream 热路径调用**
 
 ```cpp
 QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
@@ -225,7 +225,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
 
 `StreamCallback` 保持：`worker = binding->Worker`（或保留 `context` 为 worker 指针的兼容——统一改为 binding）。
 
-- [ ] **Step 4: UnregisterRelay 释放 binding**
+- [x] **Step 4: UnregisterRelay 释放 binding**
 
 ```cpp
 if (removed->Stream != nullptr) {
@@ -239,10 +239,16 @@ if (removed->Stream != nullptr) {
 
 新增并发单测：一个线程持续 `DispatchStreamEventForTest`，另一个线程 `UnregisterRelay`；断言无崩溃、无 use-after-free（ASAN 构建下必须通过）。
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
-Run: `make -C /home/jack/src/tcpquic-proxy test`  
-Expected: PASS
+Run:
+- `rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test tcpquic_relay_backend_selection_test -j2`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test`
+- `rtk ./build/bin/Release/tcpquic_relay_backend_selection_test`
+
+Expected: PASS. Actual: PASS.
 
 ```bash
 git commit -m "perf(relay): O(1) stream-to-relay binding, drop hot-path RelayLock scan"

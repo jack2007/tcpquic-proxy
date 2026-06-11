@@ -263,8 +263,8 @@ int main() {
         assert(compressor);
         assert(decompressor);
 
-        int fakeStreamToken = 0;
-        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(&fakeStreamToken);
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
 
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
@@ -326,14 +326,21 @@ int main() {
             return 1;
         }
 
-        int fakeStreamToken = 0;
-        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(&fakeStreamToken);
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
 
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
         registration.Stream = fakeStream;
         registration.EnableQuicSends = false;
         if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        if (fakeStream->Callback != TqLinuxRelayWorker::StreamCallback ||
+            fakeStream->Context == &worker ||
+            fakeStream->Context == nullptr) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -381,6 +388,13 @@ int main() {
         if (snapshot.BufferAcquireCount != 2) {
             std::fprintf(stderr, "expected 2 buffer acquires, got %llu\n",
                 static_cast<unsigned long long>(snapshot.BufferAcquireCount));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        if (snapshot.StreamLookupScanCount != 0) {
+            std::fprintf(stderr, "expected 0 stream lookup scans, got %llu\n",
+                static_cast<unsigned long long>(snapshot.StreamLookupScanCount));
             worker.Stop();
             ::close(fds[1]);
             return 1;
