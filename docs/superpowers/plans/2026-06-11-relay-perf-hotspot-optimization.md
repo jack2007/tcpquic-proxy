@@ -917,12 +917,147 @@ TCP 慢
 
 超过高水位时，暂停接收或保持 pending；低于低水位后恢复 `StreamReceiveSetEnabled(TRUE)`。
 
+**队列隔离与公平性：**
+
+Phase 4 不应让多个 tunnel 共用一个 data queue。若 worker 共享队列中直接排放 receive data/backlog，一个 TCP 卡住的 tunnel 可能把自己的数据排在队头，导致后续 tunnel 的数据无法被处理，形成跨 tunnel head-of-line blocking。
+
+目标结构：
+
+```text
+TqLinuxRelayWorker
+  EventQueue: worker 级共享 ready/control queue，只放轻量通知，仍然有界
+
+RelayState A
+  PendingQuicReceives: A tunnel 自己的 data queue
+  PendingQuicReceiveBytes
+  QuicReceiveWorkQueued
+  ReceivePaused
+
+RelayState B
+  PendingQuicReceives: B tunnel 自己的 data queue
+```
+
+共享 `EventQueue` 只放类似 `RelayQuicReceiveReady{RelayId}` 的轻量事件，不携带 receive payload view；真正的数据 backlog 保存在对应 `RelayState::PendingQuicReceives` 中。每个 relay 使用 `QuicReceiveWorkQueued` 去重：同一个 relay 已经在 worker ready queue 中时，不重复投递 ready event。
+
+慢 TCP tunnel 的处理：
+
+```text
+relay A TCP write returns EAGAIN
+-> A 的 PendingQuicReceives 保留在 relay A 内部
+-> arm A 的 EPOLLOUT
+-> 不继续向 worker EventQueue 塞 A 的 data event
+-> relay B/C 仍可通过自己的 ready event 被 worker 处理
+```
+
+因此 Phase 4 的公平性边界是：
+
+- data queue 必须是 per-relay / per-tunnel 的，不能是 worker 共享的。
+- worker `EventQueue` 是 shared ready/control queue，不是 shared data queue。
+- receive 背压按 per-relay 和 per-worker pending bytes 控制。
+- 单个 tunnel 超过高水位时，只暂停该 stream 的 receive callback：`StreamReceiveSetEnabled(FALSE)`。
+- 低于低水位后，只恢复该 stream：`StreamReceiveSetEnabled(TRUE)`。
+
+**TCP→QUIC send 背压模型：**
+
+当前 TCP→QUIC 路径不是把 data 放进 worker `EventQueue`，而是 worker 在 `EPOLLIN` 中 `readv()` 到 buffer pool，立即构造 `TqLinuxRelaySendOperation` 调用 `StreamSend()`；operation 持有 `TqBufferView` 和 `QUIC_BUFFER` 元数据，直到 `QUIC_STREAM_EVENT_SEND_COMPLETE` 回来后释放。`EventQueue` 只承载 `QuicSendComplete` control event。
+
+现有背压主要来自 `relay->Pool.PendingBytes()` 与 per tick read budget：MsQuic send complete 慢时，send operation 持有 buffer 不释放，pool pending bytes 上升，`DrainTcpReadable()` 停止继续读 TCP。Phase 4 应把这个隐式机制显式化为 per-relay QUIC send 水位。
+
+每个 `RelayState` 建议新增：
+
+```cpp
+uint64_t OutstandingQuicSendBytes;
+uint64_t OutstandingQuicSendOps;
+uint64_t IdealQuicSendBytes;
+bool TcpReadPausedForQuicBackpressure;
+bool TcpReadArmed;
+```
+
+发送路径：
+
+```text
+TCP EPOLLIN
+-> if OutstandingQuicSendBytes >= high watermark: disable EPOLLIN, return
+-> readv within min(tick budget, high - outstanding)
+-> optional compress
+-> StreamSend()
+-> OutstandingQuicSendBytes += sent bytes
+-> OutstandingQuicSendOps += 1
+```
+
+完成路径：
+
+```text
+QUIC_STREAM_EVENT_SEND_COMPLETE
+-> enqueue QuicSendComplete control event
+-> worker CompleteQuicSend()
+-> OutstandingQuicSendBytes -= operation bytes
+-> OutstandingQuicSendOps -= 1
+-> release operation buffers
+-> if paused && OutstandingQuicSendBytes <= low watermark: enable EPOLLIN
+```
+
+水位策略：
+
+```text
+HighWatermark = clamp(IdealQuicSendBytes, MinQuicSendBackpressureBytes, MaxQuicSendBackpressureBytes)
+LowWatermark  = HighWatermark / 2
+```
+
+`QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE` 可用于更新 `IdealQuicSendBytes`；若未收到 hint，使用配置默认值。这样 QUIC send 慢时，`SEND_COMPLETE` 变慢，outstanding bytes 不下降，worker 暂停该 relay 的 TCP `EPOLLIN/readv`，最终 TCP socket receive buffer 填满并通过 TCP window 背压本地 TCP 对端。
+
+TCP→QUIC 的公平性边界：
+
+- data lifetime 属于每个 `TqLinuxRelaySendOperation`，不进入 worker 共享 `EventQueue`。
+- 背压按 per-relay `OutstandingQuicSendBytes` 控制，避免一个慢 QUIC stream 消耗整个 worker 的 buffer pool。
+- worker `EventQueue` 只处理 `QuicSendComplete` 等 control event；若 send complete 很密集，可后续引入 per-relay complete batching 或 budget，但不把 payload data 放进共享 queue。
+- 压缩路径仍可沿用该模型：压缩输出 buffer 被 send operation 持有到 `SEND_COMPLETE`。
+
 **错误与关闭路径要求：**
 
 - TCP 写失败：abort stream，并确保所有尚未 `StreamReceiveComplete` 的 pending receive 有明确处理策略。
 - QUIC stream shutdown：停止继续写 TCP，释放 relay，但不能让 worker 访问已释放的 stream/binding。
 - relay closing 但仍有 pending receive：pending receive 必须持有足够的 owner/ref，避免 use-after-free。
 - event queue 满或内存分配失败：不能简单返回普通失败状态，因为 MsQuic receive callback 的失败状态可能被当作 success 处理并 drain；安全策略应是 fallback 到现有 copy 路径，或 abort stream 并保证没有未跟踪 borrowed buffer。
+
+**异常场景矩阵：**
+
+| 场景 | 触发条件 | 风险 | 处理方法 |
+|------|----------|------|----------|
+| TCP `writev` 全部成功 | `written == remaining` | 无 | `StreamReceiveComplete(written)`；释放 view 元数据；若 `Fin`，再处理 TCP half-close |
+| TCP `writev` 部分成功 | `0 < written < remaining` | cursor / complete 字节错位 | `StreamReceiveComplete(written)`；推进 slice cursor；剩余 view 等下次 writable |
+| TCP `EAGAIN` / `EWOULDBLOCK` | socket 暂不可写 | 忙等或误 complete | 不 complete；不释放 view；注册/等待 `EPOLLOUT` |
+| TCP hard error | `EPIPE` / `ECONNRESET` / `EBADF` 等 | 未写入数据无法交付 | 先 complete 已成功写入但尚未 complete 的前缀；剩余不 complete；abort QUIC stream；释放 view 元数据 |
+| TCP partial 后 hard error | 前缀已写/已 complete，剩余失败 | 重复 complete 或漏清理 | 保持 `CompletedToMsQuicBytes` 不变；剩余不 complete；abort stream；释放 view 元数据 |
+| relay 主动关闭 | 用户中断、生命周期清理、tunnel teardown | worker 仍持有 stream/data | 标记 `Closing`；禁止新 receive；owner worker 清理 pending views；未写剩余 abort；最后释放 refs |
+| relay closing 时又来 RECEIVE | callback 收到新 receive，但 relay 已关闭 | 返回普通失败可能被 MsQuic 当 success drain | 不创建 view；优先 fallback copy 或 inline abort stream；避免普通 failure return 导致误消费 |
+| QUIC peer FIN | `QUIC_RECEIVE_FLAG_FIN` | TCP half-close 时机错误 | FIN 挂在最后一个 pending view；payload 全部写完并 complete 后，再 shutdown TCP write side |
+| QUIC peer send aborted | `PEER_SEND_ABORTED` / remote `RESET_STREAM` | pending buffer 是否仍可访问不清楚 | 标记 relay aborting；停止写 pending views；释放 view 元数据；不再调用 complete |
+| QUIC peer receive aborted | `PEER_RECEIVE_ABORTED` / remote `STOP_SENDING` | 反向路径已被对端终止 | abort 整个 relay；停止新事件；清理 pending views |
+| QUIC shutdown complete | `SHUTDOWN_COMPLETE` | stream handle 可能失效 | 进入 terminal state；禁止后续 `StreamReceiveComplete`；清理 pending view 元数据；关闭 TCP |
+| event queue full | callback 内无法入队 view | 返回普通失败可能被 MsQuic 当 success drain | fallback 到现有 copy 路径；fallback 失败则 inline abort stream |
+| view 元数据分配失败 | `new` / `vector` 失败 | 同上 | fallback copy；fallback 失败则 inline abort stream |
+| pending bytes 超高水位 | TCP 慢导致积压 | 持有太多 MsQuic buffer | 暂停 receive 或保持 pending；低水位后恢复 receive |
+| stream/binding 已 closing | worker 准备 complete 时发现关闭 | use-after-free | 不再调用 complete；走 abort cleanup；pending view 释放由 owner worker 执行 |
+| 多个 pending view 同 relay | 多次 receive pending | complete 顺序错乱 | POC 禁止多个 pending；完整实现按 offset/order 串行 write 和 complete |
+| 压缩路径 | QUIC payload 需要解压再写 TCP | 无法 zero-copy | Phase 4 POC 禁用压缩；压缩保持 copy 路径 |
+
+**合并后的处理动作：**
+
+1. `CompleteWrittenPrefix(view, written)`：用于 TCP 成功写出字节。推进 cursor，调用 `StreamReceiveComplete(written)`，并保证 `CompletedToMsQuicBytes <= TcpWrittenBytes <= TotalBytes`。
+2. `KeepPendingForWritable(view)`：用于 `EAGAIN` 或 partial write 后仍有剩余。保留 view，不 complete 剩余字节。
+3. `AbortUndeliveredReceive(view, reason)`：用于 TCP hard error、relay abort、QUIC abort。先 complete 已写但未 complete 的前缀；剩余字节不 complete；随后 abort stream 并释放 view 元数据。
+4. `FallbackOrAbortInCallback(event)`：用于 callback 内 queue full、alloc fail、relay closing。先 fallback 到现有 copy 路径；失败则 inline abort stream，避免普通 failure return 被 MsQuic 当 success 消费。
+5. `DrainThenCloseFin(view)`：用于正常 FIN。先写完 payload 并 complete，再执行 TCP half-close。
+6. `ReleaseAfterOwnerWorker(view)`：所有 pending view 的释放都由 relay owner worker 执行；非 owner 线程只标记状态和投递事件，避免 stream/binding/data 生命周期竞态。
+
+**MsQuic 源码确认：abort 与 pending receive 的关系：**
+
+- `QuicStreamShutdown(... QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE ...)` 会进入 `QuicStreamRecvShutdown()`；该函数设置 `SentStopSending = TRUE`、`ReceiveEnabled = FALSE`、`ReceiveDataPending = FALSE`，并发送 `STOP_SENDING`，但不会调用 `QuicRecvBufferDrain()`。
+- `QuicStreamReceiveComplete()` 在 `SentStopSending` 或 `RemoteCloseFin` 为真时直接返回 `FALSE`，不会 drain。因此 abort 之后再调用 `StreamReceiveComplete()` 不能作为释放 pending receive 的手段。
+- `QuicRecvBufferUninitialize()` 会在 `QuicStreamFree()` 时释放 recv chunks；也就是说 abort/close 后必须停止访问 borrowed buffer 指针，不能假设 buffer 仍可用于 TCP write。
+- remote `RESET_STREAM` 路径会设置 `RemoteCloseReset`、关闭 receive，并按 final size 修正 flow-control accounting，但不会把应用层未 complete 的 borrowed pointer 变成可继续访问资源。
+- 结论：Phase 4 的关闭策略必须是“abort 前 complete 已成功写入 TCP 的前缀；abort 后不再 complete、不再 write borrowed pointer，只释放 proxy 自己的 view 元数据并等待 MsQuic stream 关闭释放内部 buffer”。
 
 - [ ] **Step 1: POC 限制范围**
 
