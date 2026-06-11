@@ -8,10 +8,29 @@
 #include <memory>
 #include <vector>
 
+struct MsQuicStream;
+
+struct TqQuicReceiveSlice {
+    const uint8_t* Data{nullptr};
+    uint32_t Length{0};
+};
+
+struct TqPendingQuicReceive {
+    MsQuicStream* Stream{nullptr};
+    uint64_t RelayId{0};
+    std::vector<TqQuicReceiveSlice> Slices;
+    size_t SliceIndex{0};
+    size_t SliceOffset{0};
+    uint64_t TotalLength{0};
+    uint64_t CompletedLength{0};
+    bool Fin{false};
+};
+
 enum class TqLinuxRelayEventType {
     TestMarker,
     TcpWritable,
     QuicReceive,
+    QuicReceiveView,
     QuicSendComplete,
     QuicIdealSendBuffer,
     Shutdown,
@@ -27,6 +46,7 @@ struct TqLinuxRelayEvent {
     size_t Length{0};
     size_t TotalLength{0};
     bool Fin{false};
+    std::shared_ptr<TqPendingQuicReceive> ReceiveView;
 };
 
 class TqLinuxRelayEventQueue final {

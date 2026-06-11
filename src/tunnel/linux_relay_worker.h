@@ -26,6 +26,7 @@ struct TqLinuxRelayWorkerConfig {
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
+    uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
 };
@@ -71,6 +72,10 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t StreamLookupScanCount{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
+    uint64_t DeferredReceiveCompleteBytes{0};
+    uint64_t DeferredReceiveCompletes{0};
+    uint64_t QuicReceivePausedCount{0};
+    uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
     uint64_t EventProducerThreadsObserved{0};
     bool MultipleEventProducerThreadsObserved{false};
@@ -126,6 +131,20 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin);
+    bool QueueDeferredQuicReceive(
+        RelayState* relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin);
+    void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
+    void FlushDeferredQuicReceives(RelayState* relay);
+    void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
+    uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
+    uint64_t LowPendingQuicReceiveBytesPerRelay() const;
+    void MaybePauseQuicReceive(RelayState* relay);
+    void MaybeResumeQuicReceive(RelayState* relay);
+    void SetQuicReceiveEnabled(RelayState* relay, bool enabled);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
     void ProcessQuicReceiveEvent(TqLinuxRelayEvent& event);
     void PurgeRetiredRelaysIfIdle();
@@ -166,6 +185,10 @@ private:
     std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
     std::atomic<uint64_t> DecompressedTcpBytes{0};
+    std::atomic<uint64_t> DeferredReceiveCompleteBytes{0};
+    std::atomic<uint64_t> DeferredReceiveCompletes{0};
+    std::atomic<uint64_t> QuicReceivePausedCount{0};
+    std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};
     mutable std::mutex RetiredBindingLock;
     std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;

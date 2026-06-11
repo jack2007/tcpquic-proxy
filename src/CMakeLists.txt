@@ -125,6 +125,22 @@ tcpquic_target_include_dirs(tcpquic_tuning_test)
 set_property(TARGET tcpquic_tuning_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tuning_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_quic_settings_test
+    unittest/quic_settings_test.cpp
+    protocol/quic_session.cpp
+    config/tuning.cpp
+    unittest/trace_proxy_stub.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_quic_settings_test)
+target_link_libraries(tcpquic_quic_settings_test Threads::Threads inc warnings msquic logging base_link)
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_quic_settings_test msquic_platform)
+endif()
+set_property(TARGET tcpquic_quic_settings_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_quic_settings_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+
 add_executable(tcpquic_tcp_write_queue_test
     unittest/tcp_write_queue_test.cpp
     tunnel/tcp_write_queue.cpp
@@ -400,6 +416,7 @@ endif()
 
 set(TCPQUIC_TEST_TARGETS
     tcpquic_tuning_test
+    tcpquic_quic_settings_test
     tcpquic_tcp_write_queue_test
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test

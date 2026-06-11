@@ -25,6 +25,13 @@ __attribute__((weak)) const MsQuicApi* MsQuic = nullptr;
 
 namespace {
 
+ssize_t WritevNoSignal(int fd, const iovec* iov, int iovcnt) {
+    msghdr message{};
+    message.msg_iov = const_cast<iovec*>(iov);
+    message.msg_iovlen = static_cast<size_t>(iovcnt);
+    return ::sendmsg(fd, &message, MSG_NOSIGNAL);
+}
+
 void AbandonOrphanedEventBuffers(TqLinuxRelayEvent& event) {
     event.Buffer.abandon();
     for (auto& buffer : event.Buffers) {
@@ -57,6 +64,9 @@ struct TqLinuxRelayWorker::RelayState {
     bool Closing{false};
     uint64_t OutstandingQuicSends{0};
     std::deque<TqBufferView> PendingTcpWrites;
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> PendingQuicReceives;
+    uint64_t PendingQuicReceiveBytes{0};
+    bool QuicReceivePaused{false};
     bool TcpWriteShutdownQueued{false};
     bool TcpWriteArmed{false};
     StreamRelayBinding* StreamBinding{nullptr};
@@ -215,9 +225,20 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::QuicReceive:
             ProcessQuicReceiveEvent(event);
             break;
+        case TqLinuxRelayEventType::QuicReceiveView:
+            ProcessQuicReceiveViewEvent(event);
+            break;
         case TqLinuxRelayEventType::QuicSendComplete:
             CompleteQuicSend(reinterpret_cast<void*>(event.Value));
             break;
+        case TqLinuxRelayEventType::TcpWritable: {
+            auto relay = FindRelayById(event.RelayId);
+            if (relay != nullptr) {
+                FlushDeferredQuicReceives(relay.get());
+                FlushTcpWrites(relay.get());
+            }
+            break;
+        }
         case TqLinuxRelayEventType::Shutdown:
             UnregisterRelay(event.RelayId);
             break;
@@ -353,6 +374,8 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
         RetiredStreamBindings.emplace_back(binding);
     }
     removed->PendingTcpWrites.clear();
+    removed->PendingQuicReceives.clear();
+    removed->PendingQuicReceiveBytes = 0;
     {
         std::lock_guard<std::mutex> guard(RelayLock);
         RetiredRelays.push_back(removed);
@@ -682,11 +705,232 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 }
 
 void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream) {
-    (void)stream;
+    auto relay = FindRelayById(relayId);
+    if (relay != nullptr && relay->Handle != nullptr) {
+        relay->Handle->Stop.store(true);
+    }
+    if (stream != nullptr && stream->Handle != nullptr) {
+        (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+    }
     TqLinuxRelayEvent shutdown{};
     shutdown.Type = TqLinuxRelayEventType::Shutdown;
     shutdown.RelayId = relayId;
     (void)Enqueue(std::move(shutdown));
+}
+
+bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
+    RelayState* relay,
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    bool fin) {
+    if (relay == nullptr || relay->Closing || buffers == nullptr || bufferCount == 0) {
+        return false;
+    }
+
+    std::shared_ptr<TqPendingQuicReceive> view(new (std::nothrow) TqPendingQuicReceive{});
+    if (!view) {
+        Errors.fetch_add(1);
+        return false;
+    }
+    view->Stream = stream;
+    view->RelayId = relay->Id;
+    view->Fin = fin;
+    view->Slices.reserve(bufferCount);
+
+    for (uint32_t i = 0; i < bufferCount; ++i) {
+        if (buffers[i].Length == 0) {
+            continue;
+        }
+        if (buffers[i].Buffer == nullptr) {
+            return false;
+        }
+        view->Slices.push_back(TqQuicReceiveSlice{buffers[i].Buffer, buffers[i].Length});
+        view->TotalLength += buffers[i].Length;
+    }
+    if (view->TotalLength == 0) {
+        return false;
+    }
+
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::QuicReceiveView;
+    event.RelayId = relay->Id;
+    event.TotalLength = view->TotalLength;
+    event.Fin = fin;
+    event.ReceiveView = std::move(view);
+    return Enqueue(std::move(event));
+}
+
+void TqLinuxRelayWorker::CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    DeferredReceiveCompleteBytes.fetch_add(bytes);
+    DeferredReceiveCompletes.fetch_add(1);
+    if (stream != nullptr && stream->Handle != nullptr) {
+        stream->ReceiveComplete(bytes);
+    }
+}
+
+uint64_t TqLinuxRelayWorker::MaxPendingQuicReceiveBytesPerRelay() const {
+    if (Config.MaxPendingQuicReceiveBytesPerRelay != 0) {
+        return Config.MaxPendingQuicReceiveBytesPerRelay;
+    }
+    return Config.MaxPendingBytes;
+}
+
+uint64_t TqLinuxRelayWorker::LowPendingQuicReceiveBytesPerRelay() const {
+    return MaxPendingQuicReceiveBytesPerRelay() / 2;
+}
+
+void TqLinuxRelayWorker::SetQuicReceiveEnabled(RelayState* relay, bool enabled) {
+    if (relay == nullptr || relay->Stream == nullptr) {
+        return;
+    }
+    if (enabled) {
+        QuicReceiveResumedCount.fetch_add(1);
+    } else {
+        QuicReceivePausedCount.fetch_add(1);
+    }
+    if (relay->Stream->Handle != nullptr) {
+        (void)relay->Stream->ReceiveSetEnabled(enabled);
+    }
+}
+
+void TqLinuxRelayWorker::MaybePauseQuicReceive(RelayState* relay) {
+    if (relay == nullptr || relay->QuicReceivePaused) {
+        return;
+    }
+    if (relay->PendingQuicReceiveBytes >= MaxPendingQuicReceiveBytesPerRelay()) {
+        relay->QuicReceivePaused = true;
+        SetQuicReceiveEnabled(relay, false);
+    }
+}
+
+void TqLinuxRelayWorker::MaybeResumeQuicReceive(RelayState* relay) {
+    if (relay == nullptr || !relay->QuicReceivePaused) {
+        return;
+    }
+    if (relay->PendingQuicReceiveBytes <= LowPendingQuicReceiveBytesPerRelay()) {
+        relay->QuicReceivePaused = false;
+        SetQuicReceiveEnabled(relay, true);
+    }
+}
+
+void TqLinuxRelayWorker::ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event) {
+    auto relay = FindRelayById(event.RelayId);
+    if (relay == nullptr || relay->Closing || !event.ReceiveView) {
+        return;
+    }
+    relay->PendingQuicReceiveBytes += event.ReceiveView->TotalLength - event.ReceiveView->CompletedLength;
+    relay->PendingQuicReceives.push_back(std::move(event.ReceiveView));
+    MaybePauseQuicReceive(relay.get());
+    FlushDeferredQuicReceives(relay.get());
+}
+
+void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+
+    while (!relay->PendingQuicReceives.empty()) {
+        auto& view = relay->PendingQuicReceives.front();
+        if (!view) {
+            relay->PendingQuicReceives.pop_front();
+            continue;
+        }
+
+        std::vector<iovec> iov;
+        iov.reserve(Config.MaxIov);
+        size_t sliceIndex = view->SliceIndex;
+        size_t sliceOffset = view->SliceOffset;
+        while (sliceIndex < view->Slices.size() && iov.size() < Config.MaxIov) {
+            const auto& slice = view->Slices[sliceIndex];
+            if (sliceOffset >= slice.Length) {
+                ++sliceIndex;
+                sliceOffset = 0;
+                continue;
+            }
+            iovec item{};
+            item.iov_base = const_cast<uint8_t*>(slice.Data + sliceOffset);
+            item.iov_len = slice.Length - sliceOffset;
+            iov.push_back(item);
+            ++sliceIndex;
+            sliceOffset = 0;
+        }
+
+        if (iov.empty()) {
+            if (view->Fin) {
+                relay->TcpWriteShutdownQueued = true;
+            }
+            relay->PendingQuicReceives.pop_front();
+            continue;
+        }
+
+        const ssize_t sent = WritevNoSignal(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
+        if (sent > 0) {
+            size_t remaining = static_cast<size_t>(sent);
+            TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent));
+            TcpWriteBatches.fetch_add(1);
+            uint64_t previous = MaxTcpWriteIovUsed.load();
+            while (previous < iov.size() &&
+                   !MaxTcpWriteIovUsed.compare_exchange_weak(previous, iov.size())) {
+            }
+
+            CompleteDeferredQuicReceive(view->Stream, static_cast<uint64_t>(sent));
+            view->CompletedLength += static_cast<uint64_t>(sent);
+            relay->PendingQuicReceiveBytes =
+                relay->PendingQuicReceiveBytes >= static_cast<uint64_t>(sent)
+                    ? relay->PendingQuicReceiveBytes - static_cast<uint64_t>(sent)
+                    : 0;
+
+            while (remaining > 0 && view->SliceIndex < view->Slices.size()) {
+                const auto& front = view->Slices[view->SliceIndex];
+                const size_t available = front.Length - view->SliceOffset;
+                if (remaining >= available) {
+                    remaining -= available;
+                    ++view->SliceIndex;
+                    view->SliceOffset = 0;
+                } else {
+                    view->SliceOffset += remaining;
+                    remaining = 0;
+                }
+            }
+
+            MaybeResumeQuicReceive(relay);
+
+            if (view->CompletedLength >= view->TotalLength) {
+                if (view->Fin) {
+                    relay->TcpWriteShutdownQueued = true;
+                }
+                relay->PendingQuicReceives.pop_front();
+            }
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            ArmTcpWritable(relay, true);
+            break;
+        }
+        if (relay->Handle != nullptr) {
+            relay->Handle->Stop.store(true);
+        }
+        relay->PendingQuicReceives.clear();
+        relay->PendingQuicReceiveBytes = 0;
+        ArmTcpWritable(relay, false);
+        break;
+    }
+
+    if (relay->PendingQuicReceives.empty() && relay->TcpWriteShutdownQueued) {
+        ::shutdown(relay->TcpFd, SHUT_WR);
+        relay->TcpWriteShutdownQueued = false;
+    }
+    MaybeResumeQuicReceive(relay);
+    if (relay->PendingQuicReceives.empty() && relay->PendingTcpWrites.empty()) {
+        ArmTcpWritable(relay, false);
+    }
 }
 
 bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
@@ -765,7 +1009,7 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
             iov.push_back(item);
         }
 
-        const ssize_t sent = ::writev(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
+        const ssize_t sent = WritevNoSignal(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (sent > 0) {
             size_t remaining = static_cast<size_t>(sent);
             TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent));
@@ -922,6 +1166,10 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.StreamLookupScanCount = StreamLookupScanCount.load();
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
+    snapshot.DeferredReceiveCompleteBytes = DeferredReceiveCompleteBytes.load();
+    snapshot.DeferredReceiveCompletes = DeferredReceiveCompletes.load();
+    snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
+    snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
     snapshot.Errors = Errors.load();
     snapshot.EventProducerThreadsObserved = EventProducerThreadCount.load();
     snapshot.MultipleEventProducerThreadsObserved =
@@ -935,6 +1183,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
             for (const auto& view : relay->PendingTcpWrites) {
                 snapshot.PendingBytes += view.Len;
             }
+            snapshot.PendingBytes += relay->PendingQuicReceiveBytes;
         }
     }
     return snapshot;
@@ -962,6 +1211,7 @@ void TqLinuxRelayWorker::Run() {
                     continue;
                 }
                 if ((events[i].events & EPOLLOUT) != 0) {
+                    FlushDeferredQuicReceives(relay.get());
                     FlushTcpWrites(relay.get());
                 }
                 if ((events[i].events & EPOLLIN) != 0) {
@@ -1026,13 +1276,24 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
             return QUIC_STATUS_SUCCESS;
         }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        const bool needsDecompress =
+            relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None;
+        if (!needsDecompress &&
+            QueueDeferredQuicReceive(
+                relay,
+                stream,
+                event->RECEIVE.Buffers,
+                event->RECEIVE.BufferCount,
+                fin)) {
+            return QUIC_STATUS_PENDING;
+        }
         if (!CopyQuicReceiveBatchToEvent(
                 relayId,
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
                 fin)) {
             AbortRelayFromCallback(relayId, stream);
-            return QUIC_STATUS_OUT_OF_MEMORY;
+            return QUIC_STATUS_PENDING;
         }
         return QUIC_STATUS_SUCCESS;
     }

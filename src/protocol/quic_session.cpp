@@ -105,7 +105,9 @@ bool ConvertListenAddress(const TqEndpoint& endpoint, QUIC_ADDR& address) {
     return QuicAddrFromString(endpoint.Host.c_str(), endpoint.Port, &address);
 }
 
-MsQuicSettings MakeSettings(const TqConfig& cfg, bool server) {
+}
+
+MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     MsQuicSettings settings;
     settings.SetCongestionControlAlgorithm(QUIC_CONGESTION_CONTROL_ALGORITHM_BBR);
     settings.SetKeepAlive(TqKeepAliveMs);
@@ -118,11 +120,14 @@ MsQuicSettings MakeSettings(const TqConfig& cfg, bool server) {
     settings.SetInitialRttMs(cfg.Tuning.InitialRttMs);
     settings.SetSendBufferingEnabled(false);
     settings.SetPacingEnabled(true);
+    settings.SetStreamMultiReceiveEnabled(true);
     if (server) {
         settings.SetServerResumptionLevel(QUIC_SERVER_RESUME_ONLY);
     }
     return settings;
 }
+
+namespace {
 
 QUIC_EXECUTION_PROFILE TqToMsQuicProfile(TqQuicProfile profile) {
     switch (profile) {
@@ -206,7 +211,7 @@ bool InitConfiguration(
 #endif
     ) {
     MsQuicAlpn alpn(TqAlpn);
-    MsQuicSettings settings = MakeSettings(cfg, server);
+    MsQuicSettings settings = TqMakeMsQuicSettings(cfg, server);
 #if defined(_WIN32) && defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
     const auto flags = server
         ? QUIC_CREDENTIAL_FLAG_NONE

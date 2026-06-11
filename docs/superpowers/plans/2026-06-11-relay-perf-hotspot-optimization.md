@@ -1059,29 +1059,50 @@ TCP→QUIC 的公平性边界：
 - remote `RESET_STREAM` 路径会设置 `RemoteCloseReset`、关闭 receive，并按 final size 修正 flow-control accounting，但不会把应用层未 complete 的 borrowed pointer 变成可继续访问资源。
 - 结论：Phase 4 的关闭策略必须是“abort 前 complete 已成功写入 TCP 的前缀；abort 后不再 complete、不再 write borrowed pointer，只释放 proxy 自己的 view 元数据并等待 MsQuic stream 关闭释放内部 buffer”。
 
-- [ ] **Step 1: POC 限制范围**
+- [x] **Step 1: POC 限制范围**
 
 先只支持 plain receive、无压缩、单 relay 单 pending receive、TCP 可立即写出或可通过 epoll writable 继续写出。保留现有 copy 路径作为 fallback。
 
-- [ ] **Step 2: 实现 `QuicReceiveView` 事件类型**
+- [x] **Step 2: 实现 `QuicReceiveView` 事件类型**
 
 新增只持有 slice 元数据的事件，不拷贝 payload。事件入队成功后 callback 返回 `QUIC_STATUS_PENDING`。
 
-- [ ] **Step 3: 实现 TCP partial write cursor**
+- [x] **Step 3: 实现 TCP partial write cursor**
 
 按 `writev()` 返回值推进 slice cursor，并对每次成功写出的字节调用 `StreamReceiveComplete(stream, written)`。
 
-- [ ] **Step 4: 加 pending bytes 水位和 receive enable/disable**
+- [x] **Step 4: 加 pending bytes 水位和 receive enable/disable**
 
 慢 TCP 下不要让应用层无限持有 MsQuic 内部 receive buffer。高水位 disable receive，低水位恢复。
 
-- [ ] **Step 5: 补齐关闭路径测试**
+- [x] **Step 5: 补齐关闭路径测试**（已覆盖 partial/EAGAIN、TCP hard error、FIN-only、QUIC shutdown cleanup、queue-full fallback abort）
 
 覆盖 TCP close、QUIC close、queue full、abort、FIN、partial write、重复 writable 等场景。
 
-- [ ] **Step 6: 单独 bench**
+- [x] **Step 6: 单独 bench**
 
 对比 Phase 3 的 QUIC→TCP plain 路径，重点看 callback copy 消失后 CPU 是否下降、吞吐是否提升、MsQuic flow control 是否能稳定背压。
+
+2026-06-11 短 bench 已执行：`DURATION_SEC=10 REPORT=/tmp/dgx-msquic-vs-proxy-phase4.md ./scripts/dgx-msquic-vs-proxy-bench.sh`。结果为 direct TCP 19.241 Gbps、secnetperf 单连接 0.705 Gbps、proxy-1x1 0.052 Gbps、proxy-16x16 0.158 Gbps、proxy-4x16 0.129 Gbps。该结果显示当前“每个 receive callback 都返回 PENDING 并交给 worker 异步 complete”的 POC 存在明显吞吐退化，不能作为最终 Phase 4 性能方案验收。源码原因高度相关：MsQuic 在 receive callback 前将 `ReceiveEnabled` 设为 `ReceiveMultiple`，默认非 multiple 时返回 `QUIC_STATUS_PENDING` 会暂停后续 receive callback，直到异步 `StreamReceiveComplete` 恢复。后续若继续 Phase 4，应改为 callback 内同步尝试 zero-copy write，只有 TCP EAGAIN/partial 时才进入 pending view；或确认并启用 receive-multiple 语义后再评估。
+
+### Phase 4 后续正确方向
+
+当前 always-pending POC 的问题不在于 borrowed receive buffer 本身，而在于把每次 receive callback 都变成“callback 返回 `QUIC_STATUS_PENDING` -> worker 被唤醒 -> TCP 写出 -> 异步 `StreamReceiveComplete` -> MsQuic 才能继续投递下一批 receive”的串行链路。后续优化应把普通快速路径留在 MsQuic receive callback 内完成，只有真正遇到慢 TCP 时才进入 deferred view。
+
+建议的下一版设计：
+
+1. receive callback 内先同步尝试 `writev()` / `sendmsg()` 到 TCP socket，直接使用 MsQuic receive buffer 指针，不拷贝 payload。
+2. 如果本次 receive payload 全部写入 TCP，则在 callback 内立即调用 `StreamReceiveComplete(total)`，保持同步消费语义。返回值可优先保持与 MsQuic 同步完成路径一致；如果源码确认 `QUIC_STATUS_CONTINUE` 更适合连续投递，再考虑切换为 `QUIC_STATUS_CONTINUE`。
+3. 如果 TCP 只写入部分数据，则对已写入前缀立即 `StreamReceiveComplete(written)`，只把剩余 slice view 和 cursor 交给 relay worker，callback 返回 `QUIC_STATUS_PENDING`。
+4. 如果 TCP 返回 `EAGAIN` / `EWOULDBLOCK` 且没有写入任何字节，则把完整 receive view 放入该 relay 的 pending receive 队列，arm TCP `EPOLLOUT`，callback 返回 `QUIC_STATUS_PENDING`。
+5. worker 只负责慢路径：TCP writable 后继续 `sendmsg()` 剩余 borrowed slice，每成功写出一段就调用 `StreamReceiveComplete(bytes)`；完成后释放 proxy 自己的 view 元数据并尝试恢复 receive。
+6. callback 内同步写必须是非阻塞、有限预算的 fast path，不能在 MsQuic worker/connection 线程里长时间循环或等待 TCP。
+
+另一条可选路线是先源码确认并启用 MsQuic `ReceiveMultiple` 语义，再重新评估 always-pending 模型。只有确认 `ReceiveMultiple` 下 pending receive 不会暂停后续 receive callback，且应用侧 pending view 的生命周期、flow control、关闭路径都能严格管理时，才值得继续评估该模型；否则优先采用“callback 同步写 fast path + partial/EAGAIN 才 pending”的设计。
+
+2026-06-11 复测：已在 `TqMakeMsQuicSettings()` 中启用 `StreamMultiReceiveEnabled`，并新增 `tcpquic_quic_settings_test` 验证 client/server settings 都设置 `IsSet.StreamMultiReceiveEnabled` 与 `StreamMultiReceiveEnabled`。同一条 10 秒 DGX bench 命令复测结果为 direct TCP 22.373 Gbps、secnetperf 单连接 0.857 Gbps、secnetperf 16 连接 51.143 Gbps、secnetperf 单连接 16 stream 1.302 Gbps、proxy-1x1 5.013 Gbps、proxy-16x16 12.230 Gbps、proxy-4x16 14.910 Gbps。
+
+结论：启用 `ReceiveMultiple` 后，always-pending 模型的核心串行化问题被解除，proxy-1x1 从 0.052 Gbps 恢复到 5.013 Gbps，说明前一次低吞吐的主因确实是默认非 multi receive 下 `QUIC_STATUS_PENDING` 暂停后续 receive callback。该模型可以继续评估，但仍需重点关注多 pending receive 的内存占用、水位暂停/恢复、公平性以及关闭路径。后续是否继续优化，应用新的 bench 基线与“callback 同步 write fast path + partial/EAGAIN 才 pending”方案做投入产出对比。
 
 ---
 
