@@ -271,10 +271,85 @@ Usage: tcpquic-proxy client|server [options]
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
 | `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
 | `--deny-targets` | server | 空 | 逗号分隔 CIDR 黑名单 |
+| `--admin-listen` | 双方 | 空 | Admin HTTP 监听地址；当前只允许 loopback：`127.0.0.1`、`localhost`、`::1` |
 
 - Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
+- Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--quic-connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
+
+## Admin HTTP API
+
+Admin HTTP 通过 `--admin-listen host:port` 开启；不配置该参数时不会启动。当前实现只允许绑定 loopback 地址，适合本机运维脚本或 SSH tunnel 访问。
+
+### Client 多 peer 模式
+
+| 方法 | 路径 | 能力 |
+|------|------|------|
+| `GET` | `/health` | 返回 client runtime 健康状态：`role`、`status`、`uptime_seconds` |
+| `GET` | `/metrics` | 返回每个 peer 的运行指标 |
+| `GET` | `/config` | 返回当前 router 配置 |
+| `PUT` | `/config` | 用请求 body 中的 JSON 替换当前 router 配置 |
+| `POST` | `/peers/{peer_id}/enable` | 启用指定 peer |
+| `POST` | `/peers/{peer_id}/disable` | 禁用指定 peer |
+
+`GET /metrics` 的 peer 字段包括：
+
+```json
+{
+  "peer_id": "agent-b",
+  "enabled": true,
+  "quic_peer": "127.0.0.1:14444",
+  "socks_listen": "127.0.0.1:11001",
+  "http_listen": "127.0.0.1:18001",
+  "state": "connected",
+  "connection_count": 4,
+  "connected_connections": 4,
+  "active_streams": 0,
+  "total_streams": 10,
+  "reconnects": 0,
+  "last_error": "",
+  "last_connected_at": ""
+}
+```
+
+`PUT /config` 与 peer enable/disable 会触发运行时变更。peer 被禁用、删除或 data-plane 参数变化时，client 会停止对应 listener、主动中断该 peer 的 tunnel，并 drain 旧 peer runtime。当前没有单独的 `DELETE /peers/{peer_id}` 或新增 peer 接口；新增、删除 peer 通过 `PUT /config` 整体替换配置完成。
+
+### Server 模式
+
+| 方法 | 路径 | 能力 |
+|------|------|------|
+| `GET` | `/health` | 返回 server 健康状态和指标 |
+| `GET` | `/metrics` | 返回 server 指标 |
+
+server metrics 字段包括：
+
+```json
+{
+  "role": "server",
+  "status": "healthy",
+  "listen": "0.0.0.0:443",
+  "uptime_seconds": 123,
+  "accepted_connections": 1,
+  "active_streams": 0,
+  "total_streams": 10,
+  "acl_denied": 0,
+  "linux_relay_wakeups": 0,
+  "linux_relay_events_processed": 0,
+  "linux_relay_pending_events": 0,
+  "linux_relay_pending_bytes": 0,
+  "linux_relay_tcp_read_bytes": 0,
+  "linux_relay_tcp_write_bytes": 0,
+  "linux_relay_read_disabled_count": 0,
+  "linux_relay_backend": "worker",
+  "linux_relay_compressed_tcp_bytes": 0,
+  "linux_relay_decompressed_tcp_bytes": 0,
+  "linux_relay_errors": 0,
+  "last_error": ""
+}
+```
+
+Admin API 当前没有鉴权或 TLS，依赖 loopback 绑定限制访问面。
 
 ## 安全与 ACL
 
