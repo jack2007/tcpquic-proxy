@@ -33,7 +33,9 @@ struct TqLinuxRelayEvent {
     uint64_t RelayId{0};
     void* Relay{nullptr};
     TqBufferRef Buffer;
+    std::vector<TqBufferRef> Buffers;
     size_t Length{0};
+    size_t TotalLength{0};
     bool Fin{false};
 };
 
@@ -101,7 +103,7 @@ public:
     bool Start();
     bool StartForTest();
     void Stop();
-    void Enqueue(const TqLinuxRelayEvent& event);
+    void Enqueue(TqLinuxRelayEvent event);
     void EnqueueForTest(const TqLinuxRelayEvent& event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
@@ -134,7 +136,11 @@ private:
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
     uint64_t FindRelayIdByStream(MsQuicStream* stream);
-    bool CopyQuicReceiveToEvent(uint64_t relayId, const uint8_t* data, uint32_t length);
+    bool CopyQuicReceiveBatchToEvent(
+        uint64_t relayId,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
     void ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event);
     bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);

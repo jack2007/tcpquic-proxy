@@ -407,6 +407,101 @@ int main() {
     {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        std::vector<uint8_t> first(600, 0x11);
+        std::vector<uint8_t> second(700, 0x22);
+        std::vector<uint8_t> third(800, 0x33);
+        QUIC_BUFFER quicBuffers[3]{};
+        quicBuffers[0].Buffer = first.data();
+        quicBuffers[0].Length = static_cast<uint32_t>(first.size());
+        quicBuffers[1].Buffer = second.data();
+        quicBuffers[1].Length = static_cast<uint32_t>(second.size());
+        quicBuffers[2].Buffer = third.data();
+        quicBuffers[2].Length = static_cast<uint32_t>(third.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 3;
+        receiveEvent.RECEIVE.Buffers = quicBuffers;
+
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &receiveEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot queued = worker.Snapshot();
+        if (queued.PendingEvents != 1) {
+            std::fprintf(stderr, "expected 1 batched receive event, got %llu\n",
+                static_cast<unsigned long long>(queued.PendingEvents));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        if (worker.DrainForTest(config.EventBudget) != 1) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        std::vector<uint8_t> expected;
+        expected.insert(expected.end(), first.begin(), first.end());
+        expected.insert(expected.end(), second.begin(), second.end());
+        expected.insert(expected.end(), third.begin(), third.end());
+
+        std::vector<uint8_t> output(expected.size());
+        size_t offset = 0;
+        while (offset < output.size()) {
+            const ssize_t received = ::read(fds[1], output.data() + offset, output.size() - offset);
+            if (received <= 0) {
+                worker.Stop();
+                ::close(fds[1]);
+                return 1;
+            }
+            offset += static_cast<size_t>(received);
+        }
+        if (output != expected) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;

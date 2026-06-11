@@ -126,10 +126,10 @@ void TqLinuxRelayWorker::Stop() {
     }
 }
 
-void TqLinuxRelayWorker::Enqueue(const TqLinuxRelayEvent& event) {
+void TqLinuxRelayWorker::Enqueue(TqLinuxRelayEvent event) {
     {
         std::lock_guard<std::mutex> guard(QueueLock);
-        Queue.push_back(event);
+        Queue.push_back(std::move(event));
     }
     Wake();
 }
@@ -564,39 +564,68 @@ uint64_t TqLinuxRelayWorker::FindRelayIdByStream(MsQuicStream* stream) {
     return 0;
 }
 
-bool TqLinuxRelayWorker::CopyQuicReceiveToEvent(
+bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
     uint64_t relayId,
-    const uint8_t* data,
-    uint32_t length) {
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    bool fin) {
     auto relay = FindRelayById(relayId);
     if (relay == nullptr || relay->Closing) {
         return false;
     }
-    if (length == 0) {
+    if (bufferCount == 0) {
+        if (fin) {
+            TqLinuxRelayEvent event{};
+            event.Type = TqLinuxRelayEventType::QuicReceive;
+            event.RelayId = relayId;
+            event.Fin = true;
+            Enqueue(std::move(event));
+        }
         return true;
     }
-    if (data == nullptr) {
+    if (buffers == nullptr) {
         return false;
     }
 
-    size_t offset = 0;
-    while (offset < length) {
-        auto buffer = relay->Pool.Acquire();
-        if (!buffer) {
-            Errors.fetch_add(1);
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::QuicReceive;
+    event.RelayId = relayId;
+
+    for (uint32_t i = 0; i < bufferCount; ++i) {
+        const uint8_t* data = buffers[i].Buffer;
+        const uint32_t length = buffers[i].Length;
+        if (length == 0) {
+            continue;
+        }
+        if (data == nullptr) {
             return false;
         }
-        const size_t chunk = std::min(buffer->Capacity(), static_cast<size_t>(length - offset));
-        std::memcpy(buffer->Data(), data + offset, chunk);
-        buffer->SetLength(chunk);
-        TqLinuxRelayEvent event{};
-        event.Type = TqLinuxRelayEventType::QuicReceive;
-        event.RelayId = relayId;
-        event.Buffer = buffer;
-        event.Length = chunk;
-        Enqueue(event);
-        offset += chunk;
+
+        size_t offset = 0;
+        while (offset < length) {
+            auto buffer = relay->Pool.Acquire();
+            if (!buffer) {
+                Errors.fetch_add(1);
+                return false;
+            }
+            const size_t chunk = std::min(buffer->Capacity(), static_cast<size_t>(length - offset));
+            std::memcpy(buffer->Data(), data + offset, chunk);
+            buffer->SetLength(chunk);
+            if (!event.Buffer) {
+                event.Buffer = buffer;
+                event.Length = chunk;
+            }
+            event.Buffers.push_back(buffer);
+            event.TotalLength += chunk;
+            offset += chunk;
+        }
     }
+
+    if (event.Buffers.empty() && !fin) {
+        return true;
+    }
+    event.Fin = fin;
+    Enqueue(std::move(event));
     return true;
 }
 
@@ -747,20 +776,46 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event)
     const bool needsDecompress =
         relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None;
     if (needsDecompress) {
-        const uint8_t* data = nullptr;
-        size_t length = 0;
-        if (event.Buffer) {
-            data = event.Buffer->Data();
-            length = event.Length;
-        }
-        if (!EnqueueQuicReceive(relay.get(), data, length, event.Fin)) {
-            if (relay->Handle != nullptr) {
-                relay->Handle->Stop.store(true);
+        if (!event.Buffers.empty()) {
+            for (size_t i = 0; i < event.Buffers.size(); ++i) {
+                const auto& buffer = event.Buffers[i];
+                if (!buffer) {
+                    continue;
+                }
+                const bool fin = event.Fin && i + 1 == event.Buffers.size();
+                if (!EnqueueQuicReceive(relay.get(), buffer->Data(), buffer->Length(), fin)) {
+                    if (relay->Handle != nullptr) {
+                        relay->Handle->Stop.store(true);
+                    }
+                    return;
+                }
             }
-            return;
+            if (event.Fin && !relay->TcpWriteShutdownQueued) {
+                relay->TcpWriteShutdownQueued = true;
+            }
+        } else {
+            const uint8_t* data = nullptr;
+            size_t length = 0;
+            if (event.Buffer) {
+                data = event.Buffer->Data();
+                length = event.Length;
+            }
+            if (!EnqueueQuicReceive(relay.get(), data, length, event.Fin)) {
+                if (relay->Handle != nullptr) {
+                    relay->Handle->Stop.store(true);
+                }
+                return;
+            }
         }
     } else {
-        if (event.Buffer && event.Length > 0) {
+        if (!event.Buffers.empty()) {
+            for (const auto& buffer : event.Buffers) {
+                if (buffer && buffer->Length() > 0) {
+                    relay->PendingTcpWrites.push_back(
+                        TqBufferView{buffer->Data(), buffer->Length(), buffer});
+                }
+            }
+        } else if (event.Buffer && event.Length > 0) {
             relay->PendingTcpWrites.push_back(
                 TqBufferView{event.Buffer->Data(), event.Length, event.Buffer});
         }
@@ -892,19 +947,14 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
         }
-        for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
-            const auto& buffer = event->RECEIVE.Buffers[i];
-            if (!CopyQuicReceiveToEvent(relayId, buffer.Buffer, buffer.Length)) {
-                AbortRelayFromCallback(relayId, stream);
-                return QUIC_STATUS_SUCCESS;
-            }
-        }
-        if ((event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0) {
-            TqLinuxRelayEvent fin{};
-            fin.Type = TqLinuxRelayEventType::QuicReceive;
-            fin.RelayId = relayId;
-            fin.Fin = true;
-            Enqueue(fin);
+        const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        if (!CopyQuicReceiveBatchToEvent(
+                relayId,
+                event->RECEIVE.Buffers,
+                event->RECEIVE.BufferCount,
+                fin)) {
+            AbortRelayFromCallback(relayId, stream);
+            return QUIC_STATUS_SUCCESS;
         }
         return QUIC_STATUS_SUCCESS;
     }

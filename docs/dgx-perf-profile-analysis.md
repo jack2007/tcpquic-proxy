@@ -204,3 +204,28 @@ sudo perf report -f -i docs/dgx-perf-profile-rerun/server.perf.data --comm tcpqu
 | UDP 内核拷贝 | ~1–8% | 否 |
 
 **优先做 buffer 池无锁化 / 预分配**，这是 tcpquic-proxy 相对原始 msquic 最突出的差距；完成后预期单连接吞吐可更接近 secnetperf，下一瓶颈将回到 TLS 与 UDP 收包（与 msquic 基线一致）。
+
+---
+
+## Phase 1 优化结果（2026-06-11）
+
+已完成 Phase 1 快速路径修复：
+
+1. QUIC receive plain path 跳过 worker 侧第二次 buffer acquire/memcpy，`8192` 字节、`4096` chunk 的生产路径回归测试将 `BufferAcquireCount` 锁定为 `2`。
+2. MsQuic stream callback 使用 `StreamRelayBinding` O(1) 定位 relay，生产路径回归测试将 `StreamLookupScanCount` 锁定为 `0`。
+3. 同一个 `QUIC_STREAM_EVENT_RECEIVE` 中的多个 `QUIC_BUFFER` 合并为一个 relay 队列事件，回归测试验证 3-buffer receive 在 drain 前 `PendingEvents == 1`。
+
+本地验证：
+
+```bash
+rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test tcpquic_relay_backend_selection_test -j2
+rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test
+rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test
+rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test
+rtk ./build/bin/Release/tcpquic_relay_backend_selection_test
+rtk cmake --build build -j2
+```
+
+结果：以上本地编译与单元测试均通过。
+
+DGX 吞吐测试未在当前系统执行：当前系统不具备 DGX 测试环境。吞吐是否达到 `proxy-1x1 >= 8.5 Gbps` 需在 DGX 环境补跑 `CASE=proxy-1x1 ./scripts/dgx-throughput-matrix.sh` 后确认。

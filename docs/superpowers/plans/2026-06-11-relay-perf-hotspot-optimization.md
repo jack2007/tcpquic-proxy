@@ -31,7 +31,7 @@
 - Modify: `src/tunnel/linux_relay_worker.cpp` — `ProcessQuicReceiveEvent`
 - Test: `src/unittest/linux_relay_worker_io_test.cpp`
 
-- [ ] **Step 1: 添加无压缩直通测试**
+- [x] **Step 1: 添加无压缩直通测试**
 
 在 `linux_relay_worker_io_test.cpp` 增加用例：plain data（非压缩），走 `DispatchStreamEventForTest` 生产路径，断言输出正确，并通过 `TqLinuxRelayWorkerSnapshot::BufferAcquireCount` 锁定池 acquire 次数。8192 字节、4096 chunk 的 RECEIVE 事件，优化前 acquire 4 次（callback 拷贝 2 次 + worker 二次拷贝 2 次），优化后应为 2 次。
 
@@ -93,12 +93,12 @@
 }
 ```
 
-- [ ] **Step 2: 运行测试确认基线通过**
+- [x] **Step 2: 运行测试确认基线通过**
 
-Run: `make -C /home/jack/src/tcpquic-proxy test`  
-Expected: FAIL（`BufferAcquireCount` 字段/计数尚不存在，或旧实现计数为 4）。这是本任务的红灯测试。
+Run: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test`
+Expected: FAIL（`BufferAcquireCount` 字段/计数尚不存在，或旧实现计数为 4）。这是本任务的红灯测试。Actual: FAIL, then PASS after implementation.
 
-- [ ] **Step 3: 修改 ProcessQuicReceiveEvent 消除二次拷贝**
+- [x] **Step 3: 修改 ProcessQuicReceiveEvent 消除二次拷贝**
 
 ```cpp
 void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event) {
@@ -133,12 +133,17 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(const TqLinuxRelayEvent& event)
 }
 ```
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
-Run: `make -C /home/jack/src/tcpquic-proxy test`  
-Expected: PASS
+Run:
+- `rtk cmake --build build --target tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_linux_relay_buffer_pool_test -j2`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_worker_queue_test`
+- `rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test`
 
-- [ ] **Step 5: Commit**
+Expected: PASS. Actual: PASS.
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/tunnel/linux_relay_worker.cpp src/unittest/linux_relay_worker_io_test.cpp
@@ -263,7 +268,7 @@ git commit -m "perf(relay): O(1) stream-to-relay binding, drop hot-path RelayLoc
 - Modify: `src/tunnel/linux_relay_worker.cpp` — `CopyQuicReceiveToEvent`, `ProcessQuicReceiveEvent`
 - Test: `src/unittest/linux_relay_worker_io_test.cpp`
 
-- [ ] **Step 1: 扩展 TqLinuxRelayEvent 支持多 buffer**
+- [x] **Step 1: 扩展 TqLinuxRelayEvent 支持多 buffer**
 
 ```cpp
 struct TqLinuxRelayEvent {
@@ -279,7 +284,7 @@ struct TqLinuxRelayEvent {
 };
 ```
 
-- [ ] **Step 2: CopyQuicReceiveToEvent 改为整段 RECEIVE 一次 Enqueue**
+- [x] **Step 2: CopyQuicReceiveToEvent 改为整段 RECEIVE 一次 Enqueue**
 
 新增函数 `CopyQuicReceiveBatchToEvent(relayId, buffers, count)`：
 
@@ -328,7 +333,7 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 }
 ```
 
-- [ ] **Step 3: ProcessQuicReceiveEvent 处理 Buffers 向量**
+- [x] **Step 3: ProcessQuicReceiveEvent 处理 Buffers 向量**
 
 ```cpp
 } else {
@@ -347,11 +352,16 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 }
 ```
 
-- [ ] **Step 4: 多 buffer RECEIVE 单测**
+- [x] **Step 4: 多 buffer RECEIVE 单测**
 
 构造 3 个 `QUIC_BUFFER` 的 `RECEIVE` 事件，断言 `Snapshot().PendingEvents` 在处理前为 1。
 
-- [ ] **Step 5: 测试 + 提交**
+- [x] **Step 5: 测试 + 提交**
+
+Verification:
+- RED: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test` failed with `expected 1 batched receive event, got 3`.
+- GREEN: `rtk cmake --build build --target tcpquic_linux_relay_worker_io_test -j2` PASS.
+- GREEN: `rtk ./build/bin/Release/tcpquic_linux_relay_worker_io_test` PASS.
 
 ```bash
 git commit -m "perf(relay): batch QUIC receive into single queued event"
@@ -361,17 +371,19 @@ git commit -m "perf(relay): batch QUIC receive into single queued event"
 
 ### Task 4: Phase 1 DGX 验证
 
-- [ ] **Step 1: 本地编译**
+- [x] **Step 1: 本地编译**
 
-Run: `make -C /home/jack/src/tcpquic-proxy -j$(nproc)`  
-Expected: 无错误
+Run: `rtk cmake --build build -j2`
+Expected: 无错误. Actual: PASS.
 
-- [ ] **Step 2: DGX 吞吐快测（如环境可用）**
+- [x] **Step 2: DGX 吞吐快测（如环境可用）**
 
 Run: `CASE=proxy-1x1 ./scripts/dgx-throughput-matrix.sh`  
 Expected: 吞吐 ≥ 8.5 Gbps（不低于优化前）
 
-- [ ] **Step 3: 记录 Phase 1 结果到 docs**
+Actual: SKIPPED. 当前系统不具备 DGX 测试环境；本阶段交付门槛限定为基本编译与本地单元测试。
+
+- [x] **Step 3: 记录 Phase 1 结果到 docs**
 
 在 `docs/dgx-perf-profile-analysis.md` 末尾追加 `## Phase 1 优化结果（日期）` 小节，记录吞吐与观察。
 
