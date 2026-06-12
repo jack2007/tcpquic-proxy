@@ -179,7 +179,11 @@ private:
         RelayState* relay,
         std::vector<TqBufferView>& input,
         std::vector<TqBufferView>& output);
-    bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
+    bool FinishTcpToQuic(RelayState* relay);
+    bool SubmitTcpBatchToQuic(
+        RelayState* relay,
+        std::vector<TqBufferView>& views,
+        QUIC_SEND_FLAGS flags = QUIC_SEND_FLAG_NONE);
     void CompleteQuicSend(void* context);
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);

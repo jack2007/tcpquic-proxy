@@ -246,20 +246,46 @@ int TestDownloadPath() {
         controller.StopAll();
         return 22;
     }
-    TqCloseSocket(client);
 
     TqSpeedResult result{};
-    if (!controller.FinishSession(3, static_cast<uint64_t>(received), 6789, result)) {
-        return 23;
-    }
-    if (result.ServerBytes == 0) {
+    auto finishFuture = std::async(std::launch::async, [&controller, &result, received]() {
+        if (!controller.FinishSession(3, static_cast<uint64_t>(received), 6789, result)) {
+            return 23;
+        }
+        return 0;
+    });
+
+    uint64_t totalReceived = static_cast<uint64_t>(received);
+    for (;;) {
+        const int rc = TqRecv(client, buffer.data(), buffer.size(), TqRecvFlags::None);
+        if (rc > 0) {
+            totalReceived += static_cast<uint64_t>(rc);
+            continue;
+        }
+        if (rc == 0) {
+            break;
+        }
+        TqCloseSocket(client);
+        controller.StopAll();
         return 24;
     }
-    if (result.AcceptedConnections != 1) {
+    TqCloseSocket(client);
+
+    if (finishFuture.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        controller.StopAll();
         return 25;
     }
-    if (result.ClosedConnections != 1) {
+    if (const int finishRc = finishFuture.get(); finishRc != 0) {
+        return finishRc;
+    }
+    if (result.ServerBytes != totalReceived) {
         return 26;
+    }
+    if (result.AcceptedConnections != 1) {
+        return 27;
+    }
+    if (result.ClosedConnections != 1) {
+        return 28;
     }
     return 0;
 }

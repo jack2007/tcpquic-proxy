@@ -399,7 +399,8 @@ public:
         {
             std::lock_guard<std::mutex> guard(Lock);
             SelfDeleteOnShutdown = true;
-            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+            if (!RelayStarted && Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
                 stream = Stream;
                 shutdownStream = true;
                 StreamShutdownQueued = true;
@@ -511,7 +512,8 @@ public:
             AbortedByConnection = true;
             SelfDeleteOnShutdown = true;
             stopRelay = RelayStarted;
-            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+            if (!RelayStarted && Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
                 stream = Stream;
                 shutdownStream = true;
                 StreamShutdownQueued = true;
@@ -812,7 +814,8 @@ private:
         {
             std::lock_guard<std::mutex> guard(Lock);
             SelfDeleteOnShutdown = true;
-            if (Stream != nullptr && !ShutdownComplete && !StreamShutdownQueued) {
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
                 stream = Stream;
                 shutdownStream = true;
                 StreamShutdownQueued = true;

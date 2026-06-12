@@ -70,6 +70,7 @@ struct TqLinuxRelayWorker::RelayState {
     std::vector<uint8_t> CapturedQuicBytesForTest;
     bool EnableQuicSends{true};
     bool Closing{false};
+    bool TcpReadClosed{false};
     uint64_t OutstandingQuicSends{0};
     std::deque<TqBufferView> PendingTcpWrites;
     std::deque<std::shared_ptr<TqPendingQuicReceive>> PendingQuicReceives;
@@ -586,6 +587,15 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             continue;
         }
         if (received == 0) {
+            if (!relay->TcpReadClosed) {
+                relay->TcpReadClosed = true;
+                ArmTcpReadable(relay, false);
+                if (!FinishTcpToQuic(relay)) {
+                    if (relay->Handle != nullptr) {
+                        relay->Handle->Stop.store(true);
+                    }
+                }
+            }
             break;
         }
         if (errno == EINTR) {
@@ -651,11 +661,66 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
     return true;
 }
 
+bool TqLinuxRelayWorker::FinishTcpToQuic(RelayState* relay) {
+    if (relay == nullptr || relay->Closing) {
+        return false;
+    }
+
+    std::vector<TqBufferView> sendViews;
+    if (relay->Compressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None) {
+        relay->CompressionOutput.clear();
+        if (!relay->Compressor->Compress(nullptr, 0, relay->CompressionOutput, true)) {
+            RecordError(RelayErrorKind::TcpToQuicCompress);
+            TcpToQuicCompressFlushFailures.fetch_add(1);
+            return false;
+        }
+
+        size_t offset = 0;
+        while (offset < relay->CompressionOutput.size()) {
+            TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+            auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
+            if (!buffer) {
+                RecordBufferAcquireFailure(
+                    RelayErrorKind::TcpToQuicBufferAcquire, acquireFailure);
+                return false;
+            }
+            const size_t chunk = std::min(buffer->Capacity(), relay->CompressionOutput.size() - offset);
+            std::memcpy(buffer->Data(), relay->CompressionOutput.data() + offset, chunk);
+            buffer->SetLength(chunk);
+            uint8_t* data = buffer->Data();
+            sendViews.push_back(TqBufferView{data, chunk, std::move(buffer)});
+            offset += chunk;
+        }
+        CompressedTcpBytes.fetch_add(relay->CompressionOutput.size());
+    }
+
+    return SubmitTcpBatchToQuic(relay, sendViews, QUIC_SEND_FLAG_FIN);
+}
+
 // In production, ClientContext owns TqLinuxRelaySendOperation until
 // QUIC_STREAM_EVENT_SEND_COMPLETE is delivered back to the owner worker.
 // Tests can disable sends to verify readv batching without a live MsQuic stream.
-bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views) {
+bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
+    RelayState* relay,
+    std::vector<TqBufferView>& views,
+    QUIC_SEND_FLAGS flags) {
     if (relay == nullptr || views.empty()) {
+        if (!relay->EnableQuicSends) {
+            return true;
+        }
+        if (flags == QUIC_SEND_FLAG_FIN) {
+            if (relay->Closing || relay->Stream == nullptr || relay->Stream->Handle == nullptr) {
+                RecordError(RelayErrorKind::QuicSend);
+                return false;
+            }
+            const QUIC_STATUS status = relay->Stream->Send(nullptr, 0, QUIC_SEND_FLAG_FIN, nullptr);
+            if (QUIC_FAILED(status)) {
+                RecordError(RelayErrorKind::QuicSend);
+                QuicSendApiFailures.fetch_add(1);
+                LastQuicSendStatus.store(static_cast<int64_t>(status));
+                return false;
+            }
+        }
         return true;
     }
     if (!relay->EnableQuicSends) {
@@ -707,7 +772,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     const QUIC_STATUS status = stream->Send(
         operation->QuicBuffers.data(),
         static_cast<uint32_t>(operation->QuicBuffers.size()),
-        QUIC_SEND_FLAG_NONE,
+        flags,
         operation);
     if (QUIC_FAILED(status)) {
         delete operation;
@@ -1594,8 +1659,10 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         }
         return QUIC_STATUS_SUCCESS;
     }
+    if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
+        return QUIC_STATUS_SUCCESS;
+    }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE ||
-        event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
