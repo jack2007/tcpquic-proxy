@@ -1144,6 +1144,9 @@ private:
     QUIC_STATUS OnStreamEvent(MsQuicStream*, QUIC_STREAM_EVENT* event) noexcept {
         switch (event->Type) {
         case QUIC_STREAM_EVENT_RECEIVE:
+            if (CloseAfterStructuredError_) {
+                break;
+            }
             for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
                 const auto& buffer = event->RECEIVE.Buffers[i];
                 BufferedRx_.insert(
@@ -1187,12 +1190,13 @@ private:
             HandleSpeedStartStub();
             return;
         default:
-            (void)TqSendDispatcherSpeedError(
+            if (!QueueStructuredError(
                 Stream_,
                 0,
                 TqSpeedError::Unsupported,
-                "unsupported control stream");
-            AbortOrClose();
+                "unsupported control stream")) {
+                AbortOrClose();
+            }
             return;
         }
     }
@@ -1232,22 +1236,36 @@ private:
 
         TqSpeedStart start{};
         if (!TqDecodeSpeedStart(BufferedRx_.data(), BufferedRx_.size(), start)) {
-            (void)TqSendDispatcherSpeedError(
+            if (!QueueStructuredError(
                 Stream_,
                 0,
                 TqSpeedError::InvalidRequest,
-                "invalid speed start");
-            AbortOrClose();
+                "invalid speed start")) {
+                AbortOrClose();
+            }
             return;
         }
 
         (void)Authorizer_;
-        (void)TqSendDispatcherSpeedError(
+        if (!QueueStructuredError(
             Stream_,
             start.SessionId,
             TqSpeedError::Unsupported,
-            "speed control unavailable");
-        AbortOrClose();
+            "speed control unavailable")) {
+            AbortOrClose();
+        }
+    }
+
+    bool QueueStructuredError(
+        MsQuicStream* stream,
+        uint32_t sessionId,
+        TqSpeedError error,
+        const char* message) {
+        if (!TqSendDispatcherSpeedError(stream, sessionId, error, message)) {
+            return false;
+        }
+        CloseAfterStructuredError_ = true;
+        return true;
     }
 
     void AbortOrClose() {
@@ -1265,6 +1283,7 @@ private:
     TqTunnelAclDeniedFn OnAclDenied_;
     std::vector<uint8_t> BufferedRx_;
     bool OwnershipTransferred_{false};
+    bool CloseAfterStructuredError_{false};
 };
 
 void TqHandleServerIncomingStreamInternal(

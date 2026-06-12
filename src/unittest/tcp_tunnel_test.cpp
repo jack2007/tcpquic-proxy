@@ -269,6 +269,64 @@ bool WaitForFakeSend(
     return false;
 }
 
+bool TakeFakeSendRecord(HQUIC handle, FakeQuicSendRecord& record) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    const auto it = g_fake_quic_streams.find(handle);
+    if (it == g_fake_quic_streams.end() || it->second.Sends.empty()) {
+        return false;
+    }
+    record = it->second.Sends.front();
+    it->second.Sends.erase(it->second.Sends.begin());
+    return true;
+}
+
+unsigned FakeShutdownCount(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    const auto it = g_fake_quic_streams.find(handle);
+    return it == g_fake_quic_streams.end() ? 0 : it->second.ShutdownCount;
+}
+
+bool DispatchFakeSendComplete(HQUIC handle) {
+    FakeQuicSendRecord record;
+    if (!TakeFakeSendRecord(handle, record)) {
+        return false;
+    }
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    event.SEND_COMPLETE.ClientContext = record.ClientContext;
+    return DispatchFakeStreamEvent(handle, event);
+}
+
+bool DispatchFakeShutdownComplete(HQUIC handle) {
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    return DispatchFakeStreamEvent(handle, event);
+}
+
+MsQuicStream* LookupFakeMsQuicStream(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    const auto it = g_fake_quic_streams.find(handle);
+    if (it == g_fake_quic_streams.end()) {
+        return nullptr;
+    }
+    return static_cast<MsQuicStream*>(it->second.Context);
+}
+
+TqTunnelContext* LookupFakeTunnelContext(HQUIC handle) {
+    MsQuicStream* stream = LookupFakeMsQuicStream(handle);
+    return stream == nullptr ? nullptr : static_cast<TqTunnelContext*>(stream->Context);
+}
+
+bool ReapPreparedFakeTunnel(MsQuicStream* stream, TqTunnelContext* context) {
+    if (stream == nullptr || context == nullptr) {
+        return false;
+    }
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqReapTunnelContext(context);
+    return true;
+}
+
 std::vector<uint8_t> BuildOpenRequestBytes(const char* host, uint16_t port) {
     TqOpenRequest req{};
     req.Flags = 0;
@@ -281,6 +339,20 @@ std::vector<uint8_t> BuildOpenRequestBytes(const char* host, uint16_t port) {
 
     std::vector<uint8_t> encoded;
     if (!TqEncodeOpenRequest(req, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
+}
+
+std::vector<uint8_t> BuildSpeedStartBytes(uint32_t sessionId) {
+    TqSpeedStart start{};
+    start.SessionId = sessionId;
+    start.Direction = TqSpeedDirection::Download;
+    start.DurationSec = 5;
+    start.Parallel = 1;
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeSpeedStart(start, encoded)) {
         encoded.clear();
     }
     return encoded;
@@ -412,6 +484,12 @@ int TestServerIncomingOpenDispatchesWithInitialBytes() {
     if (!response.Ok) return 235;
     if (response.Error != TqOpenError::Ok) return 236;
     if (responseFlags != QUIC_SEND_FLAG_NONE) return 237;
+    MsQuicStream* wrappedStream = LookupFakeMsQuicStream(rawStream);
+    TqTunnelContext* tunnelContext = LookupFakeTunnelContext(rawStream);
+    if (wrappedStream == nullptr || tunnelContext == nullptr) return 238;
+    if (!DispatchFakeSendComplete(rawStream)) return 239;
+    if (!ReapPreparedFakeTunnel(wrappedStream, tunnelContext)) return 240;
+    if (!DispatchFakeShutdownComplete(rawStream)) return 241;
     return 0;
 }
 
@@ -460,6 +538,9 @@ int TestServerIncomingLoopbackDeniedWithoutAuthorizer() {
     if (response.Error != TqOpenError::AclDenied) return 244;
     if (!aclDenied) return 245;
     if (responseFlags != QUIC_SEND_FLAG_FIN) return 246;
+    if (!DispatchFakeSendComplete(rawStream)) return 247;
+    if (FakeShutdownCount(rawStream) != 1) return 248;
+    if (!DispatchFakeShutdownComplete(rawStream)) return 249;
     return 0;
 }
 
@@ -513,6 +594,12 @@ int TestServerIncomingLoopbackAllowedByEphemeralAuthorizer() {
     }
     if (!allowedResponse.Ok) return 253;
     if (allowedResponse.Error != TqOpenError::Ok) return 254;
+    MsQuicStream* allowedWrappedStream = LookupFakeMsQuicStream(allowedStream);
+    TqTunnelContext* allowedTunnelContext = LookupFakeTunnelContext(allowedStream);
+    if (allowedWrappedStream == nullptr || allowedTunnelContext == nullptr) return 255;
+    if (!DispatchFakeSendComplete(allowedStream)) return 256;
+    if (!ReapPreparedFakeTunnel(allowedWrappedStream, allowedTunnelContext)) return 257;
+    if (!DispatchFakeShutdownComplete(allowedStream)) return 258;
 
     auto deniedStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7104));
     bool aclDenied = false;
@@ -527,7 +614,7 @@ int TestServerIncomingLoopbackAllowedByEphemeralAuthorizer() {
 
     const std::vector<uint8_t> deniedOpen =
         BuildOpenRequestBytes("127.0.0.1", static_cast<uint16_t>(listener.Port() + 1));
-    if (deniedOpen.empty()) return 255;
+    if (deniedOpen.empty()) return 259;
 
     QUIC_BUFFER deniedBuffer{
         static_cast<uint32_t>(deniedOpen.size()),
@@ -537,22 +624,68 @@ int TestServerIncomingLoopbackAllowedByEphemeralAuthorizer() {
     deniedEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
     deniedEvent.RECEIVE.BufferCount = 1;
     deniedEvent.RECEIVE.Buffers = &deniedBuffer;
-    if (!DispatchFakeStreamEvent(deniedStream, deniedEvent)) return 256;
+    if (!DispatchFakeStreamEvent(deniedStream, deniedEvent)) return 260;
 
     std::vector<uint8_t> deniedResponseBytes;
     QUIC_SEND_FLAGS deniedResponseFlags = QUIC_SEND_FLAG_NONE;
-    if (!WaitForFakeSend(deniedStream, deniedResponseBytes, deniedResponseFlags, 2000)) return 257;
+    if (!WaitForFakeSend(deniedStream, deniedResponseBytes, deniedResponseFlags, 2000)) return 261;
 
     TqOpenResponse deniedResponse{};
     if (!TqDecodeOpenResponse(
             deniedResponseBytes.data(),
             deniedResponseBytes.size(),
             deniedResponse)) {
-        return 258;
+        return 262;
     }
-    if (deniedResponse.Ok) return 259;
-    if (deniedResponse.Error != TqOpenError::AclDenied) return 260;
-    if (!aclDenied) return 261;
+    if (deniedResponse.Ok) return 263;
+    if (deniedResponse.Error != TqOpenError::AclDenied) return 264;
+    if (!aclDenied) return 265;
+    if (!DispatchFakeSendComplete(deniedStream)) return 266;
+    if (FakeShutdownCount(deniedStream) != 1) return 267;
+    if (!DispatchFakeShutdownComplete(deniedStream)) return 268;
+    return 0;
+}
+
+int TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 268;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7105));
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, nullptr);
+
+    const std::vector<uint8_t> speedStart = BuildSpeedStartBytes(77);
+    if (speedStart.empty()) return 269;
+
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(speedStart.size()),
+        const_cast<uint8_t*>(speedStart.data()),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, event)) return 270;
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) return 271;
+
+    TqSpeedErrorMessage response{};
+    if (!TqDecodeSpeedError(responseBytes.data(), responseBytes.size(), response)) return 272;
+    if (response.SessionId != 77) return 273;
+    if (response.Error != TqSpeedError::Unsupported) return 274;
+    if (responseFlags != QUIC_SEND_FLAG_FIN) return 275;
+    if (FakeShutdownCount(rawStream) != 0) return 276;
+    if (!DispatchFakeSendComplete(rawStream)) return 277;
+    if (FakeShutdownCount(rawStream) != 0) return 278;
+    if (!DispatchFakeShutdownComplete(rawStream)) return 279;
     return 0;
 }
 
@@ -798,6 +931,7 @@ int main() {
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
+    if (int rc = TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;
