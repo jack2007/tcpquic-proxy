@@ -22,6 +22,17 @@ struct TqServerMetrics {
     std::string LastError;
 };
 
+struct TqClientMetrics {
+    std::string QuicPeer;
+    std::string SocksListen;
+    std::string HttpListen;
+    uint32_t ConnectionCount{0};
+    uint32_t ConnectedConnections{0};
+    std::string LastError;
+};
+
+std::string TqClientHealthJson(const TqClientMetrics& metrics, uint64_t uptimeSeconds);
+std::string TqClientMetricsJson(const TqClientMetrics& metrics, uint64_t uptimeSeconds);
 std::string TqServerHealthJson(const TqServerMetrics& metrics, uint64_t uptimeSeconds);
 std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeSeconds);
 void TqServerMetricsConnectionAccepted(TqServerMetrics& metrics);

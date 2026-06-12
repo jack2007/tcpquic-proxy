@@ -68,6 +68,59 @@ sysctl 128MB 后：
 - 单变量实验把 inline budget 放大到 16MB 后，1x1 立即恢复，证明故障触发条件是 budget fallback path。
 - 修复后默认 128KB budget 下，1x1 不再卡尾；10s perf 吞吐 `speed_download=900306734` B/s，client 热点回到 UDP `__arch_copy_to_user`、AES-GCM 和本地 TCP `__arch_copy_from_user`，不再是 perf 样本极少的 idle 状态。
 
+### 1x1 inline byte budget 单轮矩阵（2026-06-12）
+
+测试条件：
+
+- 拓扑：spark-1619 client -> spark-1b6f server
+- 模式：`tunnel_off`，`QUIC_CONNECTIONS=1`，`DURATION_SEC=10`
+- payload：实际下载 `1,572,864,208` bytes
+- 两端均开启 admin metrics：`--admin-listen 127.0.0.1:19091`
+- 两端均设置同一个 `--inline-write-byte-budget`
+- metrics 文件：`/tmp/dgx-client-admin-metrics/{client,server}-<budget>-tunnel_off-1.json`
+
+client QUIC receive -> TCP write 指标：
+
+| inline budget | 吞吐 | inline bytes | inline % | defer bytes | defer % | callbacks | full | budget exceeded | partial/EAGAIN | avg/max |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 64KB | 5518.64 Mbps | 67,308,951 | 4.28% | 1,505,555,257 | 95.72% | 12,207 | 9,842 | 2,365 | 0/0 | 12us / 971us |
+| 128KB | 7340.00 Mbps | 188,385,996 | 11.98% | 1,384,478,212 | 88.02% | 12,987 | 10,440 | 2,547 | 0/0 | 10us / 678us |
+| 192KB | 7400.77 Mbps | 381,786,579 | 24.27% | 1,191,077,629 | 75.73% | 14,245 | 12,514 | 1,731 | 0/0 | 7us / 740us |
+| 256KB | 9552.45 Mbps | 380,418,999 | 24.19% | 1,192,445,209 | 75.81% | 13,296 | 11,217 | 2,079 | 0/0 | 16us / 940us |
+
+client receive callback `totalLength` 分布：
+
+| budget | <=16K | <=64K | <=128K | <=256K | <=1M | >1M |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64KB | 8,971 | 871 | 330 | 364 | 1,203 | 468 |
+| 128KB | 8,160 | 1,736 | 544 | 619 | 1,707 | 221 |
+| 192KB | 7,474 | 4,422 | 363 | 463 | 1,176 | 347 |
+| 256KB | 7,853 | 1,758 | 964 | 642 | 1,978 | 101 |
+
+server TCP -> QUIC 指标：
+
+| budget | tcp_read_bytes | tcp_write_bytes | inline write | partial/EAGAIN/budget |
+|---:|---:|---:|---:|---:|
+| 64KB | 1,572,864,208 | 106 | 106 | 0/0/0 |
+| 128KB | 1,572,864,208 | 106 | 106 | 0/0/0 |
+| 192KB | 1,572,864,208 | 106 | 106 | 0/0/0 |
+| 256KB | 1,572,864,208 | 106 | 106 | 0/0/0 |
+
+server QUIC send batch bytes 分布：
+
+| budget | <=16K | <=64K | <=128K | <=256K | <=1M | >1M |
+|---:|---:|---:|---:|---:|---:|---:|
+| 64KB | 4 | 42 | 125 | 174 | 1,491 | 0 |
+| 128KB | 11 | 24 | 87 | 175 | 1,474 | 0 |
+| 192KB | 3 | 17 | 3 | 2 | 1,505 | 0 |
+| 256KB | 13 | 21 | 68 | 74 | 1,520 | 0 |
+
+说明与限制：
+
+- QUIC stream 是字节流，server `Stream->Send()` 次数和 client RECEIVE callback 次数不是 1:1；send batch 分布与 receive callback `totalLength` 分布需要分别观察。
+- client inline budget 不直接改变 server TCP 读入总字节数；它改变 client receive consume / `StreamReceiveComplete()` 节奏，间接影响 QUIC flow-control、send complete 与后续 receive slice 形态。
+- 本表是单轮结果，DGX 单流吞吐存在波动；默认值决策应对 128KB / 192KB / 256KB 各跑 3 次取中位数。
+
 ## 分支核心路径
 
 sync-write 的 QUIC->TCP receive 路径是：
@@ -103,6 +156,17 @@ if partial / EAGAIN after prefix write:
 - TCP socket 可持续接受数据时，callback 仍会承担 inline `sendmsg` 工作，但现在最多按配置预算执行。
 - callback 时间变长会挤压 MsQuic worker 上其他 stream 的 receive、ACK、flow-control、send flush。
 - 单流 perf 显示 TCP->QUIC 方向 buffer pool / `DrainTcpReadable` 仍是热点，sync-write 没有解决反方向 relay 成本。
+- 当前还存在一个待修顺序风险：若 callback N 超预算后仅 enqueue deferred receive，callback N+1 又在 N 的 deferred view 被 worker 写入 TCP 前 inline full write 成功，则 N+1 的 bytes 可能先于 N 写入同一个 TCP fd。现有 FIFO 只保证 deferred view 之间的顺序，不能保证“前一个 deferred event”早于“后一个 inline write”。
+
+建议修复：
+
+```text
+relay has deferred receive queued / pending / flushing
+  -> later RECEIVE callbacks must not inline
+  -> queue full receive view and return PENDING
+```
+
+也就是增加 per-relay deferred ordering barrier，例如 `OutstandingDeferredReceives` / `QuicReceiveOrderingBarrier`。`QueueDeferredQuicReceive()` 成功 enqueue 前同步置位或递增；worker 完整写完对应 view 并 `pop_front()` 后清除或递减。`TryCompleteQuicReceiveInline()` 入口看到 barrier 时直接走 full deferred fallback。该修复需要单测覆盖“第一个 callback 超预算 deferred，第二个 callback 本可 inline”的场景，验证 TCP 输出顺序仍是 `first + second`。
 
 ## MsQuic UDP Buffer 结论
 
@@ -170,7 +234,8 @@ sync-write 分支现在会记录 TCP requested/effective buffer，因为它对 T
 - [已实现] inline `EAGAIN` count
 - [已实现] inline budget exceeded count
 - [部分实现] callback wall time count/avg/max usec；p50/p95/p99 需 histogram 或 trace 后处理
-- [未实现] 每次 `sendmsg` bytes 分布
+- [已实现] TCP->QUIC send batch bytes bucket 分布（admin metrics `linux_relay_quic_send_bytes_buckets`）
+- [已实现] QUIC receive callback `totalLength` bucket 分布（admin metrics `linux_relay_quic_receive_bytes_buckets`）
 - [已实现] deferred fallback bytes
 - [已实现] `StreamReceiveComplete(written_prefix)` 次数和 bytes（沿用 deferred complete counters）
 
@@ -182,7 +247,7 @@ TCP socket 调优后已打印：
 - [已实现] effective `SO_SNDBUF`
 - [已实现] `setsockopt` 失败 errno
 
-缺少分位数和 sendmsg bytes 分布时，仍不能完全判断 sync-write 是被 TCP buffer、callback 预算、iov 上限，还是 UDP path 限制。
+缺少 callback 分位数时，仍不能完全判断 sync-write 的 p99 尾延迟；send/receive bytes 分布已由 bucket metrics 覆盖。
 
 ### P1：callback write 预算化
 
@@ -190,7 +255,7 @@ TCP socket 调优后已打印：
 
 ```text
 inline_sendmsg_max_calls = 1（默认，可通过 `--inline-sendmsg-max-calls` 覆盖为 1 或 2）
-inline_write_byte_budget = 128KB（默认，可通过 `--inline-write-byte-budget` 覆盖为 64KB / 128KB / 256KB）
+inline_write_byte_budget = 128KB（默认，可通过 `--inline-write-byte-budget` 覆盖为 64KB / 128KB / 192KB / 256KB）
 ```
 
 当前行为：
@@ -216,14 +281,21 @@ if partial / EAGAIN after prefix write:
 - TCP backpressure 下通过 `EAGAIN`/partial/budget exceeded 退到 worker path
 - deferred receive pause 按 pending 阈值触发，不再每个 fallback 都暂停 QUIC receive
 
+当前未完成的约束：
+
+- deferred ordering barrier 尚未实现。当前代码隐含依赖“同一 stream 返回 `QUIC_STATUS_PENDING` 后，MsQuic 不会在 `ReceiveComplete()` 前继续交付后续 RECEIVE callback”；在启用 `StreamMultiReceiveEnabled` 后，这不应作为唯一顺序保证。
+- 在 barrier 实现前，sync-write fast path 不应作为最终合并版本；预算矩阵结果只能用于性能画像和定位，不代表顺序语义已闭环。
+
 仍建议跑的验证矩阵：
 
 | max calls | byte budget |
 |-----------|-------------|
 | 1 | 64KB |
 | 1 | 128KB |
+| 1 | 192KB |
 | 1 | 256KB |
 | 2 | 128KB |
+| 2 | 192KB |
 | 2 | 256KB |
 
 验收仍需 DGX bench 验证：

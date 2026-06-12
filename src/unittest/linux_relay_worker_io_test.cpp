@@ -112,14 +112,16 @@ int main() {
             snapshot.InlineWriteBytes != 0 ||
             snapshot.DeferredReceiveCompleteBytes != plain.size() ||
             snapshot.TcpWriteBytes != plain.size() ||
+            snapshot.QuicReceiveBytesBuckets[1] != 1 ||
             snapshot.PendingEvents != 0) {
             std::fprintf(stderr,
-                "expected whole receive deferred on budget overflow, budget=%llu calls=%llu inline=%llu complete=%llu tcp=%llu events=%llu\n",
+                "expected whole receive deferred on budget overflow, budget=%llu calls=%llu inline=%llu complete=%llu tcp=%llu recv_bucket=%llu events=%llu\n",
                 static_cast<unsigned long long>(snapshot.InlineBudgetExceededCount),
                 static_cast<unsigned long long>(snapshot.InlineSendmsgCalls),
                 static_cast<unsigned long long>(snapshot.InlineWriteBytes),
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
                 static_cast<unsigned long long>(snapshot.TcpWriteBytes),
+                static_cast<unsigned long long>(snapshot.QuicReceiveBytesBuckets[1]),
                 static_cast<unsigned long long>(snapshot.PendingEvents));
             worker.Stop();
             ::close(fds[1]);
@@ -139,25 +141,45 @@ int main() {
         config.MaxPendingBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
-        assert(worker.Start());
+        if (!worker.Start()) return 83;
 
         int fds[2]{-1, -1};
-        assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 84;
 
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
         registration.Stream = nullptr;
         registration.Handle = nullptr;
         registration.EnableQuicSends = false;
-        assert(worker.RegisterRelayForTest(registration));
+        if (!worker.RegisterRelayForTest(registration)) return 85;
 
         std::vector<uint8_t> payload(3000, 0x5A);
-        assert(::write(fds[1], payload.data(), payload.size()) == static_cast<ssize_t>(payload.size()));
-        assert(worker.WaitForObservedTcpBytesForTest(payload.size(), 2000));
+        if (::write(fds[1], payload.data(), payload.size()) != static_cast<ssize_t>(payload.size())) return 86;
+        if (!worker.WaitForObservedTcpBytesForTest(payload.size(), 2000)) return 87;
 
-        TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        TqLinuxRelayWorkerSnapshot snapshot{};
+        const auto sendBucketDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        do {
+            snapshot = worker.Snapshot();
+            if (snapshot.QuicSendBytesBuckets[0] != 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < sendBucketDeadline);
         assert(snapshot.TcpReadBytes >= payload.size());
         assert(snapshot.QuicSendOperations == 0);
+        if (snapshot.QuicSendBytesBuckets[0] == 0) {
+            std::fprintf(stderr,
+                "expected send bucket <=16k, buckets=%llu,%llu,%llu,%llu,%llu,%llu tcp=%llu\n",
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[0]),
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[1]),
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[2]),
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[3]),
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[4]),
+                static_cast<unsigned long long>(snapshot.QuicSendBytesBuckets[5]),
+                static_cast<unsigned long long>(snapshot.TcpReadBytes));
+            return 82;
+        }
         assert(snapshot.MaxTcpReadIovUsed >= 2);
         assert(snapshot.PendingBytes == 0);
 

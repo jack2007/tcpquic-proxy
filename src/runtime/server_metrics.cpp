@@ -4,6 +4,7 @@
 #include "linux_relay_worker.h"
 #endif
 
+#include <array>
 #include <sstream>
 
 namespace {
@@ -40,7 +41,146 @@ void TqAppendJsonString(std::ostringstream& out, const char* name, const std::st
     out << '"' << name << "\":\"" << TqJsonEscape(value) << '"';
 }
 
+struct TqRelayMetricsSnapshot {
+    static constexpr size_t SizeBucketCount = 6;
+
+    const char* Backend{"unsupported"};
+    uint64_t Wakeups{0};
+    uint64_t EventsProcessed{0};
+    uint64_t PendingEvents{0};
+    uint64_t PendingBytes{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t ReadDisabledCount{0};
+    uint64_t CompressedTcpBytes{0};
+    uint64_t DecompressedTcpBytes{0};
+    uint64_t InlineSendmsgCalls{0};
+    uint64_t InlineWriteBytes{0};
+    uint64_t InlineFullSuccess{0};
+    uint64_t InlinePartial{0};
+    uint64_t InlineEagain{0};
+    uint64_t InlineBudgetExceeded{0};
+    uint64_t InlineFallbackBytes{0};
+    uint64_t InlineCallbackCount{0};
+    uint64_t InlineCallbackAvgUsec{0};
+    uint64_t InlineCallbackMaxUsec{0};
+    std::array<uint64_t, SizeBucketCount> QuicSendBytesBuckets{};
+    std::array<uint64_t, SizeBucketCount> QuicReceiveBytesBuckets{};
+    uint64_t Errors{0};
+};
+
+TqRelayMetricsSnapshot TqSnapshotRelayMetrics(const TqServerMetrics* fallback = nullptr) {
+    TqRelayMetricsSnapshot metrics;
+#if defined(__linux__)
+    (void)fallback;
+    const auto linuxRelay = TqLinuxRelayRuntime::Instance().Snapshot();
+    metrics.Backend = "worker";
+    metrics.Wakeups = linuxRelay.WakeupWrites;
+    metrics.EventsProcessed = linuxRelay.EventsProcessed;
+    metrics.PendingEvents = linuxRelay.PendingEvents;
+    metrics.PendingBytes = linuxRelay.PendingBytes;
+    metrics.TcpReadBytes = linuxRelay.TcpReadBytes;
+    metrics.TcpWriteBytes = linuxRelay.TcpWriteBytes;
+    metrics.ReadDisabledCount = linuxRelay.ReadDisabledCount;
+    metrics.CompressedTcpBytes = linuxRelay.CompressedTcpBytes;
+    metrics.DecompressedTcpBytes = linuxRelay.DecompressedTcpBytes;
+    metrics.InlineSendmsgCalls = linuxRelay.InlineSendmsgCalls;
+    metrics.InlineWriteBytes = linuxRelay.InlineWriteBytes;
+    metrics.InlineFullSuccess = linuxRelay.InlineFullSuccessCount;
+    metrics.InlinePartial = linuxRelay.InlinePartialCount;
+    metrics.InlineEagain = linuxRelay.InlineEagainCount;
+    metrics.InlineBudgetExceeded = linuxRelay.InlineBudgetExceededCount;
+    metrics.InlineFallbackBytes = linuxRelay.InlineFallbackBytes;
+    metrics.InlineCallbackCount = linuxRelay.InlineCallbackCount;
+    metrics.InlineCallbackAvgUsec =
+        linuxRelay.InlineCallbackCount == 0 ? 0 : linuxRelay.InlineCallbackTotalUsec / linuxRelay.InlineCallbackCount;
+    metrics.InlineCallbackMaxUsec = linuxRelay.InlineCallbackMaxUsec;
+    metrics.QuicSendBytesBuckets = linuxRelay.QuicSendBytesBuckets;
+    metrics.QuicReceiveBytesBuckets = linuxRelay.QuicReceiveBytesBuckets;
+    metrics.Errors = linuxRelay.Errors;
+#else
+    if (fallback != nullptr) {
+        metrics.Wakeups = fallback->LinuxRelayWakeups;
+        metrics.EventsProcessed = fallback->LinuxRelayEventsProcessed;
+        metrics.PendingEvents = fallback->LinuxRelayPendingEvents;
+        metrics.PendingBytes = fallback->LinuxRelayPendingBytes;
+        metrics.TcpReadBytes = fallback->LinuxRelayTcpReadBytes;
+        metrics.TcpWriteBytes = fallback->LinuxRelayTcpWriteBytes;
+        metrics.ReadDisabledCount = fallback->LinuxRelayReadDisabledCount;
+    }
+#endif
+    return metrics;
+}
+
+void TqAppendSizeBucketsJson(
+    std::ostringstream& out,
+    const char* name,
+    const std::array<uint64_t, TqRelayMetricsSnapshot::SizeBucketCount>& buckets) {
+    out << ",\"" << name << "\":{";
+    out << "\"le_16k\":" << buckets[0];
+    out << ",\"le_64k\":" << buckets[1];
+    out << ",\"le_128k\":" << buckets[2];
+    out << ",\"le_256k\":" << buckets[3];
+    out << ",\"le_1m\":" << buckets[4];
+    out << ",\"gt_1m\":" << buckets[5];
+    out << '}';
+}
+
+void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
+    out << ",\"linux_relay_wakeups\":" << metrics.Wakeups;
+    out << ",\"linux_relay_events_processed\":" << metrics.EventsProcessed;
+    out << ",\"linux_relay_pending_events\":" << metrics.PendingEvents;
+    out << ",\"linux_relay_pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"linux_relay_tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"linux_relay_tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << ",\"linux_relay_read_disabled_count\":" << metrics.ReadDisabledCount;
+    out << ',';
+    TqAppendJsonString(out, "linux_relay_backend", metrics.Backend);
+    out << ",\"linux_relay_compressed_tcp_bytes\":" << metrics.CompressedTcpBytes;
+    out << ",\"linux_relay_decompressed_tcp_bytes\":" << metrics.DecompressedTcpBytes;
+    out << ",\"linux_relay_inline_sendmsg_calls\":" << metrics.InlineSendmsgCalls;
+    out << ",\"linux_relay_inline_write_bytes\":" << metrics.InlineWriteBytes;
+    out << ",\"linux_relay_inline_full_success\":" << metrics.InlineFullSuccess;
+    out << ",\"linux_relay_inline_partial\":" << metrics.InlinePartial;
+    out << ",\"linux_relay_inline_eagain\":" << metrics.InlineEagain;
+    out << ",\"linux_relay_inline_budget_exceeded\":" << metrics.InlineBudgetExceeded;
+    out << ",\"linux_relay_inline_fallback_bytes\":" << metrics.InlineFallbackBytes;
+    out << ",\"linux_relay_inline_callback_count\":" << metrics.InlineCallbackCount;
+    out << ",\"linux_relay_inline_callback_avg_usec\":" << metrics.InlineCallbackAvgUsec;
+    out << ",\"linux_relay_inline_callback_max_usec\":" << metrics.InlineCallbackMaxUsec;
+    TqAppendSizeBucketsJson(out, "linux_relay_quic_send_bytes_buckets", metrics.QuicSendBytesBuckets);
+    TqAppendSizeBucketsJson(out, "linux_relay_quic_receive_bytes_buckets", metrics.QuicReceiveBytesBuckets);
+    out << ",\"linux_relay_errors\":" << metrics.Errors;
+}
+
 } // namespace
+
+std::string TqClientMetricsJson(const TqClientMetrics& metrics, uint64_t uptimeSeconds) {
+    std::ostringstream out;
+    out << '{';
+    TqAppendJsonString(out, "role", "client");
+    out << ',';
+    TqAppendJsonString(out, "status",
+        metrics.LastError.empty() && metrics.ConnectedConnections > 0 ? "healthy" : "degraded");
+    out << ',';
+    TqAppendJsonString(out, "quic_peer", metrics.QuicPeer);
+    out << ',';
+    TqAppendJsonString(out, "socks_listen", metrics.SocksListen);
+    out << ',';
+    TqAppendJsonString(out, "http_listen", metrics.HttpListen);
+    out << ",\"uptime_seconds\":" << uptimeSeconds;
+    out << ",\"connection_count\":" << metrics.ConnectionCount;
+    out << ",\"connected_connections\":" << metrics.ConnectedConnections;
+    TqAppendRelayMetricsJson(out, TqSnapshotRelayMetrics());
+    out << ',';
+    TqAppendJsonString(out, "last_error", metrics.LastError);
+    out << '}';
+    return out.str();
+}
+
+std::string TqClientHealthJson(const TqClientMetrics& metrics, uint64_t uptimeSeconds) {
+    return TqClientMetricsJson(metrics, uptimeSeconds);
+}
 
 std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeSeconds) {
     std::lock_guard<std::mutex> guard(metrics.Lock);
@@ -57,75 +197,7 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     out << ",\"total_streams\":" << metrics.TotalStreams.load();
     out << ",\"acl_denied\":" << metrics.AclDenied.load();
 
-#if defined(__linux__)
-    const auto linuxRelay = TqLinuxRelayRuntime::Instance().Snapshot();
-    const char* linuxRelayBackend = "worker";
-    const uint64_t linuxRelayWakeups = linuxRelay.WakeupWrites;
-    const uint64_t linuxRelayEventsProcessed = linuxRelay.EventsProcessed;
-    const uint64_t linuxRelayPendingEvents = linuxRelay.PendingEvents;
-    const uint64_t linuxRelayPendingBytes = linuxRelay.PendingBytes;
-    const uint64_t linuxRelayTcpReadBytes = linuxRelay.TcpReadBytes;
-    const uint64_t linuxRelayTcpWriteBytes = linuxRelay.TcpWriteBytes;
-    const uint64_t linuxRelayReadDisabledCount = linuxRelay.ReadDisabledCount;
-    const uint64_t linuxRelayCompressedTcpBytes = linuxRelay.CompressedTcpBytes;
-    const uint64_t linuxRelayDecompressedTcpBytes = linuxRelay.DecompressedTcpBytes;
-    const uint64_t linuxRelayInlineSendmsgCalls = linuxRelay.InlineSendmsgCalls;
-    const uint64_t linuxRelayInlineWriteBytes = linuxRelay.InlineWriteBytes;
-    const uint64_t linuxRelayInlineFullSuccess = linuxRelay.InlineFullSuccessCount;
-    const uint64_t linuxRelayInlinePartial = linuxRelay.InlinePartialCount;
-    const uint64_t linuxRelayInlineEagain = linuxRelay.InlineEagainCount;
-    const uint64_t linuxRelayInlineBudgetExceeded = linuxRelay.InlineBudgetExceededCount;
-    const uint64_t linuxRelayInlineFallbackBytes = linuxRelay.InlineFallbackBytes;
-    const uint64_t linuxRelayInlineCallbackCount = linuxRelay.InlineCallbackCount;
-    const uint64_t linuxRelayInlineCallbackAvgUsec = linuxRelay.InlineCallbackCount == 0 ? 0 : linuxRelay.InlineCallbackTotalUsec / linuxRelay.InlineCallbackCount;
-    const uint64_t linuxRelayInlineCallbackMaxUsec = linuxRelay.InlineCallbackMaxUsec;
-    const uint64_t linuxRelayErrors = linuxRelay.Errors;
-#else
-    const char* linuxRelayBackend = "unsupported";
-    const uint64_t linuxRelayWakeups = metrics.LinuxRelayWakeups;
-    const uint64_t linuxRelayEventsProcessed = metrics.LinuxRelayEventsProcessed;
-    const uint64_t linuxRelayPendingEvents = metrics.LinuxRelayPendingEvents;
-    const uint64_t linuxRelayPendingBytes = metrics.LinuxRelayPendingBytes;
-    const uint64_t linuxRelayTcpReadBytes = metrics.LinuxRelayTcpReadBytes;
-    const uint64_t linuxRelayTcpWriteBytes = metrics.LinuxRelayTcpWriteBytes;
-    const uint64_t linuxRelayReadDisabledCount = metrics.LinuxRelayReadDisabledCount;
-    const uint64_t linuxRelayCompressedTcpBytes = 0;
-    const uint64_t linuxRelayDecompressedTcpBytes = 0;
-    const uint64_t linuxRelayInlineSendmsgCalls = 0;
-    const uint64_t linuxRelayInlineWriteBytes = 0;
-    const uint64_t linuxRelayInlineFullSuccess = 0;
-    const uint64_t linuxRelayInlinePartial = 0;
-    const uint64_t linuxRelayInlineEagain = 0;
-    const uint64_t linuxRelayInlineBudgetExceeded = 0;
-    const uint64_t linuxRelayInlineFallbackBytes = 0;
-    const uint64_t linuxRelayInlineCallbackCount = 0;
-    const uint64_t linuxRelayInlineCallbackAvgUsec = 0;
-    const uint64_t linuxRelayInlineCallbackMaxUsec = 0;
-    const uint64_t linuxRelayErrors = 0;
-#endif
-
-    out << ",\"linux_relay_wakeups\":" << linuxRelayWakeups;
-    out << ",\"linux_relay_events_processed\":" << linuxRelayEventsProcessed;
-    out << ",\"linux_relay_pending_events\":" << linuxRelayPendingEvents;
-    out << ",\"linux_relay_pending_bytes\":" << linuxRelayPendingBytes;
-    out << ",\"linux_relay_tcp_read_bytes\":" << linuxRelayTcpReadBytes;
-    out << ",\"linux_relay_tcp_write_bytes\":" << linuxRelayTcpWriteBytes;
-    out << ",\"linux_relay_read_disabled_count\":" << linuxRelayReadDisabledCount;
-    out << ',';
-    TqAppendJsonString(out, "linux_relay_backend", linuxRelayBackend);
-    out << ",\"linux_relay_compressed_tcp_bytes\":" << linuxRelayCompressedTcpBytes;
-    out << ",\"linux_relay_decompressed_tcp_bytes\":" << linuxRelayDecompressedTcpBytes;
-    out << ",\"linux_relay_inline_sendmsg_calls\":" << linuxRelayInlineSendmsgCalls;
-    out << ",\"linux_relay_inline_write_bytes\":" << linuxRelayInlineWriteBytes;
-    out << ",\"linux_relay_inline_full_success\":" << linuxRelayInlineFullSuccess;
-    out << ",\"linux_relay_inline_partial\":" << linuxRelayInlinePartial;
-    out << ",\"linux_relay_inline_eagain\":" << linuxRelayInlineEagain;
-    out << ",\"linux_relay_inline_budget_exceeded\":" << linuxRelayInlineBudgetExceeded;
-    out << ",\"linux_relay_inline_fallback_bytes\":" << linuxRelayInlineFallbackBytes;
-    out << ",\"linux_relay_inline_callback_count\":" << linuxRelayInlineCallbackCount;
-    out << ",\"linux_relay_inline_callback_avg_usec\":" << linuxRelayInlineCallbackAvgUsec;
-    out << ",\"linux_relay_inline_callback_max_usec\":" << linuxRelayInlineCallbackMaxUsec;
-    out << ",\"linux_relay_errors\":" << linuxRelayErrors;
+    TqAppendRelayMetricsJson(out, TqSnapshotRelayMetrics(&metrics));
     out << ',';
     TqAppendJsonString(out, "last_error", metrics.LastError);
     out << '}';

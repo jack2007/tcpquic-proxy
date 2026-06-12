@@ -325,6 +325,24 @@ int main() {
         if (snapshot.Peers[0].PeerId != "agent-a" || !snapshot.Peers[0].Enabled) return 62;
     }
     {
+        TqClientMetrics metrics;
+        metrics.QuicPeer = "127.0.0.1:14444";
+        metrics.SocksListen = "127.0.0.1:1080";
+        metrics.HttpListen = "127.0.0.1:8080";
+        metrics.ConnectionCount = 4;
+        metrics.ConnectedConnections = 3;
+        const std::string body = TqClientMetricsJson(metrics, 9);
+        if (body.find("\"role\":\"client\"") == std::string::npos) return 76;
+        if (body.find("\"status\":\"healthy\"") == std::string::npos) return 77;
+        if (body.find("\"quic_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 78;
+        if (body.find("\"socks_listen\":\"127.0.0.1:1080\"") == std::string::npos) return 79;
+        if (body.find("\"http_listen\":\"127.0.0.1:8080\"") == std::string::npos) return 80;
+        if (body.find("\"uptime_seconds\":9") == std::string::npos) return 81;
+        if (body.find("\"connection_count\":4") == std::string::npos) return 82;
+        if (body.find("\"connected_connections\":3") == std::string::npos) return 83;
+        if (body.find("\"linux_relay_inline_write_bytes\":") == std::string::npos) return 84;
+    }
+    {
         TqServerMetrics serverMetrics;
         serverMetrics.Listen = "127.0.0.1:14444";
         serverMetrics.AcceptedConnections = 3;
@@ -377,6 +395,9 @@ int main() {
         if (body.find("\"linux_relay_compressed_tcp_bytes\":") == std::string::npos) return 103;
         if (body.find("\"linux_relay_decompressed_tcp_bytes\":") == std::string::npos) return 104;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
+        if (body.find("\"linux_relay_quic_send_bytes_buckets\":") == std::string::npos) return 110;
+        if (body.find("\"linux_relay_quic_receive_bytes_buckets\":") == std::string::npos) return 111;
+        if (body.find("\"le_64k\":") == std::string::npos) return 112;
     }
     return 0;
 }

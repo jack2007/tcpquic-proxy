@@ -40,6 +40,15 @@ void AbandonOrphanedEventBuffers(TqLinuxRelayEvent& event) {
     event.Buffers.clear();
 }
 
+size_t SizeBucketIndex(uint64_t bytes) {
+    if (bytes <= 16ull * 1024) return 0;
+    if (bytes <= 64ull * 1024) return 1;
+    if (bytes <= 128ull * 1024) return 2;
+    if (bytes <= 256ull * 1024) return 3;
+    if (bytes <= 1024ull * 1024) return 4;
+    return 5;
+}
+
 }  // namespace
 
 struct TqLinuxRelayWorker::StreamRelayBinding {
@@ -540,6 +549,11 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     if (relay == nullptr || views.empty()) {
         return true;
     }
+    uint64_t batchBytes = 0;
+    for (const auto& view : views) {
+        batchBytes += view.Len;
+    }
+    RecordQuicSendBytes(batchBytes);
     if (!relay->EnableQuicSends || relay->Stream == nullptr) {
         for (const auto& view : views) {
             relay->CapturedQuicBytesForTest.insert(
@@ -586,6 +600,14 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     ++relay->OutstandingQuicSends;
     QuicSendOperations.fetch_add(1);
     return true;
+}
+
+void TqLinuxRelayWorker::RecordQuicSendBytes(uint64_t bytes) {
+    QuicSendBytesBuckets[SizeBucketIndex(bytes)].fetch_add(1);
+}
+
+void TqLinuxRelayWorker::RecordQuicReceiveBytes(uint64_t bytes) {
+    QuicReceiveBytesBuckets[SizeBucketIndex(bytes)].fetch_add(1);
 }
 
 void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
@@ -819,6 +841,7 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
     if (totalLength == 0) {
         return QUIC_STATUS_SUCCESS;
     }
+    RecordQuicReceiveBytes(totalLength);
 
     if (relay->QuicReceivePaused.load()) {
         return QUIC_STATUS_SUCCESS;
@@ -1350,6 +1373,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpReadBatches = TcpReadBatches.load();
     snapshot.TcpReadBytes = TcpReadBytes.load();
     snapshot.QuicSendOperations = QuicSendOperations.load();
+    for (size_t i = 0; i < snapshot.QuicSendBytesBuckets.size(); ++i) {
+        snapshot.QuicSendBytesBuckets[i] = QuicSendBytesBuckets[i].load();
+    }
     snapshot.MaxTcpReadIovUsed = MaxTcpReadIovUsed.load();
     snapshot.TcpWriteBatches = TcpWriteBatches.load();
     snapshot.TcpWriteBytes = TcpWriteBytes.load();
@@ -1370,6 +1396,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.InlineCallbackCount = InlineCallbackCount.load();
     snapshot.InlineCallbackTotalUsec = InlineCallbackTotalUsec.load();
     snapshot.InlineCallbackMaxUsec = InlineCallbackMaxUsec.load();
+    for (size_t i = 0; i < snapshot.QuicReceiveBytesBuckets.size(); ++i) {
+        snapshot.QuicReceiveBytesBuckets[i] = QuicReceiveBytesBuckets[i].load();
+    }
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
     snapshot.Errors = Errors.load();
@@ -1587,6 +1616,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpReadBatches += snapshot.TcpReadBatches;
         total.TcpReadBytes += snapshot.TcpReadBytes;
         total.QuicSendOperations += snapshot.QuicSendOperations;
+        for (size_t i = 0; i < total.QuicSendBytesBuckets.size(); ++i) {
+            total.QuicSendBytesBuckets[i] += snapshot.QuicSendBytesBuckets[i];
+        }
         total.MaxTcpReadIovUsed = std::max(total.MaxTcpReadIovUsed, snapshot.MaxTcpReadIovUsed);
         total.TcpWriteBatches += snapshot.TcpWriteBatches;
         total.TcpWriteBytes += snapshot.TcpWriteBytes;
@@ -1606,6 +1638,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.InlineCallbackCount += snapshot.InlineCallbackCount;
         total.InlineCallbackTotalUsec += snapshot.InlineCallbackTotalUsec;
         total.InlineCallbackMaxUsec = std::max(total.InlineCallbackMaxUsec, snapshot.InlineCallbackMaxUsec);
+        for (size_t i = 0; i < total.QuicReceiveBytesBuckets.size(); ++i) {
+            total.QuicReceiveBytesBuckets[i] += snapshot.QuicReceiveBytesBuckets[i];
+        }
         total.Errors += snapshot.Errors;
     }
     return total;

@@ -9,6 +9,7 @@
 #include <msquic.hpp>
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -58,6 +59,8 @@ struct TqLinuxRelaySendOperation {
 };
 
 struct TqLinuxRelayWorkerSnapshot {
+    static constexpr size_t SizeBucketCount = 6;
+
     uint64_t EventsProcessed{0};
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
@@ -65,6 +68,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
     uint64_t QuicSendOperations{0};
+    std::array<uint64_t, SizeBucketCount> QuicSendBytesBuckets{};
     uint64_t MaxTcpReadIovUsed{0};
     uint64_t TcpWriteBatches{0};
     uint64_t TcpWriteBytes{0};
@@ -86,6 +90,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t InlineCallbackCount{0};
     uint64_t InlineCallbackTotalUsec{0};
     uint64_t InlineCallbackMaxUsec{0};
+    std::array<uint64_t, SizeBucketCount> QuicReceiveBytesBuckets{};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
@@ -134,6 +139,8 @@ private:
         std::vector<TqBufferView>& input,
         std::vector<TqBufferView>& output);
     bool SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqBufferView>& views);
+    void RecordQuicSendBytes(uint64_t bytes);
+    void RecordQuicReceiveBytes(uint64_t bytes);
     void CompleteQuicSend(void* context);
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
@@ -195,6 +202,7 @@ private:
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};
     std::atomic<uint64_t> QuicSendOperations{0};
+    std::array<std::atomic<uint64_t>, TqLinuxRelayWorkerSnapshot::SizeBucketCount> QuicSendBytesBuckets{};
     std::atomic<uint64_t> MaxTcpReadIovUsed{0};
     std::atomic<uint64_t> TcpWriteBatches{0};
     std::atomic<uint64_t> TcpWriteBytes{0};
@@ -215,6 +223,7 @@ private:
     std::atomic<uint64_t> InlineCallbackCount{0};
     std::atomic<uint64_t> InlineCallbackTotalUsec{0};
     std::atomic<uint64_t> InlineCallbackMaxUsec{0};
+    std::array<std::atomic<uint64_t>, TqLinuxRelayWorkerSnapshot::SizeBucketCount> QuicReceiveBytesBuckets{};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};

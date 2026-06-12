@@ -326,9 +326,9 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         } else {
             ApplyWanDefaults(out);
         }
-        ApplyCustomOverrides(cfg, out);
         break;
     }
+    ApplyCustomOverrides(cfg, out);
     TqApplyLinuxRelayDefaults(out, cfg.TuningMode);
     if (cfg.TuningMode == TqTuningMode::Custom) {
         ApplyHighBdpPipelineScaling(out);
