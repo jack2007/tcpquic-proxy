@@ -399,8 +399,18 @@ int main() {
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
         if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
+        if (body.find("\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":") == std::string::npos) return 137;
+        if (body.find("\"linux_relay_tcp_read_buffer_acquire_slot_limit_failures\":") == std::string::npos) return 138;
+        if (body.find("\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":") == std::string::npos) return 139;
         if (body.find("\"linux_relay_quic_send_failures\":") == std::string::npos) return 134;
+        if (body.find("\"linux_relay_quic_send_buffer_too_large_failures\":") == std::string::npos) return 140;
+        if (body.find("\"linux_relay_quic_send_operation_alloc_failures\":") == std::string::npos) return 141;
+        if (body.find("\"linux_relay_quic_send_api_failures\":") == std::string::npos) return 142;
         if (body.find("\"linux_relay_quic_receive_decompress_failures\":") == std::string::npos) return 135;
+        if (body.find("\"linux_relay_quic_receive_view_alloc_failures\":") == std::string::npos) return 143;
+        if (body.find("\"linux_relay_quic_receive_view_null_buffer_failures\":") == std::string::npos) return 144;
+        if (body.find("\"linux_relay_quic_receive_view_empty_failures\":") == std::string::npos) return 145;
+        if (body.find("\"linux_relay_quic_receive_view_enqueue_failures\":") == std::string::npos) return 146;
         if (body.find("\"linux_relay_tcp_write_hard_errors\":") == std::string::npos) return 136;
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 126;
         if (body.find("\"linux_relay_max_tcp_write_sendmsg_bytes\":") == std::string::npos) return 127;

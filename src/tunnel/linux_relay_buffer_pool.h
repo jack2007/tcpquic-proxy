@@ -13,6 +13,13 @@ enum class TqBufferDomain {
     Ingress,
 };
 
+enum class TqBufferAcquireFailure {
+    None,
+    PendingBytesLimit,
+    SlotLimit,
+    AllocationFailure,
+};
+
 class TqRelayBufferSlot final {
 public:
     explicit TqRelayBufferSlot(size_t capacity);
@@ -87,8 +94,8 @@ public:
     TqLinuxRelayBufferPool& operator=(const TqLinuxRelayBufferPool&) = delete;
 
     void Reserve(size_t slotCount);
-    TqBufferRef AcquireWorker();
-    TqBufferRef AcquireIngress();
+    TqBufferRef AcquireWorker(TqBufferAcquireFailure* failure = nullptr);
+    TqBufferRef AcquireIngress(TqBufferAcquireFailure* failure = nullptr);
     TqBufferRef TransferToWorker(TqBufferRef ingress);
     TqBufferRef Acquire();
     size_t ChunkSize() const;

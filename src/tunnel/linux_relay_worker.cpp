@@ -206,6 +206,60 @@ void TqLinuxRelayWorker::RecordError(RelayErrorKind kind) {
     }
 }
 
+void TqLinuxRelayWorker::RecordBufferAcquireFailure(
+    RelayErrorKind kind,
+    TqBufferAcquireFailure failure) {
+    RecordError(kind);
+
+    auto recordByReason = [failure](
+        std::atomic<uint64_t>& pendingBudget,
+        std::atomic<uint64_t>& slotLimit,
+        std::atomic<uint64_t>& alloc) {
+        switch (failure) {
+        case TqBufferAcquireFailure::PendingBytesLimit:
+            pendingBudget.fetch_add(1);
+            break;
+        case TqBufferAcquireFailure::SlotLimit:
+            slotLimit.fetch_add(1);
+            break;
+        case TqBufferAcquireFailure::AllocationFailure:
+            alloc.fetch_add(1);
+            break;
+        case TqBufferAcquireFailure::None:
+            break;
+        }
+    };
+
+    switch (kind) {
+    case RelayErrorKind::TcpReadBufferAcquire:
+        recordByReason(
+            TcpReadBufferAcquirePendingBudgetFailures,
+            TcpReadBufferAcquireSlotLimitFailures,
+            TcpReadBufferAcquireAllocFailures);
+        break;
+    case RelayErrorKind::TcpToQuicBufferAcquire:
+        recordByReason(
+            TcpToQuicBufferAcquirePendingBudgetFailures,
+            TcpToQuicBufferAcquireSlotLimitFailures,
+            TcpToQuicBufferAcquireAllocFailures);
+        break;
+    case RelayErrorKind::QuicReceiveIngressBufferAcquire:
+        recordByReason(
+            QuicReceiveIngressBufferAcquirePendingBudgetFailures,
+            QuicReceiveIngressBufferAcquireSlotLimitFailures,
+            QuicReceiveIngressBufferAcquireAllocFailures);
+        break;
+    case RelayErrorKind::QuicReceiveTcpBufferAcquire:
+        recordByReason(
+            QuicReceiveTcpBufferAcquirePendingBudgetFailures,
+            QuicReceiveTcpBufferAcquireSlotLimitFailures,
+            QuicReceiveTcpBufferAcquireAllocFailures);
+        break;
+    default:
+        break;
+    }
+}
+
 bool TqLinuxRelayWorker::EnqueueForTest(TqLinuxRelayEvent event) {
     return Enqueue(std::move(event));
 }
@@ -472,9 +526,10 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
         iov.reserve(maxIov);
 
         for (size_t i = 0; i < maxIov && readBytes + Config.ReadChunkSize <= tickBudget; ++i) {
-            auto buffer = relay->Pool.AcquireWorker();
+            TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+            auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
             if (!buffer) {
-                RecordError(RelayErrorKind::TcpReadBufferAcquire);
+                RecordBufferAcquireFailure(RelayErrorKind::TcpReadBufferAcquire, acquireFailure);
                 break;
             }
             iovec item{};
@@ -550,12 +605,14 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
     for (const auto& view : input) {
         if (!relay->Compressor->Compress(view.Data, view.Len, relay->CompressionOutput, false)) {
             RecordError(RelayErrorKind::TcpToQuicCompress);
+            TcpToQuicCompressUpdateFailures.fetch_add(1);
             return false;
         }
     }
     if (relay->CompressionOutput.empty() &&
         !relay->Compressor->Flush(relay->CompressionOutput)) {
         RecordError(RelayErrorKind::TcpToQuicCompress);
+        TcpToQuicCompressFlushFailures.fetch_add(1);
         return false;
     }
     if (relay->CompressionOutput.empty()) {
@@ -565,9 +622,11 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
 
     size_t offset = 0;
     while (offset < relay->CompressionOutput.size()) {
-        auto buffer = relay->Pool.AcquireWorker();
+        TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+        auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
         if (!buffer) {
-            RecordError(RelayErrorKind::TcpToQuicBufferAcquire);
+            RecordBufferAcquireFailure(
+                RelayErrorKind::TcpToQuicBufferAcquire, acquireFailure);
             return false;
         }
         const size_t chunk = std::min(buffer->Capacity(), relay->CompressionOutput.size() - offset);
@@ -605,6 +664,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     for (const auto& view : views) {
         if (view.Len > UINT32_MAX) {
             RecordError(RelayErrorKind::QuicSend);
+            QuicSendBufferTooLargeFailures.fetch_add(1);
             return false;
         }
         QUIC_BUFFER buffer{};
@@ -616,6 +676,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     auto* operation = new (std::nothrow) TqLinuxRelaySendOperation{};
     if (operation == nullptr) {
         RecordError(RelayErrorKind::QuicSend);
+        QuicSendOperationAllocFailures.fetch_add(1);
         return false;
     }
     operation->RelayId = relay->Id;
@@ -630,6 +691,8 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     if (QUIC_FAILED(status)) {
         delete operation;
         RecordError(RelayErrorKind::QuicSend);
+        QuicSendApiFailures.fetch_add(1);
+        LastQuicSendStatus.store(static_cast<int64_t>(status));
         return false;
     }
     ++relay->OutstandingQuicSends;
@@ -732,9 +795,11 @@ bool TqLinuxRelayWorker::CopyQuicReceiveBatchToEvent(
 
         size_t offset = 0;
         while (offset < length) {
-            auto buffer = relay->Pool.AcquireIngress();
+            TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+            auto buffer = relay->Pool.AcquireIngress(&acquireFailure);
             if (!buffer) {
-                RecordError(RelayErrorKind::QuicReceiveIngressBufferAcquire);
+                RecordBufferAcquireFailure(
+                    RelayErrorKind::QuicReceiveIngressBufferAcquire, acquireFailure);
                 return false;
             }
             const size_t chunk = std::min(buffer->Capacity(), static_cast<size_t>(length - offset));
@@ -790,6 +855,7 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     std::shared_ptr<TqPendingQuicReceive> view(new (std::nothrow) TqPendingQuicReceive{});
     if (!view) {
         RecordError(RelayErrorKind::QuicReceiveView);
+        QuicReceiveViewAllocFailures.fetch_add(1);
         return false;
     }
     view->Stream = stream;
@@ -804,6 +870,8 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
             continue;
         }
         if (buffers[i].Buffer == nullptr) {
+            RecordError(RelayErrorKind::QuicReceiveView);
+            QuicReceiveViewNullBufferFailures.fetch_add(1);
             return false;
         }
         const uint8_t* data = buffers[i].Buffer;
@@ -821,6 +889,8 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
         view->TotalLength += length;
     }
     if (view->TotalLength == 0) {
+        RecordError(RelayErrorKind::QuicReceiveView);
+        QuicReceiveViewEmptyFailures.fetch_add(1);
         return false;
     }
 
@@ -830,7 +900,12 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     event.TotalLength = view->TotalLength;
     event.Fin = fin;
     event.ReceiveView = std::move(view);
-    return Enqueue(std::move(event));
+    if (!Enqueue(std::move(event))) {
+        QuicReceiveViewFailures.fetch_add(1);
+        QuicReceiveViewEnqueueFailures.fetch_add(1);
+        return false;
+    }
+    return true;
 }
 
 void TqLinuxRelayWorker::CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes) {
@@ -1019,6 +1094,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
             break;
         }
         RecordError(RelayErrorKind::TcpWriteHard);
+        LastTcpWriteErrno.store(static_cast<uint64_t>(errno));
         if (relay->Handle != nullptr) {
             relay->Handle->Stop.store(true);
         }
@@ -1083,9 +1159,11 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
 
     size_t offset = 0;
     while (offset < writeLength) {
-        auto buffer = relay->Pool.AcquireWorker();
+        TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+        auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
         if (!buffer) {
-            RecordError(RelayErrorKind::QuicReceiveTcpBufferAcquire);
+            RecordBufferAcquireFailure(
+                RelayErrorKind::QuicReceiveTcpBufferAcquire, acquireFailure);
             return false;
         }
         const size_t chunk = std::min(buffer->Capacity(), writeLength - offset);
@@ -1160,6 +1238,7 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
             break;
         }
         RecordError(RelayErrorKind::TcpWriteHard);
+        LastTcpWriteErrno.store(static_cast<uint64_t>(errno));
         break;
     }
 
@@ -1302,15 +1381,49 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.Errors = Errors.load();
     snapshot.EventQueueFullErrors = EventQueueFullErrors.load();
     snapshot.TcpReadBufferAcquireFailures = TcpReadBufferAcquireFailures.load();
+    snapshot.TcpReadBufferAcquirePendingBudgetFailures =
+        TcpReadBufferAcquirePendingBudgetFailures.load();
+    snapshot.TcpReadBufferAcquireSlotLimitFailures =
+        TcpReadBufferAcquireSlotLimitFailures.load();
+    snapshot.TcpReadBufferAcquireAllocFailures = TcpReadBufferAcquireAllocFailures.load();
     snapshot.TcpToQuicCompressFailures = TcpToQuicCompressFailures.load();
+    snapshot.TcpToQuicCompressUpdateFailures = TcpToQuicCompressUpdateFailures.load();
+    snapshot.TcpToQuicCompressFlushFailures = TcpToQuicCompressFlushFailures.load();
     snapshot.TcpToQuicBufferAcquireFailures = TcpToQuicBufferAcquireFailures.load();
+    snapshot.TcpToQuicBufferAcquirePendingBudgetFailures =
+        TcpToQuicBufferAcquirePendingBudgetFailures.load();
+    snapshot.TcpToQuicBufferAcquireSlotLimitFailures =
+        TcpToQuicBufferAcquireSlotLimitFailures.load();
+    snapshot.TcpToQuicBufferAcquireAllocFailures =
+        TcpToQuicBufferAcquireAllocFailures.load();
     snapshot.QuicSendFailures = QuicSendFailures.load();
+    snapshot.QuicSendBufferTooLargeFailures = QuicSendBufferTooLargeFailures.load();
+    snapshot.QuicSendOperationAllocFailures = QuicSendOperationAllocFailures.load();
+    snapshot.QuicSendApiFailures = QuicSendApiFailures.load();
     snapshot.QuicReceiveIngressBufferAcquireFailures =
         QuicReceiveIngressBufferAcquireFailures.load();
+    snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures =
+        QuicReceiveIngressBufferAcquirePendingBudgetFailures.load();
+    snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures =
+        QuicReceiveIngressBufferAcquireSlotLimitFailures.load();
+    snapshot.QuicReceiveIngressBufferAcquireAllocFailures =
+        QuicReceiveIngressBufferAcquireAllocFailures.load();
     snapshot.QuicReceiveViewFailures = QuicReceiveViewFailures.load();
+    snapshot.QuicReceiveViewAllocFailures = QuicReceiveViewAllocFailures.load();
+    snapshot.QuicReceiveViewNullBufferFailures = QuicReceiveViewNullBufferFailures.load();
+    snapshot.QuicReceiveViewEmptyFailures = QuicReceiveViewEmptyFailures.load();
+    snapshot.QuicReceiveViewEnqueueFailures = QuicReceiveViewEnqueueFailures.load();
     snapshot.QuicReceiveDecompressFailures = QuicReceiveDecompressFailures.load();
     snapshot.QuicReceiveTcpBufferAcquireFailures = QuicReceiveTcpBufferAcquireFailures.load();
+    snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures =
+        QuicReceiveTcpBufferAcquirePendingBudgetFailures.load();
+    snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures =
+        QuicReceiveTcpBufferAcquireSlotLimitFailures.load();
+    snapshot.QuicReceiveTcpBufferAcquireAllocFailures =
+        QuicReceiveTcpBufferAcquireAllocFailures.load();
     snapshot.TcpWriteHardErrors = TcpWriteHardErrors.load();
+    snapshot.LastTcpWriteErrno = LastTcpWriteErrno.load();
+    snapshot.LastQuicSendStatus = LastQuicSendStatus.load();
     snapshot.EventProducerThreadsObserved = EventProducerThreadCount.load();
     snapshot.MultipleEventProducerThreadsObserved =
         MultipleEventProducerThreadsObserved.load(std::memory_order_acquire);
@@ -1532,15 +1645,51 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.Errors += snapshot.Errors;
         total.EventQueueFullErrors += snapshot.EventQueueFullErrors;
         total.TcpReadBufferAcquireFailures += snapshot.TcpReadBufferAcquireFailures;
+        total.TcpReadBufferAcquirePendingBudgetFailures +=
+            snapshot.TcpReadBufferAcquirePendingBudgetFailures;
+        total.TcpReadBufferAcquireSlotLimitFailures +=
+            snapshot.TcpReadBufferAcquireSlotLimitFailures;
+        total.TcpReadBufferAcquireAllocFailures += snapshot.TcpReadBufferAcquireAllocFailures;
         total.TcpToQuicCompressFailures += snapshot.TcpToQuicCompressFailures;
+        total.TcpToQuicCompressUpdateFailures += snapshot.TcpToQuicCompressUpdateFailures;
+        total.TcpToQuicCompressFlushFailures += snapshot.TcpToQuicCompressFlushFailures;
         total.TcpToQuicBufferAcquireFailures += snapshot.TcpToQuicBufferAcquireFailures;
+        total.TcpToQuicBufferAcquirePendingBudgetFailures +=
+            snapshot.TcpToQuicBufferAcquirePendingBudgetFailures;
+        total.TcpToQuicBufferAcquireSlotLimitFailures +=
+            snapshot.TcpToQuicBufferAcquireSlotLimitFailures;
+        total.TcpToQuicBufferAcquireAllocFailures +=
+            snapshot.TcpToQuicBufferAcquireAllocFailures;
         total.QuicSendFailures += snapshot.QuicSendFailures;
+        total.QuicSendBufferTooLargeFailures += snapshot.QuicSendBufferTooLargeFailures;
+        total.QuicSendOperationAllocFailures += snapshot.QuicSendOperationAllocFailures;
+        total.QuicSendApiFailures += snapshot.QuicSendApiFailures;
         total.QuicReceiveIngressBufferAcquireFailures +=
             snapshot.QuicReceiveIngressBufferAcquireFailures;
+        total.QuicReceiveIngressBufferAcquirePendingBudgetFailures +=
+            snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
+        total.QuicReceiveIngressBufferAcquireSlotLimitFailures +=
+            snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures;
+        total.QuicReceiveIngressBufferAcquireAllocFailures +=
+            snapshot.QuicReceiveIngressBufferAcquireAllocFailures;
         total.QuicReceiveViewFailures += snapshot.QuicReceiveViewFailures;
+        total.QuicReceiveViewAllocFailures += snapshot.QuicReceiveViewAllocFailures;
+        total.QuicReceiveViewNullBufferFailures += snapshot.QuicReceiveViewNullBufferFailures;
+        total.QuicReceiveViewEmptyFailures += snapshot.QuicReceiveViewEmptyFailures;
+        total.QuicReceiveViewEnqueueFailures += snapshot.QuicReceiveViewEnqueueFailures;
         total.QuicReceiveDecompressFailures += snapshot.QuicReceiveDecompressFailures;
         total.QuicReceiveTcpBufferAcquireFailures += snapshot.QuicReceiveTcpBufferAcquireFailures;
+        total.QuicReceiveTcpBufferAcquirePendingBudgetFailures +=
+            snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
+        total.QuicReceiveTcpBufferAcquireSlotLimitFailures +=
+            snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures;
+        total.QuicReceiveTcpBufferAcquireAllocFailures +=
+            snapshot.QuicReceiveTcpBufferAcquireAllocFailures;
         total.TcpWriteHardErrors += snapshot.TcpWriteHardErrors;
+        total.LastTcpWriteErrno =
+            snapshot.LastTcpWriteErrno != 0 ? snapshot.LastTcpWriteErrno : total.LastTcpWriteErrno;
+        total.LastQuicSendStatus =
+            snapshot.LastQuicSendStatus != 0 ? snapshot.LastQuicSendStatus : total.LastQuicSendStatus;
     }
     return total;
 }

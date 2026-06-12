@@ -72,15 +72,49 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.Errors = snapshot.Errors;
     metrics.EventQueueFullErrors = snapshot.EventQueueFullErrors;
     metrics.TcpReadBufferAcquireFailures = snapshot.TcpReadBufferAcquireFailures;
+    metrics.TcpReadBufferAcquirePendingBudgetFailures =
+        snapshot.TcpReadBufferAcquirePendingBudgetFailures;
+    metrics.TcpReadBufferAcquireSlotLimitFailures =
+        snapshot.TcpReadBufferAcquireSlotLimitFailures;
+    metrics.TcpReadBufferAcquireAllocFailures = snapshot.TcpReadBufferAcquireAllocFailures;
     metrics.TcpToQuicCompressFailures = snapshot.TcpToQuicCompressFailures;
+    metrics.TcpToQuicCompressUpdateFailures = snapshot.TcpToQuicCompressUpdateFailures;
+    metrics.TcpToQuicCompressFlushFailures = snapshot.TcpToQuicCompressFlushFailures;
     metrics.TcpToQuicBufferAcquireFailures = snapshot.TcpToQuicBufferAcquireFailures;
+    metrics.TcpToQuicBufferAcquirePendingBudgetFailures =
+        snapshot.TcpToQuicBufferAcquirePendingBudgetFailures;
+    metrics.TcpToQuicBufferAcquireSlotLimitFailures =
+        snapshot.TcpToQuicBufferAcquireSlotLimitFailures;
+    metrics.TcpToQuicBufferAcquireAllocFailures =
+        snapshot.TcpToQuicBufferAcquireAllocFailures;
     metrics.QuicSendFailures = snapshot.QuicSendFailures;
+    metrics.QuicSendBufferTooLargeFailures = snapshot.QuicSendBufferTooLargeFailures;
+    metrics.QuicSendOperationAllocFailures = snapshot.QuicSendOperationAllocFailures;
+    metrics.QuicSendApiFailures = snapshot.QuicSendApiFailures;
     metrics.QuicReceiveIngressBufferAcquireFailures =
         snapshot.QuicReceiveIngressBufferAcquireFailures;
+    metrics.QuicReceiveIngressBufferAcquirePendingBudgetFailures =
+        snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
+    metrics.QuicReceiveIngressBufferAcquireSlotLimitFailures =
+        snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures;
+    metrics.QuicReceiveIngressBufferAcquireAllocFailures =
+        snapshot.QuicReceiveIngressBufferAcquireAllocFailures;
     metrics.QuicReceiveViewFailures = snapshot.QuicReceiveViewFailures;
+    metrics.QuicReceiveViewAllocFailures = snapshot.QuicReceiveViewAllocFailures;
+    metrics.QuicReceiveViewNullBufferFailures = snapshot.QuicReceiveViewNullBufferFailures;
+    metrics.QuicReceiveViewEmptyFailures = snapshot.QuicReceiveViewEmptyFailures;
+    metrics.QuicReceiveViewEnqueueFailures = snapshot.QuicReceiveViewEnqueueFailures;
     metrics.QuicReceiveDecompressFailures = snapshot.QuicReceiveDecompressFailures;
     metrics.QuicReceiveTcpBufferAcquireFailures = snapshot.QuicReceiveTcpBufferAcquireFailures;
+    metrics.QuicReceiveTcpBufferAcquirePendingBudgetFailures =
+        snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
+    metrics.QuicReceiveTcpBufferAcquireSlotLimitFailures =
+        snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures;
+    metrics.QuicReceiveTcpBufferAcquireAllocFailures =
+        snapshot.QuicReceiveTcpBufferAcquireAllocFailures;
     metrics.TcpWriteHardErrors = snapshot.TcpWriteHardErrors;
+    metrics.LastTcpWriteErrno = snapshot.LastTcpWriteErrno;
+    metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
 #endif
     return metrics;
 }
@@ -114,17 +148,60 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_event_queue_full_errors\":" << metrics.EventQueueFullErrors;
     out << ",\"linux_relay_tcp_read_buffer_acquire_failures\":"
         << metrics.TcpReadBufferAcquireFailures;
+    out << ",\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":"
+        << metrics.TcpReadBufferAcquirePendingBudgetFailures;
+    out << ",\"linux_relay_tcp_read_buffer_acquire_slot_limit_failures\":"
+        << metrics.TcpReadBufferAcquireSlotLimitFailures;
+    out << ",\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":"
+        << metrics.TcpReadBufferAcquireAllocFailures;
     out << ",\"linux_relay_tcp_to_quic_compress_failures\":"
         << metrics.TcpToQuicCompressFailures;
+    out << ",\"linux_relay_tcp_to_quic_compress_update_failures\":"
+        << metrics.TcpToQuicCompressUpdateFailures;
+    out << ",\"linux_relay_tcp_to_quic_compress_flush_failures\":"
+        << metrics.TcpToQuicCompressFlushFailures;
     out << ",\"linux_relay_tcp_to_quic_buffer_acquire_failures\":"
         << metrics.TcpToQuicBufferAcquireFailures;
+    out << ",\"linux_relay_tcp_to_quic_buffer_acquire_pending_budget_failures\":"
+        << metrics.TcpToQuicBufferAcquirePendingBudgetFailures;
+    out << ",\"linux_relay_tcp_to_quic_buffer_acquire_slot_limit_failures\":"
+        << metrics.TcpToQuicBufferAcquireSlotLimitFailures;
+    out << ",\"linux_relay_tcp_to_quic_buffer_acquire_alloc_failures\":"
+        << metrics.TcpToQuicBufferAcquireAllocFailures;
     out << ",\"linux_relay_quic_send_failures\":" << metrics.QuicSendFailures;
+    out << ",\"linux_relay_quic_send_buffer_too_large_failures\":"
+        << metrics.QuicSendBufferTooLargeFailures;
+    out << ",\"linux_relay_quic_send_operation_alloc_failures\":"
+        << metrics.QuicSendOperationAllocFailures;
+    out << ",\"linux_relay_quic_send_api_failures\":" << metrics.QuicSendApiFailures;
     out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_failures\":"
         << metrics.QuicReceiveIngressBufferAcquireFailures;
+    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_pending_budget_failures\":"
+        << metrics.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
+    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_slot_limit_failures\":"
+        << metrics.QuicReceiveIngressBufferAcquireSlotLimitFailures;
+    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_alloc_failures\":"
+        << metrics.QuicReceiveIngressBufferAcquireAllocFailures;
     out << ",\"linux_relay_quic_receive_view_failures\":" << metrics.QuicReceiveViewFailures;
+    out << ",\"linux_relay_quic_receive_view_alloc_failures\":"
+        << metrics.QuicReceiveViewAllocFailures;
+    out << ",\"linux_relay_quic_receive_view_null_buffer_failures\":"
+        << metrics.QuicReceiveViewNullBufferFailures;
+    out << ",\"linux_relay_quic_receive_view_empty_failures\":"
+        << metrics.QuicReceiveViewEmptyFailures;
+    out << ",\"linux_relay_quic_receive_view_enqueue_failures\":"
+        << metrics.QuicReceiveViewEnqueueFailures;
     out << ",\"linux_relay_quic_receive_decompress_failures\":"
         << metrics.QuicReceiveDecompressFailures;
     out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_failures\":"
         << metrics.QuicReceiveTcpBufferAcquireFailures;
+    out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures\":"
+        << metrics.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
+    out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_slot_limit_failures\":"
+        << metrics.QuicReceiveTcpBufferAcquireSlotLimitFailures;
+    out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_alloc_failures\":"
+        << metrics.QuicReceiveTcpBufferAcquireAllocFailures;
     out << ",\"linux_relay_tcp_write_hard_errors\":" << metrics.TcpWriteHardErrors;
+    out << ",\"linux_relay_last_tcp_write_errno\":" << metrics.LastTcpWriteErrno;
+    out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }

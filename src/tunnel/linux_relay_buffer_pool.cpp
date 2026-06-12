@@ -150,8 +150,14 @@ void TqLinuxRelayBufferPool::Reserve(size_t slotCount) {
     }
 }
 
-TqBufferRef TqLinuxRelayBufferPool::AcquireWorker() {
+TqBufferRef TqLinuxRelayBufferPool::AcquireWorker(TqBufferAcquireFailure* failure) {
+    if (failure != nullptr) {
+        *failure = TqBufferAcquireFailure::None;
+    }
     if (PendingBytes() + ChunkBytes > MaxBytes) {
+        if (failure != nullptr) {
+            *failure = TqBufferAcquireFailure::PendingBytesLimit;
+        }
         return {};
     }
 
@@ -161,10 +167,16 @@ TqBufferRef TqLinuxRelayBufferPool::AcquireWorker() {
         WorkerFree.pop_back();
     } else {
         if (WorkerAllocated >= WorkerMaxSlots) {
+            if (failure != nullptr) {
+                *failure = TqBufferAcquireFailure::SlotLimit;
+            }
             return {};
         }
         buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
         if (buffer == nullptr) {
+            if (failure != nullptr) {
+                *failure = TqBufferAcquireFailure::AllocationFailure;
+            }
             return {};
         }
         ++WorkerAllocated;
@@ -176,8 +188,14 @@ TqBufferRef TqLinuxRelayBufferPool::AcquireWorker() {
     return TqBufferRef(this, buffer, TqBufferDomain::Worker);
 }
 
-TqBufferRef TqLinuxRelayBufferPool::AcquireIngress() {
+TqBufferRef TqLinuxRelayBufferPool::AcquireIngress(TqBufferAcquireFailure* failure) {
+    if (failure != nullptr) {
+        *failure = TqBufferAcquireFailure::None;
+    }
     if (PendingBytes() + ChunkBytes > MaxBytes) {
+        if (failure != nullptr) {
+            *failure = TqBufferAcquireFailure::PendingBytesLimit;
+        }
         return {};
     }
 
@@ -189,10 +207,16 @@ TqBufferRef TqLinuxRelayBufferPool::AcquireIngress() {
             IngressFree.pop_back();
         } else {
             if (IngressAllocated >= IngressMaxSlots) {
+                if (failure != nullptr) {
+                    *failure = TqBufferAcquireFailure::SlotLimit;
+                }
                 return {};
             }
             buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
             if (buffer == nullptr) {
+                if (failure != nullptr) {
+                    *failure = TqBufferAcquireFailure::AllocationFailure;
+                }
                 return {};
             }
             ++IngressAllocated;

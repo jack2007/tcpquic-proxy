@@ -33,6 +33,27 @@ int main() {
     }
 
     {
+        TqLinuxRelayBufferPool pool(64, 4, 32);
+        TqBufferAcquireFailure reason = TqBufferAcquireFailure::None;
+        auto worker = pool.AcquireWorker(&reason);
+        assert(!worker);
+        assert(reason == TqBufferAcquireFailure::PendingBytesLimit);
+    }
+
+    {
+        TqLinuxRelayBufferPool pool(64, 2, 512);
+        pool.Reserve(2);
+        TqBufferAcquireFailure reason = TqBufferAcquireFailure::None;
+        auto first = pool.AcquireWorker(&reason);
+        auto second = pool.AcquireWorker(&reason);
+        auto third = pool.AcquireWorker(&reason);
+        assert(first);
+        assert(second);
+        assert(!third);
+        assert(reason == TqBufferAcquireFailure::SlotLimit);
+    }
+
+    {
         TqLinuxRelayBufferPool pool(64, 4, 512);
         pool.Reserve(4);
 
