@@ -1,7 +1,7 @@
 # tcpquic-proxy 内置测速工具设计方案
 
 > 日期：2026-06-11  
-> 状态：设计中
+> 状态：已复核，待实现计划执行
 
 ## 背景
 
@@ -43,6 +43,17 @@ client 内置 TCP client
 | B. 特殊目标地址触发 | client OPEN 到保留域名或端口，server 在普通 OPEN 路径识别测速 | 初期改动少 | 控制语义混入普通目标；与 ACL/DNS/trace 纠缠；结果回传困难 | 不采用 |
 | C. 直接 QUIC stream 测速 | client/server 在 QUIC stream 上直接收发测试数据 | 实现简单，吞吐上限更直接 | 不覆盖 TCP listen/connect 与 relay，不满足端到端 I/O 要求 | 不采用 |
 
+## 2026-06-12 设计复核修正
+
+对照当前 `quic_session`、`tcp_tunnel`、`control_protocol` 实现后，原设计需要收紧以下落地点：
+
+1. **server incoming stream 分派必须拥有首个 stream callback。** 当前 `QuicServerSession` 在 `PEER_STREAM_STARTED` 后直接调用 `TqHandleServerPeerStream()`，后者立即把 raw `HQUIC` 包成 `MsQuicStream` 并把首包解析交给 `TqTunnelContext`。新增测速控制流后，应改为 `TqHandleServerIncomingStream()` 先包住 raw stream、收集首个控制消息 header，再根据 `cmd` 分派。
+2. **普通 OPEN 的首包不能丢。** dispatcher 判断 `cmd == TQ_CMD_OPEN` 后，需要把已经收到的 `OpeningRx` 初始字节移交给 server tunnel context。推荐把 dispatcher 放在 `tcp_tunnel.cpp`，给该文件内的 `TqTunnelContext` 增加内部 `AdoptInitialBytes()` 路径，不把 tunnel 私有状态暴露到 public header。
+3. **MsQuic stream callback 切换必须显式处理。** dispatcher 先创建 `MsQuicStream(rawStream, CleanUpAutoDelete, DispatcherCallback, ctx)`。分派到普通 OPEN 后，在同一个 `MsQuicStream` 对象上切换 `Callback` / `Context` 到 `TqTunnelContext::Callback` 并把对象所有权交给 tunnel context；避免对同一个 raw stream 二次构造 `MsQuicStream`。
+4. **临时 ACL 不能限定“同一条 QUIC connection”。** client 首版计划让 `parallel = cfg.QuicConnections`，多条 test tunnel 会走 connection pool 中不同 QUIC connection。如果 ephemeral target 只允许 SPEED_START 所在 connection，`--quic-connections > 1` 会被 ACL 拒绝。首版应改为：在 session 活跃期内，允许任意已认证 QUIC connection 打开该 session 精确 loopback `(addr, port)`；session finish/timeout 后立即撤销。
+5. **`SPEED_READY` 必须回传实际地址字节。** 原字段只有 `addr_type` 和 `port`，无法表达 IPv6 loopback，也无法让 client 严格按 server 实际绑定地址构造 tunnel request。首版仍优先 IPv4 `127.0.0.1`，但 wire format 应包含 `addr_len + addr`，与 OPEN 地址表示保持一致。
+6. **upload 吞吐必须以 server bytes 为主判断端到端完成量。** 最近外部 curl 上传脚本只能测到写入本地 proxy 的速度，不代表 server 真实接收速度。内置 upload 输出中 local bytes 仅作 client 写入量，server bytes/server elapsed 才是端到端接收结果。
+
 ## 用户体验
 
 ### 命令行
@@ -51,8 +62,8 @@ client 内置 TCP client
 
 ```bash
 tcpquic-proxy client \
-  --quic-peer <server:443> \
-  --quic-cert client.crt --quic-key client.key --quic-ca ca.crt \
+  --quic-peer 127.0.0.1:14443 \
+  --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt \
   --download-test 10
 ```
 
@@ -60,8 +71,8 @@ tcpquic-proxy client \
 
 ```bash
 tcpquic-proxy client \
-  --quic-peer <server:443> \
-  --quic-cert client.crt --quic-key client.key --quic-ca ca.crt \
+  --quic-peer 127.0.0.1:14443 \
+  --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt \
   --upload-test 10
 ```
 
@@ -185,9 +196,11 @@ magic[2] version cmd
 session_id:u32
 addr_type:u8       # TQ_ADDR_IPV4 or TQ_ADDR_IPV6
 port:u16
+addr_len:u16
+addr:bytes         # 4 bytes for 127.0.0.1 in v1; future may use 16 bytes for ::1
 ```
 
-首版 server 默认绑定 IPv4 loopback `127.0.0.1:0`。如果后续需要 IPv6，可扩展为优先 IPv4、失败再尝试 IPv6。
+首版 server 默认绑定 IPv4 loopback `127.0.0.1:0`。`addr_len` 必须与 `addr_type` 匹配：IPv4 为 4，IPv6 为 16。client 用 READY 返回的地址和端口构造后续普通 OPEN，不自行猜测 loopback 地址。
 
 ### SPEED_FINISH
 
@@ -263,7 +276,7 @@ void TqHandleServerIncomingStream(
     TqTunnelAclDeniedFn onAclDenied);
 ```
 
-该函数只负责收集足够的 header 字节并按 cmd 分派。普通 OPEN 分派时要把已收到的字节交给 tunnel context，避免丢失首包。实现上可以为 `TqTunnelContext` 增加 `FeedInitialBytes()`，或让 incoming stream dispatcher 在判断为 OPEN 后创建 tunnel context 并立即调用现有 receive 处理逻辑。
+该函数只负责收集足够的 header 字节并按 cmd 分派。普通 OPEN 分派时要把已收到的字节交给 tunnel context，避免丢失首包。推荐实现把 dispatcher 放在 `tcp_tunnel.cpp`，因为 `TqTunnelContext` 目前是该文件内的私有类型。dispatcher 判断 OPEN 后在同一文件内创建 `TqTunnelContext`，调用内部 `AdoptInitialBytes()`，然后把现有 `MsQuicStream` 对象的 `Callback` / `Context` 切到 `TqTunnelContext::Callback`。
 
 ## Server 侧测试服务
 
@@ -395,6 +408,8 @@ client 输出：
 - server bytes / elapsed / Gbps / MiB/s
 - accepted/closed connection count
 
+upload 场景的 PASS/FAIL 判断以 server bytes 为准：如果 local bytes 明显大于 server bytes，应输出 warning 并返回非 0。download 场景 local/server bytes 都应接近；差异超过 1% 或超过 16 MiB 时输出 warning。
+
 ## 配置结构
 
 `TqConfig` 新增：
@@ -432,7 +447,7 @@ uint32_t SpeedTestDurationSec{0};
 为避免用户必须显式 `--allow-targets 127.0.0.1/32` 才能测速，设计采用以下规则：
 
 - 对于由 SPEED_START 创建的 session，controller 记录允许的 `(addr, port)`。
-- OPEN 来自同一个 QUIC connection 且目标为这个精确 loopback `(addr, port)` 时，server tunnel 层允许绕过普通 ACL。
+- OPEN 来自任意已认证 QUIC connection 且目标为这个精确 loopback `(addr, port)` 时，server tunnel 层允许绕过普通 ACL。
 - 只绕过该 session 的临时端口，不开放任意 loopback 访问。
 - session 结束后立即撤销该临时允许项。
 
@@ -443,11 +458,11 @@ uint32_t SpeedTestDurationSec{0};
 ```cpp
 class TqEphemeralTargetAuthorizer {
 public:
-    virtual bool IsAllowedEphemeralTarget(MsQuicConnection* conn, const std::string& host, uint16_t port) const = 0;
+    virtual bool IsAllowedEphemeralTarget(const std::string& host, uint16_t port) const = 0;
 };
 ```
 
-首版只允许发起 SPEED_START 的同一条 QUIC connection 访问 `127.0.0.1:<session_port>`。
+首版只允许访问活跃 speed session 的精确 loopback 地址和端口。由于 server 已要求 mTLS client auth，能发起 OPEN 的 peer 已完成认证；授权粒度放宽到“活跃测速端口”才能支持 `--quic-connections > 1` 的多连接测速。
 
 ## 错误处理
 
@@ -524,9 +539,9 @@ server：
 新增脚本或扩展 `scripts/test-tcpquic-proxy.sh`：
 
 ```bash
-tcpquic-proxy server ... --allow-targets 0.0.0.0/0
-tcpquic-proxy client ... --download-test 2
-tcpquic-proxy client ... --upload-test 2
+tcpquic-proxy server --quic-listen 127.0.0.1:14443 --quic-cert cert/server/server.crt --quic-key cert/server/server.key --quic-ca cert/ca.crt --allow-targets 0.0.0.0/0
+tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --download-test 2
+tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --upload-test 2
 ```
 
 覆盖：
@@ -541,9 +556,10 @@ tcpquic-proxy client ... --upload-test 2
 双机运行：
 
 ```bash
-tcpquic-proxy client ... --quic-connections 8 --compress off --download-test 10
-tcpquic-proxy client ... --quic-connections 8 --compress off --upload-test 10
-tcpquic-proxy client ... --quic-connections 8 --compress lz4 --download-test 10
+DGX_QUIC_PEER="${DGX_QUIC_PEER:?set to host:port}"
+tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress off --download-test 10
+tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress off --upload-test 10
+tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress lz4 --download-test 10
 ```
 
 记录 local/server bytes 是否接近、吞吐是否稳定、server session 是否在结束后清理。
