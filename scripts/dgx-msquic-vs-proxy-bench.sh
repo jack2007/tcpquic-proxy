@@ -30,6 +30,49 @@ PERF_SERVER_PID=""
 
 log() { printf '[msquic-vs-proxy] %s\n' "$*" >&2; }
 
+require_sysctl_value() {
+    local name="$1" min_value="$2" actual
+    actual=$(sysctl -n "$name" 2>/dev/null || echo 0)
+    if [[ "${actual:-0}" -lt "$min_value" ]]; then
+        log "sysctl ${name}=${actual:-unset}, require >= ${min_value}"
+        exit 1
+    fi
+}
+
+require_sysctl_triplet_max() {
+    local name="$1" min_value="$2" actual max_value
+    actual=$(sysctl -n "$name" 2>/dev/null || true)
+    max_value=$(awk "{print \$3}" <<<"$actual")
+    if [[ -z "$max_value" || "$max_value" -lt "$min_value" ]]; then
+        log "sysctl ${name}=\"${actual:-unset}\", require max >= ${min_value}"
+        exit 1
+    fi
+}
+
+check_required_sysctls_local() {
+    require_sysctl_value net.core.rmem_max 134217728
+    require_sysctl_value net.core.wmem_max 134217728
+    require_sysctl_triplet_max net.ipv4.tcp_rmem 134217728
+    require_sysctl_triplet_max net.ipv4.tcp_wmem 134217728
+}
+
+check_required_sysctls_remote() {
+    ssh -o BatchMode=yes "$PEER" "
+        set -e
+        check_value() { v=\$(sysctl -n \"\$1\" 2>/dev/null || echo 0); test \"\$v\" -ge \"\$2\"; }
+        check_triplet() { v=\$(sysctl -n \"\$1\" 2>/dev/null || true); m=\$(awk \"{print \\\$3}\" <<<\"\$v\"); test -n \"\$m\" && test \"\$m\" -ge \"\$2\"; }
+        check_value net.core.rmem_max 134217728
+        check_value net.core.wmem_max 134217728
+        check_triplet net.ipv4.tcp_rmem 134217728
+        check_triplet net.ipv4.tcp_wmem 134217728
+    " || { log "peer sysctl requirements failed on ${PEER}"; exit 1; }
+}
+
+check_required_sysctls() {
+    check_required_sysctls_local
+    check_required_sysctls_remote
+}
+
 mbps_from_bps() {
     python3 -c "print(f'{float(\"${1:-0}\")*8/1e6:.2f}')"
 }
@@ -249,6 +292,7 @@ trap cleanup EXIT INT TERM
 [[ -x "$BIN" ]] || { log "missing $BIN"; exit 1; }
 
 mkdir -p "$TMP"
+check_required_sysctls
 ensure_routes
 clear_peer_netem
 deploy_msquic_perf

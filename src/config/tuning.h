@@ -32,6 +32,8 @@ struct TqTuningConfig {
     uint64_t LinuxRelayPerTunnelPendingBytes{4ull * 1024 * 1024};
     uint32_t LinuxRelayWorkerEventBudget{4096};
     uint64_t LinuxRelayWorkerByteBudgetPerTick{64ull * 1024 * 1024};
+    uint32_t LinuxRelayInlineSendmsgMaxCalls{1};
+    uint64_t LinuxRelayInlineWriteByteBudget{128ull * 1024};
 };
 
 struct TqRuntimeObservations {

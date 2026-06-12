@@ -48,6 +48,91 @@ int main() {
     {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
+        config.InlineSendmsgMaxCalls = 1;
+        config.InlineWriteByteBudget = 4096;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = false;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        const std::vector<uint8_t> plain(64 * 1024, 0x4E);
+        QUIC_BUFFER quicBuffer{};
+        quicBuffer.Buffer = const_cast<uint8_t*>(plain.data());
+        quicBuffer.Length = static_cast<uint32_t>(plain.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 1;
+        receiveEvent.RECEIVE.Buffers = &quicBuffer;
+
+        const QUIC_STATUS status = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
+        if (status != QUIC_STATUS_PENDING) {
+            std::fprintf(stderr, "expected budget-limited receive PENDING, got %d\n", status);
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        TqLinuxRelayWorkerSnapshot snapshot{};
+        do {
+            snapshot = worker.Snapshot();
+            if (snapshot.TcpWriteBytes >= plain.size() && snapshot.PendingEvents == 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (snapshot.InlineBudgetExceededCount != 1 ||
+            snapshot.InlineSendmsgCalls != 0 ||
+            snapshot.InlineWriteBytes != 0 ||
+            snapshot.DeferredReceiveCompleteBytes != plain.size() ||
+            snapshot.TcpWriteBytes != plain.size() ||
+            snapshot.PendingEvents != 0) {
+            std::fprintf(stderr,
+                "expected whole receive deferred on budget overflow, budget=%llu calls=%llu inline=%llu complete=%llu tcp=%llu events=%llu\n",
+                static_cast<unsigned long long>(snapshot.InlineBudgetExceededCount),
+                static_cast<unsigned long long>(snapshot.InlineSendmsgCalls),
+                static_cast<unsigned long long>(snapshot.InlineWriteBytes),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(snapshot.TcpWriteBytes),
+                static_cast<unsigned long long>(snapshot.PendingEvents));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
@@ -241,11 +326,10 @@ int main() {
             return 1;
         }
         const TqLinuxRelayWorkerSnapshot paused = worker.Snapshot();
-        if (paused.DeferredReceiveCompleteBytes == 0 ||
-            paused.DeferredReceiveCompleteBytes >= first.size() ||
+        if (paused.DeferredReceiveCompleteBytes != 0 ||
             paused.PendingEvents != 1 ||
             paused.QuicReceivePausedCount != 1) {
-            std::fprintf(stderr, "expected first partial receive to pause, complete=%llu events=%llu pauses=%llu\n",
+            std::fprintf(stderr, "expected first over-budget receive to queue and pause, complete=%llu events=%llu pauses=%llu\n",
                 static_cast<unsigned long long>(paused.DeferredReceiveCompleteBytes),
                 static_cast<unsigned long long>(paused.PendingEvents),
                 static_cast<unsigned long long>(paused.QuicReceivePausedCount));
@@ -272,7 +356,7 @@ int main() {
             return 1;
         }
         const TqLinuxRelayWorkerSnapshot queued = worker.Snapshot();
-        if (queued.DeferredReceiveCompleteBytes != paused.DeferredReceiveCompleteBytes ||
+        if (queued.DeferredReceiveCompleteBytes != 0 ||
             queued.PendingEvents != 2 ||
             queued.QuicReceivePausedCount != 1) {
             std::fprintf(stderr, "expected paused in-flight receive to queue only, complete=%llu:%llu events=%llu pauses=%llu\n",

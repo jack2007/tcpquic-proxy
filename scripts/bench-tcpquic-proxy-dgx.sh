@@ -75,6 +75,49 @@ CERT_DIR="${TMP_DIR}/certs"
 
 log() { printf '[tcpquic-dgx-bench] %s\n' "$*" >&2; }
 
+require_sysctl_value() {
+    local name="$1" min_value="$2" actual
+    actual=$(sysctl -n "$name" 2>/dev/null || echo 0)
+    if [[ "${actual:-0}" -lt "$min_value" ]]; then
+        log "sysctl ${name}=${actual:-unset}, require >= ${min_value}"
+        exit 1
+    fi
+}
+
+require_sysctl_triplet_max() {
+    local name="$1" min_value="$2" actual max_value
+    actual=$(sysctl -n "$name" 2>/dev/null || true)
+    max_value=$(awk "{print \$3}" <<<"$actual")
+    if [[ -z "$max_value" || "$max_value" -lt "$min_value" ]]; then
+        log "sysctl ${name}=\"${actual:-unset}\", require max >= ${min_value}"
+        exit 1
+    fi
+}
+
+check_required_sysctls_local() {
+    require_sysctl_value net.core.rmem_max 134217728
+    require_sysctl_value net.core.wmem_max 134217728
+    require_sysctl_triplet_max net.ipv4.tcp_rmem 134217728
+    require_sysctl_triplet_max net.ipv4.tcp_wmem 134217728
+}
+
+check_required_sysctls_remote() {
+    ssh "$PEER" "
+        set -e
+        check_value() { v=\$(sysctl -n \"\$1\" 2>/dev/null || echo 0); test \"\$v\" -ge \"\$2\"; }
+        check_triplet() { v=\$(sysctl -n \"\$1\" 2>/dev/null || true); m=\$(awk \"{print \\\$3}\" <<<\"\$v\"); test -n \"\$m\" && test \"\$m\" -ge \"\$2\"; }
+        check_value net.core.rmem_max 134217728
+        check_value net.core.wmem_max 134217728
+        check_triplet net.ipv4.tcp_rmem 134217728
+        check_triplet net.ipv4.tcp_wmem 134217728
+    " || { log "peer sysctl requirements failed on ${PEER}"; exit 1; }
+}
+
+check_required_sysctls() {
+    check_required_sysctls_local
+    check_required_sysctls_remote
+}
+
 proxy_tuning_args() {
     local -a args=()
     if [[ "$TUNING_20GBPS" == "1" ]]; then
@@ -465,6 +508,7 @@ require_cmd python3
 [[ -x "$BIN" ]] || { log "missing binary: $BIN"; exit 1; }
 
 mkdir -p "$TMP_DIR"
+check_required_sysctls
 if [[ -z "${RATE+x}" && "$NETEM" == "1" ]]; then
     RATE="1gbit"
     log "NETEM=1: default RATE=1gbit (set RATE= to disable, or RATE=<value> to override)"

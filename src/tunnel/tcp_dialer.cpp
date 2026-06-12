@@ -5,6 +5,7 @@
 
 #include <cerrno>
 #include <cstring>
+#include <cstdio>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -110,8 +111,21 @@ void TqTuneTcpForThroughput(TqSocketHandle fd, int bufferBytes) {
     }
 
     (void)TqSetNoDelay(fd);
-    (void)TqSetSocketBuffer(fd, SO_RCVBUF, bufferBytes);
-    (void)TqSetSocketBuffer(fd, SO_SNDBUF, bufferBytes);
+    const bool rcvOk = TqSetSocketBuffer(fd, SO_RCVBUF, bufferBytes);
+    const int rcvErr = rcvOk ? 0 : TqLastSocketError();
+    const bool sndOk = TqSetSocketBuffer(fd, SO_SNDBUF, bufferBytes);
+    const int sndErr = sndOk ? 0 : TqLastSocketError();
+    const int effectiveRcv = TqGetSocketBuffer(fd, SO_RCVBUF);
+    const int effectiveSnd = TqGetSocketBuffer(fd, SO_SNDBUF);
+    std::fprintf(stderr,
+        "tcpquic-proxy tcp socket buffer: rcv_requested=%d rcv_effective=%d rcv_errno=%d "
+        "snd_requested=%d snd_effective=%d snd_errno=%d\n",
+        bufferBytes,
+        effectiveRcv,
+        rcvErr,
+        bufferBytes,
+        effectiveSnd,
+        sndErr);
 }
 
 TqDialResult TqDialTcp(const std::vector<sockaddr_storage>& addrs, int timeoutMs) {

@@ -57,6 +57,8 @@ struct TqConfig {
     uint32_t MaxMemoryMb{0};
     uint32_t TuningOverrideRelayIoSize{0};
     uint32_t TuningOverrideRelayInflightBytes{0};
+    uint32_t TuningOverrideInlineSendmsgMaxCalls{0};
+    uint32_t TuningOverrideInlineWriteByteBudget{0};
     uint32_t TuningOverrideQuicFcw{0};
     uint32_t TuningOverrideQuicSrw{0};
     uint32_t TuningOverrideQuicIw{0};

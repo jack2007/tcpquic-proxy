@@ -438,6 +438,8 @@ void TqPrintUsage(FILE* out) {
         "  --max-memory-mb <n>        Cap relay pool memory across tunnels\n"
         "  --relay-io-size <bytes>    Override relay IO size (custom)\n"
         "  --relay-inflight-bytes <n> Override relay ideal in-flight bytes\n"
+        "  --inline-sendmsg-max-calls <n> Max callback sendmsg calls before pending fallback\n"
+        "  --inline-write-byte-budget <n> Max callback inline write bytes before pending fallback\n"
         "  --quic-fcw <bytes>         Override QUIC connection flow window\n"
         "  --quic-srw <bytes>         Override QUIC stream recv window\n"
         "  --quic-iw <packets>        Override QUIC initial window packets\n"
@@ -742,6 +744,30 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayInflightBytes)) {
                 err = "invalid value for --relay-inflight-bytes";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--inline-sendmsg-max-calls", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--inline-sendmsg-max-calls", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideInlineSendmsgMaxCalls) ||
+                cfg.TuningOverrideInlineSendmsgMaxCalls == 0) {
+                err = "invalid value for --inline-sendmsg-max-calls";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--inline-write-byte-budget", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--inline-write-byte-budget", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideInlineWriteByteBudget) ||
+                cfg.TuningOverrideInlineWriteByteBudget == 0) {
+                err = "invalid value for --inline-write-byte-budget";
                 return false;
             }
         } else if (GetOptionValue(arg, "--quic-fcw", value)) {

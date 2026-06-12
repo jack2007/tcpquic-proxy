@@ -144,6 +144,12 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
             out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
         }
     }
+    if (cfg.TuningOverrideInlineSendmsgMaxCalls > 0) {
+        out.LinuxRelayInlineSendmsgMaxCalls = cfg.TuningOverrideInlineSendmsgMaxCalls;
+    }
+    if (cfg.TuningOverrideInlineWriteByteBudget > 0) {
+        out.LinuxRelayInlineWriteByteBudget = cfg.TuningOverrideInlineWriteByteBudget;
+    }
     if (cfg.TuningOverrideQuicFcw > 0) {
         out.ConnFlowControlWindow = cfg.TuningOverrideQuicFcw;
     }
@@ -561,7 +567,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
     std::fprintf(out,
         "tcpquic-proxy tuning: srw=%u fcw=%u iw=%u initrtt=%ums "
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
-        "relay_pending=%llu tick_budget=%llu read_batch=%llu\n",
+        "relay_pending=%llu tick_budget=%llu read_batch=%llu inline_calls=%u inline_bytes=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -572,7 +578,9 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         tuning.TcpSocketBufferBytes,
         static_cast<unsigned long long>(tuning.LinuxRelayPerTunnelPendingBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayWorkerByteBudgetPerTick),
-        static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes));
+        static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes),
+        tuning.LinuxRelayInlineSendmsgMaxCalls,
+        static_cast<unsigned long long>(tuning.LinuxRelayInlineWriteByteBudget));
 }
 
 void TqSetActiveTcpSocketBuffer(int bytes) {

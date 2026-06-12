@@ -69,6 +69,16 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     const uint64_t linuxRelayReadDisabledCount = linuxRelay.ReadDisabledCount;
     const uint64_t linuxRelayCompressedTcpBytes = linuxRelay.CompressedTcpBytes;
     const uint64_t linuxRelayDecompressedTcpBytes = linuxRelay.DecompressedTcpBytes;
+    const uint64_t linuxRelayInlineSendmsgCalls = linuxRelay.InlineSendmsgCalls;
+    const uint64_t linuxRelayInlineWriteBytes = linuxRelay.InlineWriteBytes;
+    const uint64_t linuxRelayInlineFullSuccess = linuxRelay.InlineFullSuccessCount;
+    const uint64_t linuxRelayInlinePartial = linuxRelay.InlinePartialCount;
+    const uint64_t linuxRelayInlineEagain = linuxRelay.InlineEagainCount;
+    const uint64_t linuxRelayInlineBudgetExceeded = linuxRelay.InlineBudgetExceededCount;
+    const uint64_t linuxRelayInlineFallbackBytes = linuxRelay.InlineFallbackBytes;
+    const uint64_t linuxRelayInlineCallbackCount = linuxRelay.InlineCallbackCount;
+    const uint64_t linuxRelayInlineCallbackAvgUsec = linuxRelay.InlineCallbackCount == 0 ? 0 : linuxRelay.InlineCallbackTotalUsec / linuxRelay.InlineCallbackCount;
+    const uint64_t linuxRelayInlineCallbackMaxUsec = linuxRelay.InlineCallbackMaxUsec;
     const uint64_t linuxRelayErrors = linuxRelay.Errors;
 #else
     const char* linuxRelayBackend = "unsupported";
@@ -81,6 +91,16 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     const uint64_t linuxRelayReadDisabledCount = metrics.LinuxRelayReadDisabledCount;
     const uint64_t linuxRelayCompressedTcpBytes = 0;
     const uint64_t linuxRelayDecompressedTcpBytes = 0;
+    const uint64_t linuxRelayInlineSendmsgCalls = 0;
+    const uint64_t linuxRelayInlineWriteBytes = 0;
+    const uint64_t linuxRelayInlineFullSuccess = 0;
+    const uint64_t linuxRelayInlinePartial = 0;
+    const uint64_t linuxRelayInlineEagain = 0;
+    const uint64_t linuxRelayInlineBudgetExceeded = 0;
+    const uint64_t linuxRelayInlineFallbackBytes = 0;
+    const uint64_t linuxRelayInlineCallbackCount = 0;
+    const uint64_t linuxRelayInlineCallbackAvgUsec = 0;
+    const uint64_t linuxRelayInlineCallbackMaxUsec = 0;
     const uint64_t linuxRelayErrors = 0;
 #endif
 
@@ -95,6 +115,16 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     TqAppendJsonString(out, "linux_relay_backend", linuxRelayBackend);
     out << ",\"linux_relay_compressed_tcp_bytes\":" << linuxRelayCompressedTcpBytes;
     out << ",\"linux_relay_decompressed_tcp_bytes\":" << linuxRelayDecompressedTcpBytes;
+    out << ",\"linux_relay_inline_sendmsg_calls\":" << linuxRelayInlineSendmsgCalls;
+    out << ",\"linux_relay_inline_write_bytes\":" << linuxRelayInlineWriteBytes;
+    out << ",\"linux_relay_inline_full_success\":" << linuxRelayInlineFullSuccess;
+    out << ",\"linux_relay_inline_partial\":" << linuxRelayInlinePartial;
+    out << ",\"linux_relay_inline_eagain\":" << linuxRelayInlineEagain;
+    out << ",\"linux_relay_inline_budget_exceeded\":" << linuxRelayInlineBudgetExceeded;
+    out << ",\"linux_relay_inline_fallback_bytes\":" << linuxRelayInlineFallbackBytes;
+    out << ",\"linux_relay_inline_callback_count\":" << linuxRelayInlineCallbackCount;
+    out << ",\"linux_relay_inline_callback_avg_usec\":" << linuxRelayInlineCallbackAvgUsec;
+    out << ",\"linux_relay_inline_callback_max_usec\":" << linuxRelayInlineCallbackMaxUsec;
     out << ",\"linux_relay_errors\":" << linuxRelayErrors;
     out << ',';
     TqAppendJsonString(out, "last_error", metrics.LastError);

@@ -737,6 +737,8 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
     view->Stream = stream;
     view->RelayId = relay->Id;
     view->Fin = fin;
+    view->CompletedLength = skipBytes;
+    view->TotalLength = skipBytes;
     view->Slices.reserve(bufferCount);
 
     uint64_t remainingSkip = skipBytes;
@@ -761,7 +763,7 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
         view->Slices.push_back(TqQuicReceiveSlice{data, static_cast<uint32_t>(length)});
         view->TotalLength += length;
     }
-    if (view->TotalLength == 0) {
+    if (view->TotalLength == view->CompletedLength) {
         return false;
     }
 
@@ -770,11 +772,12 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
     event.RelayId = relay->Id;
     event.TotalLength = view->TotalLength;
     event.Fin = fin;
+    const uint64_t pendingBytes = view->TotalLength - view->CompletedLength;
     event.ReceiveView = std::move(view);
     if (!Enqueue(std::move(event))) {
         return false;
     }
-    MaybePauseQuicReceive(relay);
+    MaybePauseQuicReceive(relay, pendingBytes);
     return true;
 }
 
@@ -789,6 +792,19 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
     if (relay == nullptr || relay->Closing || buffers == nullptr || bufferCount == 0) {
         return QUIC_STATUS_SUCCESS;
     }
+
+    const auto callbackStart = std::chrono::steady_clock::now();
+    auto recordCallbackTime = [this, callbackStart]() {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - callbackStart).count();
+        const uint64_t usec = elapsed > 0 ? static_cast<uint64_t>(elapsed) : 0;
+        InlineCallbackCount.fetch_add(1);
+        InlineCallbackTotalUsec.fetch_add(usec);
+        uint64_t previous = InlineCallbackMaxUsec.load();
+        while (previous < usec &&
+               !InlineCallbackMaxUsec.compare_exchange_weak(previous, usec)) {
+        }
+    };
 
     uint64_t totalLength = 0;
     for (uint32_t i = 0; i < bufferCount; ++i) {
@@ -808,13 +824,41 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
         return QUIC_STATUS_SUCCESS;
     }
 
+    const uint32_t maxCalls = Config.InlineSendmsgMaxCalls == 0 ? 1 : Config.InlineSendmsgMaxCalls;
+    const uint64_t byteBudget = Config.InlineWriteByteBudget == 0 ? totalLength : Config.InlineWriteByteBudget;
+    if (totalLength > byteBudget) {
+        InlineBudgetExceededCount.fetch_add(1);
+        InlineFallbackBytes.fetch_add(totalLength);
+        if (!QueueDeferredQuicReceive(relay, stream, buffers, bufferCount, 0, fin)) {
+            handled = true;
+            AbortRelayFromCallback(relay->Id, stream);
+            recordCallbackTime();
+            return QUIC_STATUS_PENDING;
+        }
+        handled = true;
+        recordCallbackTime();
+        return QUIC_STATUS_PENDING;
+    }
+
+    uint32_t calls = 0;
     uint64_t completed = 0;
+    bool budgetExceeded = false;
+    bool eagain = false;
+    bool partial = false;
+
     while (completed < totalLength) {
+        if (calls >= maxCalls || completed >= byteBudget) {
+            budgetExceeded = true;
+            break;
+        }
+
         std::vector<iovec> iov;
         iov.reserve(Config.MaxIov);
 
         uint64_t skip = completed;
-        for (uint32_t i = 0; i < bufferCount && iov.size() < Config.MaxIov; ++i) {
+        uint64_t remainingBudget = byteBudget - completed;
+        uint64_t submittedBytes = 0;
+        for (uint32_t i = 0; i < bufferCount && iov.size() < Config.MaxIov && remainingBudget > 0; ++i) {
             if (buffers[i].Length == 0) {
                 continue;
             }
@@ -822,24 +866,38 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
                 skip -= buffers[i].Length;
                 continue;
             }
+            const size_t available = static_cast<size_t>(buffers[i].Length - skip);
+            const size_t length = static_cast<size_t>(
+                std::min<uint64_t>(available, remainingBudget));
             iovec item{};
             item.iov_base = const_cast<uint8_t*>(buffers[i].Buffer + skip);
-            item.iov_len = buffers[i].Length - skip;
+            item.iov_len = length;
             iov.push_back(item);
+            submittedBytes += length;
+            remainingBudget -= length;
             skip = 0;
         }
         if (iov.empty()) {
+            budgetExceeded = completed < totalLength;
             break;
         }
 
         const ssize_t sent = WritevNoSignal(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (sent > 0) {
-            completed += static_cast<uint64_t>(sent);
-            TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent));
+            ++calls;
+            const uint64_t sentBytes = static_cast<uint64_t>(sent);
+            completed += sentBytes;
+            TcpWriteBytes.fetch_add(sentBytes);
             TcpWriteBatches.fetch_add(1);
+            InlineSendmsgCalls.fetch_add(1);
+            InlineWriteBytes.fetch_add(sentBytes);
             uint64_t previous = MaxTcpWriteIovUsed.load();
             while (previous < iov.size() &&
                    !MaxTcpWriteIovUsed.compare_exchange_weak(previous, iov.size())) {
+            }
+            if (sentBytes < submittedBytes) {
+                partial = true;
+                break;
             }
             continue;
         }
@@ -847,6 +905,7 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
             continue;
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            eagain = true;
             break;
         }
         if (completed > 0) {
@@ -857,27 +916,38 @@ QUIC_STATUS TqLinuxRelayWorker::TryCompleteQuicReceiveInline(
         }
         AbortRelayFromCallback(relay->Id, stream);
         handled = true;
+        recordCallbackTime();
         return QUIC_STATUS_PENDING;
     }
 
     if (completed == totalLength) {
-        // Synchronous receive: MsQuic advances flow control on SUCCESS without
-        // StreamReceiveComplete. Calling both double-consumes and stalls the stream.
         if (fin) {
             (void)::shutdown(relay->TcpFd, SHUT_WR);
         }
+        InlineFullSuccessCount.fetch_add(1);
         handled = true;
+        recordCallbackTime();
         return QUIC_STATUS_SUCCESS;
     }
-    if (completed > 0) {
-        CompleteDeferredQuicReceive(stream, completed);
+
+    if (budgetExceeded) {
+        InlineBudgetExceededCount.fetch_add(1);
     }
+    if (eagain) {
+        InlineEagainCount.fetch_add(1);
+    }
+    if (partial) {
+        InlinePartialCount.fetch_add(1);
+    }
+    InlineFallbackBytes.fetch_add(totalLength - completed);
     if (!QueueDeferredQuicReceive(relay, stream, buffers, bufferCount, completed, fin)) {
         handled = true;
         AbortRelayFromCallback(relay->Id, stream);
+        recordCallbackTime();
         return QUIC_STATUS_PENDING;
     }
     handled = true;
+    recordCallbackTime();
     return QUIC_STATUS_PENDING;
 }
 
@@ -906,8 +976,14 @@ void TqLinuxRelayWorker::SetQuicReceiveEnabled(RelayState* relay, bool enabled) 
     }
 }
 
-void TqLinuxRelayWorker::MaybePauseQuicReceive(RelayState* relay) {
+void TqLinuxRelayWorker::MaybePauseQuicReceive(RelayState* relay, uint64_t pendingBytes) {
     if (relay == nullptr) {
+        return;
+    }
+    const uint64_t limit = Config.MaxPendingQuicReceiveBytesPerRelay != 0
+        ? Config.MaxPendingQuicReceiveBytesPerRelay
+        : Config.MaxPendingBytes;
+    if (limit != 0 && pendingBytes < limit) {
         return;
     }
     bool expected = false;
@@ -933,9 +1009,14 @@ void TqLinuxRelayWorker::ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event) {
     if (relay == nullptr || relay->Closing || !event.ReceiveView) {
         return;
     }
+    if (event.ReceiveView->CompletedLength > 0) {
+        CompleteDeferredQuicReceive(
+            event.ReceiveView->Stream,
+            event.ReceiveView->CompletedLength);
+    }
     relay->PendingQuicReceiveBytes += event.ReceiveView->TotalLength - event.ReceiveView->CompletedLength;
     relay->PendingQuicReceives.push_back(std::move(event.ReceiveView));
-    MaybePauseQuicReceive(relay.get());
+    MaybePauseQuicReceive(relay.get(), relay->PendingQuicReceiveBytes);
     FlushDeferredQuicReceives(relay.get());
 }
 
@@ -1279,6 +1360,16 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
     snapshot.DeferredReceiveCompleteBytes = DeferredReceiveCompleteBytes.load();
     snapshot.DeferredReceiveCompletes = DeferredReceiveCompletes.load();
+    snapshot.InlineSendmsgCalls = InlineSendmsgCalls.load();
+    snapshot.InlineWriteBytes = InlineWriteBytes.load();
+    snapshot.InlineFullSuccessCount = InlineFullSuccessCount.load();
+    snapshot.InlinePartialCount = InlinePartialCount.load();
+    snapshot.InlineEagainCount = InlineEagainCount.load();
+    snapshot.InlineBudgetExceededCount = InlineBudgetExceededCount.load();
+    snapshot.InlineFallbackBytes = InlineFallbackBytes.load();
+    snapshot.InlineCallbackCount = InlineCallbackCount.load();
+    snapshot.InlineCallbackTotalUsec = InlineCallbackTotalUsec.load();
+    snapshot.InlineCallbackMaxUsec = InlineCallbackMaxUsec.load();
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
     snapshot.Errors = Errors.load();
@@ -1455,6 +1546,9 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
         config.MaxIov = tuning.LinuxRelayMaxIov;
         config.MaxPendingBytes = tuning.LinuxRelayPerWorkerPendingBytes;
+        config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerWorkerPendingBytes;
+        config.InlineSendmsgMaxCalls = tuning.LinuxRelayInlineSendmsgMaxCalls;
+        config.InlineWriteByteBudget = tuning.LinuxRelayInlineWriteByteBudget;
         auto worker = std::make_unique<TqLinuxRelayWorker>(config);
         if (!worker->Start()) {
             Workers.clear();
@@ -1500,6 +1594,18 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.ReadDisabledCount += snapshot.ReadDisabledCount;
         total.CompressedTcpBytes += snapshot.CompressedTcpBytes;
         total.DecompressedTcpBytes += snapshot.DecompressedTcpBytes;
+        total.DeferredReceiveCompleteBytes += snapshot.DeferredReceiveCompleteBytes;
+        total.DeferredReceiveCompletes += snapshot.DeferredReceiveCompletes;
+        total.InlineSendmsgCalls += snapshot.InlineSendmsgCalls;
+        total.InlineWriteBytes += snapshot.InlineWriteBytes;
+        total.InlineFullSuccessCount += snapshot.InlineFullSuccessCount;
+        total.InlinePartialCount += snapshot.InlinePartialCount;
+        total.InlineEagainCount += snapshot.InlineEagainCount;
+        total.InlineBudgetExceededCount += snapshot.InlineBudgetExceededCount;
+        total.InlineFallbackBytes += snapshot.InlineFallbackBytes;
+        total.InlineCallbackCount += snapshot.InlineCallbackCount;
+        total.InlineCallbackTotalUsec += snapshot.InlineCallbackTotalUsec;
+        total.InlineCallbackMaxUsec = std::max(total.InlineCallbackMaxUsec, snapshot.InlineCallbackMaxUsec);
         total.Errors += snapshot.Errors;
     }
     return total;
