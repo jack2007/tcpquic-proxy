@@ -358,6 +358,10 @@ std::vector<uint8_t> BuildSpeedStartBytes(uint32_t sessionId) {
     return encoded;
 }
 
+std::vector<uint8_t> BuildUnknownCommandBytes(uint8_t cmd) {
+    return std::vector<uint8_t>{TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, cmd};
+}
+
 class FakeEphemeralTargetAuthorizer final : public TqEphemeralTargetAuthorizer {
 public:
     FakeEphemeralTargetAuthorizer(std::string host, uint16_t port) :
@@ -689,6 +693,47 @@ int TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort() {
     return 0;
 }
 
+int TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 280;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7106));
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, nullptr);
+
+    const std::vector<uint8_t> payload = BuildUnknownCommandBytes(0x7f);
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(payload.size()),
+        const_cast<uint8_t*>(payload.data()),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, event)) return 281;
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) return 282;
+
+    TqSpeedErrorMessage response{};
+    if (!TqDecodeSpeedError(responseBytes.data(), responseBytes.size(), response)) return 283;
+    if (response.SessionId != 0) return 284;
+    if (response.Error != TqSpeedError::Unsupported) return 285;
+    if (responseFlags != QUIC_SEND_FLAG_FIN) return 286;
+    if (FakeShutdownCount(rawStream) != 0) return 287;
+    if (!DispatchFakeSendComplete(rawStream)) return 288;
+    if (FakeShutdownCount(rawStream) != 0) return 289;
+    if (!DispatchFakeShutdownComplete(rawStream)) return 290;
+    return 0;
+}
+
 } // namespace
 
 static int TestTunnelRegistryAbortsOnlyMatchingConnection() {
@@ -932,6 +977,7 @@ int main() {
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
     if (int rc = TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort()) return rc;
+    if (int rc = TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;
