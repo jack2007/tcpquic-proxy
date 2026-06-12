@@ -110,7 +110,7 @@ bool TqByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t
     const uint64_t high = std::max(localBytes, serverBytes);
     const uint64_t low = std::min(localBytes, serverBytes);
     diffOut = high - low;
-    limitOut = std::max<uint64_t>(16ull * 1024ull * 1024ull, high / 100ull);
+    limitOut = std::min<uint64_t>(16ull * 1024ull * 1024ull, high / 100ull);
     return diffOut <= limitOut;
 }
 
@@ -322,13 +322,14 @@ void TqRunDownloadWorker(
     std::array<uint8_t, 64 * 1024> buffer{};
     uint64_t payloadState = 0x4d595df4d0f33173ULL;
     TqFillSpeedPayload(buffer.data(), buffer.size(), payloadState);
+    const auto deadline = TqClock::now() + std::chrono::seconds(session->Start.DurationSec);
     TqSocketHandle socket = TqInvalidSocket;
     {
         std::lock_guard<std::mutex> lock(connection->Mutex);
         socket = connection->Socket;
     }
 
-    while (!session->Stopping.load(std::memory_order_relaxed)) {
+    while (!session->Stopping.load(std::memory_order_relaxed) && TqClock::now() < deadline) {
         const int rc = TqSend(socket, buffer.data(), buffer.size(), TqSendFlags::NoSignal);
         if (rc > 0) {
             session->ServerBytes.fetch_add(static_cast<uint64_t>(rc), std::memory_order_relaxed);
@@ -1200,6 +1201,11 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     if (start.Direction == TqSpeedDirection::Upload) {
         stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
+            if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
+                (void)TqShutdownBoth(worker.Socket);
+            }
+        }
+        for (auto& worker : workers) {
             if (worker.Thread.joinable()) {
                 worker.Thread.join();
             }
@@ -1210,33 +1216,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             goto cleanup;
         }
     } else {
-        finishClientBytes = countWorkerBytes();
-    }
-
-    finish.SessionId = start.SessionId;
-    finish.ClientBytes = finishClientBytes;
-    finish.ClientElapsedUs = localElapsedUs;
-    if (!control.SendFinish(finish)) {
-        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
-        goto cleanup;
-    }
-
-    stop.store(true, std::memory_order_relaxed);
-    if (start.Direction == TqSpeedDirection::Download) {
-        const auto drainDeadline = TqClock::now() + std::chrono::seconds(3);
-        while (TqClock::now() < drainDeadline) {
-            bool allDone = true;
-            for (const auto& worker : workers) {
-                if (!worker.Done.load(std::memory_order_acquire)) {
-                    allDone = false;
-                    break;
-                }
-            }
-            if (allDone) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+        stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
                 (void)TqShutdownBoth(worker.Socket);
@@ -1252,6 +1232,14 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             goto cleanup;
         }
         finishClientBytes = countWorkerBytes();
+    }
+
+    finish.SessionId = start.SessionId;
+    finish.ClientBytes = finishClientBytes;
+    finish.ClientElapsedUs = localElapsedUs;
+    if (!control.SendFinish(finish)) {
+        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
+        goto cleanup;
     }
 
     if (!control.WaitForResult(std::chrono::seconds(15), result)) {
@@ -1312,11 +1300,13 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
                 ok = false;
             } else if (!TqByteCountsCloseEnough(localBytes, result.ServerBytes, diffBytes, limitBytes)) {
                 std::fprintf(stderr,
-                    "tcpquic-proxy: download server generated more bytes than client drained "
-                    "(local=%llu server=%llu diff=%llu); throughput uses local bytes\n",
+                    "tcpquic-proxy: download local/server byte mismatch exceeds limit "
+                    "(local=%llu server=%llu diff=%llu limit=%llu); throughput uses local bytes\n",
                     static_cast<unsigned long long>(localBytes),
                     static_cast<unsigned long long>(result.ServerBytes),
-                    static_cast<unsigned long long>(diffBytes));
+                    static_cast<unsigned long long>(diffBytes),
+                    static_cast<unsigned long long>(limitBytes));
+                ok = false;
             }
         }
     }

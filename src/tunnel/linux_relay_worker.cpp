@@ -704,7 +704,10 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
     RelayState* relay,
     std::vector<TqBufferView>& views,
     QUIC_SEND_FLAGS flags) {
-    if (relay == nullptr || views.empty()) {
+    if (relay == nullptr) {
+        return false;
+    }
+    if (views.empty()) {
         if (!relay->EnableQuicSends) {
             return true;
         }

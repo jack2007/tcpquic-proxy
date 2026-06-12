@@ -344,6 +344,21 @@ endif()
 target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(WIN32)
+    add_custom_target(tcpquic_tcp_tunnel_test ALL
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:tcpquic_tunnel_test>
+            $<TARGET_FILE_DIR:tcpquic_tunnel_test>/tcpquic_tcp_tunnel_test$<TARGET_FILE_SUFFIX:tcpquic_tunnel_test>
+        DEPENDS tcpquic_tunnel_test)
+else()
+    add_custom_target(tcpquic_tcp_tunnel_test ALL
+        COMMAND ${CMAKE_COMMAND} -E create_symlink
+            $<TARGET_FILE_NAME:tcpquic_tunnel_test>
+            $<TARGET_FILE_DIR:tcpquic_tunnel_test>/tcpquic_tcp_tunnel_test
+        DEPENDS tcpquic_tunnel_test
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:tcpquic_tunnel_test>")
+endif()
+set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
 set(TCPQUIC_POSIX_TEST_TARGETS)
 if(NOT WIN32)

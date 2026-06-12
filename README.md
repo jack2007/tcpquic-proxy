@@ -171,6 +171,45 @@ done
 
 覆盖 happy path、ACL/DNS/refused 负路径、zstd/lz4 端到端、`--quic-connections 4` 连接池。
 
+### 内置吞吐测试
+
+内置 speed test 通过已认证的 QUIC 控制流在 server 侧临时启动 loopback TCP 测试端口，
+client 再用正常 TCP-over-QUIC tunnel 连接该端口，因此不需要额外 curl、iperf 或 HTTP server。
+
+```bash
+# server
+./build/bin/Release/tcpquic-proxy server \
+  --quic-listen 127.0.0.1:14443 \
+  --quic-cert cert/server/server.crt \
+  --quic-key cert/server/server.key \
+  --quic-ca cert/ca.crt \
+  --allow-targets 10.0.0.0/8
+
+# client download / upload
+./build/bin/Release/tcpquic-proxy client \
+  --quic-peer 127.0.0.1:14443 \
+  --quic-cert cert/client/client.crt \
+  --quic-key cert/client/client.key \
+  --quic-ca cert/ca.crt \
+  --quic-connections 1 \
+  --compress off \
+  --download-test 10
+
+./build/bin/Release/tcpquic-proxy client \
+  --quic-peer 127.0.0.1:14443 \
+  --quic-cert cert/client/client.crt \
+  --quic-key cert/client/client.key \
+  --quic-ca cert/ca.crt \
+  --quic-connections 1 \
+  --compress off \
+  --upload-test 10
+```
+
+输出中的 upload 吞吐以 server bytes 为主，download 吞吐以 client local bytes 为主。
+speed test 的默认 `--compress auto` 会在测试 tunnel 内按 `off` 处理；如需验证压缩路径，
+显式传入 `--compress lz4` 或 `--compress zstd`。详细说明和 caveat 见
+[`docs/built-in-speed-test-20260612.md`](docs/built-in-speed-test-20260612.md)。
+
 ### 并发隧道压测
 
 ```bash
@@ -267,6 +306,8 @@ Usage: tcpquic-proxy client|server [options]
 | `--quic-ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
 | `--quic-connections` | client | `1` | QUIC 连接池大小（最大 128） |
 | `--quic-reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
+| `--download-test` | client | 空 | 内置端到端 download 吞吐测试秒数 |
+| `--upload-test` | client | 空 | 内置端到端 upload 吞吐测试秒数 |
 | `--compress` | 双方 | `auto` | `auto` / `zstd` / `lz4` / `off` |
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
 | `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
@@ -275,6 +316,7 @@ Usage: tcpquic-proxy client|server [options]
 
 - Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
 - Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--quic-connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
+- `--download-test` 和 `--upload-test` 只允许 client 单 peer 模式使用，不能与 `--warmup-mb` 或 router `--client-config` 同时使用。
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
 
@@ -420,6 +462,7 @@ src/
 |------|------|
 | [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](docs/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
 | [`docs/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md`](docs/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md) | 独立仓库重构设计 |
+| [`docs/built-in-speed-test-20260612.md`](docs/built-in-speed-test-20260612.md) | 内置 speed test 用法与结果解读 |
 | [`docs/plans/2026-06-06-tcpquic-proxy.md`](docs/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
 | [`docs/plans/2026-06-06-tcpquic-thread-model.md`](docs/plans/2026-06-06-tcpquic-thread-model.md) | 线程模型 |
 | [`docs/plans/2026-06-06-tcpquic-adaptive-tuning.md`](docs/plans/2026-06-06-tcpquic-adaptive-tuning.md) | 自适应调参 |

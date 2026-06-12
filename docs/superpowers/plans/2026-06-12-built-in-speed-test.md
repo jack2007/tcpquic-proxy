@@ -39,7 +39,7 @@
 - Modify: `src/config/config.cpp`
 - Modify: `src/unittest/tuning_test.cpp`
 
-- [ ] **Step 1: Add failing config tests**
+- [x] **Step 1: Add failing config tests**
 
 Add cases to `src/unittest/tuning_test.cpp`:
 
@@ -88,13 +88,13 @@ Add cases to `src/unittest/tuning_test.cpp`:
 
 Also add negative cases for both flags together, zero seconds, server mode, `--client-config`, and `--warmup-mb`.
 
-- [ ] **Step 2: Run test and verify it fails**
+- [x] **Step 2: Run test and verify it fails**
 
 Run: `rtk cmake --build build --target tcpquic_tuning_test -j2 && rtk ./build/bin/Release/tcpquic_tuning_test`
 
 Expected: compile fails because `TqSpeedTestMode` / `SpeedTestDurationSec` do not exist.
 
-- [ ] **Step 3: Implement config fields and parsing**
+- [x] **Step 3: Implement config fields and parsing**
 
 Add to `src/config/config.h`:
 
@@ -122,13 +122,13 @@ In `TqPrintUsage()`, add:
 
 In `TqParseArgs()`, parse both flags as `uint32_t` in range `1..86400`, reject both being set, reject server mode, reject `--client-config`, and reject `WarmupMb > 0`.
 
-- [ ] **Step 4: Run test and verify it passes**
+- [x] **Step 4: Run test and verify it passes**
 
 Run: `rtk cmake --build build --target tcpquic_tuning_test -j2 && rtk ./build/bin/Release/tcpquic_tuning_test`
 
 Expected: exit code 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add src/config/config.h src/config/config.cpp src/unittest/tuning_test.cpp
@@ -144,7 +144,7 @@ rtk git commit -m "feat: add speed test cli options"
 - Modify: `src/protocol/control_protocol.cpp`
 - Modify: `src/unittest/control_protocol_test.cpp`
 
-- [ ] **Step 1: Add failing protocol tests**
+- [x] **Step 1: Add failing protocol tests**
 
 Extend `src/unittest/control_protocol_test.cpp` with round-trip tests for:
 
@@ -190,13 +190,13 @@ error.Message = "bad speed request";
 
 Also test invalid direction, `duration_sec == 0`, `parallel == 0`, non-zero flags, and READY IPv4 with `addr_len != 4`.
 
-- [ ] **Step 2: Run test and verify it fails**
+- [x] **Step 2: Run test and verify it fails**
 
 Run: `rtk cmake --build build --target tcpquic_control_test -j2 && rtk ./build/bin/Release/tcpquic_control_test`
 
 Expected: compile fails because speed protocol symbols do not exist.
 
-- [ ] **Step 3: Implement protocol structs and helpers**
+- [x] **Step 3: Implement protocol structs and helpers**
 
 Add command constants:
 
@@ -225,13 +225,13 @@ bool TqDecodeSpeedError(const uint8_t* data, size_t len, TqSpeedErrorMessage& ou
 
 Keep all integers big-endian, cap error message length at 1024 bytes, and require exact input lengths on decode.
 
-- [ ] **Step 4: Run test and verify it passes**
+- [x] **Step 4: Run test and verify it passes**
 
 Run: `rtk cmake --build build --target tcpquic_control_test -j2 && rtk ./build/bin/Release/tcpquic_control_test`
 
 Expected: exit code 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add src/protocol/control_protocol.h src/protocol/control_protocol.cpp src/unittest/control_protocol_test.cpp
@@ -248,7 +248,7 @@ rtk git commit -m "feat: add speed test control protocol"
 - Create: `src/unittest/speed_test_test.cpp`
 - Modify: `src/CMakeLists.txt`
 
-- [ ] **Step 1: Add failing runtime unit test**
+- [x] **Step 1: Add failing runtime unit test**
 
 Create `src/unittest/speed_test_test.cpp` with tests for:
 
@@ -272,13 +272,13 @@ assert(!controller.IsAllowedEphemeralTarget("127.0.0.1", ready.Port));
 
 Add a second test that connects a local TCP client to `ready.Port`, sends 1 MiB in upload mode, finishes the session, and asserts `result.ServerBytes == 1024 * 1024`.
 
-- [ ] **Step 2: Run test and verify it fails**
+- [x] **Step 2: Run test and verify it fails**
 
 Run: `rtk cmake --build build --target tcpquic_speed_test_test -j2`
 
 Expected: target or headers do not exist.
 
-- [ ] **Step 3: Implement server controller**
+- [x] **Step 3: Implement server controller**
 
 In `speed_test.h`, expose:
 
@@ -301,7 +301,7 @@ public:
 
 In `speed_test.cpp`, implement an IPv4 loopback listener using POSIX/Windows socket APIs guarded by `#if defined(_WIN32)`. Use blocking accept and one worker thread per accepted TCP connection. Upload workers `recv()` and count bytes; download workers `send()` a reusable 64 KiB buffer and count bytes. `FinishSession()` stops the listener, shuts down accepted sockets, joins session threads, fills `TqSpeedResult`, and removes the ephemeral target.
 
-- [ ] **Step 4: Add CMake target**
+- [x] **Step 4: Add CMake target**
 
 Add `runtime/speed_test.cpp` to `TCPQUIC_PROXY_SOURCES`, and add:
 
@@ -318,13 +318,13 @@ set_property(TARGET tcpquic_speed_test_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_speed_test_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 ```
 
-- [ ] **Step 5: Run test and verify it passes**
+- [x] **Step 5: Run test and verify it passes**
 
 Run: `rtk cmake --build build --target tcpquic_speed_test_test -j2 && rtk ./build/bin/Release/tcpquic_speed_test_test`
 
 Expected: exit code 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add src/runtime/speed_test.h src/runtime/speed_test.cpp src/unittest/speed_test_test.cpp src/CMakeLists.txt
@@ -340,17 +340,17 @@ rtk git commit -m "feat: add speed test runtime"
 - Modify: `src/tunnel/tcp_tunnel.cpp`
 - Modify: `src/unittest/tcp_tunnel_test.cpp`
 
-- [ ] **Step 1: Add failing dispatcher tests**
+- [x] **Step 1: Add failing dispatcher tests**
 
 Extend `src/unittest/tcp_tunnel_test.cpp` with a fake stream callback test that sends an encoded OPEN request into the new incoming dispatcher and verifies the existing ACL/open path still runs. Add an ephemeral target test where normal ACL denies `127.0.0.1`, but a fake `TqEphemeralTargetAuthorizer` allows the exact port and the OPEN is not counted as ACL denied.
 
-- [ ] **Step 2: Run test and verify it fails**
+- [x] **Step 2: Run test and verify it fails**
 
 Run: `rtk cmake --build build --target tcpquic_tcp_tunnel_test -j2 && rtk ./build/bin/Release/tcpquic_tcp_tunnel_test`
 
 Expected: compile fails because `TqHandleServerIncomingStream()` does not exist.
 
-- [ ] **Step 3: Implement dispatcher and initial-byte handoff**
+- [x] **Step 3: Implement dispatcher and initial-byte handoff**
 
 Replace public server stream entry with:
 
@@ -388,13 +388,13 @@ if (EphemeralAuthorizer != nullptr &&
 
 Only exact IPv4/IPv6 loopback literals may use this bypass.
 
-- [ ] **Step 4: Run test and verify it passes**
+- [x] **Step 4: Run test and verify it passes**
 
 Run: `rtk cmake --build build --target tcpquic_tcp_tunnel_test -j2 && rtk ./build/bin/Release/tcpquic_tcp_tunnel_test`
 
 Expected: exit code 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add src/tunnel/tcp_tunnel.h src/tunnel/tcp_tunnel.cpp src/unittest/tcp_tunnel_test.cpp
@@ -411,7 +411,7 @@ rtk git commit -m "feat: dispatch server control streams"
 - Modify: `src/main.cpp`
 - Modify: `src/CMakeLists.txt`
 
-- [ ] **Step 1: Add client runner API**
+- [x] **Step 1: Add client runner API**
 
 Expose:
 
@@ -420,7 +420,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg);
 void TqHandleServerSpeedControlStream(TqServerSpeedTestController& controller, MsQuicConnection* conn, HQUIC rawStream);
 ```
 
-- [ ] **Step 2: Implement client control stream**
+- [x] **Step 2: Implement client control stream**
 
 `TqRunClientSpeedTest()` should:
 
@@ -430,7 +430,8 @@ void TqHandleServerSpeedControlStream(TqServerSpeedTestController& controller, M
 4. Send `SPEED_START`.
 5. Wait for `SPEED_READY`.
 6. Create `cfg.QuicConnections` socket pairs.
-7. For each pair, call `TqStartClientTunnel(quic.PickConnection(), req, tunnelFd, cfg)`.
+7. For each pair, call `TqStartClientTunnel(quic.PickConnection(), req, tunnelFd, tunnelCfg)`.
+   `tunnelCfg` is copied from `cfg`; when `cfg.Compress == "auto"`, speed-test data tunnels use `off` so default smoke tests measure IO throughput instead of auto-compression bootstrap behavior. Explicit `--compress lz4`, `--compress zstd`, and `--compress off` are preserved.
 8. Run upload/download pump workers on the other socket.
 9. Send `SPEED_FINISH`.
 10. Wait for `SPEED_RESULT`.
@@ -438,7 +439,7 @@ void TqHandleServerSpeedControlStream(TqServerSpeedTestController& controller, M
 
 Use server bytes as the primary upload result; warn and return false when local/server bytes differ by more than 1% or 16 MiB.
 
-- [ ] **Step 3: Wire main**
+- [x] **Step 3: Wire main**
 
 In `RunSinglePeerClient()`, after QUIC startup and before opening SOCKS/HTTP listeners:
 
@@ -458,13 +459,13 @@ auto speed = std::make_shared<TqServerSpeedTestController>();
 
 Pass `speed.get()` into `TqHandleServerIncomingStream()`. Ensure `speed->StopAll()` runs before server exit.
 
-- [ ] **Step 4: Build**
+- [x] **Step 4: Build**
 
 Run: `rtk cmake --build build --target tcpquic-proxy tcpquic_speed_test_test tcpquic_tcp_tunnel_test tcpquic_control_test tcpquic_tuning_test -j2`
 
 Expected: all targets build successfully.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run:
 
@@ -477,7 +478,7 @@ rtk ./build/bin/Release/tcpquic_tuning_test
 
 Expected: all exit code 0.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 rtk git add src/runtime/speed_test.h src/runtime/speed_test.cpp src/main.cpp src/CMakeLists.txt
@@ -492,19 +493,20 @@ rtk git commit -m "feat: wire built-in speed test mode"
 - Modify: `README.md`
 - Create: `docs/built-in-speed-test-20260612.md`
 
-- [ ] **Step 1: Update README**
+- [x] **Step 1: Update README**
 
 Add examples:
 
 ```bash
 tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 1 --compress off --download-test 10
 tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 1 --compress off --upload-test 10
-tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 4 --compress lz4 --download-test 10
+tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 4 --compress off --download-test 10
 ```
 
 Document that upload throughput should be read from server bytes, not only local write bytes.
+Document that speed-test `--compress auto` is treated as `off` for the data tunnels, and that explicit lz4/zstd speed tests are compression-path diagnostics rather than the recommended IO baseline.
 
-- [ ] **Step 2: Run local end-to-end smoke test**
+- [x] **Step 2: Run local end-to-end smoke test**
 
 Run a local server/client pair with test certs used by the existing integration workflow:
 
@@ -529,7 +531,9 @@ rtk ./build/bin/Release/tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic
 
 Expected: upload reports server bytes close to local bytes, download reports local/server bytes close, and throughput is within the same order as the current external scripts.
 
-- [ ] **Step 4: Final verification**
+Status: not run in this session because `DGX_QUIC_PEER` is not set in the local environment.
+
+- [x] **Step 4: Final verification**
 
 Run:
 
@@ -544,7 +548,7 @@ rtk git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add README.md docs/built-in-speed-test-20260612.md
