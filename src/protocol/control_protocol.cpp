@@ -390,7 +390,7 @@ bool TqDecodeSpeedResult(const uint8_t* data, size_t len, TqSpeedResult& out) {
     return true;
 }
 
-bool TqEncodeSpeedErrorMessage(const TqSpeedErrorMessage& msg, std::vector<uint8_t>& out) {
+bool TqEncodeSpeedError(const TqSpeedErrorMessage& msg, std::vector<uint8_t>& out) {
     if (!ValidateSpeedError(msg)) {
         return false;
     }
@@ -410,7 +410,7 @@ bool TqEncodeSpeedErrorMessage(const TqSpeedErrorMessage& msg, std::vector<uint8
     return out.size() == TQ_SPEED_ERROR_MIN_SIZE + msg.Message.size();
 }
 
-bool TqDecodeSpeedErrorMessage(const uint8_t* data, size_t len, TqSpeedErrorMessage& out) {
+bool TqDecodeSpeedError(const uint8_t* data, size_t len, TqSpeedErrorMessage& out) {
     if (data == nullptr || len < TQ_SPEED_ERROR_MIN_SIZE) {
         return false;
     }

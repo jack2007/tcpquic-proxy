@@ -118,5 +118,5 @@ bool TqEncodeSpeedFinish(const TqSpeedFinish& msg, std::vector<uint8_t>& out);
 bool TqDecodeSpeedFinish(const uint8_t* data, size_t len, TqSpeedFinish& out);
 bool TqEncodeSpeedResult(const TqSpeedResult& msg, std::vector<uint8_t>& out);
 bool TqDecodeSpeedResult(const uint8_t* data, size_t len, TqSpeedResult& out);
-bool TqEncodeSpeedErrorMessage(const TqSpeedErrorMessage& msg, std::vector<uint8_t>& out);
-bool TqDecodeSpeedErrorMessage(const uint8_t* data, size_t len, TqSpeedErrorMessage& out);
+bool TqEncodeSpeedError(const TqSpeedErrorMessage& msg, std::vector<uint8_t>& out);
+bool TqDecodeSpeedError(const uint8_t* data, size_t len, TqSpeedErrorMessage& out);

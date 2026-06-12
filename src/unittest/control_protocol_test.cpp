@@ -165,12 +165,12 @@ int main() {
     error.SessionId = 7;
     error.Error = TqSpeedError::InvalidRequest;
     error.Message = "bad speed request";
-    if (!TqEncodeSpeedErrorMessage(error, buf)) {
+    if (!TqEncodeSpeedError(error, buf)) {
         return 1;
     }
 
     TqSpeedErrorMessage errorDecoded{};
-    if (!TqDecodeSpeedErrorMessage(buf.data(), buf.size(), errorDecoded)) {
+    if (!TqDecodeSpeedError(buf.data(), buf.size(), errorDecoded)) {
         return 1;
     }
     if (errorDecoded.SessionId != 7 ||
@@ -181,16 +181,16 @@ int main() {
 
     std::vector<uint8_t> errorMut = buf;
     errorMut[8] = 0x7f;
-    if (TqDecodeSpeedErrorMessage(errorMut.data(), errorMut.size(), errorDecoded)) {
+    if (TqDecodeSpeedError(errorMut.data(), errorMut.size(), errorDecoded)) {
         return 1;
     }
     errorMut = buf;
     errorMut[9] = 0x04;
     errorMut[10] = 0x01;
-    if (TqDecodeSpeedErrorMessage(errorMut.data(), errorMut.size(), errorDecoded)) {
+    if (TqDecodeSpeedError(errorMut.data(), errorMut.size(), errorDecoded)) {
         return 1;
     }
-    if (TqDecodeSpeedErrorMessage(buf.data(), buf.size() - 1, errorDecoded)) {
+    if (TqDecodeSpeedError(buf.data(), buf.size() - 1, errorDecoded)) {
         return 1;
     }
 
