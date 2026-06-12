@@ -438,6 +438,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
     tcpquic_control_test
+    tcpquic_speed_test_test
     tcpquic_acl_test
     tcpquic_config_router_test
     tcpquic_compress_test

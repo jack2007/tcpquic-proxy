@@ -3,8 +3,11 @@
 #include "platform_socket.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -167,6 +170,54 @@ int TestDownloadPath() {
     return 0;
 }
 
+int TestUploadFinishWithOpenClient() {
+    TqServerSpeedTestController controller;
+    TqSpeedStart start{};
+    start.SessionId = 4;
+    start.Direction = TqSpeedDirection::Upload;
+    start.DurationSec = 2;
+    start.Parallel = 1;
+
+    TqSpeedReady ready{};
+    if (!controller.StartSession(start, ready)) {
+        return 30;
+    }
+
+    TqSocketHandle client = TqInvalidSocket;
+    if (!ConnectLoopback(ready.Port, client)) {
+        controller.StopAll();
+        return 31;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    auto finishFuture = std::async(std::launch::async, [&controller]() {
+        TqSpeedResult result{};
+        if (!controller.FinishSession(4, 0, 0, result)) {
+            return 34;
+        }
+        if (result.AcceptedConnections != 1) {
+            return 35;
+        }
+        if (result.ClosedConnections != 1) {
+            return 36;
+        }
+        return 0;
+    });
+
+    if (finishFuture.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+        TqCloseSocket(client);
+        return 32;
+    }
+
+    TqCloseSocket(client);
+    const int finishRc = finishFuture.get();
+    if (finishRc != 0) {
+        return finishRc;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -181,6 +232,9 @@ int main() {
         return rc;
     }
     if (const int rc = TestDownloadPath(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestUploadFinishWithOpenClient(); rc != 0) {
         return rc;
     }
     return 0;

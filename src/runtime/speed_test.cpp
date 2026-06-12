@@ -72,6 +72,14 @@ struct TqSpeedSession {
     explicit TqSpeedSession(const TqSpeedStart& startIn)
         : Start(startIn), StartedAt(TqClock::now()) {}
 
+    struct Connection {
+        explicit Connection(TqSocketHandle socketIn) : Socket(socketIn) {}
+
+        std::mutex Mutex;
+        TqSocketHandle Socket{TqInvalidSocket};
+        std::thread Worker;
+    };
+
     TqSpeedStart Start;
     uint16_t Port{0};
     TqSocketHandle Listener{TqInvalidSocket};
@@ -82,12 +90,34 @@ struct TqSpeedSession {
     TqClock::time_point StartedAt;
     std::thread AcceptThread;
     std::mutex Mutex;
-    std::vector<TqSocketHandle> AcceptedSockets;
-    std::vector<std::thread> WorkerThreads;
+    std::vector<std::shared_ptr<Connection>> Connections;
 };
 
-void TqRunUploadWorker(const std::shared_ptr<TqSpeedSession>& session, TqSocketHandle socket) {
+void TqCloseConnectionSocket(
+    const std::shared_ptr<TqSpeedSession>& session,
+    const std::shared_ptr<TqSpeedSession::Connection>& connection) {
+    TqSocketHandle socket = TqInvalidSocket;
+    {
+        std::lock_guard<std::mutex> lock(connection->Mutex);
+        socket = connection->Socket;
+        connection->Socket = TqInvalidSocket;
+    }
+    if (TqSocketValid(socket)) {
+        TqCloseSocket(socket);
+    }
+    session->ClosedConnections.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TqRunUploadWorker(
+    const std::shared_ptr<TqSpeedSession>& session,
+    const std::shared_ptr<TqSpeedSession::Connection>& connection) {
     std::array<uint8_t, 64 * 1024> buffer{};
+    TqSocketHandle socket = TqInvalidSocket;
+    {
+        std::lock_guard<std::mutex> lock(connection->Mutex);
+        socket = connection->Socket;
+    }
+
     for (;;) {
         const int rc = TqRecv(socket, buffer.data(), buffer.size(), TqRecvFlags::None);
         if (rc > 0) {
@@ -104,13 +134,19 @@ void TqRunUploadWorker(const std::shared_ptr<TqSpeedSession>& session, TqSocketH
         break;
     }
 
-    TqCloseSocket(socket);
-    session->ClosedConnections.fetch_add(1, std::memory_order_relaxed);
+    TqCloseConnectionSocket(session, connection);
 }
 
-void TqRunDownloadWorker(const std::shared_ptr<TqSpeedSession>& session, TqSocketHandle socket) {
+void TqRunDownloadWorker(
+    const std::shared_ptr<TqSpeedSession>& session,
+    const std::shared_ptr<TqSpeedSession::Connection>& connection) {
     std::array<uint8_t, 64 * 1024> buffer{};
     buffer.fill(0x53);
+    TqSocketHandle socket = TqInvalidSocket;
+    {
+        std::lock_guard<std::mutex> lock(connection->Mutex);
+        socket = connection->Socket;
+    }
 
     while (!session->Stopping.load(std::memory_order_relaxed)) {
         const int rc = TqSend(socket, buffer.data(), buffer.size(), TqSendFlags::NoSignal);
@@ -128,8 +164,7 @@ void TqRunDownloadWorker(const std::shared_ptr<TqSpeedSession>& session, TqSocke
         break;
     }
 
-    TqCloseSocket(socket);
-    session->ClosedConnections.fetch_add(1, std::memory_order_relaxed);
+    TqCloseConnectionSocket(session, connection);
 }
 
 void TqRunAcceptLoop(const std::shared_ptr<TqSpeedSession>& session) {
@@ -146,14 +181,21 @@ void TqRunAcceptLoop(const std::shared_ptr<TqSpeedSession>& session) {
         }
 
         session->AcceptedConnections.fetch_add(1, std::memory_order_relaxed);
+        std::shared_ptr<TqSpeedSession::Connection> connection =
+            std::make_shared<TqSpeedSession::Connection>(accepted);
         {
             std::lock_guard<std::mutex> lock(session->Mutex);
-            session->AcceptedSockets.push_back(accepted);
+            session->Connections.push_back(connection);
+        }
+        try {
             if (session->Start.Direction == TqSpeedDirection::Upload) {
-                session->WorkerThreads.emplace_back(TqRunUploadWorker, session, accepted);
+                connection->Worker = std::thread(TqRunUploadWorker, session, connection);
             } else {
-                session->WorkerThreads.emplace_back(TqRunDownloadWorker, session, accepted);
+                connection->Worker = std::thread(TqRunDownloadWorker, session, connection);
             }
+        } catch (...) {
+            TqCloseConnectionSocket(session, connection);
+            break;
         }
     }
 }
@@ -172,29 +214,33 @@ void TqStopSession(const std::shared_ptr<TqSpeedSession>& session) {
         }
     }
 
-    std::vector<TqSocketHandle> acceptedSockets;
-    {
-        std::lock_guard<std::mutex> lock(session->Mutex);
-        acceptedSockets = session->AcceptedSockets;
-    }
-    for (TqSocketHandle accepted : acceptedSockets) {
-        (void)TqShutdownBoth(accepted);
-    }
-
     if (session->AcceptThread.joinable()) {
         session->AcceptThread.join();
     }
 
-    std::vector<std::thread> workerThreads;
+    std::vector<std::shared_ptr<TqSpeedSession::Connection>> connections;
     {
         std::lock_guard<std::mutex> lock(session->Mutex);
-        workerThreads.swap(session->WorkerThreads);
-        session->AcceptedSockets.clear();
+        connections = session->Connections;
     }
-    for (std::thread& worker : workerThreads) {
-        if (worker.joinable()) {
-            worker.join();
+    for (const auto& connection : connections) {
+        TqSocketHandle socket = TqInvalidSocket;
+        {
+            std::lock_guard<std::mutex> lock(connection->Mutex);
+            socket = connection->Socket;
         }
+        if (TqSocketValid(socket)) {
+            (void)TqShutdownBoth(socket);
+        }
+    }
+    for (const auto& connection : connections) {
+        if (connection->Worker.joinable()) {
+            connection->Worker.join();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(session->Mutex);
+        session->Connections.clear();
     }
 }
 
