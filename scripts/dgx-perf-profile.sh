@@ -4,6 +4,7 @@
 # 用法:
 #   ./scripts/dgx-perf-profile.sh
 #   DURATION_SEC=25 CASE=proxy-1x1 ./scripts/dgx-perf-profile.sh
+#   CASE=proxy-4x16 ./scripts/dgx-perf-profile.sh
 #   CASE=secnetperf-1conn ./scripts/dgx-perf-profile.sh   # msquic 基线对照
 #
 # 输出:
@@ -32,7 +33,9 @@ QUIC_PORT="${QUIC_PORT:-4433}"
 PERF_PORT="${PERF_PORT:-4434}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 DURATION_SEC="${DURATION_SEC:-25}"
-CASE="${CASE:-proxy-1x1}"   # proxy-1x1 | secnetperf-1conn
+CASE="${CASE:-proxy-1x1}"   # proxy-1x1 | proxy-4x16 | secnetperf-1conn
+QUIC_CONNS="${QUIC_CONNS:-1}"
+CURL_PARALLEL="${CURL_PARALLEL:-1}"
 FREQ="${FREQ:-999}"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${OUT_DIR:-${ROOT}/docs/dgx-perf-profile-${TS}}"
@@ -102,16 +105,17 @@ generate_certs() {
 }
 
 proxy_args() {
+    local quic_conns="${1:-${QUIC_CONNS}}"
     printf '%s' \
         "--tuning custom --quic-fcw 1073741824 --quic-srw 1073741824 --quic-iw 4000 \
         --quic-initrtt-ms 1 --relay-io-size 1048576 --relay-inflight-bytes 1073741824 \
-        --max-memory-mb 4096 --quic-connections 1 --compress off"
+        --max-memory-mb 4096 --quic-connections ${quic_conns} --compress off"
 }
 
 start_proxy_stack() {
     remote_kill_all
     local args
-    args=$(proxy_args)
+    args=$(proxy_args "${QUIC_CONNS}")
     ssh -o BatchMode=yes "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
         --quic-listen ${TARGET}:${QUIC_PORT} \
         --allow-targets ${TARGET}/32,127.0.0.0/8 \
@@ -212,10 +216,14 @@ run_proxy_perf() {
     (
         end=$((SECONDS + DURATION_SEC))
         while [ "$SECONDS" -lt "$end" ]; do
-            curl -fsS --interface "$BIND" \
-                -x "http://127.0.0.1:${PROXY_PORT}" --proxytunnel \
-                "http://${TARGET}:${HTTP_PORT}/tcpquic-dgx-payload.bin" \
-                -o /dev/null --max-time 120 2>/dev/null || true
+            local i
+            for i in $(seq 1 "${CURL_PARALLEL}"); do
+                curl -fsS --interface "$BIND" \
+                    -x "http://127.0.0.1:${PROXY_PORT}" --proxytunnel \
+                    "http://${TARGET}:${HTTP_PORT}/tcpquic-dgx-payload.bin" \
+                    -o /dev/null --max-time 120 2>/dev/null &
+            done
+            wait || true
         done
     ) &
     local curl_pid=$!
@@ -253,8 +261,17 @@ write_summary() {
         echo ""
         echo "- 时间: $(date -Iseconds)"
         echo "- 场景: ${CASE} (${mode})"
+        echo "- QUIC 连接: ${QUIC_CONNS} | 并行 curl: ${CURL_PARALLEL}"
         echo "- 采样: ${DURATION_SEC}s @ ${FREQ}Hz, call-graph dwarf"
         echo "- 本机: ${BIND} | 对端: ${TARGET}"
+        if [[ -f "${OUT_DIR}/sysctl.txt" ]]; then
+            echo ""
+            echo "## 内核 socket 参数"
+            echo '```'
+            cat "${OUT_DIR}/sysctl.txt"
+            echo '```'
+            echo ""
+        fi
         echo ""
         if [[ -f "${OUT_DIR}/throughput.txt" ]]; then
             echo "## 吞吐"
@@ -299,11 +316,22 @@ ensure_payload
 
 case "$CASE" in
     proxy-1x1)
+        QUIC_CONNS=1
+        CURL_PARALLEL=1
         generate_certs
         run_proxy_perf
         perf_top_report "${OUT_DIR}/client.perf.data" "${OUT_DIR}/client.top.txt" tcpquic-proxy
         perf_top_report "${OUT_DIR}/server.perf.data" "${OUT_DIR}/server.top.txt" tcpquic-proxy
         write_summary "tcpquic-proxy 单 QUIC + 单 curl"
+        ;;
+    proxy-4x16)
+        QUIC_CONNS=16
+        CURL_PARALLEL=4
+        generate_certs
+        run_proxy_perf
+        perf_top_report "${OUT_DIR}/client.perf.data" "${OUT_DIR}/client.top.txt" tcpquic-proxy
+        perf_top_report "${OUT_DIR}/server.perf.data" "${OUT_DIR}/server.top.txt" tcpquic-proxy
+        write_summary "tcpquic-proxy quic=16 + 4 并行 curl"
         ;;
     secnetperf-1conn)
         [[ -x "$SECNETPERF" ]] || { log "missing $SECNETPERF"; exit 1; }

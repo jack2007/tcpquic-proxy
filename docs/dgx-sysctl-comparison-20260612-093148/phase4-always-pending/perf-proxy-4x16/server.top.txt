@@ -1,0 +1,150 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 72K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 113397771326
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ............  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    23.47%         10274  [.] aes_gcm_enc_256_kernel                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---armv8_aes_gcm_encrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+    10.21%          4471  [.] CxPlatHashtableEnumerateNext                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---QuicStreamSetGetFlowControlSummary
+               |          
+                --10.18%--BbrCongestionControlUpdateBlockedState
+                          |          
+                           --10.12%--QuicLossDetectionOnPacketSent
+                                     QuicPacketBuilderFinalize
+                                     QuicSendFlush
+                                     QuicConnDrainOperations
+                                     QuicWorkerProcessConnection
+                                     QuicWorkerLoop
+                                     QuicWorkerThread
+                                     start_thread
+                                     thread_start
+
+     2.24%           993  [k] __arch_copy_from_user                                                                                                                                                                                                                                                                                                                                                                                        -      -            
+            |          
+             --2.16%--ip_generic_getfrag
+                       __ip_append_data
+                       ip_make_skb
+                       udp_sendmsg
+                       udpv6_sendmsg
+                       inet6_sendmsg
+                       __sock_sendmsg
+                       ____sys_sendmsg
+                       ___sys_sendmsg
+                       __sys_sendmsg
+                       __arm64_sys_sendmsg
+                       invoke_syscall
+                       el0_svc_common.constprop.0
+                       do_el0_svc
+                       el0_svc
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       __libc_sendmsg
+                       __libc_sendmsg
+                       CxPlatSendDataSendSegmented
+                       CxPlatSendDataSend
+                       SocketSend
+                       QuicBindingSend
+                       QuicPacketBuilderSendBatch
+                       QuicPacketBuilderFinalize
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     2.02%           896  [.] QuicStreamSetGetFlowControlSummary                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |          
+             --2.01%--BbrCongestionControlUpdateBlockedState
+                       |          
+                        --1.97%--QuicLossDetectionOnPacketSent
+                                  QuicPacketBuilderFinalize
+                                  QuicSendFlush
+                                  QuicConnDrainOperations
+                                  QuicWorkerProcessConnection
+                                  QuicWorkerLoop
+                                  QuicWorkerThread
+                                  start_thread
+                                  thread_start
+
+     1.83%           808  [.] __memcpy_sve                                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --1.66%--QuicStreamCopyFromSendRequests
+                       QuicStreamWriteOneFrame
+                       QuicStreamWriteStreamFrames
+                       QuicStreamSendWrite
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     1.40%           624  [.] 0x0000000000000578                                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---__kernel_clock_gettime
+
+     1.15%           522  [k] handle_softirqs                                                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__do_softirq
+               ____do_softirq
+               call_on_irq_stack
+               do_softirq_own_stack
+               |          
+                --1.15%--__irq_exit_rcu
+                          irq_exit_rcu
+                          |          
+                           --1.09%--el0_interrupt
+                                     __el0_irq_handler_common
+                                     el0t_64_irq_handler
+                                     el0t_64_irq
+                                     |          
+                                      --0.42%--aes_gcm_enc_256_kernel
+                                                armv8_aes_gcm_encrypt
+                                                ossl_gcm_aad_update
+                                                0x5aa
+
+     1.09%           743  [k] _raw_spin_lock                                                                                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+             --1.03%--do_anonymous_page
+                       handle_pte_fault
+                       __handle_mm_fault
+                       handle_mm_fault
+                       do_page_fault
+                       do_translation_fault
+                       do_mem_abort
+                       el0_da
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       |          
+                        --0.98%--__memset_zva64
+                                  TqRelayBufferSlot::TqRelayBufferSlot(unsigned long)
+                                  TqLinuxRelayBufferPool::Reserve(unsigned long)
+                                  std::__shared_count<(__gnu_cxx::_Lock_policy)2>::__shared_count<TqLinuxRelayWorker::RelayState, std::allocator<void>, TqLinuxRelayRegistration const&, TqLinuxRelayWorkerConfig&>(TqLinuxRelayWorker::RelayState*&, std::_Sp_alloc_shared_tag<std::allocator<void> >, TqLinuxRelayRegistration const&, TqLinuxRelayWorkerConfig&)
+                                  TqLinuxRelayWorker::RegisterRelayWithId(TqLinuxRelayRegistration const&)
+                                  TqRelayStart(int, MsQuicStream*, ITqCompressor*, ITqDecompressor*, TqRelayHandle*, TqTuningConfig const&, TqCompressAlgo)
+                                  TqTunnelContext::Callback(MsQuicStream*, void*, QUIC_STREAM_EVENT*)
+                                  MsQuicStream::MsQuicCallback(QUIC_HANDLE*, MsQuicStream*, QUIC_STREAM_EVENT*)
+                                  QuicStreamCompleteSendRequest
+                                  QuicStreamOnAck
+                                  QuicLossDetectionOnPacketAcknowledged
+                                  QuicLossDetectionProcessAckBlocks
+                                  QuicLossDetectionProcessAckFrame
+                                  QuicConnRecvFrames
+                                  QuicConnRecvDatagramBatch
+                                  QuicConnRecvDatagrams
+                                  QuicConnFlushRecv

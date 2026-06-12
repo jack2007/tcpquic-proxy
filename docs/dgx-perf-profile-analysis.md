@@ -472,3 +472,34 @@ Deferred receive view（`QuicReceiveView` + `StreamReceiveComplete`）+ `StreamM
 2. always-pending 在多流场景反超 Phase 3（4×16 **23.2 vs 10.2 Gbps**），与零拷贝 + multi-receive 一致。
 3. sync-write 修复 flow-control 后单流可用（~4.8 Gbps），但多流崩溃至 **2.5–4.9 Gbps**，callback 同步写阻塞是主要嫌疑；应作为混合 fast path 而非独立 Phase 4 方案。
 4. 详见计划文档 **Task 11**。
+
+---
+
+## sysctl 调优后 Phase 3 vs Phase 4 复测（2026-06-12）
+
+内核参数（两台 DGX）：
+
+```bash
+net.core.rmem_max=134217728 net.core.wmem_max=134217728
+net.core.rmem_default=4194304 net.core.wmem_default=4194304
+net.ipv4.tcp_rmem='4096 1048576 134217728'
+net.ipv4.tcp_wmem='4096 1048576 134217728'
+```
+
+脚本：`./scripts/dgx-phase-sysctl-comparison.sh`（吞吐 + perf proxy-1×1 / proxy-4×16）
+
+完整报告：`docs/dgx-sysctl-comparison-20260612-093148/summary.md`
+
+### 吞吐
+
+| 指标 | Phase 3 | always-pending | sync-write |
+|------|---------|----------------|------------|
+| proxy-1×1 | **11.768 Gbps** | 5.747 Gbps | 5.010 Gbps |
+| proxy-4×16 | 7.178 Gbps | **24.988 Gbps** | 22.678 Gbps |
+
+### 结论
+
+1. **单流**：Phase 3 仍领先 ~2×；sysctl 对 Phase 4 单流帮助有限。
+2. **多流 sync-write 从 4.9 → 22.7 Gbps**，证实 TCP 发送 buffer 不足是此前多流崩溃的重要外因。
+3. **perf**：always-pending 单流 relay 池 ~3%；sync-write 单流 client 池 Acquire/Release ~21%；多流共性瓶颈为 UDP `__arch_copy_to_user` ~22–24%。
+4. 详见计划 **Task 12**。

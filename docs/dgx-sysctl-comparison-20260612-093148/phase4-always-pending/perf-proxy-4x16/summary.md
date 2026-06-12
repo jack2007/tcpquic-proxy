@@ -1,0 +1,341 @@
+# DGX perf 热点分析
+
+- 时间: 2026-06-12T09:40:31+08:00
+- 场景: proxy-4x16 (tcpquic-proxy quic=16 + 4 并行 curl)
+- QUIC 连接: 16 | 并行 curl: 4
+- 采样: 25s @ 999Hz, call-graph dwarf
+- 本机: 169.254.250.230 | 对端: 169.254.59.196
+
+## 内核 socket 参数
+```
+# local spark-1619
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.ipv4.tcp_rmem = 4096	1048576	134217728
+net.ipv4.tcp_wmem = 4096	1048576	134217728
+
+# peer 169.254.59.196
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.ipv4.tcp_rmem = 4096	1048576	134217728
+net.ipv4.tcp_wmem = 4096	1048576	134217728
+```
+
+
+## 吞吐
+```
+speed_download=667935982
+```
+
+## Client 热点 Top
+```
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 10
+#
+# Samples: 19K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 52152894546
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ............  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    22.10%          4205  [k] __arch_copy_to_user                                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |          
+             --22.09%--simple_copy_to_iter
+                       __skb_datagram_iter
+                       |          
+                       |--21.40%--__skb_datagram_iter
+                       |          skb_copy_datagram_iter
+                       |          udpv6_recvmsg
+                       |          inet6_recvmsg
+                       |          sock_recvmsg
+                       |          ____sys_recvmsg
+                       |          ___sys_recvmsg
+                       |          do_recvmmsg
+                       |          __arm64_sys_recvmmsg
+                       |          invoke_syscall
+                       |          el0_svc_common.constprop.0
+                       |          do_el0_svc
+                       |          el0_svc
+                       |          el0t_64_sync_handler
+                       |          el0t_64_sync
+                       |          recvmmsg_syscall (inlined)
+                       |          __recvmmsg
+                       |          CxPlatSocketReceiveCoalesced
+                       |          CxPlatSocketContextIoEventComplete
+                       |          CxPlatProcessEvents
+                       |          CxPlatWorkerThread
+                       |          start_thread
+                       |          thread_start
+                       |          
+                        --0.69%--skb_copy_datagram_iter
+                                  |          
+                                   --0.69%--udpv6_recvmsg
+                                             inet6_recvmsg
+                                             sock_recvmsg
+                                             ____sys_recvmsg
+                                             ___sys_recvmsg
+                                             do_recvmmsg
+                                             __arm64_sys_recvmmsg
+                                             invoke_syscall
+                                             el0_svc_common.constprop.0
+                                             do_el0_svc
+                                             el0_svc
+                                             el0t_64_sync_handler
+                                             el0t_64_sync
+                                             recvmmsg_syscall (inlined)
+                                             __recvmmsg
+                                             CxPlatSocketReceiveCoalesced
+                                             CxPlatSocketContextIoEventComplete
+                                             CxPlatProcessEvents
+                                             CxPlatWorkerThread
+                                             start_thread
+                                             thread_start
+
+     8.00%          1494  [.] aes_gcm_dec_256_kernel                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---armv8_aes_gcm_decrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+     6.44%          1228  [k] __slab_free                                                                                                                                                                                                                                                                                                                                                                                                  -      -            
+            |          
+            |--5.88%--kmem_cache_free
+            |          |          
+            |           --5.83%--skb_free_head
+            |                     skb_release_data
+            |                     |          
+            |                      --5.79%--kfree_skb_list_reason
+            |                                skb_release_data
+            |                                __consume_stateless_skb
+            |                                skb_consume_udp
+            |                                udpv6_recvmsg
+            |                                inet6_recvmsg
+            |                                sock_recvmsg
+            |                                ____sys_recvmsg
+            |                                ___sys_recvmsg
+            |                                do_recvmmsg
+            |                                __arm64_sys_recvmmsg
+            |                                invoke_syscall
+            |                                el0_svc_common.constprop.0
+            |                                do_el0_svc
+            |                                el0_svc
+            |                                el0t_64_sync_handler
+            |                                el0t_64_sync
+            |                                recvmmsg_syscall (inlined)
+            |                                __recvmmsg
+            |                                CxPlatSocketReceiveCoalesced
+            |                                CxPlatSocketContextIoEventComplete
+            |                                CxPlatProcessEvents
+            |                                CxPlatWorkerThread
+            |                                start_thread
+            |                                thread_start
+            |          
+             --0.48%--kmem_cache_free_bulk.part.0
+                       kmem_cache_free_bulk
+                       kfree_skb_list_reason
+                       skb_release_data
+                       __consume_stateless_skb
+                       skb_consume_udp
+                       udpv6_recvmsg
+                       inet6_recvmsg
+                       sock_recvmsg
+                       ____sys_recvmsg
+                       ___sys_recvmsg
+                       do_recvmmsg
+                       __arm64_sys_recvmmsg
+                       invoke_syscall
+                       el0_svc_common.constprop.0
+                       do_el0_svc
+                       el0_svc
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       recvmmsg_syscall (inlined)
+                       __recvmmsg
+                       CxPlatSocketReceiveCoalesced
+                       CxPlatSocketContextIoEventComplete
+                       CxPlatProcessEvents
+                       CxPlatWorkerThread
+                       start_thread
+                       thread_start
+
+     3.93%           751  [k] __skb_datagram_iter                                                                                                                                                                                                                                                                                                                                                                                          -      -            
+            |          
+            |--2.42%--skb_copy_datagram_iter
+            |          udpv6_recvmsg
+            |          inet6_recvmsg
+            |          sock_recvmsg
+            |          ____sys_recvmsg
+            |          ___sys_recvmsg
+            |          do_recvmmsg
+            |          __arm64_sys_recvmmsg
+            |          invoke_syscall
+            |          el0_svc_common.constprop.0
+            |          do_el0_svc
+            |          el0_svc
+            |          el0t_64_sync_handler
+            |          el0t_64_sync
+            |          recvmmsg_syscall (inlined)
+            |          __recvmmsg
+            |          CxPlatSocketReceiveCoalesced
+```
+
+## Server 热点 Top
+```
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 72K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 113397771326
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                                                                                                                                                                           IPC   [IPC Coverage]
+# ........  ............  ...............................................................................................................................................................................................................................................................................................................................................................................................................  ....................
+#
+    23.47%         10274  [.] aes_gcm_enc_256_kernel                                                                                                                                                                                                                                                                                                                                                                                       -      -            
+            |
+            ---armv8_aes_gcm_encrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+    10.21%          4471  [.] CxPlatHashtableEnumerateNext                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |
+            ---QuicStreamSetGetFlowControlSummary
+               |          
+                --10.18%--BbrCongestionControlUpdateBlockedState
+                          |          
+                           --10.12%--QuicLossDetectionOnPacketSent
+                                     QuicPacketBuilderFinalize
+                                     QuicSendFlush
+                                     QuicConnDrainOperations
+                                     QuicWorkerProcessConnection
+                                     QuicWorkerLoop
+                                     QuicWorkerThread
+                                     start_thread
+                                     thread_start
+
+     2.24%           993  [k] __arch_copy_from_user                                                                                                                                                                                                                                                                                                                                                                                        -      -            
+            |          
+             --2.16%--ip_generic_getfrag
+                       __ip_append_data
+                       ip_make_skb
+                       udp_sendmsg
+                       udpv6_sendmsg
+                       inet6_sendmsg
+                       __sock_sendmsg
+                       ____sys_sendmsg
+                       ___sys_sendmsg
+                       __sys_sendmsg
+                       __arm64_sys_sendmsg
+                       invoke_syscall
+                       el0_svc_common.constprop.0
+                       do_el0_svc
+                       el0_svc
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       __libc_sendmsg
+                       __libc_sendmsg
+                       CxPlatSendDataSendSegmented
+                       CxPlatSendDataSend
+                       SocketSend
+                       QuicBindingSend
+                       QuicPacketBuilderSendBatch
+                       QuicPacketBuilderFinalize
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     2.02%           896  [.] QuicStreamSetGetFlowControlSummary                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |          
+             --2.01%--BbrCongestionControlUpdateBlockedState
+                       |          
+                        --1.97%--QuicLossDetectionOnPacketSent
+                                  QuicPacketBuilderFinalize
+                                  QuicSendFlush
+                                  QuicConnDrainOperations
+                                  QuicWorkerProcessConnection
+                                  QuicWorkerLoop
+                                  QuicWorkerThread
+                                  start_thread
+                                  thread_start
+
+     1.83%           808  [.] __memcpy_sve                                                                                                                                                                                                                                                                                                                                                                                                 -      -            
+            |          
+             --1.66%--QuicStreamCopyFromSendRequests
+                       QuicStreamWriteOneFrame
+                       QuicStreamWriteStreamFrames
+                       QuicStreamSendWrite
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     1.40%           624  [.] 0x0000000000000578                                                                                                                                                                                                                                                                                                                                                                                           -      -            
+            |
+            ---__kernel_clock_gettime
+
+     1.15%           522  [k] handle_softirqs                                                                                                                                                                                                                                                                                                                                                                                              -      -            
+            |
+            ---__do_softirq
+               ____do_softirq
+               call_on_irq_stack
+               do_softirq_own_stack
+               |          
+                --1.15%--__irq_exit_rcu
+                          irq_exit_rcu
+                          |          
+                           --1.09%--el0_interrupt
+                                     __el0_irq_handler_common
+                                     el0t_64_irq_handler
+                                     el0t_64_irq
+                                     |          
+                                      --0.42%--aes_gcm_enc_256_kernel
+                                                armv8_aes_gcm_encrypt
+                                                ossl_gcm_aad_update
+                                                0x5aa
+
+     1.09%           743  [k] _raw_spin_lock                                                                                                                                                                                                                                                                                                                                                                                               -      -            
+            |          
+             --1.03%--do_anonymous_page
+                       handle_pte_fault
+                       __handle_mm_fault
+                       handle_mm_fault
+                       do_page_fault
+                       do_translation_fault
+                       do_mem_abort
+                       el0_da
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       |          
+                        --0.98%--__memset_zva64
+                                  TqRelayBufferSlot::TqRelayBufferSlot(unsigned long)
+                                  TqLinuxRelayBufferPool::Reserve(unsigned long)
+                                  std::__shared_count<(__gnu_cxx::_Lock_policy)2>::__shared_count<TqLinuxRelayWorker::RelayState, std::allocator<void>, TqLinuxRelayRegistration const&, TqLinuxRelayWorkerConfig&>(TqLinuxRelayWorker::RelayState*&, std::_Sp_alloc_shared_tag<std::allocator<void> >, TqLinuxRelayRegistration const&, TqLinuxRelayWorkerConfig&)
+                                  TqLinuxRelayWorker::RegisterRelayWithId(TqLinuxRelayRegistration const&)
+                                  TqRelayStart(int, MsQuicStream*, ITqCompressor*, ITqDecompressor*, TqRelayHandle*, TqTuningConfig const&, TqCompressAlgo)
+                                  TqTunnelContext::Callback(MsQuicStream*, void*, QUIC_STREAM_EVENT*)
+                                  MsQuicStream::MsQuicCallback(QUIC_HANDLE*, MsQuicStream*, QUIC_STREAM_EVENT*)
+                                  QuicStreamCompleteSendRequest
+                                  QuicStreamOnAck
+                                  QuicLossDetectionOnPacketAcknowledged
+                                  QuicLossDetectionProcessAckBlocks
+                                  QuicLossDetectionProcessAckFrame
+                                  QuicConnRecvFrames
+                                  QuicConnRecvDatagramBatch
+                                  QuicConnRecvDatagrams
+                                  QuicConnFlushRecv
+```
+

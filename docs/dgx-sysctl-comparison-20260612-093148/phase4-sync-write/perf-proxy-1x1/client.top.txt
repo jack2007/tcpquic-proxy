@@ -1,0 +1,150 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 10
+#
+# Samples: 63K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 172649717593
+#
+# Overhead       Samples  Symbol                                                                                                                                               IPC   [IPC Coverage]
+# ........  ............  ...................................................................................................................................................  ....................
+#
+    11.11%          6846  [.] TqLinuxRelayBufferPool::AcquireWorker()                                                                                                          -      -            
+            |
+            ---TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+               TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--5.65%--0x20e5b7bf16595b
+               |          0x20e5b7bf16595b
+               |          thread_start
+               |          
+                --5.44%--0x24e5b7bf16595b
+                          0x24e5b7bf16595b
+                          thread_start
+
+     9.97%          6145  [.] TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot*)                                                                                        -      -            
+            |
+            ---TqBufferHandle::~TqBufferHandle()
+               TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+               TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--5.01%--0x20e5b7bf16595b
+               |          0x20e5b7bf16595b
+               |          thread_start
+               |          
+                --4.92%--0x24e5b7bf16595b
+                          0x24e5b7bf16595b
+                          thread_start
+
+     7.53%          4642  [.] TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)                                                                            -      -            
+            |
+            ---TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--3.80%--0x24e5b7bf16595b
+               |          0x24e5b7bf16595b
+               |          thread_start
+               |          
+                --3.70%--0x20e5b7bf16595b
+                          0x20e5b7bf16595b
+                          thread_start
+
+     5.04%          3112  [k] el0_svc                                                                                                                                          -      -            
+            |
+            ---el0t_64_sync_handler
+               el0t_64_sync
+               |          
+                --4.58%--__GI___readv
+                          __GI___readv
+                          TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                          TqLinuxRelayWorker::Run()
+                          0xe5b7bf3c1adf
+                          |          
+                          |--2.30%--0x24e5b7bf16595b
+                          |          0x24e5b7bf16595b
+                          |          thread_start
+                          |          
+                           --2.28%--0x20e5b7bf16595b
+                                     0x20e5b7bf16595b
+                                     thread_start
+
+     3.40%          2232  [k] __arch_copy_to_user                                                                                                                              -      -            
+            |          
+             --3.40%--simple_copy_to_iter
+                       __skb_datagram_iter
+                       |          
+                        --3.23%--__skb_datagram_iter
+                                  skb_copy_datagram_iter
+                                  udpv6_recvmsg
+                                  inet6_recvmsg
+                                  sock_recvmsg
+                                  ____sys_recvmsg
+                                  ___sys_recvmsg
+                                  do_recvmmsg
+                                  __arm64_sys_recvmmsg
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  recvmmsg_syscall (inlined)
+                                  __recvmmsg
+                                  CxPlatSocketReceiveCoalesced
+                                  CxPlatSocketContextIoEventComplete
+                                  CxPlatProcessEvents
+                                  CxPlatWorkerThread
+                                  start_thread
+                                  thread_start
+
+     3.32%          2046  [k] __import_iovec                                                                                                                                   -      -            
+            |          
+             --3.20%--import_iovec
+                       |          
+                        --3.19%--vfs_readv
+                                  do_readv
+                                  __arm64_sys_readv
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  __GI___readv
+                                  __GI___readv
+                                  TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                                  TqLinuxRelayWorker::Run()
+                                  0xe5b7bf3c1adf
+                                  |          
+                                  |--1.61%--0x24e5b7bf16595b
+                                  |          0x24e5b7bf16595b
+                                  |          thread_start
+                                  |          
+                                   --1.56%--0x20e5b7bf16595b
+                                             0x20e5b7bf16595b
+                                             thread_start
+
+     2.64%          1799  [.] aes_gcm_dec_256_kernel                                                                                                                           -      -            
+            |
+            ---armv8_aes_gcm_decrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+     2.55%          1571  [.] TqLinuxRelayBufferPool::PendingBytes() const                                                                                                     -      -            
+            |          
+             --2.50%--TqLinuxRelayBufferPool::AcquireWorker()
+                       TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                       TqLinuxRelayWorker::Run()
+                       0xe5b7bf3c1adf
+                       |          
+                       |--1.27%--0x20e5b7bf16595b
+                       |          0x20e5b7bf16595b
+                       |          thread_start
+                       |          
+                        --1.22%--0x24e5b7bf16595b
+                                  0x24e5b7bf16595b
+                                  thread_start
+
+     2.20%          1358  [.] __GI___readv                                                                                                                                     -      -            

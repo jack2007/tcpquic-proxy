@@ -1,0 +1,4 @@
+direct-tcp=27.933 Gbps
+proxy-1x1=5.010
+proxy-16x16=14.407
+proxy-4x16=22.678

@@ -1,0 +1,150 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 70K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 113254316417
+#
+# Overhead       Samples  Symbol                                                                                                                                                                                                                                                                             IPC   [IPC Coverage]
+# ........  ............  .................................................................................................................................................................................................................................................................................  ....................
+#
+    23.94%         10564  [.] aes_gcm_enc_256_kernel                                                                                                                                                                                                                                                         -      -            
+            |
+            ---armv8_aes_gcm_encrypt
+               ossl_gcm_aad_update
+               |          
+                --23.93%--0x5aa
+
+    10.08%          4433  [.] CxPlatHashtableEnumerateNext                                                                                                                                                                                                                                                   -      -            
+            |
+            ---QuicStreamSetGetFlowControlSummary
+               |          
+                --10.04%--BbrCongestionControlUpdateBlockedState
+                          |          
+                           --10.01%--QuicLossDetectionOnPacketSent
+                                     QuicPacketBuilderFinalize
+                                     QuicSendFlush
+                                     QuicConnDrainOperations
+                                     QuicWorkerProcessConnection
+                                     QuicWorkerLoop
+                                     QuicWorkerThread
+                                     start_thread
+                                     thread_start
+
+     2.29%          1009  [k] __arch_copy_from_user                                                                                                                                                                                                                                                          -      -            
+            |          
+             --2.23%--ip_generic_getfrag
+                       __ip_append_data
+                       ip_make_skb
+                       udp_sendmsg
+                       udpv6_sendmsg
+                       inet6_sendmsg
+                       __sock_sendmsg
+                       ____sys_sendmsg
+                       ___sys_sendmsg
+                       __sys_sendmsg
+                       __arm64_sys_sendmsg
+                       invoke_syscall
+                       el0_svc_common.constprop.0
+                       do_el0_svc
+                       el0_svc
+                       el0t_64_sync_handler
+                       el0t_64_sync
+                       __libc_sendmsg
+                       __libc_sendmsg
+                       CxPlatSendDataSendSegmented
+                       CxPlatSendDataSend
+                       SocketSend
+                       QuicBindingSend
+                       QuicPacketBuilderSendBatch
+                       QuicPacketBuilderFinalize
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     1.96%           858  [.] QuicStreamSetGetFlowControlSummary                                                                                                                                                                                                                                             -      -            
+            |          
+             --1.95%--BbrCongestionControlUpdateBlockedState
+                       |          
+                        --1.92%--QuicLossDetectionOnPacketSent
+                                  QuicPacketBuilderFinalize
+                                  QuicSendFlush
+                                  QuicConnDrainOperations
+                                  QuicWorkerProcessConnection
+                                  QuicWorkerLoop
+                                  QuicWorkerThread
+                                  start_thread
+                                  thread_start
+
+     1.86%           823  [.] __memcpy_sve                                                                                                                                                                                                                                                                   -      -            
+            |          
+             --1.68%--QuicStreamCopyFromSendRequests
+                       QuicStreamWriteOneFrame
+                       QuicStreamWriteStreamFrames
+                       QuicStreamSendWrite
+                       QuicSendFlush
+                       QuicConnDrainOperations
+                       QuicWorkerProcessConnection
+                       QuicWorkerLoop
+                       QuicWorkerThread
+                       start_thread
+                       thread_start
+
+     1.33%           592  [.] 0x0000000000000578                                                                                                                                                                                                                                                             -      -            
+            |
+            ---__kernel_clock_gettime
+
+     1.29%           584  [k] handle_softirqs                                                                                                                                                                                                                                                                -      -            
+            |
+            ---__do_softirq
+               ____do_softirq
+               call_on_irq_stack
+               do_softirq_own_stack
+               |          
+                --1.29%--__irq_exit_rcu
+                          irq_exit_rcu
+                          |          
+                           --1.24%--el0_interrupt
+                                     __el0_irq_handler_common
+                                     el0t_64_irq_handler
+                                     el0t_64_irq
+                                     |          
+                                      --0.52%--aes_gcm_enc_256_kernel
+                                                armv8_aes_gcm_encrypt
+                                                ossl_gcm_aad_update
+                                                0x5aa
+
+     1.16%           517  [.] QuicPacketBuilderFinalize                                                                                                                                                                                                                                                      -      -            
+            |
+            ---QuicSendFlush
+               |          
+                --1.16%--QuicConnDrainOperations
+                          QuicWorkerProcessConnection
+                          QuicWorkerLoop
+                          QuicWorkerThread
+                          start_thread
+                          thread_start
+
+     0.98%           707  [k] _raw_spin_unlock_irqrestore                                                                                                                                                                                                                                                    -      -            
+     0.78%           408  [.] __aarch64_cas4_acq                                                                                                                                                                                                                                                             -      -            
+            |          
+             --0.41%--lll_mutex_lock_optimized (inlined)
+                       ___pthread_mutex_lock (inlined)
+
+     0.77%           341  [.] CRYPTO_gcm128_encrypt_ctr32                                                                                                                                                                                                                                                    -      -            
+            |
+            ---generic_aes_gcm_cipher_update
+               gcm_cipher_internal
+               ossl_gcm_stream_update
+               EVP_EncryptUpdate
+               CxPlatEncrypt
+               QuicPacketBuilderFinalize
+               QuicSendFlush
+               |          
+                --0.77%--QuicConnDrainOperations
+                          QuicWorkerProcessConnection

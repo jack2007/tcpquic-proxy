@@ -1,0 +1,341 @@
+# DGX perf 热点分析
+
+- 时间: 2026-06-12T09:44:14+08:00
+- 场景: proxy-1x1 (tcpquic-proxy 单 QUIC + 单 curl)
+- QUIC 连接: 1 | 并行 curl: 1
+- 采样: 25s @ 999Hz, call-graph dwarf
+- 本机: 169.254.250.230 | 对端: 169.254.59.196
+
+## 内核 socket 参数
+```
+# local spark-1619
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.ipv4.tcp_rmem = 4096	1048576	134217728
+net.ipv4.tcp_wmem = 4096	1048576	134217728
+
+# peer 169.254.59.196
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 4194304
+net.core.wmem_default = 4194304
+net.ipv4.tcp_rmem = 4096	1048576	134217728
+net.ipv4.tcp_wmem = 4096	1048576	134217728
+```
+
+
+## 吞吐
+```
+speed_download=331992005
+```
+
+## Client 热点 Top
+```
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 10
+#
+# Samples: 63K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 172649717593
+#
+# Overhead       Samples  Symbol                                                                                                                                               IPC   [IPC Coverage]
+# ........  ............  ...................................................................................................................................................  ....................
+#
+    11.11%          6846  [.] TqLinuxRelayBufferPool::AcquireWorker()                                                                                                          -      -            
+            |
+            ---TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+               TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--5.65%--0x20e5b7bf16595b
+               |          0x20e5b7bf16595b
+               |          thread_start
+               |          
+                --5.44%--0x24e5b7bf16595b
+                          0x24e5b7bf16595b
+                          thread_start
+
+     9.97%          6145  [.] TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot*)                                                                                        -      -            
+            |
+            ---TqBufferHandle::~TqBufferHandle()
+               TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+               TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--5.01%--0x20e5b7bf16595b
+               |          0x20e5b7bf16595b
+               |          thread_start
+               |          
+                --4.92%--0x24e5b7bf16595b
+                          0x24e5b7bf16595b
+                          thread_start
+
+     7.53%          4642  [.] TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)                                                                            -      -            
+            |
+            ---TqLinuxRelayWorker::Run()
+               0xe5b7bf3c1adf
+               |          
+               |--3.80%--0x24e5b7bf16595b
+               |          0x24e5b7bf16595b
+               |          thread_start
+               |          
+                --3.70%--0x20e5b7bf16595b
+                          0x20e5b7bf16595b
+                          thread_start
+
+     5.04%          3112  [k] el0_svc                                                                                                                                          -      -            
+            |
+            ---el0t_64_sync_handler
+               el0t_64_sync
+               |          
+                --4.58%--__GI___readv
+                          __GI___readv
+                          TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                          TqLinuxRelayWorker::Run()
+                          0xe5b7bf3c1adf
+                          |          
+                          |--2.30%--0x24e5b7bf16595b
+                          |          0x24e5b7bf16595b
+                          |          thread_start
+                          |          
+                           --2.28%--0x20e5b7bf16595b
+                                     0x20e5b7bf16595b
+                                     thread_start
+
+     3.40%          2232  [k] __arch_copy_to_user                                                                                                                              -      -            
+            |          
+             --3.40%--simple_copy_to_iter
+                       __skb_datagram_iter
+                       |          
+                        --3.23%--__skb_datagram_iter
+                                  skb_copy_datagram_iter
+                                  udpv6_recvmsg
+                                  inet6_recvmsg
+                                  sock_recvmsg
+                                  ____sys_recvmsg
+                                  ___sys_recvmsg
+                                  do_recvmmsg
+                                  __arm64_sys_recvmmsg
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  recvmmsg_syscall (inlined)
+                                  __recvmmsg
+                                  CxPlatSocketReceiveCoalesced
+                                  CxPlatSocketContextIoEventComplete
+                                  CxPlatProcessEvents
+                                  CxPlatWorkerThread
+                                  start_thread
+                                  thread_start
+
+     3.32%          2046  [k] __import_iovec                                                                                                                                   -      -            
+            |          
+             --3.20%--import_iovec
+                       |          
+                        --3.19%--vfs_readv
+                                  do_readv
+                                  __arm64_sys_readv
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  __GI___readv
+                                  __GI___readv
+                                  TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                                  TqLinuxRelayWorker::Run()
+                                  0xe5b7bf3c1adf
+                                  |          
+                                  |--1.61%--0x24e5b7bf16595b
+                                  |          0x24e5b7bf16595b
+                                  |          thread_start
+                                  |          
+                                   --1.56%--0x20e5b7bf16595b
+                                             0x20e5b7bf16595b
+                                             thread_start
+
+     2.64%          1799  [.] aes_gcm_dec_256_kernel                                                                                                                           -      -            
+            |
+            ---armv8_aes_gcm_decrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+     2.55%          1571  [.] TqLinuxRelayBufferPool::PendingBytes() const                                                                                                     -      -            
+            |          
+             --2.50%--TqLinuxRelayBufferPool::AcquireWorker()
+                       TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                       TqLinuxRelayWorker::Run()
+                       0xe5b7bf3c1adf
+                       |          
+                       |--1.27%--0x20e5b7bf16595b
+                       |          0x20e5b7bf16595b
+                       |          thread_start
+                       |          
+                        --1.22%--0x24e5b7bf16595b
+                                  0x24e5b7bf16595b
+                                  thread_start
+
+     2.20%          1358  [.] __GI___readv                                                                                                                                     -      -            
+```
+
+## Server 热点 Top
+```
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 22K of event 'armv8_pmuv3_0/cycles/P'
+# Event count (approx.): 18285328107
+#
+# Overhead       Samples  Symbol                                                                                                                             IPC   [IPC Coverage]
+# ........  ............  .................................................................................................................................  ....................
+#
+     1.55%           435  [k] finish_task_switch.isra.0                                                                                                      -      -            
+            |          
+             --1.51%--__schedule
+                       schedule
+                       |          
+                        --1.48%--schedule_hrtimeout_range_clock
+                                  schedule_hrtimeout_range
+                                  ep_poll
+                                  do_epoll_wait
+                                  do_epoll_pwait.part.0
+                                  __arm64_sys_epoll_pwait
+                                  invoke_syscall
+                                  el0_svc_common.constprop.0
+                                  do_el0_svc
+                                  el0_svc
+                                  el0t_64_sync_handler
+                                  el0t_64_sync
+                                  __GI_epoll_pwait (inlined)
+                                  CxPlatProcessEvents
+                                  CxPlatWorkerThread
+                                  start_thread
+                                  thread_start
+
+     0.93%            65  [.] aes_gcm_enc_256_kernel                                                                                                         -      -            
+            |
+            ---armv8_aes_gcm_encrypt
+               ossl_gcm_aad_update
+               0x5aa
+
+     0.60%            89  [k] el0_svc                                                                                                                        -      -            
+            |
+            ---el0t_64_sync_handler
+               el0t_64_sync
+
+     0.60%           142  [k] fdget                                                                                                                          -      -            
+     0.56%           164  [.] __aarch64_cas4_acq                                                                                                             -      -            
+     0.53%           170  [.] __aarch64_ldadd8_sync                                                                                                          -      -            
+     0.43%            85  [k] __arch_copy_to_user                                                                                                            -      -            
+
+
+# Samples: 214K of event 'armv8_pmuv3_1/cycles/P'
+# Event count (approx.): 825295020004
+#
+# Overhead       Samples  Symbol                                                                                                       IPC   [IPC Coverage]
+# ........  ............  ...........................................................................................................  ....................
+#
+    25.04%         53442  [.] __aarch64_ldadd8_relax                                                                                   -      -            
+            |          
+            |--13.77%--TqLinuxRelayBufferPool::AcquireWorker()
+            |          TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+            |          TqLinuxRelayWorker::Run()
+            |          0xfee74f431adf
+            |          |          
+            |          |--1.82%--0x11fee74f1d595b
+            |          |          0x11fee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.78%--0x37fee74f1d595b
+            |          |          0x37fee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.76%--0x7dfee74f1d595b
+            |          |          0x7dfee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.72%--0x51fee74f1d595b
+            |          |          0x51fee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.70%--0x7ffee74f1d595b
+            |          |          0x7ffee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.68%--0x79fee74f1d595b
+            |          |          0x79fee74f1d595b
+            |          |          thread_start
+            |          |          
+            |          |--1.68%--0x15fee74f1d595b
+            |          |          0x15fee74f1d595b
+            |          |          thread_start
+            |          |          
+            |           --1.62%--0x5ffee74f1d595b
+            |                     0x5ffee74f1d595b
+            |                     thread_start
+            |          
+             --11.27%--TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot*)
+                       TqBufferHandle::~TqBufferHandle()
+                       |          
+                        --11.27%--TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                                  TqLinuxRelayWorker::Run()
+                                  0xfee74f431adf
+                                  |          
+                                  |--1.45%--0x7ffee74f1d595b
+                                  |          0x7ffee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.44%--0x11fee74f1d595b
+                                  |          0x11fee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.44%--0x37fee74f1d595b
+                                  |          0x37fee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.43%--0x7dfee74f1d595b
+                                  |          0x7dfee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.41%--0x51fee74f1d595b
+                                  |          0x51fee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.38%--0x15fee74f1d595b
+                                  |          0x15fee74f1d595b
+                                  |          thread_start
+                                  |          
+                                  |--1.37%--0x79fee74f1d595b
+                                  |          0x79fee74f1d595b
+                                  |          thread_start
+                                  |          
+                                   --1.36%--0x5ffee74f1d595b
+                                             0x5ffee74f1d595b
+                                             thread_start
+
+     6.74%         14383  [.] TqLinuxRelayBufferPool::ReleaseWorker(TqRelayBufferSlot*)                                                -      -            
+            |
+            ---TqBufferHandle::~TqBufferHandle()
+               |          
+                --6.74%--TqLinuxRelayWorker::DrainTcpReadable(TqLinuxRelayWorker::RelayState*)
+                          TqLinuxRelayWorker::Run()
+                          0xfee74f431adf
+                          |          
+                          |--0.88%--0x7dfee74f1d595b
+                          |          0x7dfee74f1d595b
+                          |          thread_start
+                          |          
+                          |--0.87%--0x7ffee74f1d595b
+                          |          0x7ffee74f1d595b
+                          |          thread_start
+```
+

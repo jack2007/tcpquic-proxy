@@ -1236,3 +1236,28 @@ REPORT=/tmp/dgx-phase4-sync-write-$(date +%Y%m%d-%H%M%S).md \
 - [x] perf 采样 client core dump 已修复（Task 8.1；`RetiredRelays` + ingress 池同步）
 - [x] Phase 4 deferred receive DGX 验证已记录（Task 10.1；单流 ~5.2 Gbps，receive 零拷贝生效，待 fast path）
 - [x] Phase 3 专用基线 vs Phase 4 双方案同晚对比已记录（Task 11；Phase 3 单流 ~14 Gbps，always-pending 多流 ~23 Gbps）
+- [x] sysctl 调优后吞吐 + perf 复测已记录（Task 12；sync-write 多流 4.9→22.7 Gbps）
+
+---
+
+### Task 12: sysctl 调优后 DGX 吞吐 + perf 复测（2026-06-12）
+
+用户将 `net.core.rmem/wmem_*` 与 `net.ipv4.tcp_rmem/wmem` 调至 128MB 上限后，用 `./scripts/dgx-phase-sysctl-comparison.sh` 连续跑三轮 bench + 两轮 perf（proxy-1×1、proxy-4×16）。
+
+**吞吐（30s）**
+
+| 指标 | Phase 3 | always-pending | sync-write |
+|------|---------|----------------|------------|
+| proxy-1×1 | **11.768 Gbps** | 5.747 Gbps | 5.010 Gbps |
+| proxy-4×16 | 7.178 Gbps | **24.988 Gbps** | 22.678 Gbps |
+
+**perf 要点**
+
+- sync-write 单流 client：`AcquireWorker`/`ReleaseWorker` ~21%（TCP 方向池热点）
+- always-pending 单流 client：AES-GCM ~16.5%，relay 池 ~3%
+- 多流 Phase 4：UDP `__arch_copy_to_user` ~22–24%
+
+原始数据：`docs/dgx-sysctl-comparison-20260612-093148/`
+
+- [x] **Step 1: 三轮 bench + perf**
+- [x] **Step 2: 对比与热点写入文档**
