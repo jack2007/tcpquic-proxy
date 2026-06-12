@@ -1,6 +1,5 @@
 #include "control_protocol.h"
 
-#include <cassert>
 #include <cstring>
 
 int main() {
@@ -12,41 +11,79 @@ int main() {
     req.Addr.assign(host, host + strlen(host));
 
     std::vector<uint8_t> buf;
-    assert(TqEncodeOpenRequest(req, buf));
+    if (!TqEncodeOpenRequest(req, buf)) {
+        return 1;
+    }
 
     TqOpenRequest decoded{};
-    assert(TqDecodeOpenRequest(buf.data(), buf.size(), decoded));
-    assert(decoded.Port == 3306);
-    assert(decoded.Flags == (TQ_FLAG_COMPRESS | TQ_FLAG_DNS_REMOTE));
-    assert(decoded.AddrType == TQ_ADDR_DOMAIN);
-    assert(decoded.Addr.size() == strlen(host));
-    assert(memcmp(decoded.Addr.data(), host, strlen(host)) == 0);
+    if (!TqDecodeOpenRequest(buf.data(), buf.size(), decoded)) {
+        return 2;
+    }
+    if (decoded.Port != 3306) {
+        return 3;
+    }
+    if (decoded.Flags != (TQ_FLAG_COMPRESS | TQ_FLAG_DNS_REMOTE)) {
+        return 4;
+    }
+    if (decoded.AddrType != TQ_ADDR_DOMAIN) {
+        return 5;
+    }
+    if (decoded.Addr.size() != strlen(host)) {
+        return 6;
+    }
+    if (memcmp(decoded.Addr.data(), host, strlen(host)) != 0) {
+        return 7;
+    }
 
     TqOpenResponse ok{true, TqOpenError::Ok, 0};
     std::vector<uint8_t> rbuf;
-    assert(TqEncodeOpenResponse(ok, rbuf));
-    assert(rbuf.size() == TQ_OPEN_RESPONSE_SIZE);
+    if (!TqEncodeOpenResponse(ok, rbuf)) {
+        return 8;
+    }
+    if (rbuf.size() != TQ_OPEN_RESPONSE_SIZE) {
+        return 9;
+    }
 
     TqOpenResponse rdec{};
-    assert(TqDecodeOpenResponse(rbuf.data(), rbuf.size(), rdec));
-    assert(rdec.Ok);
-    assert(rdec.Error == TqOpenError::Ok);
-    assert(rdec.ConnId == 0);
+    if (!TqDecodeOpenResponse(rbuf.data(), rbuf.size(), rdec)) {
+        return 10;
+    }
+    if (!rdec.Ok) {
+        return 11;
+    }
+    if (rdec.Error != TqOpenError::Ok) {
+        return 12;
+    }
+    if (rdec.ConnId != 0) {
+        return 13;
+    }
 
     TqOpenResponse fail{false, TqOpenError::AclDenied, 0};
     std::vector<uint8_t> fbuf;
-    assert(TqEncodeOpenResponse(fail, fbuf));
-    assert(fbuf.size() == TQ_OPEN_RESPONSE_SIZE);
+    if (!TqEncodeOpenResponse(fail, fbuf)) {
+        return 14;
+    }
+    if (fbuf.size() != TQ_OPEN_RESPONSE_SIZE) {
+        return 15;
+    }
 
     TqOpenResponse fdec{};
-    assert(TqDecodeOpenResponse(fbuf.data(), fbuf.size(), fdec));
-    assert(!fdec.Ok);
-    assert(fdec.Error == TqOpenError::AclDenied);
+    if (!TqDecodeOpenResponse(fbuf.data(), fbuf.size(), fdec)) {
+        return 16;
+    }
+    if (fdec.Ok) {
+        return 17;
+    }
+    if (fdec.Error != TqOpenError::AclDenied) {
+        return 18;
+    }
 
     // DOMAIN without DNS_REMOTE must be rejected.
     TqOpenRequest badDomain = req;
     badDomain.Flags = TQ_FLAG_COMPRESS;
-    assert(!TqEncodeOpenRequest(badDomain, buf));
+    if (TqEncodeOpenRequest(badDomain, buf)) {
+        return 19;
+    }
 
     TqSpeedStart start{};
     start.SessionId = 7;
