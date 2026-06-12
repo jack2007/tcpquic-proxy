@@ -325,6 +325,27 @@ int main() {
         if (snapshot.Peers[0].PeerId != "agent-a" || !snapshot.Peers[0].Enabled) return 62;
     }
     {
+        TqClientMetrics metrics;
+        metrics.QuicPeer = "127.0.0.1:14444";
+        metrics.SocksListen = "127.0.0.1:1080";
+        metrics.HttpListen = "127.0.0.1:8080";
+        metrics.ConnectionCount = 4;
+        metrics.ConnectedConnections = 3;
+        const std::string body = TqClientMetricsJson(metrics, 9);
+        if (body.find("\"role\":\"client\"") == std::string::npos) return 76;
+        if (body.find("\"status\":\"healthy\"") == std::string::npos) return 77;
+        if (body.find("\"quic_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 78;
+        if (body.find("\"socks_listen\":\"127.0.0.1:1080\"") == std::string::npos) return 79;
+        if (body.find("\"http_listen\":\"127.0.0.1:8080\"") == std::string::npos) return 80;
+        if (body.find("\"uptime_seconds\":9") == std::string::npos) return 81;
+        if (body.find("\"connection_count\":4") == std::string::npos) return 82;
+        if (body.find("\"connected_connections\":3") == std::string::npos) return 83;
+        if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 84;
+        if (body.find("\"linux_relay_deferred_receive_complete_bytes\":") == std::string::npos) return 85;
+        if (body.find("\"linux_relay_inline_quic_receive_full_writes\":") == std::string::npos) return 86;
+        if (body.find("\"linux_relay_max_pending_quic_receive_bytes\":") == std::string::npos) return 87;
+    }
+    {
         TqServerMetrics serverMetrics;
         serverMetrics.Listen = "127.0.0.1:14444";
         serverMetrics.AcceptedConnections = 3;
@@ -377,6 +398,14 @@ int main() {
         if (body.find("\"linux_relay_compressed_tcp_bytes\":") == std::string::npos) return 103;
         if (body.find("\"linux_relay_decompressed_tcp_bytes\":") == std::string::npos) return 104;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
+        if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 126;
+        if (body.find("\"linux_relay_max_tcp_write_sendmsg_bytes\":") == std::string::npos) return 127;
+        if (body.find("\"linux_relay_tcp_write_eagain_count\":") == std::string::npos) return 128;
+        if (body.find("\"linux_relay_tcp_write_partial_count\":") == std::string::npos) return 129;
+        if (body.find("\"linux_relay_deferred_receive_completion_flushes\":") == std::string::npos) return 130;
+        if (body.find("\"linux_relay_max_pending_quic_receive_queue\":") == std::string::npos) return 131;
+        if (body.find("\"linux_relay_inline_quic_receive_budget_exceeded\":") == std::string::npos) return 132;
+        if (body.find("\"linux_relay_max_inline_quic_receive_bytes\":") == std::string::npos) return 133;
     }
     return 0;
 }

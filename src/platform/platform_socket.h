@@ -60,4 +60,5 @@ const char* TqInetNtop(int family, const void* addr, char* text, size_t textLeng
 bool TqSetReuseAddr(TqSocketHandle socket);
 bool TqSetNoDelay(TqSocketHandle socket);
 bool TqSetSocketBuffer(TqSocketHandle socket, int option, int bytes);
+int TqGetSocketBuffer(TqSocketHandle socket, int option);
 bool TqSocketPair(TqSocketHandle out[2]);

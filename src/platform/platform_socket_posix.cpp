@@ -95,6 +95,15 @@ bool TqSetSocketBuffer(TqSocketHandle socket, int option, int bytes) {
     return bytes <= 0 || ::setsockopt(socket, SOL_SOCKET, option, &bytes, sizeof(bytes)) == 0;
 }
 
+int TqGetSocketBuffer(TqSocketHandle socket, int option) {
+    int bytes = 0;
+    socklen_t length = sizeof(bytes);
+    if (::getsockopt(socket, SOL_SOCKET, option, &bytes, &length) != 0) {
+        return -1;
+    }
+    return bytes;
+}
+
 bool TqSocketPair(TqSocketHandle out[2]) {
     out[0] = TqInvalidSocket;
     out[1] = TqInvalidSocket;

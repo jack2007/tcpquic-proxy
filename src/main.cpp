@@ -384,6 +384,27 @@ struct TqSinglePeerClientRuntime {
         CloseListenersLocked();
     }
 
+    TqClientMetrics SnapshotMetrics() const {
+        TqClientMetrics metrics;
+        metrics.QuicPeer = Config.QuicPeer;
+        metrics.SocksListen = Config.SocksListen;
+        metrics.HttpListen = Config.HttpListen;
+        metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
+        metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
+        return metrics;
+    }
+
+    std::string HandleAdmin(const TqHttpRequest& req, uint64_t uptimeSeconds) const {
+        const TqClientMetrics metrics = SnapshotMetrics();
+        if (req.Method == "GET" && req.Path == "/health") {
+            return TqJsonResponse(200, TqClientHealthJson(metrics, uptimeSeconds));
+        }
+        if (req.Method == "GET" && req.Path == "/metrics") {
+            return TqJsonResponse(200, TqClientMetricsJson(metrics, uptimeSeconds));
+        }
+        return TqJsonResponse(404, "{\"error\":\"not found\"}");
+    }
+
     TqConfig Config;
     QuicClientSession* Quic{nullptr};
     TqThreadPool Pool;
@@ -396,6 +417,7 @@ struct TqSinglePeerClientRuntime {
 };
 
 int RunSinglePeerClient(const TqConfig& cfg) {
+    const auto started = std::chrono::steady_clock::now();
     QuicClientSession quic;
     if (!quic.Start(cfg)) {
         return 1;
@@ -463,6 +485,30 @@ int RunSinglePeerClient(const TqConfig& cfg) {
 
     std::fprintf(stderr, "tcpquic-proxy: QUIC peer %s (%u connections)\n",
         cfg.QuicPeer.c_str(), quic.ConnectionCount());
+
+    std::unique_ptr<TqAdminHttpServer> admin;
+    if (!cfg.AdminListen.empty()) {
+        if (!TqValidateAdminListen(cfg.AdminListen, err)) {
+            std::fprintf(stderr, "tcpquic-proxy: invalid admin listen: %s\n", err.c_str());
+            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
+            runtime->DisableAccepting();
+            runtime->Pool.Stop();
+            return 1;
+        }
+        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [runtime, started](const TqHttpRequest& req) {
+            const uint64_t uptimeSeconds = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
+            return runtime->HandleAdmin(req, uptimeSeconds);
+        }));
+        if (!admin->Start(err)) {
+            std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());
+            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
+            runtime->DisableAccepting();
+            runtime->Pool.Stop();
+            return 1;
+        }
+        std::fprintf(stderr, "tcpquic-proxy: admin listening on %s\n", admin->ListenAddress().c_str());
+    }
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::hours(24));

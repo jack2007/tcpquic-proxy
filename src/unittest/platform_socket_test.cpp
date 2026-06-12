@@ -23,6 +23,12 @@ int main() {
     assert(std::memcmp(buffer.data(), payload, std::strlen(payload)) == 0);
 
     assert(TqSetNonBlocking(pair[0]));
+    assert(TqSetSocketBuffer(pair[0], SO_RCVBUF, 256 * 1024));
+    assert(TqSetSocketBuffer(pair[0], SO_SNDBUF, 256 * 1024));
+    const int receiveBuffer = TqGetSocketBuffer(pair[0], SO_RCVBUF);
+    const int sendBuffer = TqGetSocketBuffer(pair[0], SO_SNDBUF);
+    assert(receiveBuffer > 0);
+    assert(sendBuffer > 0);
     assert(TqShutdownSend(pair[0]));
 
     TqCloseSocket(pair[0]);

@@ -74,6 +74,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/warmup.cpp
     runtime/admin_http.cpp
     runtime/router_runtime.cpp
+    runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
     runtime/trace.cpp
     platform/exe_path.cpp
@@ -361,6 +362,7 @@ set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN
 set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     unittest/router_runtime_test.cpp
     runtime/router_runtime.cpp
+    runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
     runtime/admin_http.cpp
     config/config.cpp

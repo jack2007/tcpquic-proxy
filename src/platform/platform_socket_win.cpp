@@ -85,6 +85,16 @@ bool TqSetSocketBuffer(TqSocketHandle socket, int option, int bytes) {
         reinterpret_cast<const char*>(&bytes), sizeof(bytes)) == 0;
 }
 
+int TqGetSocketBuffer(TqSocketHandle socket, int option) {
+    int bytes = 0;
+    int length = sizeof(bytes);
+    if (::getsockopt(socket, SOL_SOCKET, option,
+            reinterpret_cast<char*>(&bytes), &length) != 0) {
+        return -1;
+    }
+    return bytes;
+}
+
 bool TqSocketPair(TqSocketHandle out[2]) {
     out[0] = TqInvalidSocket;
     out[1] = TqInvalidSocket;

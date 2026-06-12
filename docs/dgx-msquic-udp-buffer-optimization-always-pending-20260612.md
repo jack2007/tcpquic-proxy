@@ -228,6 +228,26 @@ if receive 非压缩 && TCP fd 可写:
 3. 大改 relay buffer pool 来解决 always-pending 多流：当前多流热点已转向 UDP copy。
 4. 无预算 callback write：这会把 always-pending 变成 sync-write 的风险形态。
 
+## 实现状态
+
+本分支已完成代码侧第一轮优化，目标是提供可观测性与可控实验开关，而不是直接替换 always-pending 主路径。
+
+已落地：
+
+- TCP socket tuning 增加 requested/effective `SO_RCVBUF`、`SO_SNDBUF` 输出。
+- always-pending worker snapshot 增加 pending receive bytes/queue、`sendmsg` bytes/calls、partial/EAGAIN、deferred completion flush、inline receive fast path 等指标。
+- 新增 `LinuxRelayQuicReceiveCompleteBatchBytes`，用于实验 `StreamReceiveComplete` 聚合阈值。默认值为 `0`，即保持原有“写多少 complete 多少”的行为。
+- 新增 `LinuxRelayInlineQuicReceiveMaxBytes`，用于极窄 inline write fast path。默认 128KB，LAN profile 为 64KB；worker 测试配置默认关闭，避免影响既有单元测试语义。
+- inline fast path 只在非压缩 QUIC receive 上尝试一次 `sendmsg`：全量写完返回 `QUIC_STATUS_SUCCESS`；partial、`EAGAIN`、超预算立即转入 deferred pending view。
+- deferred receive completion 支持按阈值延迟 flush，并在 view 完成、unregister、错误清理时强制 flush 已完成字节。
+
+仍需 DGX 环境验证：
+
+- `LinuxRelayQuicReceiveCompleteBatchBytes` 的 128KB/256KB/512KB/1MB 矩阵。
+- `LinuxRelayPerTunnelPendingBytes` 的 4MB/16MB/32MB/64MB 矩阵。
+- inline 64KB/128KB 对 proxy-1x1 的收益与对 proxy-4x16 的影响。
+- UDP_GRO/offload/RSS/IRQ affinity/XDP 等 P4 系统层调查。
+
 ## 建议执行顺序
 
 1. bench 脚本固化 sysctl 校验。

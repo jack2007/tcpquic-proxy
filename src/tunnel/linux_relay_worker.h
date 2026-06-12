@@ -27,6 +27,8 @@ struct TqLinuxRelayWorkerConfig {
     uint32_t MaxIov{16};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
+    uint64_t DeferredReceiveCompleteBatchBytes{0};
+    uint64_t InlineQuicReceiveMaxBytes{0};
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
 };
@@ -67,6 +69,10 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpWriteBatches{0};
     uint64_t TcpWriteBytes{0};
     uint64_t MaxTcpWriteIovUsed{0};
+    uint64_t TcpWriteSendmsgCalls{0};
+    uint64_t MaxTcpWriteSendmsgBytes{0};
+    uint64_t TcpWriteEagainCount{0};
+    uint64_t TcpWritePartialCount{0};
     uint64_t ReadDisabledCount{0};
     uint64_t BufferAcquireCount{0};
     uint64_t StreamLookupScanCount{0};
@@ -74,6 +80,16 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t DecompressedTcpBytes{0};
     uint64_t DeferredReceiveCompleteBytes{0};
     uint64_t DeferredReceiveCompletes{0};
+    uint64_t DeferredReceiveCompletionFlushes{0};
+    uint64_t MaxPendingQuicReceiveBytes{0};
+    uint64_t MaxPendingQuicReceiveQueue{0};
+    uint64_t InlineQuicReceiveAttempts{0};
+    uint64_t InlineQuicReceiveFullWrites{0};
+    uint64_t InlineQuicReceivePartialWrites{0};
+    uint64_t InlineQuicReceiveEagainCount{0};
+    uint64_t InlineQuicReceiveBudgetExceeded{0};
+    uint64_t InlineQuicReceiveBytes{0};
+    uint64_t MaxInlineQuicReceiveBytes{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
@@ -140,6 +156,21 @@ private:
     void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
     void FlushDeferredQuicReceives(RelayState* relay);
     void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
+    void FlushDeferredReceiveCompletion(TqPendingQuicReceive& view, bool force);
+    bool QueueDeferredQuicReceiveFromOffset(
+        RelayState* relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        uint64_t completedPrefix,
+        bool fin);
+    QUIC_STATUS TryInlineQuicReceive(
+        RelayState* relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin,
+        bool& handled) noexcept;
     uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
     uint64_t LowPendingQuicReceiveBytesPerRelay() const;
     void MaybePauseQuicReceive(RelayState* relay);
@@ -181,12 +212,26 @@ private:
     std::atomic<uint64_t> TcpWriteBatches{0};
     std::atomic<uint64_t> TcpWriteBytes{0};
     std::atomic<uint64_t> MaxTcpWriteIovUsed{0};
+    std::atomic<uint64_t> TcpWriteSendmsgCalls{0};
+    std::atomic<uint64_t> MaxTcpWriteSendmsgBytes{0};
+    std::atomic<uint64_t> TcpWriteEagainCount{0};
+    std::atomic<uint64_t> TcpWritePartialCount{0};
     std::atomic<uint64_t> ReadDisabledCount{0};
     std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
     std::atomic<uint64_t> DecompressedTcpBytes{0};
     std::atomic<uint64_t> DeferredReceiveCompleteBytes{0};
     std::atomic<uint64_t> DeferredReceiveCompletes{0};
+    std::atomic<uint64_t> DeferredReceiveCompletionFlushes{0};
+    std::atomic<uint64_t> MaxPendingQuicReceiveBytesObserved{0};
+    std::atomic<uint64_t> MaxPendingQuicReceiveQueueObserved{0};
+    std::atomic<uint64_t> InlineQuicReceiveAttempts{0};
+    std::atomic<uint64_t> InlineQuicReceiveFullWrites{0};
+    std::atomic<uint64_t> InlineQuicReceivePartialWrites{0};
+    std::atomic<uint64_t> InlineQuicReceiveEagainCount{0};
+    std::atomic<uint64_t> InlineQuicReceiveBudgetExceeded{0};
+    std::atomic<uint64_t> InlineQuicReceiveBytes{0};
+    std::atomic<uint64_t> MaxInlineQuicReceiveBytes{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};

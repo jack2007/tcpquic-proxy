@@ -23,6 +23,7 @@ struct TqPendingQuicReceive {
     size_t SliceOffset{0};
     uint64_t TotalLength{0};
     uint64_t CompletedLength{0};
+    uint64_t PendingCompleteBytes{0};
     bool Fin{false};
 };
 
