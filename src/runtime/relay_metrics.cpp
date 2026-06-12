@@ -70,6 +70,17 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
     metrics.Errors = snapshot.Errors;
+    metrics.EventQueueFullErrors = snapshot.EventQueueFullErrors;
+    metrics.TcpReadBufferAcquireFailures = snapshot.TcpReadBufferAcquireFailures;
+    metrics.TcpToQuicCompressFailures = snapshot.TcpToQuicCompressFailures;
+    metrics.TcpToQuicBufferAcquireFailures = snapshot.TcpToQuicBufferAcquireFailures;
+    metrics.QuicSendFailures = snapshot.QuicSendFailures;
+    metrics.QuicReceiveIngressBufferAcquireFailures =
+        snapshot.QuicReceiveIngressBufferAcquireFailures;
+    metrics.QuicReceiveViewFailures = snapshot.QuicReceiveViewFailures;
+    metrics.QuicReceiveDecompressFailures = snapshot.QuicReceiveDecompressFailures;
+    metrics.QuicReceiveTcpBufferAcquireFailures = snapshot.QuicReceiveTcpBufferAcquireFailures;
+    metrics.TcpWriteHardErrors = snapshot.TcpWriteHardErrors;
 #endif
     return metrics;
 }
@@ -100,4 +111,20 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_quic_receive_paused_count\":" << metrics.QuicReceivePausedCount;
     out << ",\"linux_relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
     out << ",\"linux_relay_errors\":" << metrics.Errors;
+    out << ",\"linux_relay_event_queue_full_errors\":" << metrics.EventQueueFullErrors;
+    out << ",\"linux_relay_tcp_read_buffer_acquire_failures\":"
+        << metrics.TcpReadBufferAcquireFailures;
+    out << ",\"linux_relay_tcp_to_quic_compress_failures\":"
+        << metrics.TcpToQuicCompressFailures;
+    out << ",\"linux_relay_tcp_to_quic_buffer_acquire_failures\":"
+        << metrics.TcpToQuicBufferAcquireFailures;
+    out << ",\"linux_relay_quic_send_failures\":" << metrics.QuicSendFailures;
+    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_failures\":"
+        << metrics.QuicReceiveIngressBufferAcquireFailures;
+    out << ",\"linux_relay_quic_receive_view_failures\":" << metrics.QuicReceiveViewFailures;
+    out << ",\"linux_relay_quic_receive_decompress_failures\":"
+        << metrics.QuicReceiveDecompressFailures;
+    out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_failures\":"
+        << metrics.QuicReceiveTcpBufferAcquireFailures;
+    out << ",\"linux_relay_tcp_write_hard_errors\":" << metrics.TcpWriteHardErrors;
 }

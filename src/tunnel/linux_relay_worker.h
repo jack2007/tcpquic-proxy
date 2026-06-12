@@ -85,6 +85,16 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
+    uint64_t EventQueueFullErrors{0};
+    uint64_t TcpReadBufferAcquireFailures{0};
+    uint64_t TcpToQuicCompressFailures{0};
+    uint64_t TcpToQuicBufferAcquireFailures{0};
+    uint64_t QuicSendFailures{0};
+    uint64_t QuicReceiveIngressBufferAcquireFailures{0};
+    uint64_t QuicReceiveViewFailures{0};
+    uint64_t QuicReceiveDecompressFailures{0};
+    uint64_t QuicReceiveTcpBufferAcquireFailures{0};
+    uint64_t TcpWriteHardErrors{0};
     uint64_t EventProducerThreadsObserved{0};
     bool MultipleEventProducerThreadsObserved{false};
 };
@@ -119,8 +129,22 @@ public:
         _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
+    enum class RelayErrorKind {
+        EventQueueFull,
+        TcpReadBufferAcquire,
+        TcpToQuicCompress,
+        TcpToQuicBufferAcquire,
+        QuicSend,
+        QuicReceiveIngressBufferAcquire,
+        QuicReceiveView,
+        QuicReceiveDecompress,
+        QuicReceiveTcpBufferAcquire,
+        TcpWriteHard
+    };
+
     struct RelayState;
     struct StreamRelayBinding;
+    void RecordError(RelayErrorKind kind);
     void Wake();
     void RecordEventProducer();
     size_t DrainEvents(size_t budget);
@@ -213,6 +237,16 @@ private:
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};
+    std::atomic<uint64_t> EventQueueFullErrors{0};
+    std::atomic<uint64_t> TcpReadBufferAcquireFailures{0};
+    std::atomic<uint64_t> TcpToQuicCompressFailures{0};
+    std::atomic<uint64_t> TcpToQuicBufferAcquireFailures{0};
+    std::atomic<uint64_t> QuicSendFailures{0};
+    std::atomic<uint64_t> QuicReceiveIngressBufferAcquireFailures{0};
+    std::atomic<uint64_t> QuicReceiveViewFailures{0};
+    std::atomic<uint64_t> QuicReceiveDecompressFailures{0};
+    std::atomic<uint64_t> QuicReceiveTcpBufferAcquireFailures{0};
+    std::atomic<uint64_t> TcpWriteHardErrors{0};
     mutable std::mutex RetiredBindingLock;
     std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;
 };

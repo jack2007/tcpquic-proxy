@@ -29,6 +29,16 @@ struct TqRelayMetricsSnapshot {
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
+    uint64_t EventQueueFullErrors{0};
+    uint64_t TcpReadBufferAcquireFailures{0};
+    uint64_t TcpToQuicCompressFailures{0};
+    uint64_t TcpToQuicBufferAcquireFailures{0};
+    uint64_t QuicSendFailures{0};
+    uint64_t QuicReceiveIngressBufferAcquireFailures{0};
+    uint64_t QuicReceiveViewFailures{0};
+    uint64_t QuicReceiveDecompressFailures{0};
+    uint64_t QuicReceiveTcpBufferAcquireFailures{0};
+    uint64_t TcpWriteHardErrors{0};
 };
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();

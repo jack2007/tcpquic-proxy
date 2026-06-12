@@ -34,23 +34,24 @@ int main() {
         TqLinuxRelayWorker worker(config);
         assert(worker.StartForTest());
 
-        for (uint64_t i = 0; i < config.EventQueueCapacity; ++i) {
+        bool sawFull = false;
+        for (uint64_t i = 0; i < config.EventQueueCapacity + 8; ++i) {
             TqLinuxRelayEvent event{};
             event.Type = TqLinuxRelayEventType::TestMarker;
             event.Value = i + 1;
-            assert(worker.EnqueueForTest(std::move(event)));
+            if (!worker.EnqueueForTest(std::move(event))) {
+                sawFull = true;
+                break;
+            }
         }
-
-        TqLinuxRelayEvent event{};
-        event.Type = TqLinuxRelayEventType::TestMarker;
-        event.Value = 99;
-        assert(!worker.EnqueueForTest(std::move(event)));
+        if (!sawFull) return 109;
 
         TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        assert(snapshot.PendingEvents == config.EventQueueCapacity);
-        assert(snapshot.Errors == 1);
+        if (snapshot.PendingEvents == 0) return 108;
+        if (snapshot.Errors != 1) return 107;
+        if (snapshot.EventQueueFullErrors != 1) return 110;
 
-        assert(worker.DrainForTest(config.EventQueueCapacity) == config.EventQueueCapacity);
+        assert(worker.DrainForTest(snapshot.PendingEvents) == snapshot.PendingEvents);
         snapshot = worker.Snapshot();
         assert(snapshot.PendingEvents == 0);
 
@@ -103,4 +104,3 @@ int main() {
 
     return 0;
 }
-

@@ -397,6 +397,11 @@ int main() {
         if (body.find("\"linux_relay_compressed_tcp_bytes\":") == std::string::npos) return 103;
         if (body.find("\"linux_relay_decompressed_tcp_bytes\":") == std::string::npos) return 104;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
+        if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
+        if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
+        if (body.find("\"linux_relay_quic_send_failures\":") == std::string::npos) return 134;
+        if (body.find("\"linux_relay_quic_receive_decompress_failures\":") == std::string::npos) return 135;
+        if (body.find("\"linux_relay_tcp_write_hard_errors\":") == std::string::npos) return 136;
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 126;
         if (body.find("\"linux_relay_max_tcp_write_sendmsg_bytes\":") == std::string::npos) return 127;
         if (body.find("\"linux_relay_tcp_write_eagain_count\":") == std::string::npos) return 128;
