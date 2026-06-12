@@ -1,5 +1,6 @@
 #include "platform_socket.h"
 #include "quic_session.h"
+#include "speed_test.h"
 #include "relay.h"
 #include "tcp_dialer.h"
 #include "tcp_tunnel.h"
@@ -107,8 +108,11 @@ void TqTraceTargetTcpClosed(uint64_t tunnelId) {
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -145,6 +149,414 @@ static void SelfRegisterAbort(void*) {
         TqRegisterConnectionTunnel(g_self_register_conn, g_self_register_ctx, SelfRegisterAbort);
     }
 }
+
+namespace {
+
+struct FakeQuicSendRecord {
+    std::vector<uint8_t> Bytes;
+    QUIC_SEND_FLAGS Flags{QUIC_SEND_FLAG_NONE};
+    void* ClientContext{nullptr};
+};
+
+struct FakeQuicStreamRecord {
+    void* Handler{nullptr};
+    void* Context{nullptr};
+    std::vector<FakeQuicSendRecord> Sends;
+    unsigned CloseCount{0};
+    unsigned ShutdownCount{0};
+};
+
+std::mutex g_fake_quic_lock;
+std::map<HQUIC, FakeQuicStreamRecord> g_fake_quic_streams;
+
+void ResetFakeQuicState() {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    g_fake_quic_streams.clear();
+}
+
+void QUIC_API FakeSetCallbackHandler(HQUIC handle, void* handler, void* context) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    auto& record = g_fake_quic_streams[handle];
+    record.Handler = handler;
+    record.Context = context;
+}
+
+QUIC_STATUS QUIC_API FakeStreamSend(
+    HQUIC handle,
+    const QUIC_BUFFER* const buffers,
+    uint32_t bufferCount,
+    QUIC_SEND_FLAGS flags,
+    void* clientSendContext) {
+    std::vector<uint8_t> bytes;
+    for (uint32_t i = 0; i < bufferCount; ++i) {
+        bytes.insert(
+            bytes.end(),
+            buffers[i].Buffer,
+            buffers[i].Buffer + buffers[i].Length);
+    }
+
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    auto& record = g_fake_quic_streams[handle];
+    record.Sends.push_back(FakeQuicSendRecord{std::move(bytes), flags, clientSendContext});
+    return QUIC_STATUS_SUCCESS;
+}
+
+QUIC_STATUS QUIC_API FakeStreamShutdown(
+    HQUIC handle,
+    QUIC_STREAM_SHUTDOWN_FLAGS,
+    QUIC_UINT62) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    ++g_fake_quic_streams[handle].ShutdownCount;
+    return QUIC_STATUS_SUCCESS;
+}
+
+void QUIC_API FakeStreamClose(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    ++g_fake_quic_streams[handle].CloseCount;
+}
+
+void InstallFakeMsQuicForTcpTunnel(QUIC_API_TABLE& table) {
+    std::memset(&table, 0, sizeof(table));
+    table.SetCallbackHandler = FakeSetCallbackHandler;
+    table.StreamSend = FakeStreamSend;
+    table.StreamShutdown = FakeStreamShutdown;
+    table.StreamClose = FakeStreamClose;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&table);
+    ResetFakeQuicState();
+}
+
+bool DispatchFakeStreamEvent(HQUIC handle, QUIC_STREAM_EVENT& event) {
+    void* handler = nullptr;
+    void* context = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+        const auto it = g_fake_quic_streams.find(handle);
+        if (it == g_fake_quic_streams.end()) {
+            return false;
+        }
+        handler = it->second.Handler;
+        context = it->second.Context;
+    }
+
+    if (handler == nullptr) {
+        return false;
+    }
+
+    auto* callback =
+        reinterpret_cast<QUIC_STREAM_CALLBACK_HANDLER>(handler);
+    return callback(handle, context, &event) == QUIC_STATUS_SUCCESS;
+}
+
+bool WaitForFakeSend(
+    HQUIC handle,
+    std::vector<uint8_t>& bytes,
+    QUIC_SEND_FLAGS& flags,
+    uint32_t timeoutMs) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+            const auto it = g_fake_quic_streams.find(handle);
+            if (it != g_fake_quic_streams.end() && !it->second.Sends.empty()) {
+                bytes = it->second.Sends.front().Bytes;
+                flags = it->second.Sends.front().Flags;
+                return true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+
+std::vector<uint8_t> BuildOpenRequestBytes(const char* host, uint16_t port) {
+    TqOpenRequest req{};
+    req.Flags = 0;
+    req.AddrType = TQ_ADDR_IPV4;
+    req.Port = port;
+    req.Addr.resize(4);
+    if (!TqInetPton(AF_INET, host, req.Addr.data())) {
+        return {};
+    }
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeOpenRequest(req, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
+}
+
+class FakeEphemeralTargetAuthorizer final : public TqEphemeralTargetAuthorizer {
+public:
+    FakeEphemeralTargetAuthorizer(std::string host, uint16_t port) :
+        Host_(std::move(host)),
+        Port_(port) {}
+
+    bool IsAllowedEphemeralTarget(const std::string& host, uint16_t port) const override {
+        return host == Host_ && port == Port_;
+    }
+
+private:
+    std::string Host_;
+    uint16_t Port_{0};
+};
+
+class LoopbackListener {
+public:
+    bool Start() {
+        Listener_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (!TqSocketValid(Listener_)) {
+            return false;
+        }
+        if (!TqSetReuseAddr(Listener_)) {
+            return false;
+        }
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = 0;
+        if (!TqInetPton(AF_INET, "127.0.0.1", &addr.sin_addr)) {
+            return false;
+        }
+        if (::bind(Listener_, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+            return false;
+        }
+        if (::listen(Listener_, 1) != 0) {
+            return false;
+        }
+
+        sockaddr_in bound{};
+        socklen_t boundLen = sizeof(bound);
+        if (::getsockname(Listener_, reinterpret_cast<sockaddr*>(&bound), &boundLen) != 0) {
+            return false;
+        }
+        Port_ = ntohs(bound.sin_port);
+        AcceptThread_ = std::thread([this]() {
+            sockaddr_in peer{};
+            socklen_t peerLen = sizeof(peer);
+            Accepted_ =
+                ::accept(Listener_, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+        });
+        return true;
+    }
+
+    ~LoopbackListener() {
+        if (TqSocketValid(Listener_)) {
+            (void)TqShutdownBoth(Listener_);
+            TqCloseSocket(Listener_);
+        }
+        if (AcceptThread_.joinable()) {
+            AcceptThread_.join();
+        }
+        if (TqSocketValid(Accepted_)) {
+            TqCloseSocket(Accepted_);
+        }
+    }
+
+    uint16_t Port() const { return Port_; }
+
+private:
+    TqSocketHandle Listener_{TqInvalidSocket};
+    TqSocketHandle Accepted_{TqInvalidSocket};
+    uint16_t Port_{0};
+    std::thread AcceptThread_;
+};
+
+int TestServerIncomingOpenDispatchesWithInitialBytes() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 228;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    LoopbackListener listener;
+    if (!listener.Start()) return 229;
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7101));
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, nullptr);
+
+    const std::vector<uint8_t> openBytes =
+        BuildOpenRequestBytes("127.0.0.1", listener.Port());
+    if (openBytes.empty()) return 230;
+
+    QUIC_BUFFER firstBuffer{
+        static_cast<uint32_t>(4),
+        const_cast<uint8_t*>(openBytes.data()),
+    };
+    QUIC_STREAM_EVENT firstEvent{};
+    firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    firstEvent.RECEIVE.BufferCount = 1;
+    firstEvent.RECEIVE.Buffers = &firstBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, firstEvent)) return 231;
+
+    QUIC_BUFFER secondBuffer{
+        static_cast<uint32_t>(openBytes.size() - 4),
+        const_cast<uint8_t*>(openBytes.data() + 4),
+    };
+    QUIC_STREAM_EVENT secondEvent{};
+    secondEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    secondEvent.RECEIVE.BufferCount = 1;
+    secondEvent.RECEIVE.Buffers = &secondBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, secondEvent)) return 232;
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) return 233;
+
+    TqOpenResponse response{};
+    if (!TqDecodeOpenResponse(responseBytes.data(), responseBytes.size(), response)) return 234;
+    if (!response.Ok) return 235;
+    if (response.Error != TqOpenError::Ok) return 236;
+    if (responseFlags != QUIC_SEND_FLAG_NONE) return 237;
+    return 0;
+}
+
+int TestServerIncomingLoopbackDeniedWithoutAuthorizer() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 238;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("10.0.0.0/8");
+    TqConfig cfg{};
+
+    bool aclDenied = false;
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7102));
+    TqHandleServerIncomingStream(
+        nullptr,
+        rawStream,
+        acl,
+        cfg,
+        nullptr,
+        {},
+        [&aclDenied]() { aclDenied = true; });
+
+    const std::vector<uint8_t> openBytes = BuildOpenRequestBytes("127.0.0.1", 34567);
+    if (openBytes.empty()) return 239;
+
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(openBytes.size()),
+        const_cast<uint8_t*>(openBytes.data()),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, event)) return 240;
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) return 241;
+
+    TqOpenResponse response{};
+    if (!TqDecodeOpenResponse(responseBytes.data(), responseBytes.size(), response)) return 242;
+    if (response.Ok) return 243;
+    if (response.Error != TqOpenError::AclDenied) return 244;
+    if (!aclDenied) return 245;
+    if (responseFlags != QUIC_SEND_FLAG_FIN) return 246;
+    return 0;
+}
+
+int TestServerIncomingLoopbackAllowedByEphemeralAuthorizer() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 247;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    LoopbackListener listener;
+    if (!listener.Start()) return 248;
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("10.0.0.0/8");
+    TqConfig cfg{};
+    FakeEphemeralTargetAuthorizer authorizer("127.0.0.1", listener.Port());
+
+    auto allowedStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7103));
+    TqHandleServerIncomingStreamForTest(
+        nullptr,
+        allowedStream,
+        acl,
+        cfg,
+        &authorizer);
+
+    const std::vector<uint8_t> allowedOpen =
+        BuildOpenRequestBytes("127.0.0.1", listener.Port());
+    if (allowedOpen.empty()) return 249;
+
+    QUIC_BUFFER allowedBuffer{
+        static_cast<uint32_t>(allowedOpen.size()),
+        const_cast<uint8_t*>(allowedOpen.data()),
+    };
+    QUIC_STREAM_EVENT allowedEvent{};
+    allowedEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    allowedEvent.RECEIVE.BufferCount = 1;
+    allowedEvent.RECEIVE.Buffers = &allowedBuffer;
+    if (!DispatchFakeStreamEvent(allowedStream, allowedEvent)) return 250;
+
+    std::vector<uint8_t> allowedResponseBytes;
+    QUIC_SEND_FLAGS allowedResponseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(allowedStream, allowedResponseBytes, allowedResponseFlags, 2000)) return 251;
+
+    TqOpenResponse allowedResponse{};
+    if (!TqDecodeOpenResponse(
+            allowedResponseBytes.data(),
+            allowedResponseBytes.size(),
+            allowedResponse)) {
+        return 252;
+    }
+    if (!allowedResponse.Ok) return 253;
+    if (allowedResponse.Error != TqOpenError::Ok) return 254;
+
+    auto deniedStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7104));
+    bool aclDenied = false;
+    TqHandleServerIncomingStreamForTest(
+        nullptr,
+        deniedStream,
+        acl,
+        cfg,
+        &authorizer,
+        {},
+        [&aclDenied]() { aclDenied = true; });
+
+    const std::vector<uint8_t> deniedOpen =
+        BuildOpenRequestBytes("127.0.0.1", static_cast<uint16_t>(listener.Port() + 1));
+    if (deniedOpen.empty()) return 255;
+
+    QUIC_BUFFER deniedBuffer{
+        static_cast<uint32_t>(deniedOpen.size()),
+        const_cast<uint8_t*>(deniedOpen.data()),
+    };
+    QUIC_STREAM_EVENT deniedEvent{};
+    deniedEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    deniedEvent.RECEIVE.BufferCount = 1;
+    deniedEvent.RECEIVE.Buffers = &deniedBuffer;
+    if (!DispatchFakeStreamEvent(deniedStream, deniedEvent)) return 256;
+
+    std::vector<uint8_t> deniedResponseBytes;
+    QUIC_SEND_FLAGS deniedResponseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(deniedStream, deniedResponseBytes, deniedResponseFlags, 2000)) return 257;
+
+    TqOpenResponse deniedResponse{};
+    if (!TqDecodeOpenResponse(
+            deniedResponseBytes.data(),
+            deniedResponseBytes.size(),
+            deniedResponse)) {
+        return 258;
+    }
+    if (deniedResponse.Ok) return 259;
+    if (deniedResponse.Error != TqOpenError::AclDenied) return 260;
+    if (!aclDenied) return 261;
+    return 0;
+}
+
+} // namespace
 
 static int TestTunnelRegistryAbortsOnlyMatchingConnection() {
     auto* conn1 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1001));
@@ -383,6 +795,9 @@ int main() {
     if (int rc = TestTunnelRegistryAbortCallbackCanRegisterSameContext()) return rc;
     if (int rc = TestConnectionAbortClosesTunnelTcp()) return rc;
     if (int rc = TestClientOpenOwnerDefersShutdownCompleteDelete()) return rc;
+    if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
+    if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
+    if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
 
     TunnelRequest req{};
     req.AddrType = TQ_ADDR_DOMAIN;

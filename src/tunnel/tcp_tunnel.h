@@ -11,6 +11,8 @@
 
 struct MsQuicConnection;
 struct MsQuicStream;
+class TqEphemeralTargetAuthorizer;
+class TqServerSpeedTestController;
 
 struct TunnelRequest {
     uint8_t AddrType;
@@ -44,6 +46,26 @@ void TqHandleServerPeerStream(
     const TqConfig& cfg,
     TqTunnelCompletionFn onComplete = {},
     TqTunnelAclDeniedFn onAclDenied = {});
+
+void TqHandleServerIncomingStream(
+    MsQuicConnection* conn,
+    HQUIC rawStream,
+    const TqAcl& acl,
+    const TqConfig& cfg,
+    TqServerSpeedTestController* speed,
+    TqTunnelCompletionFn onComplete = {},
+    TqTunnelAclDeniedFn onAclDenied = {});
+
+#if defined(TCPQUIC_TUNNEL_TESTING)
+void TqHandleServerIncomingStreamForTest(
+    MsQuicConnection* conn,
+    HQUIC rawStream,
+    const TqAcl& acl,
+    const TqConfig& cfg,
+    const TqEphemeralTargetAuthorizer* authorizer,
+    TqTunnelCompletionFn onComplete = {},
+    TqTunnelAclDeniedFn onAclDenied = {});
+#endif
 
 struct TqTunnelContext;
 

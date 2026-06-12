@@ -5,6 +5,7 @@
 #include "platform_socket.h"
 #include "quic_session.h"
 #include "relay.h"
+#include "speed_test.h"
 #include "tcp_dialer.h"
 #include "trace.h"
 #include "tunnel_registry.h"
@@ -180,15 +181,68 @@ bool TqDomainResolves(const std::string& host, uint16_t port) {
     return status == 0;
 }
 
+bool TqAppendLiteralTargetAddress(
+    const TqOpenRequest& req,
+    std::vector<sockaddr_storage>& addrs) {
+    sockaddr_storage storage{};
+    if (req.AddrType == TQ_ADDR_IPV4 && req.Addr.size() == 4) {
+        auto* addr = reinterpret_cast<sockaddr_in*>(&storage);
+        addr->sin_family = AF_INET;
+        addr->sin_port = htons(req.Port);
+        std::memcpy(&addr->sin_addr, req.Addr.data(), 4);
+        addrs.push_back(storage);
+        return true;
+    }
+
+    if (req.AddrType == TQ_ADDR_IPV6 && req.Addr.size() == 16) {
+        auto* addr = reinterpret_cast<sockaddr_in6*>(&storage);
+        addr->sin6_family = AF_INET6;
+        addr->sin6_port = htons(req.Port);
+        std::memcpy(&addr->sin6_addr, req.Addr.data(), 16);
+        addrs.push_back(storage);
+        return true;
+    }
+
+    return false;
+}
+
+bool TqIsAllowedEphemeralLoopbackTarget(
+    const TqOpenRequest& req,
+    const std::string& host,
+    const TqEphemeralTargetAuthorizer* authorizer) {
+    if (authorizer == nullptr) {
+        return false;
+    }
+
+    if (req.AddrType == TQ_ADDR_IPV4 && host == "127.0.0.1") {
+        return authorizer->IsAllowedEphemeralTarget(host, req.Port);
+    }
+
+    if (req.AddrType == TQ_ADDR_IPV6 && host == "::1") {
+        return authorizer->IsAllowedEphemeralTarget(host, req.Port);
+    }
+
+    return false;
+}
+
 bool TqResolveAllowedTarget(
     const TqOpenRequest& req,
     const TqAcl& acl,
+    const TqEphemeralTargetAuthorizer* authorizer,
     std::vector<sockaddr_storage>& addrs,
     TqOpenError& error) {
     std::string host;
     if (!TqHostFromOpenRequest(req, host)) {
         error = TqOpenError::Internal;
         return false;
+    }
+
+    if (TqIsAllowedEphemeralLoopbackTarget(req, host, authorizer)) {
+        if (!TqAppendLiteralTargetAddress(req, addrs)) {
+            error = TqOpenError::Internal;
+            return false;
+        }
+        return true;
     }
 
     if (req.AddrType == TQ_ADDR_DOMAIN && !TqDomainResolves(host, req.Port)) {
@@ -218,6 +272,7 @@ public:
         TqSocketHandle tcpFd,
         const TqConfig& cfg,
         const TqAcl* acl,
+        const TqEphemeralTargetAuthorizer* authorizer,
         MsQuicConnection* quicConn = nullptr,
         TqTunnelCompletionFn onComplete = {},
         TqTunnelAclDeniedFn onAclDenied = {}) :
@@ -226,6 +281,7 @@ public:
         TcpFd(tcpFd),
         Config(cfg),
         Acl(acl),
+        Authorizer(authorizer),
         QuicConn(quicConn),
         OnComplete(std::move(onComplete)),
         OnAclDenied(std::move(onAclDenied)) {
@@ -416,6 +472,14 @@ public:
 
     void SetIngressTraceProto(uint8_t proto) {
         TraceIngressProto = proto;
+    }
+
+    void TakeOpeningBytes(std::vector<uint8_t>&& openingRx) {
+        OpeningRx = std::move(openingRx);
+    }
+
+    void ResumeServerOpenFromBufferedData() {
+        TryHandleServerOpen();
     }
 
     void RegisterWithConnectionIfNeeded() {
@@ -610,7 +674,7 @@ private:
 
         std::vector<sockaddr_storage> addrs;
         TqOpenError error = TqOpenError::Internal;
-        if (Acl == nullptr || !TqResolveAllowedTarget(req, *Acl, addrs, error)) {
+        if (Acl == nullptr || !TqResolveAllowedTarget(req, *Acl, Authorizer, addrs, error)) {
             ServerOpenDispatched.store(true, std::memory_order_release);
             if (error == TqOpenError::AclDenied && OnAclDenied) {
                 OnAclDenied();
@@ -865,6 +929,7 @@ private:
     TqSocketHandle TcpFd{TqInvalidSocket};
     TqConfig Config;
     const TqAcl* Acl;
+    const TqEphemeralTargetAuthorizer* Authorizer;
     MsQuicConnection* QuicConn;
     TqTunnelCompletionFn OnComplete;
     TqTunnelAclDeniedFn OnAclDenied;
@@ -942,6 +1007,7 @@ TqTunnelStartResult TqStartClientTunnel(
         clientTcpFd,
         cfg,
         nullptr,
+        nullptr,
         conn);
     if (context == nullptr) {
         return {false, TqOpenError::Internal};
@@ -1009,27 +1075,217 @@ TqTunnelStartResult TqStartClientTunnel(
     return {true, TqOpenError::Ok, tunnelId};
 }
 
-void TqHandleServerPeerStream(
+namespace {
+
+bool TqSendDispatcherBytes(
+    MsQuicStream* stream,
+    const std::vector<uint8_t>& data,
+    QUIC_SEND_FLAGS flags) {
+    auto* sendContext = TqTunnelSendContext::New(data.data(), data.size());
+    if (sendContext == nullptr) {
+        return false;
+    }
+    const QUIC_STATUS status = stream->Send(&sendContext->Buffer, 1, flags, sendContext);
+    if (QUIC_FAILED(status)) {
+        TqTunnelSendContext::Delete(sendContext);
+        return false;
+    }
+    return true;
+}
+
+bool TqSendDispatcherSpeedError(
+    MsQuicStream* stream,
+    uint32_t sessionId,
+    TqSpeedError error,
+    const char* message) {
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeSpeedError(TqSpeedErrorMessage{sessionId, error, message}, encoded)) {
+        return false;
+    }
+    return TqSendDispatcherBytes(stream, encoded, QUIC_SEND_FLAG_FIN);
+}
+
+class TqServerIncomingStreamDispatcher final {
+public:
+    TqServerIncomingStreamDispatcher(
+        MsQuicConnection* conn,
+        MsQuicStream* stream,
+        const TqAcl& acl,
+        const TqConfig& cfg,
+        const TqEphemeralTargetAuthorizer* authorizer,
+        TqTunnelCompletionFn onComplete,
+        TqTunnelAclDeniedFn onAclDenied) :
+        Conn_(conn),
+        Stream_(stream),
+        Acl_(acl),
+        Config_(cfg),
+        Authorizer_(authorizer),
+        OnComplete_(std::move(onComplete)),
+        OnAclDenied_(std::move(onAclDenied)) {}
+
+    ~TqServerIncomingStreamDispatcher() {
+        if (!OwnershipTransferred_ && OnComplete_) {
+            OnComplete_();
+        }
+    }
+
+    static QUIC_STATUS QUIC_API Callback(
+        _In_ MsQuicStream* stream,
+        _In_opt_ void* context,
+        _Inout_ QUIC_STREAM_EVENT* event) noexcept {
+        auto* dispatcher = static_cast<TqServerIncomingStreamDispatcher*>(context);
+        if (dispatcher == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        return dispatcher->OnStreamEvent(stream, event);
+    }
+
+private:
+    QUIC_STATUS OnStreamEvent(MsQuicStream*, QUIC_STREAM_EVENT* event) noexcept {
+        switch (event->Type) {
+        case QUIC_STREAM_EVENT_RECEIVE:
+            for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
+                const auto& buffer = event->RECEIVE.Buffers[i];
+                BufferedRx_.insert(
+                    BufferedRx_.end(),
+                    buffer.Buffer,
+                    buffer.Buffer + buffer.Length);
+            }
+            TryDispatch();
+            break;
+        case QUIC_STREAM_EVENT_SEND_COMPLETE:
+            TqTunnelSendContext::Delete(
+                static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            break;
+        case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+            Stream_ = nullptr;
+            delete this;
+            break;
+        default:
+            break;
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
+
+    void TryDispatch() {
+        if (BufferedRx_.size() < 4 || Stream_ == nullptr) {
+            return;
+        }
+
+        if (BufferedRx_[0] != TQ_MAGIC_0 ||
+            BufferedRx_[1] != TQ_MAGIC_1 ||
+            BufferedRx_[2] != TQ_VERSION) {
+            AbortOrClose();
+            return;
+        }
+
+        switch (BufferedRx_[3]) {
+        case TQ_CMD_OPEN:
+            HandOffToTunnelContext();
+            return;
+        case TQ_CMD_SPEED_START:
+            HandleSpeedStartStub();
+            return;
+        default:
+            (void)TqSendDispatcherSpeedError(
+                Stream_,
+                0,
+                TqSpeedError::Unsupported,
+                "unsupported control stream");
+            AbortOrClose();
+            return;
+        }
+    }
+
+    void HandOffToTunnelContext() {
+        auto* context = new (std::nothrow) TqTunnelContext(
+            TqTunnelRole::ServerOpen,
+            Stream_,
+            TqInvalidSocket,
+            Config_,
+            &Acl_,
+            Authorizer_,
+            Conn_,
+            std::move(OnComplete_),
+            std::move(OnAclDenied_));
+        if (context == nullptr) {
+            AbortOrClose();
+            return;
+        }
+
+        context->SetStream(Stream_);
+        context->TakeOpeningBytes(std::move(BufferedRx_));
+        Stream_->Callback = TqTunnelContext::Callback;
+        Stream_->Context = context;
+        context->RegisterWithConnectionIfNeeded();
+
+        OwnershipTransferred_ = true;
+        Stream_ = nullptr;
+        context->ResumeServerOpenFromBufferedData();
+        delete this;
+    }
+
+    void HandleSpeedStartStub() {
+        if (BufferedRx_.size() < TQ_SPEED_START_SIZE) {
+            return;
+        }
+
+        TqSpeedStart start{};
+        if (!TqDecodeSpeedStart(BufferedRx_.data(), BufferedRx_.size(), start)) {
+            (void)TqSendDispatcherSpeedError(
+                Stream_,
+                0,
+                TqSpeedError::InvalidRequest,
+                "invalid speed start");
+            AbortOrClose();
+            return;
+        }
+
+        (void)Authorizer_;
+        (void)TqSendDispatcherSpeedError(
+            Stream_,
+            start.SessionId,
+            TqSpeedError::Unsupported,
+            "speed control unavailable");
+        AbortOrClose();
+    }
+
+    void AbortOrClose() {
+        if (Stream_ != nullptr) {
+            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+    }
+
+    MsQuicConnection* Conn_{nullptr};
+    MsQuicStream* Stream_{nullptr};
+    const TqAcl& Acl_;
+    TqConfig Config_;
+    const TqEphemeralTargetAuthorizer* Authorizer_{nullptr};
+    TqTunnelCompletionFn OnComplete_;
+    TqTunnelAclDeniedFn OnAclDenied_;
+    std::vector<uint8_t> BufferedRx_;
+    bool OwnershipTransferred_{false};
+};
+
+void TqHandleServerIncomingStreamInternal(
     MsQuicConnection* conn,
     HQUIC rawStream,
     const TqAcl& acl,
     const TqConfig& cfg,
+    const TqEphemeralTargetAuthorizer* authorizer,
     TqTunnelCompletionFn onComplete,
     TqTunnelAclDeniedFn onAclDenied) {
     if (rawStream == nullptr) {
         return;
     }
 
-    auto* context = new (std::nothrow) TqTunnelContext(
-        TqTunnelRole::ServerOpen,
-        nullptr,
-        TqInvalidSocket,
-        cfg,
-        &acl,
-        conn,
-        onComplete,
-        std::move(onAclDenied));
-    if (context == nullptr) {
+    auto* stream = new (std::nothrow) MsQuicStream(
+        rawStream,
+        CleanUpAutoDelete,
+        MsQuicStream::NoOpCallback,
+        nullptr);
+    if (stream == nullptr || !stream->IsValid()) {
+        delete stream;
         if (onComplete) {
             onComplete();
         }
@@ -1037,20 +1293,82 @@ void TqHandleServerPeerStream(
         return;
     }
 
-    auto* stream = new (std::nothrow) MsQuicStream(
-        rawStream,
-        CleanUpAutoDelete,
-        TqTunnelContext::Callback,
-        context);
-    if (stream == nullptr || !stream->IsValid()) {
+    auto* dispatcher = new (std::nothrow) TqServerIncomingStreamDispatcher(
+        conn,
+        stream,
+        acl,
+        cfg,
+        authorizer,
+        std::move(onComplete),
+        std::move(onAclDenied));
+    if (dispatcher == nullptr) {
         delete stream;
-        delete context;
+        if (onComplete) {
+            onComplete();
+        }
         MsQuic->StreamClose(rawStream);
         return;
     }
 
-    context->SetStream(stream);
-    context->RegisterWithConnectionIfNeeded();
+    stream->Callback = TqServerIncomingStreamDispatcher::Callback;
+    stream->Context = dispatcher;
+}
+
+} // namespace
+
+void TqHandleServerIncomingStream(
+    MsQuicConnection* conn,
+    HQUIC rawStream,
+    const TqAcl& acl,
+    const TqConfig& cfg,
+    TqServerSpeedTestController* speed,
+    TqTunnelCompletionFn onComplete,
+    TqTunnelAclDeniedFn onAclDenied) {
+    TqHandleServerIncomingStreamInternal(
+        conn,
+        rawStream,
+        acl,
+        cfg,
+        speed,
+        std::move(onComplete),
+        std::move(onAclDenied));
+}
+
+#if defined(TCPQUIC_TUNNEL_TESTING)
+void TqHandleServerIncomingStreamForTest(
+    MsQuicConnection* conn,
+    HQUIC rawStream,
+    const TqAcl& acl,
+    const TqConfig& cfg,
+    const TqEphemeralTargetAuthorizer* authorizer,
+    TqTunnelCompletionFn onComplete,
+    TqTunnelAclDeniedFn onAclDenied) {
+    TqHandleServerIncomingStreamInternal(
+        conn,
+        rawStream,
+        acl,
+        cfg,
+        authorizer,
+        std::move(onComplete),
+        std::move(onAclDenied));
+}
+#endif
+
+void TqHandleServerPeerStream(
+    MsQuicConnection* conn,
+    HQUIC rawStream,
+    const TqAcl& acl,
+    const TqConfig& cfg,
+    TqTunnelCompletionFn onComplete,
+    TqTunnelAclDeniedFn onAclDenied) {
+    TqHandleServerIncomingStream(
+        conn,
+        rawStream,
+        acl,
+        cfg,
+        nullptr,
+        std::move(onComplete),
+        std::move(onAclDenied));
 }
 
 #if defined(TCPQUIC_TUNNEL_TESTING)
@@ -1063,6 +1381,7 @@ TqTunnelContext* TqCreateTestRegisteredTunnel(
         nullptr,
         tcpFd,
         cfg,
+        nullptr,
         nullptr,
         connection);
     if (context != nullptr) {
@@ -1087,6 +1406,7 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
         nullptr,
         TqInvalidSocket,
         cfg,
+        nullptr,
         nullptr,
         nullptr,
         std::move(onComplete));
