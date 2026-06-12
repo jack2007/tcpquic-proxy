@@ -7,6 +7,7 @@
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "socks5_server.h"
+#include "speed_test.h"
 #include "tcp_tunnel.h"
 #include "thread_pool.h"
 #include "tuning.h"
@@ -423,6 +424,12 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return 1;
     }
 
+    if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        const bool ok = TqRunClientSpeedTest(quic, cfg);
+        quic.Stop();
+        return ok ? 0 : 1;
+    }
+
     if (cfg.WarmupMb > 0) {
         if (!quic.EnsureAnyConnected()) {
             std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
@@ -556,6 +563,7 @@ int RunServer(const TqConfig& cfg) {
     acl.DenyCidrs = cfg.DenyTargets;
 
     auto metrics = std::make_shared<TqServerMetrics>();
+    auto speed = std::make_shared<TqServerSpeedTestController>();
     metrics->Listen = cfg.QuicListen;
     const auto started = std::chrono::steady_clock::now();
 
@@ -563,7 +571,7 @@ int RunServer(const TqConfig& cfg) {
     quic.SetConnectionHandler([metrics](MsQuicConnection*) {
         TqServerMetricsConnectionAccepted(*metrics);
     });
-    quic.SetPeerStreamHandler([&acl, &cfg, metrics](MsQuicConnection* conn, HQUIC stream) {
+    quic.SetPeerStreamHandler([&acl, &cfg, metrics, speed](MsQuicConnection* conn, HQUIC stream) {
         TqServerMetricsStreamStarted(*metrics);
         if (stream == nullptr) {
             {
@@ -573,7 +581,7 @@ int RunServer(const TqConfig& cfg) {
             TqServerMetricsStreamFinished(*metrics);
             return;
         }
-        TqHandleServerPeerStream(conn, stream, acl, cfg, [metrics]() {
+        TqHandleServerIncomingStream(conn, stream, acl, cfg, speed.get(), [metrics]() {
             TqServerMetricsStreamFinished(*metrics);
         }, [metrics]() {
             metrics->AclDenied.fetch_add(1);
@@ -613,6 +621,7 @@ int RunServer(const TqConfig& cfg) {
 
     std::fprintf(stderr, "tcpquic-proxy: QUIC server listening on %s\n", cfg.QuicListen.c_str());
     quic.Run();
+    speed->StopAll();
     return 0;
 }
 

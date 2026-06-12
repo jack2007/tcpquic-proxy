@@ -1,9 +1,17 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <vector>
 
 #include "control_protocol.h"
+#include "msquic.hpp"
+
+struct TqConfig;
+class QuicClientSession;
+class MsQuicStream;
+struct MsQuicConnection;
 
 class TqEphemeralTargetAuthorizer {
 public:
@@ -25,3 +33,18 @@ private:
     struct Impl;
     Impl* Impl_;
 };
+
+bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg);
+void TqHandleServerSpeedControlStream(
+    TqServerSpeedTestController& controller,
+    MsQuicConnection* conn,
+    HQUIC rawStream);
+
+// Internal handoff for the server incoming-stream dispatcher after it has already
+// wrapped the raw stream and buffered initial bytes.
+bool TqAttachServerSpeedControlStream(
+    TqServerSpeedTestController& controller,
+    MsQuicConnection* conn,
+    MsQuicStream* stream,
+    std::vector<uint8_t> initialBytes,
+    std::function<void()> onComplete = {});

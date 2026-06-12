@@ -238,11 +238,35 @@ set_property(TARGET tcpquic_control_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 add_executable(tcpquic_speed_test_test
     unittest/speed_test_test.cpp
     runtime/speed_test.cpp
+    tunnel/tcp_tunnel.cpp
+    tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
+    config/tuning.cpp
     protocol/control_protocol.cpp
+    acl/acl.cpp
+    protocol/compress.cpp
+    tunnel/relay.cpp
+    tunnel/tcp_write_queue.cpp
+    tunnel/tunnel_reaper.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/linux_relay_buffer_pool.cpp
+        tunnel/linux_relay_worker.cpp
+    )
+endif()
+if(WIN32)
+    target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/windows_relay_worker.cpp
+    )
+endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
-target_link_libraries(tcpquic_speed_test_test Threads::Threads)
+target_link_libraries(tcpquic_speed_test_test Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link)
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_speed_test_test msquic_platform)
+endif()
+target_compile_definitions(tcpquic_speed_test_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_speed_test_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_speed_test_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(WIN32)
@@ -284,6 +308,7 @@ set_property(TARGET tcpquic_compress_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 set(TCPQUIC_TUNNEL_TEST_SOURCES
     unittest/tcp_tunnel_test.cpp
+    runtime/speed_test.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp

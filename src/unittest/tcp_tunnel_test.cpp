@@ -31,6 +31,14 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
     return 0;
 }
 
+bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
+    return false;
+}
+
+MsQuicConnection* QuicClientSession::PickConnection() {
+    return nullptr;
+}
+
 bool TqTraceEnabled() {
     return false;
 }
@@ -358,6 +366,40 @@ std::vector<uint8_t> BuildSpeedStartBytes(uint32_t sessionId) {
     return encoded;
 }
 
+std::vector<uint8_t> BuildSpeedStartBytes(
+    uint32_t sessionId,
+    TqSpeedDirection direction,
+    uint32_t durationSec,
+    uint16_t parallel) {
+    TqSpeedStart start{};
+    start.SessionId = sessionId;
+    start.Direction = direction;
+    start.DurationSec = durationSec;
+    start.Parallel = parallel;
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeSpeedStart(start, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
+}
+
+std::vector<uint8_t> BuildSpeedFinishBytes(
+    uint32_t sessionId,
+    uint64_t clientBytes,
+    uint64_t clientElapsedUs) {
+    TqSpeedFinish finish{};
+    finish.SessionId = sessionId;
+    finish.ClientBytes = clientBytes;
+    finish.ClientElapsedUs = clientElapsedUs;
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeSpeedFinish(finish, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
+}
+
 std::vector<uint8_t> BuildUnknownCommandBytes(uint8_t cmd) {
     return std::vector<uint8_t>{TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, cmd};
 }
@@ -376,6 +418,30 @@ private:
     std::string Host_;
     uint16_t Port_{0};
 };
+
+bool ConnectLoopback(uint16_t port, TqSocketHandle& outSocket) {
+    outSocket = TqInvalidSocket;
+    TqSocketHandle sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!TqSocketValid(sock)) {
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (!TqInetPton(AF_INET, "127.0.0.1", &addr.sin_addr)) {
+        TqCloseSocket(sock);
+        return false;
+    }
+
+    if (::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        TqCloseSocket(sock);
+        return false;
+    }
+
+    outSocket = sock;
+    return true;
+}
 
 class LoopbackListener {
 public:
@@ -693,6 +759,142 @@ int TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort() {
     return 0;
 }
 
+int TestServerIncomingSpeedControlDispatchesToController() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 291;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+    TqServerSpeedTestController controller;
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7107));
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, &controller);
+
+    const std::vector<uint8_t> speedStart =
+        BuildSpeedStartBytes(88, TqSpeedDirection::Upload, 5, 1);
+    if (speedStart.empty()) return 292;
+
+    QUIC_BUFFER firstBuffer{
+        8,
+        const_cast<uint8_t*>(speedStart.data()),
+    };
+    QUIC_STREAM_EVENT firstEvent{};
+    firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    firstEvent.RECEIVE.BufferCount = 1;
+    firstEvent.RECEIVE.Buffers = &firstBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, firstEvent)) return 293;
+
+    QUIC_BUFFER secondBuffer{
+        static_cast<uint32_t>(speedStart.size() - 8),
+        const_cast<uint8_t*>(speedStart.data() + 8),
+    };
+    QUIC_STREAM_EVENT secondEvent{};
+    secondEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    secondEvent.RECEIVE.BufferCount = 1;
+    secondEvent.RECEIVE.Buffers = &secondBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, secondEvent)) return 294;
+
+    std::vector<uint8_t> readyBytes;
+    QUIC_SEND_FLAGS readyFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, readyBytes, readyFlags, 2000)) return 295;
+
+    TqSpeedReady ready{};
+    if (!TqDecodeSpeedReady(readyBytes.data(), readyBytes.size(), ready)) return 296;
+    if (ready.SessionId != 88) return 297;
+    if (ready.AddrType != TQ_ADDR_IPV4) return 298;
+    if (ready.Port == 0) return 299;
+    if (readyFlags != QUIC_SEND_FLAG_NONE) return 300;
+    if (!DispatchFakeSendComplete(rawStream)) return 301;
+
+    TqSocketHandle client = TqInvalidSocket;
+    if (!ConnectLoopback(ready.Port, client)) return 302;
+
+    std::vector<uint8_t> payload(256 * 1024, 0x4a);
+    size_t sent = 0;
+    while (sent < payload.size()) {
+        const int rc = TqSend(
+            client,
+            payload.data() + sent,
+            payload.size() - sent,
+            TqSendFlags::NoSignal);
+        if (rc <= 0) {
+            TqCloseSocket(client);
+            controller.StopAll();
+            return 303;
+        }
+        sent += static_cast<size_t>(rc);
+    }
+    (void)TqShutdownSend(client);
+    TqCloseSocket(client);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    const std::vector<uint8_t> speedFinish =
+        BuildSpeedFinishBytes(88, static_cast<uint64_t>(payload.size()), 3210000);
+    if (speedFinish.empty()) {
+        controller.StopAll();
+        return 304;
+    }
+
+    QUIC_BUFFER finishBuffer{
+        static_cast<uint32_t>(speedFinish.size()),
+        const_cast<uint8_t*>(speedFinish.data()),
+    };
+    QUIC_STREAM_EVENT finishEvent{};
+    finishEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    finishEvent.RECEIVE.BufferCount = 1;
+    finishEvent.RECEIVE.Buffers = &finishBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, finishEvent)) {
+        controller.StopAll();
+        return 305;
+    }
+
+    std::vector<uint8_t> resultBytes;
+    QUIC_SEND_FLAGS resultFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, resultBytes, resultFlags, 2000)) {
+        controller.StopAll();
+        return 306;
+    }
+
+    TqSpeedResult result{};
+    if (!TqDecodeSpeedResult(resultBytes.data(), resultBytes.size(), result)) {
+        controller.StopAll();
+        return 307;
+    }
+    if (result.SessionId != 88) {
+        controller.StopAll();
+        return 308;
+    }
+    if (result.ServerBytes != payload.size()) {
+        controller.StopAll();
+        return 309;
+    }
+    if (result.AcceptedConnections != 1) {
+        controller.StopAll();
+        return 310;
+    }
+    if (result.ClosedConnections != 1) {
+        controller.StopAll();
+        return 311;
+    }
+    if (resultFlags != QUIC_SEND_FLAG_FIN) {
+        controller.StopAll();
+        return 312;
+    }
+    if (!DispatchFakeSendComplete(rawStream)) {
+        controller.StopAll();
+        return 313;
+    }
+    if (!DispatchFakeShutdownComplete(rawStream)) {
+        controller.StopAll();
+        return 314;
+    }
+    return 0;
+}
+
 int TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort() {
     TqSocketStartup startup;
     if (!startup.Ok()) return 280;
@@ -977,6 +1179,7 @@ int main() {
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
     if (int rc = TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort()) return rc;
+    if (int rc = TestServerIncomingSpeedControlDispatchesToController()) return rc;
     if (int rc = TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort()) return rc;
 
     TunnelRequest req{};

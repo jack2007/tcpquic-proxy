@@ -1112,6 +1112,7 @@ public:
         MsQuicStream* stream,
         const TqAcl& acl,
         const TqConfig& cfg,
+        TqServerSpeedTestController* speed,
         const TqEphemeralTargetAuthorizer* authorizer,
         TqTunnelCompletionFn onComplete,
         TqTunnelAclDeniedFn onAclDenied) :
@@ -1119,6 +1120,7 @@ public:
         Stream_(stream),
         Acl_(acl),
         Config_(cfg),
+        Speed_(speed),
         Authorizer_(authorizer),
         OnComplete_(std::move(onComplete)),
         OnAclDenied_(std::move(onAclDenied)) {}
@@ -1187,7 +1189,7 @@ private:
             HandOffToTunnelContext();
             return;
         case TQ_CMD_SPEED_START:
-            HandleSpeedStartStub();
+            HandOffToSpeedControlStream();
             return;
         default:
             if (!QueueStructuredError(
@@ -1229,31 +1231,43 @@ private:
         delete this;
     }
 
-    void HandleSpeedStartStub() {
+    void HandOffToSpeedControlStream() {
         if (BufferedRx_.size() < TQ_SPEED_START_SIZE) {
             return;
         }
 
         TqSpeedStart start{};
-        if (!TqDecodeSpeedStart(BufferedRx_.data(), BufferedRx_.size(), start)) {
-            if (!QueueStructuredError(
-                Stream_,
-                0,
-                TqSpeedError::InvalidRequest,
-                "invalid speed start")) {
+        if (!TqDecodeSpeedStart(BufferedRx_.data(), TQ_SPEED_START_SIZE, start)) {
+            if (!QueueStructuredError(Stream_, 0, TqSpeedError::InvalidRequest, "invalid speed start")) {
                 AbortOrClose();
             }
             return;
         }
 
-        (void)Authorizer_;
-        if (!QueueStructuredError(
-            Stream_,
-            start.SessionId,
-            TqSpeedError::Unsupported,
-            "speed control unavailable")) {
-            AbortOrClose();
+        if (Speed_ == nullptr) {
+            if (!QueueStructuredError(
+                    Stream_,
+                    start.SessionId,
+                    TqSpeedError::Unsupported,
+                    "speed control unavailable")) {
+                AbortOrClose();
+            }
+            return;
         }
+
+        if (!TqAttachServerSpeedControlStream(
+                *Speed_,
+                Conn_,
+                Stream_,
+                std::move(BufferedRx_),
+                std::move(OnComplete_))) {
+            AbortOrClose();
+            return;
+        }
+
+        OwnershipTransferred_ = true;
+        Stream_ = nullptr;
+        delete this;
     }
 
     bool QueueStructuredError(
@@ -1278,6 +1292,7 @@ private:
     MsQuicStream* Stream_{nullptr};
     const TqAcl& Acl_;
     TqConfig Config_;
+    TqServerSpeedTestController* Speed_{nullptr};
     const TqEphemeralTargetAuthorizer* Authorizer_{nullptr};
     TqTunnelCompletionFn OnComplete_;
     TqTunnelAclDeniedFn OnAclDenied_;
@@ -1291,6 +1306,7 @@ void TqHandleServerIncomingStreamInternal(
     HQUIC rawStream,
     const TqAcl& acl,
     const TqConfig& cfg,
+    TqServerSpeedTestController* speed,
     const TqEphemeralTargetAuthorizer* authorizer,
     TqTunnelCompletionFn onComplete,
     TqTunnelAclDeniedFn onAclDenied) {
@@ -1317,6 +1333,7 @@ void TqHandleServerIncomingStreamInternal(
         stream,
         acl,
         cfg,
+        speed,
         authorizer,
         std::move(onComplete),
         std::move(onAclDenied));
@@ -1349,6 +1366,7 @@ void TqHandleServerIncomingStream(
         acl,
         cfg,
         speed,
+        speed,
         std::move(onComplete),
         std::move(onAclDenied));
 }
@@ -1367,6 +1385,7 @@ void TqHandleServerIncomingStreamForTest(
         rawStream,
         acl,
         cfg,
+        nullptr,
         authorizer,
         std::move(onComplete),
         std::move(onAclDenied));

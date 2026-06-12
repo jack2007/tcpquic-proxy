@@ -1,6 +1,8 @@
 #include "speed_test.h"
 
 #include "platform_socket.h"
+#include "quic_session.h"
+#include "trace.h"
 
 #include <array>
 #include <chrono>
@@ -9,6 +11,98 @@
 #include <future>
 #include <thread>
 #include <vector>
+
+bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
+    return false;
+}
+
+MsQuicConnection* QuicClientSession::PickConnection() {
+    return nullptr;
+}
+
+uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
+    (void)connection;
+    return 0;
+}
+
+uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
+    (void)connection;
+    return 0;
+}
+
+bool TqTraceEnabled() {
+    return false;
+}
+
+uint64_t TqTraceStreamStarted(
+    MsQuicConnection* connection,
+    uint32_t connId,
+    const char* role,
+    const char* target,
+    uint8_t compressFlags) {
+    (void)connection;
+    (void)connId;
+    (void)role;
+    (void)target;
+    (void)compressFlags;
+    return 0;
+}
+
+void TqTraceIncOpenTx(uint32_t connId) {
+    (void)connId;
+}
+
+void TqTraceIncOpenRx(uint32_t connId) {
+    (void)connId;
+}
+
+void TqTraceRelayStarted(uint64_t tunnelId) {
+    (void)tunnelId;
+}
+
+void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField) {
+    (void)tunnelId;
+    (void)ok;
+    (void)error;
+    (void)connIdField;
+}
+
+void TqTraceStreamClosed(
+    uint64_t tunnelId,
+    const char* role,
+    const char* target,
+    bool relayStarted,
+    TqOpenError closeReason) {
+    (void)tunnelId;
+    (void)role;
+    (void)target;
+    (void)relayStarted;
+    (void)closeReason;
+}
+
+void TqTraceProxyClosed(TqTraceProxyProto proto, TqSocketHandle fd) {
+    (void)proto;
+    (void)fd;
+}
+
+void TqTraceTargetTcpDialing(uint64_t tunnelId, const char* target) {
+    (void)tunnelId;
+    (void)target;
+}
+
+void TqTraceTargetTcpConnected(uint64_t tunnelId, TqSocketHandle fd) {
+    (void)tunnelId;
+    (void)fd;
+}
+
+void TqTraceTargetTcpFailed(uint64_t tunnelId, TqOpenError error) {
+    (void)tunnelId;
+    (void)error;
+}
+
+void TqTraceTargetTcpClosed(uint64_t tunnelId) {
+    (void)tunnelId;
+}
 
 namespace {
 

@@ -467,6 +467,7 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
         removed->Stream->Callback = MsQuicStream::NoOpCallback;
         removed->Stream->Context = nullptr;
     }
+    removed->Stream = nullptr;
     removed->StreamBinding = nullptr;
     if (binding != nullptr) {
         while (binding->CallbackRefs.load(std::memory_order_acquire) != 0) {
@@ -657,7 +658,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     if (relay == nullptr || views.empty()) {
         return true;
     }
-    if (!relay->EnableQuicSends || relay->Stream == nullptr) {
+    if (!relay->EnableQuicSends) {
         for (const auto& view : views) {
             relay->CapturedQuicBytesForTest.insert(
                 relay->CapturedQuicBytesForTest.end(),
@@ -666,6 +667,11 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
         }
         views.clear();
         return true;
+    }
+    if (relay->Closing || relay->Stream == nullptr || relay->Stream->Handle == nullptr) {
+        views.clear();
+        RecordError(RelayErrorKind::QuicSend);
+        return false;
     }
 
     std::vector<QUIC_BUFFER> quicBuffers;
@@ -691,8 +697,14 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(RelayState* relay, std::vector<TqB
     operation->RelayId = relay->Id;
     operation->Views = std::move(views);
     operation->QuicBuffers = std::move(quicBuffers);
+    MsQuicStream* stream = relay->Stream;
+    if (stream == nullptr || stream->Handle == nullptr) {
+        delete operation;
+        RecordError(RelayErrorKind::QuicSend);
+        return false;
+    }
 
-    const QUIC_STATUS status = relay->Stream->Send(
+    const QUIC_STATUS status = stream->Send(
         operation->QuicBuffers.data(),
         static_cast<uint32_t>(operation->QuicBuffers.size()),
         QUIC_SEND_FLAG_NONE,
@@ -1585,6 +1597,10 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE ||
         event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+        relay->Stream = nullptr;
+        relay->Closing = true;
         TqLinuxRelayEvent shutdown{};
         shutdown.Type = TqLinuxRelayEventType::Shutdown;
         shutdown.RelayId = relayId;
