@@ -54,8 +54,8 @@ static bool IsValidSpeedDirection(uint8_t v) {
            v == static_cast<uint8_t>(TqSpeedDirection::Upload);
 }
 
-static bool IsValidSpeedError(uint8_t v) {
-    return v <= static_cast<uint8_t>(TqSpeedError::Unsupported);
+static bool IsValidSpeedErrorFrameCode(uint8_t v) {
+    return v != static_cast<uint8_t>(TqSpeedError::Ok);
 }
 
 static bool ValidateAddr(const TqOpenRequest& req) {
@@ -93,7 +93,7 @@ static bool ValidateSpeedReady(const TqSpeedReady& msg) {
 }
 
 static bool ValidateSpeedError(const TqSpeedErrorMessage& msg) {
-    return IsValidSpeedError(static_cast<uint8_t>(msg.Error)) &&
+    return IsValidSpeedErrorFrameCode(static_cast<uint8_t>(msg.Error)) &&
            msg.Message.size() <= TQ_SPEED_ERROR_MAX_MESSAGE_LEN;
 }
 
@@ -426,7 +426,7 @@ bool TqDecodeSpeedError(const uint8_t* data, size_t len, TqSpeedErrorMessage& ou
     if (len != expectedLen || messageLen > TQ_SPEED_ERROR_MAX_MESSAGE_LEN) {
         return false;
     }
-    if (!IsValidSpeedError(data[8])) {
+    if (!IsValidSpeedErrorFrameCode(data[8])) {
         return false;
     }
 

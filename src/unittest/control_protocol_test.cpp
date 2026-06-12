@@ -179,8 +179,19 @@ int main() {
         return 1;
     }
 
+    std::vector<uint8_t> futureError = buf;
+    futureError[8] = 99;
+    if (!TqDecodeSpeedError(futureError.data(), futureError.size(), errorDecoded)) {
+        return 1;
+    }
+    if (errorDecoded.SessionId != 7 ||
+        static_cast<uint8_t>(errorDecoded.Error) != 99 ||
+        errorDecoded.Message != "bad speed request") {
+        return 1;
+    }
+
     std::vector<uint8_t> errorMut = buf;
-    errorMut[8] = 0x7f;
+    errorMut[8] = 0x00;
     if (TqDecodeSpeedError(errorMut.data(), errorMut.size(), errorDecoded)) {
         return 1;
     }
