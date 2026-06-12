@@ -76,6 +76,7 @@ struct TqLinuxRelayWorker::RelayState {
     uint64_t PendingQuicReceiveBytes{0};
     bool QuicReceivePaused{false};
     bool TcpWriteShutdownQueued{false};
+    bool TcpReadArmed{true};
     bool TcpWriteArmed{false};
     StreamRelayBinding* StreamBinding{nullptr};
     TqLinuxRelayBufferPool Pool;
@@ -88,8 +89,11 @@ struct TqLinuxRelayWorker::RelayState {
           Decompressor(registration.Decompressor),
           CompressAlgo(registration.CompressAlgo),
           EnableQuicSends(registration.EnableQuicSends),
-          Pool(config.ReadChunkSize, config.MaxIov * 4, config.MaxPendingBytes) {
-        Pool.Reserve(config.MaxIov * 4);
+          Pool(
+              config.ReadChunkSize,
+              static_cast<size_t>(config.WorkerSlots) + config.IngressSlots,
+              config.MaxPendingBytes) {
+        Pool.Reserve(config.WorkerSlots, config.IngressSlots);
     }
 };
 
@@ -515,7 +519,7 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     const uint64_t tickBudget = std::min<uint64_t>(Config.ReadBatchBytes, Config.ByteBudgetPerTick);
     while (readBytes < tickBudget) {
         if (relay->Pool.PendingBytes() + Config.ReadChunkSize > relay->Pool.MaxPendingBytes()) {
-            ReadDisabledCount.fetch_add(1);
+            ArmTcpReadable(relay, false);
             break;
         }
 
@@ -529,7 +533,12 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
             auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
             if (!buffer) {
-                RecordBufferAcquireFailure(RelayErrorKind::TcpReadBufferAcquire, acquireFailure);
+                if (acquireFailure == TqBufferAcquireFailure::PendingBytesLimit ||
+                    acquireFailure == TqBufferAcquireFailure::SlotLimit) {
+                    ArmTcpReadable(relay, false);
+                } else {
+                    RecordBufferAcquireFailure(RelayErrorKind::TcpReadBufferAcquire, acquireFailure);
+                }
                 break;
             }
             iovec item{};
@@ -715,6 +724,9 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
         --relay->OutstandingQuicSends;
     }
     delete operation;
+    if (relay != nullptr && !relay->Closing) {
+        ArmTcpReadable(relay.get(), true);
+    }
 }
 
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
@@ -1251,19 +1263,39 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
     }
 }
 
+void TqLinuxRelayWorker::ArmTcpReadable(RelayState* relay, bool enabled) {
+    if (relay == nullptr || relay->TcpFd < 0 || EpollFd < 0 || relay->TcpReadArmed == enabled) {
+        return;
+    }
+    relay->TcpReadArmed = enabled;
+    if (!enabled) {
+        ReadDisabledCount.fetch_add(1);
+    }
+    UpdateTcpInterest(relay);
+}
+
 void TqLinuxRelayWorker::ArmTcpWritable(RelayState* relay, bool enabled) {
     if (relay == nullptr || relay->TcpFd < 0 || EpollFd < 0 || relay->TcpWriteArmed == enabled) {
         return;
     }
+    relay->TcpWriteArmed = enabled;
+    UpdateTcpInterest(relay);
+}
+
+void TqLinuxRelayWorker::UpdateTcpInterest(RelayState* relay) {
+    if (relay == nullptr || relay->TcpFd < 0 || EpollFd < 0) {
+        return;
+    }
     epoll_event event{};
-    event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
-    if (enabled) {
+    event.events = EPOLLRDHUP | EPOLLERR;
+    if (relay->TcpReadArmed) {
+        event.events |= EPOLLIN;
+    }
+    if (relay->TcpWriteArmed) {
         event.events |= EPOLLOUT;
     }
     event.data.u64 = relay->Id;
-    if (::epoll_ctl(EpollFd, EPOLL_CTL_MOD, relay->TcpFd, &event) == 0) {
-        relay->TcpWriteArmed = enabled;
-    }
+    (void)::epoll_ctl(EpollFd, EPOLL_CTL_MOD, relay->TcpFd, &event);
 }
 
 void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
@@ -1583,6 +1615,8 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
         config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
         config.MaxIov = tuning.LinuxRelayMaxIov;
+        config.WorkerSlots = tuning.LinuxRelayWorkerSlots;
+        config.IngressSlots = tuning.LinuxRelayIngressSlots;
         config.MaxPendingBytes = tuning.LinuxRelayPerWorkerPendingBytes;
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;

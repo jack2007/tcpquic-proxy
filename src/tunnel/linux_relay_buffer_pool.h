@@ -94,6 +94,7 @@ public:
     TqLinuxRelayBufferPool& operator=(const TqLinuxRelayBufferPool&) = delete;
 
     void Reserve(size_t slotCount);
+    void Reserve(size_t workerSlots, size_t ingressSlots);
     TqBufferRef AcquireWorker(TqBufferAcquireFailure* failure = nullptr);
     TqBufferRef AcquireIngress(TqBufferAcquireFailure* failure = nullptr);
     TqBufferRef TransferToWorker(TqBufferRef ingress);

@@ -22,9 +22,11 @@ struct QUIC_STREAM_EVENT;
 struct TqLinuxRelayWorkerConfig {
     uint32_t EventBudget{4096};
     uint64_t ByteBudgetPerTick{64ull * 1024 * 1024};
-    size_t ReadChunkSize{64 * 1024};
+    size_t ReadChunkSize{128 * 1024};
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
+    uint32_t WorkerSlots{128};
+    uint32_t IngressSlots{128};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     uint64_t DeferredReceiveCompleteBatchBytes{0};
@@ -209,11 +211,13 @@ private:
     void MaybePauseQuicReceive(RelayState* relay);
     void MaybeResumeQuicReceive(RelayState* relay);
     void SetQuicReceiveEnabled(RelayState* relay, bool enabled);
+    void ArmTcpReadable(RelayState* relay, bool enabled);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
     void ProcessQuicReceiveEvent(TqLinuxRelayEvent& event);
     void PurgeRetiredRelaysIfIdle();
     bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);
     void FlushTcpWrites(RelayState* relay);
+    void UpdateTcpInterest(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
     QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
     QUIC_STATUS OnStreamEventWithBinding(

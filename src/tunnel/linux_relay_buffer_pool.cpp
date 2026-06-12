@@ -123,11 +123,13 @@ TqLinuxRelayBufferPool::~TqLinuxRelayBufferPool() {
 
 void TqLinuxRelayBufferPool::Reserve(size_t slotCount) {
     const size_t capped = std::min(slotCount, MaxBuffers);
-    IngressMaxSlots = capped / 2;
-    WorkerMaxSlots = capped - IngressMaxSlots;
-    if (WorkerMaxSlots == 0 && capped > 0) {
-        WorkerMaxSlots = 1;
-    }
+    Reserve(capped - (capped / 2), capped / 2);
+}
+
+void TqLinuxRelayBufferPool::Reserve(size_t workerSlots, size_t ingressSlots) {
+    const size_t total = std::min(workerSlots + ingressSlots, MaxBuffers);
+    WorkerMaxSlots = std::min(workerSlots, total);
+    IngressMaxSlots = total - WorkerMaxSlots;
 
     while (WorkerAllocated < WorkerMaxSlots) {
         auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
