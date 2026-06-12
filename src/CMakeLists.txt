@@ -76,6 +76,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
+    runtime/speed_test.cpp
     runtime/trace.cpp
     platform/exe_path.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
@@ -233,6 +234,20 @@ add_executable(tcpquic_control_test
 tcpquic_target_include_dirs(tcpquic_control_test)
 set_property(TARGET tcpquic_control_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_control_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_speed_test_test
+    unittest/speed_test_test.cpp
+    runtime/speed_test.cpp
+    protocol/control_protocol.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_speed_test_test)
+target_link_libraries(tcpquic_speed_test_test Threads::Threads)
+set_property(TARGET tcpquic_speed_test_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_speed_test_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(WIN32)
+    target_link_libraries(tcpquic_speed_test_test ws2_32)
+endif()
 
 add_executable(tcpquic_acl_test
     unittest/acl_test.cpp
