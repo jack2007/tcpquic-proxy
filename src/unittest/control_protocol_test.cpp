@@ -53,41 +53,86 @@ int main() {
     start.Direction = TqSpeedDirection::Download;
     start.DurationSec = 10;
     start.Parallel = 4;
-    assert(TqEncodeSpeedStart(start, buf));
+    if (!TqEncodeSpeedStart(start, buf)) {
+        return 1;
+    }
 
     TqSpeedStart startDecoded{};
-    assert(TqDecodeSpeedStart(buf.data(), buf.size(), startDecoded));
-    assert(startDecoded.SessionId == 7);
-    assert(startDecoded.Direction == TqSpeedDirection::Download);
-    assert(startDecoded.DurationSec == 10);
-    assert(startDecoded.Parallel == 4);
-    assert(startDecoded.Flags == 0);
+    if (!TqDecodeSpeedStart(buf.data(), buf.size(), startDecoded)) {
+        return 1;
+    }
+    if (startDecoded.SessionId != 7 ||
+        startDecoded.Direction != TqSpeedDirection::Download ||
+        startDecoded.DurationSec != 10 ||
+        startDecoded.Parallel != 4 ||
+        startDecoded.Flags != 0) {
+        return 1;
+    }
+
+    std::vector<uint8_t> startMut = buf;
+    startMut[8] = 0;
+    if (TqDecodeSpeedStart(startMut.data(), startMut.size(), startDecoded)) {
+        return 1;
+    }
+    startMut = buf;
+    startMut[15] = 1;
+    if (TqDecodeSpeedStart(startMut.data(), startMut.size(), startDecoded)) {
+        return 1;
+    }
+    if (TqDecodeSpeedStart(buf.data(), buf.size() - 1, startDecoded)) {
+        return 1;
+    }
 
     TqSpeedReady ready{};
     ready.SessionId = 7;
     ready.AddrType = TQ_ADDR_IPV4;
     ready.Port = 54321;
     ready.Addr = {127, 0, 0, 1};
-    assert(TqEncodeSpeedReady(ready, buf));
+    if (!TqEncodeSpeedReady(ready, buf)) {
+        return 1;
+    }
 
     TqSpeedReady readyDecoded{};
-    assert(TqDecodeSpeedReady(buf.data(), buf.size(), readyDecoded));
-    assert(readyDecoded.SessionId == 7);
-    assert(readyDecoded.AddrType == TQ_ADDR_IPV4);
-    assert(readyDecoded.Port == 54321);
-    assert(readyDecoded.Addr == ready.Addr);
+    if (!TqDecodeSpeedReady(buf.data(), buf.size(), readyDecoded)) {
+        return 1;
+    }
+    if (readyDecoded.SessionId != 7 ||
+        readyDecoded.AddrType != TQ_ADDR_IPV4 ||
+        readyDecoded.Port != 54321 ||
+        readyDecoded.Addr != ready.Addr) {
+        return 1;
+    }
+
+    std::vector<uint8_t> readyMut = buf;
+    readyMut[11] = 0;
+    readyMut[12] = 3;
+    if (TqDecodeSpeedReady(readyMut.data(), readyMut.size(), readyDecoded)) {
+        return 1;
+    }
+    if (TqDecodeSpeedReady(buf.data(), buf.size() - 1, readyDecoded)) {
+        return 1;
+    }
 
     TqSpeedFinish finish{};
     finish.SessionId = 7;
     finish.ClientBytes = 123456789ULL;
     finish.ClientElapsedUs = 10000001ULL;
-    assert(TqEncodeSpeedFinish(finish, buf));
+    if (!TqEncodeSpeedFinish(finish, buf)) {
+        return 1;
+    }
 
     TqSpeedFinish finishDecoded{};
-    assert(TqDecodeSpeedFinish(buf.data(), buf.size(), finishDecoded));
-    assert(finishDecoded.SessionId == 7);
-    assert(finishDecoded.ClientBytes == 123456789ULL);
-    assert(finishDecoded.ClientElapsedUs == 10000001ULL);
+    if (!TqDecodeSpeedFinish(buf.data(), buf.size(), finishDecoded)) {
+        return 1;
+    }
+    if (finishDecoded.SessionId != 7 ||
+        finishDecoded.ClientBytes != 123456789ULL ||
+        finishDecoded.ClientElapsedUs != 10000001ULL) {
+        return 1;
+    }
+    if (TqDecodeSpeedFinish(buf.data(), buf.size() - 1, finishDecoded)) {
+        return 1;
+    }
 
     TqSpeedResult result{};
     result.SessionId = 7;
@@ -96,48 +141,88 @@ int main() {
     result.AcceptedConnections = 4;
     result.ClosedConnections = 4;
     result.Status = 0;
-    assert(TqEncodeSpeedResult(result, buf));
+    if (!TqEncodeSpeedResult(result, buf)) {
+        return 1;
+    }
 
     TqSpeedResult resultDecoded{};
-    assert(TqDecodeSpeedResult(buf.data(), buf.size(), resultDecoded));
-    assert(resultDecoded.SessionId == 7);
-    assert(resultDecoded.ServerBytes == 123456000ULL);
-    assert(resultDecoded.ServerElapsedUs == 10000002ULL);
-    assert(resultDecoded.AcceptedConnections == 4);
-    assert(resultDecoded.ClosedConnections == 4);
-    assert(resultDecoded.Status == 0);
+    if (!TqDecodeSpeedResult(buf.data(), buf.size(), resultDecoded)) {
+        return 1;
+    }
+    if (resultDecoded.SessionId != 7 ||
+        resultDecoded.ServerBytes != 123456000ULL ||
+        resultDecoded.ServerElapsedUs != 10000002ULL ||
+        resultDecoded.AcceptedConnections != 4 ||
+        resultDecoded.ClosedConnections != 4 ||
+        resultDecoded.Status != 0) {
+        return 1;
+    }
+    if (TqDecodeSpeedResult(buf.data(), buf.size() - 1, resultDecoded)) {
+        return 1;
+    }
 
     TqSpeedErrorMessage error{};
     error.SessionId = 7;
     error.Error = TqSpeedError::InvalidRequest;
     error.Message = "bad speed request";
-    assert(TqEncodeSpeedErrorMessage(error, buf));
+    if (!TqEncodeSpeedErrorMessage(error, buf)) {
+        return 1;
+    }
 
     TqSpeedErrorMessage errorDecoded{};
-    assert(TqDecodeSpeedErrorMessage(buf.data(), buf.size(), errorDecoded));
-    assert(errorDecoded.SessionId == 7);
-    assert(errorDecoded.Error == TqSpeedError::InvalidRequest);
-    assert(errorDecoded.Message == "bad speed request");
+    if (!TqDecodeSpeedErrorMessage(buf.data(), buf.size(), errorDecoded)) {
+        return 1;
+    }
+    if (errorDecoded.SessionId != 7 ||
+        errorDecoded.Error != TqSpeedError::InvalidRequest ||
+        errorDecoded.Message != "bad speed request") {
+        return 1;
+    }
+
+    std::vector<uint8_t> errorMut = buf;
+    errorMut[8] = 0x7f;
+    if (TqDecodeSpeedErrorMessage(errorMut.data(), errorMut.size(), errorDecoded)) {
+        return 1;
+    }
+    errorMut = buf;
+    errorMut[9] = 0x04;
+    errorMut[10] = 0x01;
+    if (TqDecodeSpeedErrorMessage(errorMut.data(), errorMut.size(), errorDecoded)) {
+        return 1;
+    }
+    if (TqDecodeSpeedErrorMessage(buf.data(), buf.size() - 1, errorDecoded)) {
+        return 1;
+    }
 
     TqSpeedStart badDirection = start;
     badDirection.Direction = static_cast<TqSpeedDirection>(0);
-    assert(!TqEncodeSpeedStart(badDirection, buf));
+    if (TqEncodeSpeedStart(badDirection, buf)) {
+        return 1;
+    }
 
     TqSpeedStart badDuration = start;
     badDuration.DurationSec = 0;
-    assert(!TqEncodeSpeedStart(badDuration, buf));
+    if (TqEncodeSpeedStart(badDuration, buf)) {
+        return 1;
+    }
 
     TqSpeedStart badParallel = start;
     badParallel.Parallel = 0;
-    assert(!TqEncodeSpeedStart(badParallel, buf));
+    if (TqEncodeSpeedStart(badParallel, buf)) {
+        return 1;
+    }
 
     TqSpeedStart badFlags = start;
     badFlags.Flags = 1;
-    assert(!TqEncodeSpeedStart(badFlags, buf));
+    if (TqEncodeSpeedStart(badFlags, buf)) {
+        return 1;
+    }
 
     TqSpeedReady badReady = ready;
     badReady.Addr = {127, 0, 0};
-    assert(!TqEncodeSpeedReady(badReady, buf));
+    if (TqEncodeSpeedReady(badReady, buf)) {
+        return 1;
+    }
 
     return 0;
 }
