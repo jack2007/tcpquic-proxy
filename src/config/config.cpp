@@ -47,6 +47,13 @@ bool ParseUint32(const char* s, uint32_t& out) {
     return true;
 }
 
+bool ParseUint32InRange(const char* s, uint32_t minValue, uint32_t maxValue, uint32_t& out) {
+    if (!ParseUint32(s, out)) {
+        return false;
+    }
+    return out >= minValue && out <= maxValue;
+}
+
 bool ParseInt(const char* s, int& out) {
     char* end = nullptr;
     const long v = std::strtol(s, &end, 10);
@@ -428,6 +435,8 @@ void TqPrintUsage(FILE* out) {
         "  --warmup-mb <n>            Client startup download warmup per QUIC conn (default 0)\n"
         "  --warmup-target <host:port> Warmup HTTP target (required when --warmup-mb > 0)\n"
         "  --warmup-path <path>       Warmup HTTP GET path (default /)\n"
+        "  --download-test <sec>       Client: built-in end-to-end download speed test\n"
+        "  --upload-test <sec>         Client: built-in end-to-end upload speed test\n"
         "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
         "  --handshake-threads <n>    SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
         "  --compress <mode>          auto|zstd|lz4|off (default auto)\n"
@@ -477,6 +486,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     }
 
     bool quicPeerSpecified = false;
+    bool speedTestSpecified = false;
     for (int i = 2; i < argc; ++i) {
         const char* arg = argv[i];
         const char* value = nullptr;
@@ -618,6 +628,40 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.WarmupPath = value;
+        } else if (GetOptionValue(arg, "--download-test", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--download-test", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+                err = "--download-test and --upload-test are mutually exclusive";
+                return false;
+            }
+            if (!ParseUint32InRange(value, 1, 86400, cfg.SpeedTestDurationSec)) {
+                err = "invalid value for --download-test (must be 1..86400)";
+                return false;
+            }
+            cfg.SpeedTestMode = TqSpeedTestMode::Download;
+            speedTestSpecified = true;
+        } else if (GetOptionValue(arg, "--upload-test", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--upload-test", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+                err = "--download-test and --upload-test are mutually exclusive";
+                return false;
+            }
+            if (!ParseUint32InRange(value, 1, 86400, cfg.SpeedTestDurationSec)) {
+                err = "invalid value for --upload-test (must be 1..86400)";
+                return false;
+            }
+            cfg.SpeedTestMode = TqSpeedTestMode::Upload;
+            speedTestSpecified = true;
         } else if (GetOptionValue(arg, "--quic-profile", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--quic-profile", err);
@@ -857,6 +901,20 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     if (!cfg.ClientConfigPath.empty() && quicPeerSpecified) {
         err = "--client-config and --quic-peer are mutually exclusive";
         return false;
+    }
+    if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        if (cfg.Mode != TqMode::Client) {
+            err = "speed-test options are valid only in client mode";
+            return false;
+        }
+        if (!cfg.ClientConfigPath.empty()) {
+            err = "speed-test options cannot be used with --client-config";
+            return false;
+        }
+        if (cfg.WarmupMb > 0) {
+            err = "speed-test options cannot be used with --warmup-mb";
+            return false;
+        }
     }
     if (!cfg.ClientConfigPath.empty()) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {

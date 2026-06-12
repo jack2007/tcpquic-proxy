@@ -9,6 +9,12 @@
 
 enum class TqMode { Client, Server };
 
+enum class TqSpeedTestMode {
+    None,
+    Download,
+    Upload,
+};
+
 enum class TqQuicProfile { MaxThroughput, LowLatency };
 
 struct TqPeerConfig {
@@ -44,6 +50,8 @@ struct TqConfig {
     uint32_t WarmupMb{0};
     std::string WarmupTarget;
     std::string WarmupPath{"/"};
+    TqSpeedTestMode SpeedTestMode{TqSpeedTestMode::None};
+    uint32_t SpeedTestDurationSec{0};
     TqQuicProfile QuicProfile{TqQuicProfile::MaxThroughput};
     uint32_t HandshakeThreads = 8;
     std::string Compress = "auto";

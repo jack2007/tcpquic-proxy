@@ -321,5 +321,159 @@ int main() {
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 16u * 1024 * 1024);
     }
 
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--download-test";
+        char arg3[] = "10";
+        char arg4[] = "--quic-peer";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--quic-key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(TqParseArgs(12, argv, cfg, err));
+        assert(cfg.SpeedTestMode == TqSpeedTestMode::Download);
+        assert(cfg.SpeedTestDurationSec == 10);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--upload-test";
+        char arg3[] = "5";
+        char arg4[] = "--quic-peer";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--quic-key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(TqParseArgs(12, argv, cfg, err));
+        assert(cfg.SpeedTestMode == TqSpeedTestMode::Upload);
+        assert(cfg.SpeedTestDurationSec == 5);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--download-test";
+        char arg3[] = "10";
+        char arg4[] = "--upload-test";
+        char arg5[] = "5";
+        char arg6[] = "--quic-peer";
+        char arg7[] = "127.0.0.1:4433";
+        char arg8[] = "--quic-cert";
+        char arg9[] = "cert.pem";
+        char arg10[] = "--quic-key";
+        char arg11[] = "key.pem";
+        char arg12[] = "--quic-ca";
+        char arg13[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13};
+        assert(!TqParseArgs(14, argv, cfg, err));
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--download-test";
+        char arg3[] = "0";
+        char arg4[] = "--quic-peer";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--quic-key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(!TqParseArgs(12, argv, cfg, err));
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--upload-test";
+        char arg3[] = "86401";
+        char arg4[] = "--quic-peer";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--quic-key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(!TqParseArgs(12, argv, cfg, err));
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "server";
+        char arg2[] = "--download-test";
+        char arg3[] = "10";
+        char arg4[] = "--quic-listen";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--quic-key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(!TqParseArgs(12, argv, cfg, err));
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--client-config";
+        char arg3[] = "client-config.json";
+        char arg4[] = "--download-test";
+        char arg5[] = "10";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5};
+        assert(!TqParseArgs(6, argv, cfg, err));
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--warmup-mb";
+        char arg3[] = "1";
+        char arg4[] = "--download-test";
+        char arg5[] = "10";
+        char arg6[] = "--quic-peer";
+        char arg7[] = "127.0.0.1:4433";
+        char arg8[] = "--quic-cert";
+        char arg9[] = "cert.pem";
+        char arg10[] = "--quic-key";
+        char arg11[] = "key.pem";
+        char arg12[] = "--quic-ca";
+        char arg13[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13};
+        assert(!TqParseArgs(14, argv, cfg, err));
+    }
+
     return 0;
 }
