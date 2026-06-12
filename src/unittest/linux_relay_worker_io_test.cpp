@@ -469,7 +469,7 @@ int main() {
 
         const QUIC_STATUS status = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
         if (status != QUIC_STATUS_PENDING || !handle.Stop.load()) {
-            std::fprintf(stderr, "expected queue-full receive to abort inline with PENDING, status=%d stop=%d\n",
+            std::fprintf(stderr, "expected queue-full receive to stop relay with PENDING, status=%d stop=%d\n",
                 status,
                 handle.Stop.load() ? 1 : 0);
             worker.Stop();
@@ -801,7 +801,7 @@ int main() {
         while (offset < output.size()) {
             const ssize_t received = ::read(fds[1], output.data() + offset, output.size() - offset);
             if (received <= 0) {
-                std::fprintf(stderr, "inline full read failed at offset=%zu received=%zd errno=%d\n", offset, received, errno);
+                std::fprintf(stderr, "deferred receive read failed at offset=%zu received=%zd errno=%d\n", offset, received, errno);
                 worker.Stop();
                 ::close(fds[1]);
                 return 1;
@@ -809,7 +809,7 @@ int main() {
             offset += static_cast<size_t>(received);
         }
         if (output != plain) {
-            std::fprintf(stderr, "inline full output mismatch\n");
+            std::fprintf(stderr, "deferred receive output mismatch\n");
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -1039,7 +1039,6 @@ int main() {
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
         config.MaxPendingBytes = 256 * 1024;
-        config.InlineQuicReceiveMaxBytes = 16 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1076,8 +1075,13 @@ int main() {
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
 
         const QUIC_STATUS receiveStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
-        if (receiveStatus != QUIC_STATUS_SUCCESS) {
-            std::fprintf(stderr, "expected inline receive status SUCCESS, got %d\n", receiveStatus);
+        if (receiveStatus != QUIC_STATUS_PENDING) {
+            std::fprintf(stderr, "expected queued receive status PENDING, got %d\n", receiveStatus);
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        if (worker.DrainForTest(config.EventBudget) != 1) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -1102,78 +1106,12 @@ int main() {
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (snapshot.PendingEvents != 0 ||
-            snapshot.InlineQuicReceiveFullWrites != 1 ||
-            snapshot.InlineQuicReceiveBytes != plain.size() ||
-            snapshot.DeferredReceiveCompleteBytes != 0 ||
-            snapshot.DeferredReceiveCompletes != 0) {
-            std::fprintf(stderr, "expected one inline full write, pending=%llu inline=%llu bytes=%llu complete=%llu/%llu\n",
+            snapshot.DeferredReceiveCompleteBytes != plain.size() ||
+            snapshot.DeferredReceiveCompletes != 1) {
+            std::fprintf(stderr, "expected queued receive write, pending=%llu complete=%llu/%llu\n",
                 static_cast<unsigned long long>(snapshot.PendingEvents),
-                static_cast<unsigned long long>(snapshot.InlineQuicReceiveFullWrites),
-                static_cast<unsigned long long>(snapshot.InlineQuicReceiveBytes),
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompletes));
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-
-        worker.Stop();
-        ::close(fds[1]);
-    }
-
-    {
-        TqLinuxRelayWorkerConfig config{};
-        config.EventBudget = 128;
-        config.ReadChunkSize = 4096;
-        config.ReadBatchBytes = 64 * 1024;
-        config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
-        config.InlineQuicReceiveMaxBytes = 1024;
-
-        TqLinuxRelayWorker worker(config);
-        if (!worker.Start()) {
-            return 1;
-        }
-
-        int fds[2]{-1, -1};
-        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
-            worker.Stop();
-            return 1;
-        }
-
-        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
-        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
-
-        TqLinuxRelayRegistration registration{};
-        registration.TcpFd = fds[0];
-        registration.Stream = fakeStream;
-        registration.EnableQuicSends = false;
-        if (!worker.RegisterRelayForTest(registration)) {
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-
-        const std::vector<uint8_t> plain(2048, 0x5B);
-        QUIC_BUFFER quicBuffer{};
-        quicBuffer.Buffer = const_cast<uint8_t*>(plain.data());
-        quicBuffer.Length = static_cast<uint32_t>(plain.size());
-
-        QUIC_STREAM_EVENT receiveEvent{};
-        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
-        receiveEvent.RECEIVE.BufferCount = 1;
-        receiveEvent.RECEIVE.Buffers = &quicBuffer;
-
-        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING) {
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-        const TqLinuxRelayWorkerSnapshot queued = worker.Snapshot();
-        if (queued.InlineQuicReceiveBudgetExceeded != 1 || queued.PendingEvents != 1) {
-            std::fprintf(stderr, "expected inline budget fallback, budget=%llu pending=%llu\n",
-                static_cast<unsigned long long>(queued.InlineQuicReceiveBudgetExceeded),
-                static_cast<unsigned long long>(queued.PendingEvents));
             worker.Stop();
             ::close(fds[1]);
             return 1;

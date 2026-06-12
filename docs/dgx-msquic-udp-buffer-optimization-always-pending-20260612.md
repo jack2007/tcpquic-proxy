@@ -179,35 +179,7 @@ always-pending 对 pending receive 空间敏感。需要测试：
 - 是否损害多流公平性。
 - 内存占用是否可控。
 
-### P3：极窄 inline write fast path
-
-always-pending 可以引入非常小的 inline 尝试，但不能变成 sync-write 分支那种“尽量写完”。
-
-建议策略：
-
-```text
-if receive 非压缩 && TCP fd 可写:
-  最多 1 次 sendmsg
-  最多 64KB / 128KB
-  full write 才返回 QUIC_STATUS_SUCCESS
-  partial / EAGAIN / 超预算 -> queue deferred view + QUIC_STATUS_PENDING
-```
-
-目的：
-
-- 单流短包或 TCP 空闲时绕过 pending/complete 往返。
-- 保持 callback 时间可预测。
-- 多流下仍以 worker pending path 为主。
-
-必须记录：
-
-- inline full success count
-- inline partial count
-- inline EAGAIN count
-- inline budget exceeded count
-- callback duration p50/p95/p99
-
-### P4：UDP receive path 系统优化
+### P3：UDP receive path 系统优化
 
 当 proxy-4x16 已到 25 Gbps，`__arch_copy_to_user` 是共性热点。always-pending 分支下一步应单独调查：
 
@@ -230,23 +202,21 @@ if receive 非压缩 && TCP fd 可写:
 
 ## 实现状态
 
-本分支已完成代码侧第一轮优化，目标是提供可观测性与可控实验开关，而不是直接替换 always-pending 主路径。
+本分支已完成代码侧第一轮优化，目标是提供可观测性与可控实验开关，并保持 always-pending 主路径“全部入队”的语义。
 
 已落地：
 
 - TCP socket tuning 增加 requested/effective `SO_RCVBUF`、`SO_SNDBUF` 输出。
-- always-pending worker snapshot 增加 pending receive bytes/queue、`sendmsg` bytes/calls、partial/EAGAIN、deferred completion flush、inline receive fast path 等指标。
+- always-pending worker snapshot 增加 pending receive bytes/queue、`sendmsg` bytes/calls、partial/EAGAIN、deferred completion flush 等指标。
 - 新增 `LinuxRelayQuicReceiveCompleteBatchBytes`，用于实验 `StreamReceiveComplete` 聚合阈值。默认值为 `0`，即保持原有“写多少 complete 多少”的行为。
-- 新增 `LinuxRelayInlineQuicReceiveMaxBytes`，用于极窄 inline write fast path。默认 128KB，LAN profile 为 64KB；worker 测试配置默认关闭，避免影响既有单元测试语义。
-- inline fast path 只在非压缩 QUIC receive 上尝试一次 `sendmsg`：全量写完返回 `QUIC_STATUS_SUCCESS`；partial、`EAGAIN`、超预算立即转入 deferred pending view。
+- 非压缩 QUIC receive 全部通过 `QueueDeferredQuicReceive()` 入 pending view；压缩 QUIC receive 全部通过 `CopyQuicReceiveBatchToEvent()` copy 后入普通 `QuicReceive` 事件。
 - deferred receive completion 支持按阈值延迟 flush，并在 view 完成、unregister、错误清理时强制 flush 已完成字节。
 
 仍需 DGX 环境验证：
 
 - `LinuxRelayQuicReceiveCompleteBatchBytes` 的 128KB/256KB/512KB/1MB 矩阵。
 - `LinuxRelayPerTunnelPendingBytes` 的 4MB/16MB/32MB/64MB 矩阵。
-- inline 64KB/128KB 对 proxy-1x1 的收益与对 proxy-4x16 的影响。
-- UDP_GRO/offload/RSS/IRQ affinity/XDP 等 P4 系统层调查。
+- UDP_GRO/offload/RSS/IRQ affinity/XDP 等系统层调查。
 
 ## 建议执行顺序
 
@@ -255,8 +225,7 @@ if receive 非压缩 && TCP fd 可写:
 3. 加 always-pending pending/complete/sendmsg 指标。
 4. 跑 `StreamReceiveComplete` 聚合矩阵。
 5. 跑 per-relay pending budget 矩阵。
-6. 实现极窄 inline write fast path。
-7. 单独开任务调查 UDP_GRO / offload / RSS / affinity。
+6. 单独开任务调查 UDP_GRO / offload / RSS / affinity。
 
 ## 分支判断
 

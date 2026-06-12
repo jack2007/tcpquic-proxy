@@ -231,8 +231,7 @@ int main() {
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayGlobalPendingBytes == 512ull * 1024 * 1024 / 2);
         assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 4u * 1024 * 1024);
-        if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0 ||
-            cfg.Tuning.LinuxRelayInlineQuicReceiveMaxBytes != 128 * 1024) {
+        if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0) {
             return 1;
         }
         assert(cfg.Tuning.LinuxRelayPerWorkerPendingBytes >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
@@ -250,9 +249,6 @@ int main() {
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 256 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 1024);
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 16u * 1024 * 1024);
-        if (cfg.Tuning.LinuxRelayInlineQuicReceiveMaxBytes != 64 * 1024) {
-            return 1;
-        }
     }
 
     return 0;

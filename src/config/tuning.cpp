@@ -176,7 +176,6 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
         out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
         out.LinuxRelayWorkerEventBudget = 1024;
         out.LinuxRelayWorkerByteBudgetPerTick = 16ull * 1024 * 1024;
-        out.LinuxRelayInlineQuicReceiveMaxBytes = 64ull * 1024;
     } else {
         out.LinuxRelayMaxIov = 16;
         out.LinuxRelayReadChunkSize = 64 * 1024;
@@ -563,7 +562,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "tcpquic-proxy tuning: srw=%u fcw=%u iw=%u initrtt=%ums "
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
-        "quic_complete_batch=%llu inline_quic_recv=%llu\n",
+        "quic_complete_batch=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -575,8 +574,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayPerTunnelPendingBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayWorkerByteBudgetPerTick),
         static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes),
-        static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes),
-        static_cast<unsigned long long>(tuning.LinuxRelayInlineQuicReceiveMaxBytes));
+        static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes));
 }
 
 void TqSetActiveTcpSocketBuffer(int bytes) {

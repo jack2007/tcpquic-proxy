@@ -28,13 +28,6 @@ struct TqRelayMetricsSnapshot {
     uint64_t MaxPendingQuicReceiveQueue{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
-    uint64_t InlineQuicReceiveAttempts{0};
-    uint64_t InlineQuicReceiveFullWrites{0};
-    uint64_t InlineQuicReceivePartialWrites{0};
-    uint64_t InlineQuicReceiveEagainCount{0};
-    uint64_t InlineQuicReceiveBudgetExceeded{0};
-    uint64_t InlineQuicReceiveBytes{0};
-    uint64_t MaxInlineQuicReceiveBytes{0};
     uint64_t Errors{0};
 };
 

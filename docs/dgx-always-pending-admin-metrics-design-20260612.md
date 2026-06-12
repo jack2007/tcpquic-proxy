@@ -6,7 +6,7 @@
 
 ## 目标
 
-为 DGX bench 同时提供 client/server 两端的 admin `/metrics` 可观测性，重点覆盖 always-pending relay path 的 pending receive、`sendmsg`、`StreamReceiveComplete` 聚合、inline QUIC receive fast path 和 backpressure 指标。
+为 DGX bench 同时提供 client/server 两端的 admin `/metrics` 可观测性，重点覆盖 always-pending relay path 的 pending receive、`sendmsg`、`StreamReceiveComplete` 聚合和 backpressure 指标。
 
 ## 接口
 
@@ -79,18 +79,6 @@ always-pending 关键指标：
 | `linux_relay_quic_receive_paused_count` | `ReceiveSetEnabled(false)` 次数 |
 | `linux_relay_quic_receive_resumed_count` | `ReceiveSetEnabled(true)` 次数 |
 
-inline receive fast path 指标：
-
-| 字段 | 用途 |
-|------|------|
-| `linux_relay_inline_quic_receive_attempts` | callback 内 inline `sendmsg` 尝试次数 |
-| `linux_relay_inline_quic_receive_full_writes` | inline 一次完整写完次数 |
-| `linux_relay_inline_quic_receive_partial_writes` | inline partial 次数 |
-| `linux_relay_inline_quic_receive_eagain_count` | inline `EAGAIN` 次数 |
-| `linux_relay_inline_quic_receive_budget_exceeded` | receive 超过 inline budget 次数 |
-| `linux_relay_inline_quic_receive_bytes` | inline 已写 bytes |
-| `linux_relay_max_inline_quic_receive_bytes` | 单次 inline 最大写入 bytes |
-
 压缩相关指标：
 
 | 字段 | 用途 |
@@ -110,7 +98,7 @@ curl -s http://127.0.0.1:<admin-port>/metrics
 
 1. bench 前 baseline `/metrics`
 2. bench 后 `/metrics`
-3. 两者差值，用于计算每秒 `sendmsg`、每次 complete bytes、inline full ratio、EAGAIN/partial 频率
+3. 两者差值，用于计算每秒 `sendmsg`、每次 complete bytes、EAGAIN/partial 频率
 
 重点派生指标：
 
@@ -118,7 +106,5 @@ curl -s http://127.0.0.1:<admin-port>/metrics
 |----------|------|
 | average complete bytes | delta `deferred_receive_complete_bytes` / delta `deferred_receive_completes` |
 | sendmsg average bytes | delta `tcp_write_bytes` / delta `tcp_write_sendmsg_calls` |
-| inline full ratio | delta `inline_quic_receive_full_writes` / delta `inline_quic_receive_attempts` |
 | receive pause pressure | delta `quic_receive_paused_count` 与 pending high-water |
 | TCP write pressure | delta `tcp_write_eagain_count`、delta `tcp_write_partial_count` |
-

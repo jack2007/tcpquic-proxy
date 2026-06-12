@@ -342,7 +342,6 @@ int main() {
         if (body.find("\"connected_connections\":3") == std::string::npos) return 83;
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 84;
         if (body.find("\"linux_relay_deferred_receive_complete_bytes\":") == std::string::npos) return 85;
-        if (body.find("\"linux_relay_inline_quic_receive_full_writes\":") == std::string::npos) return 86;
         if (body.find("\"linux_relay_max_pending_quic_receive_bytes\":") == std::string::npos) return 87;
     }
     {
@@ -404,8 +403,6 @@ int main() {
         if (body.find("\"linux_relay_tcp_write_partial_count\":") == std::string::npos) return 129;
         if (body.find("\"linux_relay_deferred_receive_completion_flushes\":") == std::string::npos) return 130;
         if (body.find("\"linux_relay_max_pending_quic_receive_queue\":") == std::string::npos) return 131;
-        if (body.find("\"linux_relay_inline_quic_receive_budget_exceeded\":") == std::string::npos) return 132;
-        if (body.find("\"linux_relay_max_inline_quic_receive_bytes\":") == std::string::npos) return 133;
     }
     return 0;
 }

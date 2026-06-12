@@ -69,13 +69,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.MaxPendingQuicReceiveQueue = snapshot.MaxPendingQuicReceiveQueue;
     metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
-    metrics.InlineQuicReceiveAttempts = snapshot.InlineQuicReceiveAttempts;
-    metrics.InlineQuicReceiveFullWrites = snapshot.InlineQuicReceiveFullWrites;
-    metrics.InlineQuicReceivePartialWrites = snapshot.InlineQuicReceivePartialWrites;
-    metrics.InlineQuicReceiveEagainCount = snapshot.InlineQuicReceiveEagainCount;
-    metrics.InlineQuicReceiveBudgetExceeded = snapshot.InlineQuicReceiveBudgetExceeded;
-    metrics.InlineQuicReceiveBytes = snapshot.InlineQuicReceiveBytes;
-    metrics.MaxInlineQuicReceiveBytes = snapshot.MaxInlineQuicReceiveBytes;
     metrics.Errors = snapshot.Errors;
 #endif
     return metrics;
@@ -106,12 +99,5 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_max_pending_quic_receive_queue\":" << metrics.MaxPendingQuicReceiveQueue;
     out << ",\"linux_relay_quic_receive_paused_count\":" << metrics.QuicReceivePausedCount;
     out << ",\"linux_relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
-    out << ",\"linux_relay_inline_quic_receive_attempts\":" << metrics.InlineQuicReceiveAttempts;
-    out << ",\"linux_relay_inline_quic_receive_full_writes\":" << metrics.InlineQuicReceiveFullWrites;
-    out << ",\"linux_relay_inline_quic_receive_partial_writes\":" << metrics.InlineQuicReceivePartialWrites;
-    out << ",\"linux_relay_inline_quic_receive_eagain_count\":" << metrics.InlineQuicReceiveEagainCount;
-    out << ",\"linux_relay_inline_quic_receive_budget_exceeded\":" << metrics.InlineQuicReceiveBudgetExceeded;
-    out << ",\"linux_relay_inline_quic_receive_bytes\":" << metrics.InlineQuicReceiveBytes;
-    out << ",\"linux_relay_max_inline_quic_receive_bytes\":" << metrics.MaxInlineQuicReceiveBytes;
     out << ",\"linux_relay_errors\":" << metrics.Errors;
 }
