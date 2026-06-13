@@ -120,7 +120,7 @@ bool IsHostPort(const std::string& value) {
 }
 
 bool IsValidCompress(const std::string& value) {
-    return value.empty() || value == "auto" || value == "zstd" || value == "lz4" || value == "off";
+    return value.empty() || value == "auto" || value == "zstd" || value == "off";
 }
 
 int HexValue(char ch) {
@@ -439,7 +439,7 @@ void TqPrintUsage(FILE* out) {
         "  --upload-test <sec>         Client: built-in end-to-end upload speed test\n"
         "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
         "  --handshake-threads <n>    SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
-        "  --compress <mode>          auto|zstd|lz4|off (default auto)\n"
+        "  --compress <mode>          auto|zstd|off (default auto)\n"
         "  --compress-level <n>       Compression level (default 1)\n"
         "  --tuning <mode>            auto|lan|wan|custom (default wan)\n"
         "  --target-bandwidth-mbps <n> Target bandwidth for auto/custom BDP\n"
@@ -696,6 +696,10 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.Compress = value;
+            if (!IsValidCompress(cfg.Compress)) {
+                err = "invalid compress";
+                return false;
+            }
         } else if (GetOptionValue(arg, "--compress-level", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--compress-level", err);

@@ -156,13 +156,37 @@ int main() {
     {
         TqRouterConfig router;
         std::string err;
-        if (!Load(R"json({"version":1,"peers":[{"peer_id":"auto","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","compress":"auto"},{"peer_id":"zstd","quic_peer":"127.0.0.1:14445","socks_listen":"127.0.0.1:11002","compress":"zstd"},{"peer_id":"lz4","quic_peer":"127.0.0.1:14446","socks_listen":"127.0.0.1:11003","compress":"lz4"},{"peer_id":"off","quic_peer":"127.0.0.1:14447","socks_listen":"127.0.0.1:11004","compress":"off"},{"peer_id":"default","quic_peer":"127.0.0.1:14448","socks_listen":"127.0.0.1:11005"}]})json", router, err)) return 35;
-        if (router.Peers.size() != 5) return 36;
+        if (!Load(R"json({"version":1,"peers":[{"peer_id":"auto","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","compress":"auto"},{"peer_id":"zstd","quic_peer":"127.0.0.1:14445","socks_listen":"127.0.0.1:11002","compress":"zstd"},{"peer_id":"off","quic_peer":"127.0.0.1:14447","socks_listen":"127.0.0.1:11004","compress":"off"},{"peer_id":"default","quic_peer":"127.0.0.1:14448","socks_listen":"127.0.0.1:11005"}]})json", router, err)) return 35;
+        if (router.Peers.size() != 4) return 36;
         if (router.Peers[0].Compress != "auto") return 37;
         if (router.Peers[1].Compress != "zstd") return 38;
-        if (router.Peers[2].Compress != "lz4") return 39;
-        if (router.Peers[3].Compress != "off") return 40;
-        if (!router.Peers[4].Compress.empty()) return 41;
+        if (router.Peers[2].Compress != "off") return 40;
+        if (!router.Peers[3].Compress.empty()) return 41;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"peers":[{"peer_id":"lz4","quic_peer":"127.0.0.1:14446","socks_listen":"127.0.0.1:11003","compress":"lz4"}]})json", router, err)) return 39;
+        if (err.find("invalid compress") == std::string::npos) return 73;
+    }
+    {
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--quic-peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--compress";
+        char arg5[] = "lz4";
+        char arg6[] = "--quic-cert";
+        char arg7[] = "a.crt";
+        char arg8[] = "--quic-key";
+        char arg9[] = "a.key";
+        char arg10[] = "--quic-ca";
+        char arg11[] = "ca.crt";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        TqConfig cfg;
+        std::string err;
+        if (Parse(12, argv, cfg, err)) return 74;
+        if (err.find("invalid compress") == std::string::npos) return 75;
     }
     {
         TqRouterConfig router;

@@ -664,7 +664,7 @@ int main(int argc, char** argv) {
     }
     if (TqCompressionAdaptiveEnabled(cfg)) {
         std::fprintf(stderr,
-            "tcpquic-proxy compress auto: probe=%s (ratio samples choose off/lz4/zstd)\n",
+            "tcpquic-proxy compress auto: probe=%s (ratio samples choose off/zstd)\n",
             TqResolveAutoCompress(cfg));
     }
 

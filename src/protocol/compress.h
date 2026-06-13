@@ -4,7 +4,7 @@
 #include <memory>
 #include <vector>
 
-enum class TqCompressAlgo { None, Zstd, Lz4 };
+enum class TqCompressAlgo { None, Zstd };
 
 struct ITqCompressor {
     virtual ~ITqCompressor() = default;

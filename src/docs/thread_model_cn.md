@@ -377,7 +377,7 @@ relay worker 按 tuning 为每个 worker 维护池化缓冲，并按 active rela
 | 中 | 按 profile 支持 LOW_LATENCY / MAX_THROUGHPUT 切换 | ✅ DONE | `--quic-profile max-throughput\|low-latency` |
 | 低 | relay TCP→QUIC 改 epoll 多路复用 | ✅ DONE | Linux 生产路径：`TqLinuxRelayWorker` + epoll + readv |
 | 低 | relay QUIC→TCP 改 worker writev | ✅ DONE | 池化缓冲 + writev，无 per-tunnel TcpWriter |
-| 低 | 压缩隧道走 worker inline 压缩 | ✅ DONE | 含 zstd/lz4 的生产 relay 均注册到 worker |
+| 低 | 压缩隧道走 worker inline 压缩 | ✅ DONE | 含 zstd 的生产 relay 均注册到 worker |
 
 ## Linux relay worker 生产状态
 

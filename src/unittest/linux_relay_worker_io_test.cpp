@@ -765,55 +765,6 @@ int main() {
     {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
-        config.ReadChunkSize = 1024;
-        config.ReadBatchBytes = 4096;
-        config.MaxIov = 4;
-        config.MaxPendingBytes = 64 * 1024;
-
-        TqLinuxRelayWorker worker(config);
-        assert(worker.Start());
-
-        int fds[2]{-1, -1};
-        assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
-
-        auto compressor = TqCreateCompressor(TqCompressAlgo::Lz4, 1);
-        auto decompressor = TqCreateDecompressor(TqCompressAlgo::Lz4);
-        assert(compressor);
-        assert(decompressor);
-
-        TqLinuxRelayRegistration registration{};
-        registration.TcpFd = fds[0];
-        registration.Stream = nullptr;
-        registration.Handle = nullptr;
-        registration.Decompressor = decompressor.get();
-        registration.CompressAlgo = TqCompressAlgo::Lz4;
-        registration.EnableQuicSends = false;
-        assert(worker.RegisterRelayForTest(registration));
-
-        const std::vector<uint8_t> plain(2048, 0x7C);
-        std::vector<uint8_t> compressed;
-        assert(compressor->Compress(plain.data(), plain.size(), compressed, false));
-        assert(compressor->Flush(compressed));
-        assert(!compressed.empty());
-
-        assert(worker.EnqueueQuicReceiveForTest(fds[0], compressed.data(), compressed.size(), true));
-
-        std::vector<uint8_t> output(plain.size());
-        size_t offset = 0;
-        while (offset < output.size()) {
-            const ssize_t received = ::read(fds[1], output.data() + offset, output.size() - offset);
-            assert(received > 0);
-            offset += static_cast<size_t>(received);
-        }
-        assert(output == plain);
-
-        worker.Stop();
-        ::close(fds[1]);
-    }
-
-    {
-        TqLinuxRelayWorkerConfig config{};
-        config.EventBudget = 128;
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;

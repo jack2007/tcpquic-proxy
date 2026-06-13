@@ -481,31 +481,6 @@ curl -fsS \
 grep -q "compress-me-" "$TMP_DIR/http-connect-zstd.out" ||
     fail_with_logs "zstd compressed tunnel did not return large payload"
 
-log "testing lz4 compression end-to-end"
-kill "$CLIENT_PID" "$SERVER_PID" 2>/dev/null || true
-wait "$CLIENT_PID" 2>/dev/null || true
-wait "$SERVER_PID" 2>/dev/null || true
-CLIENT_PID=""
-SERVER_PID=""
-eval "exec ${SERVER_STDIN_FD}>&-"
-SERVER_STDIN_FD=""
-
-read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" lz4 "$TMP_DIR/proxy-server-lz4.log" "$TMP_DIR/server-lz4.stdin")
-wait_log "$TMP_DIR/proxy-server-lz4.log" "QUIC server listening" "lz4 server"
-CLIENT_PID=$(start_client 4433 8080 1080 lz4 "$TMP_DIR/proxy-client-lz4.log")
-wait_tcp 127.0.0.1 8080 "lz4 HTTP listener"
-
-curl -fsS \
-    -x http://127.0.0.1:8080 \
-    --proxytunnel \
-    "http://127.0.0.1:15001/large.txt" \
-    --max-time 15 \
-    -o "$TMP_DIR/http-connect-lz4.out" \
-    >"$TMP_DIR/curl-http-connect-lz4.log" 2>&1 ||
-    fail_with_logs "lz4 HTTP CONNECT curl failed"
-grep -q "compress-me-" "$TMP_DIR/http-connect-lz4.out" ||
-    fail_with_logs "lz4 compressed tunnel did not return large payload"
-
 log "testing QUIC connection pool (--quic-connections 4)"
 kill "$CLIENT_PID" "$SERVER_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true

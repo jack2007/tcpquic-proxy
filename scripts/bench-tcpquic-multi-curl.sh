@@ -16,7 +16,7 @@
 #   LOCAL             1 时强制本机 127.0.0.1 冒烟（不 SSH）；未设置且 SSH 失败时自动降级
 #   PARALLEL_CURL     并行 curl 数量（默认 4）
 #   QUIC_CONNECTIONS  client --quic-connections（默认 4）
-#   COMPRESS          隧道压缩：off|zstd|lz4（默认 off）
+#   COMPRESS          隧道压缩：off|zstd（默认 off）
 #   SIZE_MB           每路 curl 载荷大小 MB（默认 32）
 #   PAYLOAD_KIND      载荷类型：repeat|zeros|text（默认 repeat）
 #   WARMUP_MB         client 启动预热下载 MB/QUIC 连接（默认：DURATION_SEC=0 且 SIZE_MB<64 时为 2，否则 0）

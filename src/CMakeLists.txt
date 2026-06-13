@@ -106,12 +106,12 @@ if(WIN32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd lz4 spdlog::spdlog)
-target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
+target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog)
+target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
 
-set(TCPQUIC_TEST_LIBS libzstd lz4)
+set(TCPQUIC_TEST_LIBS libzstd)
 set(TCPQUIC_TEST_INCLUDES)
-set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1 TCPQUIC_HAS_LZ4=1)
+set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1)
 set(TCPQUIC_SERVER_TEST_SOURCES
     runtime/thread_pool.cpp
     tunnel/tcp_dialer.cpp

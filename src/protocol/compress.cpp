@@ -7,10 +7,6 @@
 #include <zstd.h>
 #endif
 
-#ifdef TCPQUIC_HAS_LZ4
-#include <lz4frame.h>
-#endif
-
 namespace {
 
 class TqNoneCompressor final : public ITqCompressor {
@@ -177,203 +173,6 @@ private:
 
 #endif // TCPQUIC_HAS_ZSTD
 
-#ifdef TCPQUIC_HAS_LZ4
-
-class TqLz4Compressor final : public ITqCompressor {
-public:
-    explicit TqLz4Compressor(int level) {
-        prefs_ = LZ4F_preferences_t{};
-        prefs_.compressionLevel = std::clamp(level, 0, 12);
-        if (LZ4F_createCompressionContext(&ctx_, LZ4F_VERSION) != 0) {
-            ctx_ = nullptr;
-        }
-    }
-
-    ~TqLz4Compressor() override {
-        if (ctx_ != nullptr) {
-            LZ4F_freeCompressionContext(ctx_);
-        }
-    }
-
-    TqLz4Compressor(const TqLz4Compressor&) = delete;
-    TqLz4Compressor& operator=(const TqLz4Compressor&) = delete;
-
-    bool Compress(const uint8_t* in, size_t inLen, std::vector<uint8_t>& out, bool endStream) override {
-        if (ctx_ == nullptr) {
-            return false;
-        }
-        if (inLen > 0 && in == nullptr) {
-            return false;
-        }
-
-        if (inLen > 0) {
-            if (!started_) {
-                const size_t bound = LZ4F_compressBound(0, &prefs_);
-                std::vector<uint8_t> header(bound);
-                const size_t headerSize = LZ4F_compressBegin(
-                    ctx_, header.data(), header.size(), &prefs_);
-                if (LZ4F_isError(headerSize)) {
-                    return false;
-                }
-                out.insert(out.end(), header.begin(), header.begin() + headerSize);
-                started_ = true;
-            }
-
-            const size_t bound = LZ4F_compressBound(inLen, &prefs_);
-            std::vector<uint8_t> chunk(bound);
-            const size_t written = LZ4F_compressUpdate(
-                ctx_, chunk.data(), chunk.size(), in, inLen, nullptr);
-            if (LZ4F_isError(written)) {
-                return false;
-            }
-            if (written > 0) {
-                out.insert(out.end(), chunk.begin(), chunk.begin() + written);
-            }
-
-            const size_t endBound = LZ4F_compressBound(0, &prefs_);
-            std::vector<uint8_t> tail(endBound);
-            const size_t endSize = LZ4F_compressEnd(ctx_, tail.data(), tail.size(), nullptr);
-            if (LZ4F_isError(endSize)) {
-                return false;
-            }
-            if (endSize > 0) {
-                out.insert(out.end(), tail.begin(), tail.begin() + endSize);
-            }
-            started_ = false;
-            return true;
-        }
-
-        if (endStream && started_) {
-            const size_t bound = LZ4F_compressBound(0, &prefs_);
-            std::vector<uint8_t> tail(bound);
-            const size_t endSize = LZ4F_compressEnd(ctx_, tail.data(), tail.size(), nullptr);
-            if (LZ4F_isError(endSize)) {
-                return false;
-            }
-            if (endSize > 0) {
-                out.insert(out.end(), tail.begin(), tail.begin() + endSize);
-            }
-            started_ = false;
-        }
-
-        return true;
-    }
-
-    bool Flush(std::vector<uint8_t>& out) override {
-        if (ctx_ == nullptr || !started_) {
-            return true;
-        }
-        const size_t bound = LZ4F_compressBound(0, &prefs_);
-        if (bound == 0) {
-            return true;
-        }
-        std::vector<uint8_t> chunk(bound);
-        const size_t written = LZ4F_flush(ctx_, chunk.data(), chunk.size(), nullptr);
-        if (LZ4F_isError(written)) {
-            return false;
-        }
-        if (written > 0) {
-            out.insert(out.end(), chunk.begin(), chunk.begin() + written);
-        }
-        return true;
-    }
-
-    void Reset() override {
-        if (ctx_ != nullptr) {
-            LZ4F_freeCompressionContext(ctx_);
-            ctx_ = nullptr;
-        }
-        started_ = false;
-        if (LZ4F_createCompressionContext(&ctx_, LZ4F_VERSION) != 0) {
-            ctx_ = nullptr;
-        }
-    }
-
-private:
-    LZ4F_compressionContext_t ctx_{nullptr};
-    LZ4F_preferences_t prefs_{};
-    bool started_{false};
-};
-
-class TqLz4Decompressor final : public ITqDecompressor {
-public:
-    TqLz4Decompressor() {
-        if (LZ4F_createDecompressionContext(&ctx_, LZ4F_VERSION) != 0) {
-            ctx_ = nullptr;
-        }
-    }
-
-    ~TqLz4Decompressor() override {
-        if (ctx_ != nullptr) {
-            LZ4F_freeDecompressionContext(ctx_);
-        }
-    }
-
-    TqLz4Decompressor(const TqLz4Decompressor&) = delete;
-    TqLz4Decompressor& operator=(const TqLz4Decompressor&) = delete;
-
-    bool Decompress(const uint8_t* in, size_t inLen, std::vector<uint8_t>& out) override {
-        if (ctx_ == nullptr) {
-            return false;
-        }
-        if (inLen > 0 && in == nullptr) {
-            return false;
-        }
-        if (inLen > 0) {
-            pending_.insert(pending_.end(), in, in + inLen);
-        }
-
-        size_t srcPos = 0;
-        while (srcPos < pending_.size()) {
-            std::vector<uint8_t> scratch(256 * 1024);
-            size_t dstSize = scratch.size();
-            size_t srcSize = pending_.size() - srcPos;
-            const size_t ret = LZ4F_decompress(
-                ctx_,
-                scratch.data(),
-                &dstSize,
-                pending_.data() + srcPos,
-                &srcSize,
-                nullptr);
-            if (LZ4F_isError(ret)) {
-                return false;
-            }
-            if (dstSize > 0) {
-                out.insert(out.end(), scratch.begin(), scratch.begin() + dstSize);
-            }
-            if (srcSize == 0) {
-                break;
-            }
-            srcPos += srcSize;
-            if (ret == 0) {
-                LZ4F_resetDecompressionContext(ctx_);
-            }
-        }
-
-        if (srcPos > 0) {
-            pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(srcPos));
-        }
-        return true;
-    }
-
-    void Reset() override {
-        pending_.clear();
-        if (ctx_ != nullptr) {
-            LZ4F_freeDecompressionContext(ctx_);
-            ctx_ = nullptr;
-        }
-        if (LZ4F_createDecompressionContext(&ctx_, LZ4F_VERSION) != 0) {
-            ctx_ = nullptr;
-        }
-    }
-
-private:
-    LZ4F_decompressionContext_t ctx_{nullptr};
-    std::vector<uint8_t> pending_;
-};
-
-#endif // TCPQUIC_HAS_LZ4
-
 } // namespace
 
 std::unique_ptr<ITqCompressor> TqCreateCompressor(TqCompressAlgo algo, int level) {
@@ -383,12 +182,6 @@ std::unique_ptr<ITqCompressor> TqCreateCompressor(TqCompressAlgo algo, int level
     case TqCompressAlgo::Zstd:
 #ifdef TCPQUIC_HAS_ZSTD
         return std::make_unique<TqZstdCompressor>(level);
-#else
-        return nullptr;
-#endif
-    case TqCompressAlgo::Lz4:
-#ifdef TCPQUIC_HAS_LZ4
-        return std::make_unique<TqLz4Compressor>(level);
 #else
         return nullptr;
 #endif
@@ -403,12 +196,6 @@ std::unique_ptr<ITqDecompressor> TqCreateDecompressor(TqCompressAlgo algo) {
     case TqCompressAlgo::Zstd:
 #ifdef TCPQUIC_HAS_ZSTD
         return std::make_unique<TqZstdDecompressor>();
-#else
-        return nullptr;
-#endif
-    case TqCompressAlgo::Lz4:
-#ifdef TCPQUIC_HAS_LZ4
-        return std::make_unique<TqLz4Decompressor>();
 #else
         return nullptr;
 #endif

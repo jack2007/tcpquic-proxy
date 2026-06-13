@@ -75,15 +75,12 @@ TqCompressAlgo TqAlgoFromFlags(uint8_t flags) {
     if ((flags & TQ_FLAG_COMPRESS) == 0) {
         return TqCompressAlgo::None;
     }
-    if ((flags & TQ_FLAG_COMPRESS_LZ4) != 0) {
-        return TqCompressAlgo::Lz4;
-    }
     return TqCompressAlgo::Zstd;
 }
 
 uint8_t TqFlagsFromConfig(const TunnelRequest& req, const TqConfig& cfg) {
     uint8_t flags = req.CompressFlags;
-    flags &= static_cast<uint8_t>(~(TQ_FLAG_COMPRESS | TQ_FLAG_COMPRESS_LZ4));
+    flags &= static_cast<uint8_t>(~TQ_FLAG_COMPRESS);
 
     const char* compressMode = cfg.Compress.c_str();
     if (cfg.Compress == "auto") {
@@ -92,8 +89,6 @@ uint8_t TqFlagsFromConfig(const TunnelRequest& req, const TqConfig& cfg) {
 
     if (std::strcmp(compressMode, "zstd") == 0) {
         flags |= TQ_FLAG_COMPRESS;
-    } else if (std::strcmp(compressMode, "lz4") == 0) {
-        flags |= TQ_FLAG_COMPRESS | TQ_FLAG_COMPRESS_LZ4;
     }
 
     if (req.AddrType == TQ_ADDR_DOMAIN) {

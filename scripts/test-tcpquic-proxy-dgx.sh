@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 双机 tcpquic-proxy 端到端冒烟：HTTP CONNECT + 可选 lz4 + 连接池
+# 双机 tcpquic-proxy 端到端冒烟：HTTP CONNECT + 可选 zstd + 连接池
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

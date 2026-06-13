@@ -77,7 +77,7 @@ BDP(bytes) = bandwidth_mbps * 1_000_000 / 8 * rtt_ms / 1000
 | `InitialWindowPackets` | 半自动 | 有助于启动，但过大可能造成突发丢包，应按档位保守设置 |
 | relay IO size | 适合 | 低带宽可小块降低延迟，高带宽可大块降低 syscall 开销 |
 | in-flight sends | 适合 | 可由 `target_inflight_bytes / io_size` 推导 |
-| compression | 适合 | 可采样压缩率和 CPU 成本后选择 off / lz4 / zstd |
+| compression | 适合 | 可采样压缩率和 CPU 成本后选择 off / zstd |
 | QUIC 连接数 | 不建议只按带宽自动调 | 更应按并发 TCP 隧道数、CPU、连接稳定性决定 |
 | netem limit/interface | 不属于生产自适应 | 只影响测试环境，脚本应自动解析 interface 并按 BDP 设置 limit |
 
@@ -165,9 +165,9 @@ enP2p1s0f0np0
 
 压缩不是传输层参数，但对于可压缩内容会显著提高业务有效吞吐。
 
-| 场景 | tunnel_off | zstd | lz4 |
-|------|------------|------|-----|
-| loopback 64MB 示例 | 5430.73 Mbps | 12943.82 Mbps | 7526.05 Mbps |
+| 场景 | tunnel_off | zstd |
+|------|------------|------|
+| loopback 64MB 示例 | 5430.73 Mbps | 12943.82 Mbps |
 
 使用建议：
 
@@ -175,7 +175,6 @@ enP2p1s0f0np0
 |------|----------|
 | `--compress off` | 已压缩文件、视频、随机数据、纯网络栈基准 |
 | `--compress zstd` | 文本、JSON、日志、可压缩 HTTP 响应，追求压缩率 |
-| `--compress lz4` | 可压缩数据且更看重 CPU 开销 / 低延迟 |
 
 ## 不建议优先调整的项
 
@@ -195,7 +194,7 @@ enP2p1s0f0np0
 2. 确认 `tc -s qdisc show dev <iface>` 中 `limit 1000000` 生效，且没有异常队列溢出。
 3. 确认 `QUIC_CONNECTIONS=1`、BBR、500MB/512MiB 窗口、`iw=2000`、`initrtt=100ms` 生效。
 4. 用 `SIZE_MB=128` 或 `DURATION_SEC=10` 复测，避免 32MB 短载荷误判。
-5. 先看 `tunnel_off`，再评估 `zstd` / `lz4` 的业务收益。
+5. 先看 `tunnel_off`，再评估 `zstd` 的业务收益。
 6. 如只在本地 loopback 慢，优先排查 relay fast path、send buffer pool、in-flight send 和 TCP socket buffer。
 
 ## 常用命令备忘

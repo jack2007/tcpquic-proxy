@@ -267,14 +267,10 @@ void TqMaybeLogRuntimeObservationsLocked() {
 }
 
 constexpr uint32_t kCompressRatioOffPermille = 980;
-constexpr uint32_t kCompressRatioLz4Permille = 820;
 
 const char* TqModeFromRatioPermille(uint32_t ratioPermille) {
     if (ratioPermille >= kCompressRatioOffPermille) {
         return "off";
-    }
-    if (ratioPermille >= kCompressRatioLz4Permille) {
-        return "lz4";
     }
     return "zstd";
 }
@@ -537,7 +533,7 @@ const char* TqResolveAutoCompress(const TqConfig& cfg) {
     }
 
     if (!obs.HasSample || obs.SampleCount == 0) {
-        return "lz4";
+        return "off";
     }
     return TqModeFromRatioPermille(obs.RatioPermille);
 }

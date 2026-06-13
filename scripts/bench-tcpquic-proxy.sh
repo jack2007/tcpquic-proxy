@@ -297,12 +297,6 @@ run_mode() {
                 speed=$(measure_tunnel)
                 stop_proxy
                 ;;
-            tunnel_lz4)
-                stop_proxy
-                start_proxy lz4
-                speed=$(measure_tunnel)
-                stop_proxy
-                ;;
             *)
                 log "unknown mode: $mode"
                 exit 1
@@ -436,14 +430,12 @@ wait_tcp 127.0.0.1 "$TARGET_HTTP_PORT" "target HTTP server"
 IFS=',' read -r _ DIRECT_BPS DIRECT_MBPS < <(run_mode direct)
 IFS=',' read -r _ OFF_BPS OFF_MBPS < <(run_mode tunnel_off)
 IFS=',' read -r _ ZSTD_BPS ZSTD_MBPS < <(run_mode tunnel_zstd)
-IFS=',' read -r _ LZ4_BPS LZ4_MBPS < <(run_mode tunnel_lz4)
 stop_proxy
 
 log "summary:"
 log "  direct:      ${DIRECT_MBPS} Mbps"
 log "  tunnel off:  ${OFF_MBPS} Mbps"
 log "  tunnel zstd: ${ZSTD_MBPS} Mbps"
-log "  tunnel lz4:  ${LZ4_MBPS} Mbps"
 
 if [ "$SKIP_APPEND" != "1" ]; then
     append_research_log "$DIRECT_BPS" "$DIRECT_MBPS" "$OFF_BPS" "$OFF_MBPS" "$ZSTD_BPS" "$ZSTD_MBPS"

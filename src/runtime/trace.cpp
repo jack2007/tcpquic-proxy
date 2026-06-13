@@ -128,9 +128,6 @@ std::string CompressLabel(uint8_t flags) {
     if ((flags & TQ_FLAG_COMPRESS) == 0) {
         return "off";
     }
-    if ((flags & TQ_FLAG_COMPRESS_LZ4) != 0) {
-        return "lz4";
-    }
     return "zstd";
 }
 

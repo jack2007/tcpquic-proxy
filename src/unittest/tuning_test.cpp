@@ -152,14 +152,14 @@ int main() {
         TqResetCompressionObservations();
         TqConfig cfg{};
         cfg.Compress = "auto";
-        assert(std::strcmp(TqResolveAutoCompress(cfg), "lz4") == 0);
+        assert(std::strcmp(TqResolveAutoCompress(cfg), "off") == 0);
 
         TqRecordCompressionSample(10000, 9900);
         assert(std::strcmp(TqResolveAutoCompress(cfg), "off") == 0);
 
         TqResetCompressionObservations();
         TqRecordCompressionSample(10000, 8500);
-        assert(std::strcmp(TqResolveAutoCompress(cfg), "lz4") == 0);
+        assert(std::strcmp(TqResolveAutoCompress(cfg), "zstd") == 0);
 
         TqResetCompressionObservations();
         TqRecordCompressionSample(10000, 5000);

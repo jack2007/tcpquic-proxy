@@ -31,7 +31,7 @@
 
 ## 构建
 
-**依赖：** 见仓库根目录 [`README.md`](../README.md#依赖)。msquic / quictls / lz4 / zstd 均已 vendored，无需系统 `libzstd-dev` 等 dev 包。
+**依赖：** 见仓库根目录 [`README.md`](../README.md#依赖)。msquic / quictls / zstd 均已 vendored，无需系统 `libzstd-dev` 等 dev 包。
 
 ```bash
 git submodule update --init --recursive
@@ -57,7 +57,7 @@ cmake --build . --target tcpquic_control_test tcpquic_acl_test \
 ./scripts/test-tcpquic-proxy.sh
 ```
 
-覆盖 happy path、ACL/DNS/refused 负路径、zstd/lz4 端到端、`--quic-connections 4` 连接池。
+覆盖 happy path、ACL/DNS/refused 负路径、zstd 端到端、`--quic-connections 4` 连接池。
 
 ### 并发隧道压测
 
@@ -65,14 +65,14 @@ cmake --build . --target tcpquic_control_test tcpquic_acl_test \
 # 默认 100 条并发 HTTP CONNECT 隧道
 ./scripts/test-tcpquic-concurrent.sh
 
-# 128 隧道 + 8 条 QUIC 连接 + lz4
-TUNNELS=128 QUIC_CONNECTIONS=8 COMPRESS=lz4 ./scripts/test-tcpquic-concurrent.sh
+# 128 隧道 + 8 条 QUIC 连接 + zstd
+TUNNELS=128 QUIC_CONNECTIONS=8 COMPRESS=zstd ./scripts/test-tcpquic-concurrent.sh
 ```
 
 ### 性能基线（Task 14）
 
 ```bash
-# 对比裸 TCP、隧道 off/zstd/lz4（结果写入 research_progress.md）
+# 对比裸 TCP、隧道 off/zstd（结果写入 research_progress.md）
 ./scripts/bench-tcpquic-proxy.sh
 
 # 双机 DGX（spark-1619 ↔ spark-1b6f，可选对端 netem）
@@ -143,7 +143,7 @@ Usage: tcpquic-proxy client|server [options]
 | `--quic-key` | 双方 | （必填） | 本端私钥 PEM |
 | `--quic-ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
 | `--quic-connections` | client | `1` | QUIC 连接池大小（最大 128） |
-| `--compress` | 双方 | `auto` | `auto` / `zstd` / `lz4` / `off` |
+| `--compress` | 双方 | `auto` | `auto` / `zstd` / `off` |
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
 | `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
 | `--deny-targets` | server | 空 | 逗号分隔 CIDR 黑名单 |
@@ -208,7 +208,7 @@ src/
 - 单 QUIC 长连接或连接池（`--quic-connections`）、1 TCP = 1 Stream
 - SOCKS5 CONNECT（NO AUTH）、HTTP CONNECT 隧道
 - 动态目标（B 侧 DNS + TCP 拨号）
-- mTLS、CIDR ACL、zstd / lz4 流式压缩
+- mTLS、CIDR ACL、zstd 流式压缩
 
 **未实现（规格预留）：**
 

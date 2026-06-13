@@ -21,7 +21,6 @@ static constexpr uint8_t TQ_ADDR_IPV6 = 0x02;
 static constexpr uint8_t TQ_ADDR_DOMAIN = 0x03;
 
 static constexpr uint8_t TQ_FLAG_COMPRESS = 0x01;
-static constexpr uint8_t TQ_FLAG_COMPRESS_LZ4 = 0x02;
 static constexpr uint8_t TQ_FLAG_DNS_REMOTE = 0x04;
 
 static constexpr size_t TQ_OPEN_RESPONSE_SIZE = 9;

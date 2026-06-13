@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 双机 DGX tcpquic-proxy 压测：裸 TCP vs QUIC 隧道（off/zstd/lz4），可选对端 netem
+# 双机 DGX tcpquic-proxy 压测：裸 TCP vs QUIC 隧道（off/zstd），可选对端 netem
 #
 # 拓扑（默认 spark 200G 直连）:
 #   对端 spark-1b6f: 169.254.59.196 — HTTP 目标 + tcpquic-proxy server
@@ -67,7 +67,7 @@ PROXY_PORT="${PROXY_PORT:-18080}"
 SKIP_APPEND="${SKIP_APPEND:-0}"
 METRIC_MODE="${METRIC_MODE:-average}"  # steady | average
 # RATE: unset vs empty distinguished — default applied in main when NETEM=1
-MODES="${MODES:-direct tunnel_off tunnel_zstd tunnel_lz4}"
+MODES="${MODES:-direct tunnel_off tunnel_zstd}"
 LOG_FILE="${ROOT}/research_progress.md"
 
 TMP_DIR="/tmp/tcpquic-dgx-bench-$$"
@@ -499,7 +499,6 @@ start_remote_http
 declare -A COMPRESS_MAP=(
     [tunnel_off]=off
     [tunnel_zstd]=zstd
-    [tunnel_lz4]=lz4
 )
 
 RESULT_ROWS="| 模式 | 平均吞吐 |"
