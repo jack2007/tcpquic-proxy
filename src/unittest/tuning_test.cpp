@@ -17,6 +17,8 @@ int main() {
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
         assert(cfg.Tuning.TcpSocketBufferBytes == 4 * 1024 * 1024);
+        assert(cfg.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay == 16ull * 1024 * 1024);
+        assert(cfg.Tuning.WindowsRelayQuicReceiveCompleteBatchBytes == 0);
     }
 
     {
