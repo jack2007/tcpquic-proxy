@@ -8,6 +8,31 @@
 
 **Tech Stack:** C++17, CMake, MsQuic stream pending receive API, zstd streaming API, Linux `epoll`, `readv`/`writev`, existing assert-style unit tests.
 
+**Execution Status (2026-06-13):** Completed on branch `linux-unified-pending-zstd`.
+
+Completed commits:
+
+- `363a11f refactor: remove lz4 compression support`
+- `0d78aa4 feat: add bounded zstd decompression`
+- `2875946 feat: drain linux zstd receives from pending views`
+- `89a0396 refactor: remove ingress relay buffer domain`
+- `5929d73 feat: add zstd relay decompression metrics`
+
+Final local verification:
+
+```bash
+rtk cmake --build build --target tcpquic-proxy tcpquic_compress_test tcpquic_config_router_test tcpquic_tuning_test tcpquic_relay_buffer_pool_test tcpquic_linux_relay_buffer_pool_test tcpquic_linux_relay_worker_io_test tcpquic_admin_http_test tcpquic_router_runtime_test -j2
+rtk ./build/bin/Release/tcpquic_compress_test
+rtk ./build/bin/Release/tcpquic_config_router_test
+rtk ./build/bin/Release/tcpquic_tuning_test
+rtk ./build/bin/Release/tcpquic_relay_buffer_pool_test
+rtk ./build/bin/Release/tcpquic_linux_relay_buffer_pool_test
+rtk timeout 30s ./build/bin/Release/tcpquic_linux_relay_worker_io_test
+rtk ./build/bin/Release/tcpquic_admin_http_test
+rtk ./build/bin/Release/tcpquic_router_runtime_test
+rtk git diff --check
+```
+
 ---
 
 ## File Map
@@ -956,4 +981,3 @@ Record throughput and admin metrics. Expected:
 rtk git add docs/dgx-unified-pending-zstd-linux-*/
 rtk git commit -m "docs: record linux unified pending zstd validation"
 ```
-
