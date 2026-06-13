@@ -1,0 +1,10 @@
+tcpquic-proxy QUIC execution profile: max-throughput
+tcpquic-proxy tuning: srw=1073741824 fcw=1073741824 iw=4000 initrtt=1ms relay_io=1048576 ideal_send=1073741824 inflight=1024 tcp_buf=67108864 relay_pending=536870912 tick_budget=536870912 read_batch=4194304 read_chunk=131072 worker_slots=128 ingress_slots=128 quic_complete_batch=0
+tcpquic-proxy relay memory budget: 4096 MB (pool scales by active tunnels)
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+tcpquic-proxy: speed client received READY session=2111338305 port=37495
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed client sending FINISH session=2111338305 client_bytes=60302659264 elapsed_us=30000000
+tcpquic-proxy: speed client waiting for SPEED_RESULT
+tcpquic-proxy: speed client received RESULT session=2111338305 server_bytes=60219834822 elapsed_us=30003099 accepted=1 closed=1

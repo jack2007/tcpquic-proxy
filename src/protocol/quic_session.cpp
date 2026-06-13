@@ -479,6 +479,34 @@ MsQuicConnection* QuicClientSession::PickConnection() {
     return nullptr;
 }
 
+MsQuicConnection* QuicClientSession::PickConnectionAt(size_t index) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index >= State->Slots.size()) {
+        return nullptr;
+    }
+    auto& slot = State->Slots[index];
+    if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+        return slot.Connection.get();
+    }
+    return nullptr;
+}
+
+MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t firstIndex) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (firstIndex >= State->Slots.size()) {
+        return nullptr;
+    }
+    const size_t count = State->Slots.size() - firstIndex;
+    for (size_t attempt = 0; attempt < count; ++attempt) {
+        const size_t index = firstIndex + (PickIndex.fetch_add(1) % count);
+        auto& slot = State->Slots[index];
+        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+            return slot.Connection.get();
+        }
+    }
+    return nullptr;
+}
+
 uint32_t QuicClientSession::ConnectionCount() const {
     return static_cast<uint32_t>(Config.QuicConnections);
 }

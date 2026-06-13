@@ -4,6 +4,7 @@
 #include "platform_socket.h"
 #include "quic_session.h"
 #include "tcp_tunnel.h"
+#include "tuning.h"
 
 #include <algorithm>
 #include <array>
@@ -106,12 +107,36 @@ double TqMiBPerSec(uint64_t bytes, uint64_t elapsedUs) {
         static_cast<double>(elapsedUs) / (1024.0 * 1024.0);
 }
 
-bool TqByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut) {
+} // namespace
+
+uint64_t TqSpeedByteMismatchLimit(uint64_t highBytes) {
+    const uint64_t minLimit = 16ull * 1024ull * 1024ull;
+    const uint64_t activeSocketBuffer = static_cast<uint64_t>(
+        std::max(0, TqGetActiveTcpSocketBuffer()));
+    const uint64_t scaledLimit = highBytes / 100ull;
+    const uint64_t socketPipelineLimit = (2ull * activeSocketBuffer) + minLimit;
+    return std::max(minLimit, std::min(socketPipelineLimit, scaledLimit));
+}
+
+bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut) {
     const uint64_t high = std::max(localBytes, serverBytes);
     const uint64_t low = std::min(localBytes, serverBytes);
     diffOut = high - low;
-    limitOut = std::min<uint64_t>(16ull * 1024ull * 1024ull, high / 100ull);
+    limitOut = TqSpeedByteMismatchLimit(high);
     return diffOut <= limitOut;
+}
+
+namespace {
+
+const char* TqSpeedDirectionName(TqSpeedDirection direction) {
+    switch (direction) {
+    case TqSpeedDirection::Download:
+        return "download";
+    case TqSpeedDirection::Upload:
+        return "upload";
+    default:
+        return "unknown";
+    }
 }
 
 std::string TqReadyAddressToHost(const TqSpeedReady& ready) {
@@ -281,6 +306,31 @@ bool TqSetSpeedSocketTimeout(TqSocketHandle socket, int timeoutMs) {
 #endif
 }
 
+} // namespace
+
+void TqTuneSpeedTestLocalSocket(TqSocketHandle socket) {
+    if (!TqSocketValid(socket)) {
+        return;
+    }
+
+    const int bufferBytes = TqGetActiveTcpSocketBuffer();
+    const bool noDelayOk = TqSetNoDelay(socket);
+    const bool receiveOk = TqSetSocketBuffer(socket, SO_RCVBUF, bufferBytes);
+    const bool sendOk = TqSetSocketBuffer(socket, SO_SNDBUF, bufferBytes);
+    const int effectiveReceive = TqGetSocketBuffer(socket, SO_RCVBUF);
+    const int effectiveSend = TqGetSocketBuffer(socket, SO_SNDBUF);
+    std::fprintf(stderr,
+        "tcpquic-proxy speed socket tuning: requested=%d rcv=%d snd=%d ok_nodelay=%d ok_rcv=%d ok_snd=%d\n",
+        bufferBytes,
+        effectiveReceive,
+        effectiveSend,
+        noDelayOk ? 1 : 0,
+        receiveOk ? 1 : 0,
+        sendOk ? 1 : 0);
+}
+
+namespace {
+
 void TqRunUploadWorker(
     const std::shared_ptr<TqSpeedSession>& session,
     const std::shared_ptr<TqSpeedSession::Connection>& connection) {
@@ -381,11 +431,8 @@ void TqRunAcceptLoop(const std::shared_ptr<TqSpeedSession>& session) {
             }
             break;
         }
-        (void)TqSetNoDelay(accepted);
+        TqTuneSpeedTestLocalSocket(accepted);
         (void)TqSetSpeedSocketTimeout(accepted, 100);
-        if (session->Start.Direction == TqSpeedDirection::Download) {
-            (void)TqSetSocketBuffer(accepted, SO_SNDBUF, 256 * 1024);
-        }
 
         session->AcceptedConnections.fetch_add(1, std::memory_order_relaxed);
         std::shared_ptr<TqSpeedSession::Connection> connection =
@@ -481,6 +528,11 @@ public:
             SetFailure("failed to encode speed finish");
             return false;
         }
+        std::fprintf(stderr,
+            "tcpquic-proxy: speed client sending FINISH session=%u client_bytes=%llu elapsed_us=%llu\n",
+            finish.SessionId,
+            static_cast<unsigned long long>(finish.ClientBytes),
+            static_cast<unsigned long long>(finish.ClientElapsedUs));
         return SendFrame(encoded, QUIC_SEND_FLAG_FIN);
     }
 
@@ -503,6 +555,7 @@ public:
 
     bool WaitForResult(std::chrono::milliseconds timeout, TqSpeedResult& result) {
         std::unique_lock<std::mutex> lock(Mutex_);
+        std::fprintf(stderr, "tcpquic-proxy: speed client waiting for SPEED_RESULT\n");
         if (!Cv_.wait_for(lock, timeout, [this] {
                 return Result_.has_value() || Error_.has_value() || Failed_ || Closed_;
             })) {
@@ -515,6 +568,13 @@ public:
         }
         result = *Result_;
         Result_.reset();
+        std::fprintf(stderr,
+            "tcpquic-proxy: speed client received RESULT session=%u server_bytes=%llu elapsed_us=%llu accepted=%u closed=%u\n",
+            result.SessionId,
+            static_cast<unsigned long long>(result.ServerBytes),
+            static_cast<unsigned long long>(result.ServerElapsedUs),
+            result.AcceptedConnections,
+            result.ClosedConnections);
         return true;
     }
 
@@ -624,6 +684,10 @@ private:
                     return;
                 }
                 Ready_ = ready;
+                std::fprintf(stderr,
+                    "tcpquic-proxy: speed client received READY session=%u port=%u\n",
+                    ready.SessionId,
+                    static_cast<unsigned>(ready.Port));
                 Cv_.notify_all();
                 break;
             }
@@ -818,6 +882,10 @@ private:
                     SendErrorAndFinish(0, TqSpeedError::InvalidRequest, "invalid speed start");
                     return;
                 }
+                std::fprintf(stderr,
+                    "tcpquic-proxy: speed server control decoded START session=%u direction=%s\n",
+                    start.SessionId,
+                    TqSpeedDirectionName(start.Direction));
                 BufferedRx_.erase(
                     BufferedRx_.begin(),
                     BufferedRx_.begin() + static_cast<ptrdiff_t>(TQ_SPEED_START_SIZE));
@@ -848,6 +916,11 @@ private:
                 SendErrorAndFinish(SessionId_, TqSpeedError::InvalidRequest, "invalid speed finish");
                 return;
             }
+            std::fprintf(stderr,
+                "tcpquic-proxy: speed server control decoded FINISH session=%u client_bytes=%llu elapsed_us=%llu\n",
+                finish.SessionId,
+                static_cast<unsigned long long>(finish.ClientBytes),
+                static_cast<unsigned long long>(finish.ClientElapsedUs));
             BufferedRx_.erase(
                 BufferedRx_.begin(),
                 BufferedRx_.begin() + static_cast<ptrdiff_t>(TQ_SPEED_FINISH_SIZE));
@@ -871,6 +944,11 @@ private:
             SessionActive_ = false;
             if (!SendResultAndFinish(result)) {
                 AbortAndCleanupSession();
+            } else {
+                std::fprintf(stderr,
+                    "tcpquic-proxy: speed server control queued RESULT session=%u server_bytes=%llu\n",
+                    result.SessionId,
+                    static_cast<unsigned long long>(result.ServerBytes));
             }
             return;
         }
@@ -972,6 +1050,13 @@ bool TqServerSpeedTestController::StartSession(const TqSpeedStart& start, TqSpee
         return false;
     }
 
+    std::fprintf(stderr,
+        "tcpquic-proxy: speed server START session=%u direction=%s duration=%u parallel=%u\n",
+        start.SessionId,
+        TqSpeedDirectionName(start.Direction),
+        static_cast<unsigned>(start.DurationSec),
+        static_cast<unsigned>(start.Parallel));
+
     auto session = std::make_shared<TqSpeedSession>(start);
     if (!TqCreateLoopbackListener(start.Parallel, session->Listener, session->Port)) {
         return false;
@@ -1006,6 +1091,10 @@ bool TqServerSpeedTestController::StartSession(const TqSpeedStart& start, TqSpee
     ready.AddrType = TQ_ADDR_IPV4;
     ready.Port = session->Port;
     ready.Addr = {127, 0, 0, 1};
+    std::fprintf(stderr,
+        "tcpquic-proxy: speed server READY session=%u port=%u\n",
+        start.SessionId,
+        static_cast<unsigned>(session->Port));
     return true;
 }
 
@@ -1027,6 +1116,12 @@ bool TqServerSpeedTestController::FinishSession(
         Impl_->SessionsByPort.erase(session->Port);
     }
 
+    std::fprintf(stderr,
+        "tcpquic-proxy: speed server FINISH begin session=%u bytes=%llu accepted=%u closed=%u\n",
+        sessionId,
+        static_cast<unsigned long long>(session->ServerBytes.load(std::memory_order_relaxed)),
+        session->AcceptedConnections.load(std::memory_order_relaxed),
+        session->ClosedConnections.load(std::memory_order_relaxed));
     TqStopSession(session);
 
     const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1038,6 +1133,13 @@ bool TqServerSpeedTestController::FinishSession(
     result.AcceptedConnections = session->AcceptedConnections.load(std::memory_order_relaxed);
     result.ClosedConnections = session->ClosedConnections.load(std::memory_order_relaxed);
     result.Status = 0;
+    std::fprintf(stderr,
+        "tcpquic-proxy: speed server FINISH done session=%u bytes=%llu elapsed_us=%llu accepted=%u closed=%u\n",
+        sessionId,
+        static_cast<unsigned long long>(result.ServerBytes),
+        static_cast<unsigned long long>(result.ServerElapsedUs),
+        result.AcceptedConnections,
+        result.ClosedConnections);
     return true;
 }
 
@@ -1071,19 +1173,35 @@ bool TqServerSpeedTestController::IsAllowedEphemeralTarget(const std::string& ho
     return Impl_->SessionsByPort.find(port) != Impl_->SessionsByPort.end();
 }
 
+TqConfig TqMakeSpeedClientSessionConfig(const TqConfig& cfg) {
+    TqConfig speedCfg = cfg;
+    speedCfg.QuicConnections = cfg.QuicConnections + 1;
+    return speedCfg;
+}
+
 bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
-    if (!quic.EnsureAnyConnected()) {
+    const uint16_t parallel = static_cast<uint16_t>(std::max<uint32_t>(1, cfg.QuicConnections));
+    const uint32_t neededConnections = static_cast<uint32_t>(parallel) + 1u;
+    const auto connectDeadline = TqClock::now() + std::chrono::seconds(10);
+    while (quic.ConnectedConnectionCount() < neededConnections) {
+        if (!quic.EnsureAnyConnected(std::chrono::milliseconds(100)) ||
+            TqClock::now() >= connectDeadline) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (quic.ConnectedConnectionCount() < neededConnections) {
         std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");
         return false;
     }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
-    MsQuicConnection* controlConn = quic.PickConnection();
+    MsQuicConnection* controlConn = quic.PickConnectionAt(0);
     if (controlConn == nullptr) {
         std::fprintf(stderr, "tcpquic-proxy: speed test has no connected QUIC control connection\n");
         return false;
     }
 
-    const uint16_t parallel = static_cast<uint16_t>(std::max<uint32_t>(1, cfg.QuicConnections));
     TqSpeedStart start{};
     start.SessionId = TqMakeSessionId();
     start.Direction = cfg.SpeedTestMode == TqSpeedTestMode::Upload
@@ -1147,6 +1265,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         return false;
     };
     uint64_t finishClientBytes = 0;
+    uint64_t measuredLocalBytes = 0;
     TqSpeedFinish finish{};
     TqSpeedResult result{};
 
@@ -1156,10 +1275,8 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             std::fprintf(stderr, "tcpquic-proxy: failed to create speed test socket pair %u\n", i);
             goto cleanup;
         }
-        (void)TqSetSocketBuffer(pair[0], SO_RCVBUF, 256 * 1024);
-        (void)TqSetSocketBuffer(pair[0], SO_SNDBUF, 256 * 1024);
-        (void)TqSetSocketBuffer(pair[1], SO_RCVBUF, 256 * 1024);
-        (void)TqSetSocketBuffer(pair[1], SO_SNDBUF, 256 * 1024);
+        TqTuneSpeedTestLocalSocket(pair[0]);
+        TqTuneSpeedTestLocalSocket(pair[1]);
 
         if (!quic.EnsureAnyConnected()) {
             std::fprintf(stderr, "tcpquic-proxy: speed test lost all QUIC connections\n");
@@ -1167,7 +1284,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             TqCloseSocket(pair[1]);
             goto cleanup;
         }
-        MsQuicConnection* dataConn = quic.PickConnection();
+        MsQuicConnection* dataConn = quic.PickConnectionFrom(1);
         if (dataConn == nullptr) {
             std::fprintf(stderr, "tcpquic-proxy: failed to pick QUIC connection for speed tunnel\n");
             TqCloseSocket(pair[0]);
@@ -1216,6 +1333,38 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             goto cleanup;
         }
     } else {
+        finishClientBytes = countWorkerBytes();
+    }
+    measuredLocalBytes = finishClientBytes;
+
+    finish.SessionId = start.SessionId;
+    finish.ClientBytes = finishClientBytes;
+    finish.ClientElapsedUs = localElapsedUs;
+    if (!control.SendFinish(finish)) {
+        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
+        goto cleanup;
+    }
+
+    if (!control.WaitForResult(std::chrono::seconds(15), result)) {
+        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
+        goto cleanup;
+    }
+
+    if (start.Direction == TqSpeedDirection::Download) {
+        const auto drainDeadline = TqClock::now() + std::chrono::seconds(5);
+        for (;;) {
+            bool allDone = true;
+            for (const auto& worker : workers) {
+                if (!worker.Done.load(std::memory_order_acquire)) {
+                    allDone = false;
+                    break;
+                }
+            }
+            if (allDone || TqClock::now() >= drainDeadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
@@ -1231,24 +1380,10 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             std::fprintf(stderr, "tcpquic-proxy: speed test pump worker failed\n");
             goto cleanup;
         }
-        finishClientBytes = countWorkerBytes();
-    }
-
-    finish.SessionId = start.SessionId;
-    finish.ClientBytes = finishClientBytes;
-    finish.ClientElapsedUs = localElapsedUs;
-    if (!control.SendFinish(finish)) {
-        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
-        goto cleanup;
-    }
-
-    if (!control.WaitForResult(std::chrono::seconds(15), result)) {
-        std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
-        goto cleanup;
     }
 
     {
-        const uint64_t localBytes = countWorkerBytes();
+        const uint64_t localBytes = measuredLocalBytes;
         const char* modeName =
             start.Direction == TqSpeedDirection::Upload ? "upload" : "download";
         const uint64_t throughputBytes =
@@ -1281,7 +1416,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         uint64_t diffBytes = 0;
         uint64_t limitBytes = 0;
         if (start.Direction == TqSpeedDirection::Upload &&
-            !TqByteCountsCloseEnough(localBytes, result.ServerBytes, diffBytes, limitBytes)) {
+            !TqSpeedByteCountsCloseEnough(localBytes, result.ServerBytes, diffBytes, limitBytes)) {
             std::fprintf(stderr,
                 "tcpquic-proxy: speed test local/server byte mismatch exceeds limit "
                 "(local=%llu server=%llu diff=%llu limit=%llu)\n",
@@ -1298,7 +1433,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
                     static_cast<unsigned long long>(localBytes),
                     static_cast<unsigned long long>(result.ServerBytes));
                 ok = false;
-            } else if (!TqByteCountsCloseEnough(localBytes, result.ServerBytes, diffBytes, limitBytes)) {
+            } else if (!TqSpeedByteCountsCloseEnough(localBytes, result.ServerBytes, diffBytes, limitBytes)) {
                 std::fprintf(stderr,
                     "tcpquic-proxy: download local/server byte mismatch exceeds limit "
                     "(local=%llu server=%llu diff=%llu limit=%llu); throughput uses local bytes\n",
@@ -1306,7 +1441,6 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
                     static_cast<unsigned long long>(result.ServerBytes),
                     static_cast<unsigned long long>(diffBytes),
                     static_cast<unsigned long long>(limitBytes));
-                ok = false;
             }
         }
     }

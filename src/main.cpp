@@ -420,7 +420,10 @@ struct TqSinglePeerClientRuntime {
 int RunSinglePeerClient(const TqConfig& cfg) {
     const auto started = std::chrono::steady_clock::now();
     QuicClientSession quic;
-    if (!quic.Start(cfg)) {
+    const TqConfig quicCfg = cfg.SpeedTestMode == TqSpeedTestMode::None
+        ? cfg
+        : TqMakeSpeedClientSessionConfig(cfg);
+    if (!quic.Start(quicCfg)) {
         return 1;
     }
 

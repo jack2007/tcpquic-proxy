@@ -7,6 +7,7 @@
 
 #include "control_protocol.h"
 #include "msquic.hpp"
+#include "platform_socket.h"
 
 struct TqConfig;
 class QuicClientSession;
@@ -35,6 +36,10 @@ private:
 };
 
 bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg);
+TqConfig TqMakeSpeedClientSessionConfig(const TqConfig& cfg);
+void TqTuneSpeedTestLocalSocket(TqSocketHandle socket);
+uint64_t TqSpeedByteMismatchLimit(uint64_t highBytes);
+bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut);
 void TqHandleServerSpeedControlStream(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,

@@ -1,8 +1,10 @@
 #include "speed_test.h"
 
+#include "config.h"
 #include "platform_socket.h"
 #include "quic_session.h"
 #include "trace.h"
+#include "tuning.h"
 
 #include <array>
 #include <chrono>
@@ -18,6 +20,18 @@ bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
 
 MsQuicConnection* QuicClientSession::PickConnection() {
     return nullptr;
+}
+
+MsQuicConnection* QuicClientSession::PickConnectionAt(size_t) {
+    return nullptr;
+}
+
+MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t) {
+    return nullptr;
+}
+
+uint32_t QuicClientSession::ConnectedConnectionCount() const {
+    return 0;
 }
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -338,6 +352,70 @@ int TestUploadFinishWithOpenClient() {
     return 0;
 }
 
+int TestSpeedClientSessionConfigAddsDedicatedControlConnection() {
+    TqConfig cfg{};
+    cfg.QuicConnections = 16;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.Compress = "off";
+
+    const TqConfig speedCfg = TqMakeSpeedClientSessionConfig(cfg);
+    if (speedCfg.QuicConnections != 17) {
+        return 40;
+    }
+    if (speedCfg.QuicPeer != cfg.QuicPeer) {
+        return 41;
+    }
+    if (speedCfg.Compress != cfg.Compress) {
+        return 42;
+    }
+    return 0;
+}
+
+int TestSpeedLocalSocketUsesActiveThroughputBuffer() {
+    const int requestedBuffer = 4 * 1024 * 1024;
+    TqSetActiveTcpSocketBuffer(requestedBuffer);
+
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        return 50;
+    }
+
+    TqTuneSpeedTestLocalSocket(pair[0]);
+
+    const int sendBuffer = TqGetSocketBuffer(pair[0], SO_SNDBUF);
+    const int receiveBuffer = TqGetSocketBuffer(pair[0], SO_RCVBUF);
+    TqCloseSocket(pair[0]);
+    TqCloseSocket(pair[1]);
+
+    if (sendBuffer < requestedBuffer) {
+        return 51;
+    }
+    if (receiveBuffer < requestedBuffer) {
+        return 52;
+    }
+    return 0;
+}
+
+int TestSpeedByteMismatchLimitAllowsConfiguredSocketBuffer() {
+    const uint64_t requestedBuffer = 64ull * 1024ull * 1024ull;
+    const uint64_t expectedLimit = (2ull * requestedBuffer) + (16ull * 1024ull * 1024ull);
+    TqSetActiveTcpSocketBuffer(static_cast<int>(requestedBuffer));
+
+    const uint64_t localBytes = 60ull * 1024ull * 1024ull * 1024ull;
+    uint64_t diff = 0;
+    uint64_t limit = 0;
+    if (!TqSpeedByteCountsCloseEnough(localBytes, localBytes - expectedLimit + 1, diff, limit)) {
+        return 60;
+    }
+    if (limit != expectedLimit) {
+        return 61;
+    }
+    if (TqSpeedByteCountsCloseEnough(localBytes, localBytes - expectedLimit - 1, diff, limit)) {
+        return 62;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -355,6 +433,15 @@ int main() {
         return rc;
     }
     if (const int rc = TestUploadFinishWithOpenClient(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestSpeedClientSessionConfigAddsDedicatedControlConnection(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestSpeedLocalSocketUsesActiveThroughputBuffer(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestSpeedByteMismatchLimitAllowsConfiguredSocketBuffer(); rc != 0) {
         return rc;
     }
     return 0;

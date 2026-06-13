@@ -37,6 +37,8 @@ public:
     void Stop();
     MsQuicConnection* GetConnection();
     MsQuicConnection* PickConnection();
+    MsQuicConnection* PickConnectionAt(size_t index);
+    MsQuicConnection* PickConnectionFrom(size_t firstIndex);
     bool EnsureConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     bool EnsureAnyConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void SetPeerStreamHandler(StreamHandler h);
