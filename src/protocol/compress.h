@@ -1,10 +1,18 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <vector>
 
 enum class TqCompressAlgo { None, Zstd };
+
+struct TqDecompressResult {
+    size_t InputConsumed{0};
+    size_t OutputProduced{0};
+    bool NeedsMoreInput{false};
+    bool NeedsMoreOutput{false};
+};
 
 struct ITqCompressor {
     virtual ~ITqCompressor() = default;
@@ -19,6 +27,12 @@ struct ITqCompressor {
 struct ITqDecompressor {
     virtual ~ITqDecompressor() = default;
     virtual bool Decompress(const uint8_t* in, size_t inLen, std::vector<uint8_t>& out) = 0;
+    virtual bool DecompressInto(
+        const uint8_t* input,
+        size_t inputLength,
+        uint8_t* output,
+        size_t outputCapacity,
+        TqDecompressResult* result) = 0;
     virtual void Reset() = 0;
 };
 

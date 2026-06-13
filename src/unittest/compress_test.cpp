@@ -1,9 +1,23 @@
 #include "compress.h"
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+static std::vector<uint8_t> CompressZstdPayload(const std::vector<uint8_t>& payload) {
+    auto compressor = TqCreateCompressor(TqCompressAlgo::Zstd, 1);
+    if (compressor == nullptr) {
+        std::abort();
+    }
+
+    std::vector<uint8_t> compressed;
+    if (!compressor->Compress(payload.data(), payload.size(), compressed, true)) {
+        std::abort();
+    }
+    return compressed;
+}
 
 int main() {
     std::string original;
@@ -123,6 +137,62 @@ int main() {
 
     assert(decompressed.size() == original.size());
     assert(std::memcmp(decompressed.data(), original.data(), original.size()) == 0);
+
+    {
+        std::vector<uint8_t> payload(256 * 1024);
+        uint32_t x = 0x12345678u;
+        for (auto& byte : payload) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            byte = static_cast<uint8_t>(x & 0xffu);
+        }
+        std::vector<uint8_t> compressed = CompressZstdPayload(payload);
+        auto boundedDecompressor = TqCreateDecompressor(TqCompressAlgo::Zstd);
+        if (boundedDecompressor == nullptr) {
+            return 10;
+        }
+
+        std::vector<uint8_t> output;
+        size_t inputOffset = 0;
+        size_t iterations = 0;
+        while (output.size() < payload.size()) {
+            uint8_t chunk[4096]{};
+            TqDecompressResult result{};
+            const uint8_t* input = inputOffset < compressed.size() ? compressed.data() + inputOffset : nullptr;
+            const size_t inputLength = compressed.size() - inputOffset;
+            if (!boundedDecompressor->DecompressInto(
+                input,
+                inputLength,
+                chunk,
+                sizeof(chunk),
+                &result)) {
+                return 11;
+            }
+            if (result.InputConsumed > inputLength) {
+                return 12;
+            }
+            if (result.OutputProduced > sizeof(chunk)) {
+                return 13;
+            }
+            if (result.InputConsumed == 0 && result.OutputProduced == 0) {
+                return result.NeedsMoreInput ? 14 : 15;
+            }
+            inputOffset += result.InputConsumed;
+            output.insert(output.end(), chunk, chunk + result.OutputProduced);
+            ++iterations;
+            if (iterations > 100000) {
+                return 16;
+            }
+        }
+
+        if (inputOffset != compressed.size()) {
+            return 17;
+        }
+        if (output != payload) {
+            return 18;
+        }
+    }
 
     // None passthrough sanity check.
     auto none_compressor = TqCreateCompressor(TqCompressAlgo::None, 0);

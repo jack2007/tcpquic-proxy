@@ -40,6 +40,33 @@ public:
         return true;
     }
 
+    bool DecompressInto(
+        const uint8_t* input,
+        size_t inputLength,
+        uint8_t* output,
+        size_t outputCapacity,
+        TqDecompressResult* result) override {
+        if (result == nullptr) {
+            return false;
+        }
+        *result = TqDecompressResult{};
+        if (inputLength > 0 && input == nullptr) {
+            return false;
+        }
+        if (outputCapacity > 0 && output == nullptr) {
+            return false;
+        }
+        const size_t n = std::min(inputLength, outputCapacity);
+        if (n > 0) {
+            std::memcpy(output, input, n);
+        }
+        result->InputConsumed = n;
+        result->OutputProduced = n;
+        result->NeedsMoreOutput = n < inputLength;
+        result->NeedsMoreInput = n == inputLength;
+        return true;
+    }
+
     void Reset() override {}
 };
 
@@ -158,6 +185,35 @@ public:
             }
         }
 
+        return true;
+    }
+
+    bool DecompressInto(
+        const uint8_t* input,
+        size_t inputLength,
+        uint8_t* output,
+        size_t outputCapacity,
+        TqDecompressResult* result) override {
+        if (result == nullptr || ctx_ == nullptr) {
+            return false;
+        }
+        *result = TqDecompressResult{};
+        if (inputLength > 0 && input == nullptr) {
+            return false;
+        }
+        if (outputCapacity > 0 && output == nullptr) {
+            return false;
+        }
+        ZSTD_inBuffer inBuffer = {input, inputLength, 0};
+        ZSTD_outBuffer outBuffer = {output, outputCapacity, 0};
+        const size_t ret = ZSTD_decompressStream(ctx_, &outBuffer, &inBuffer);
+        if (ZSTD_isError(ret)) {
+            return false;
+        }
+        result->InputConsumed = inBuffer.pos;
+        result->OutputProduced = outBuffer.pos;
+        result->NeedsMoreInput = (ret != 0 && inBuffer.pos == inBuffer.size);
+        result->NeedsMoreOutput = (outBuffer.pos == outBuffer.size && ret != 0);
         return true;
     }
 
