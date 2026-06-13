@@ -76,14 +76,9 @@ void TqBufferHandle::reset() {
     }
     auto* pool = Pool;
     auto* slot = Slot;
-    const TqBufferDomain domain = Domain;
     Pool = nullptr;
     Slot = nullptr;
-    if (domain == TqBufferDomain::Worker) {
-        pool->ReleaseWorker(slot);
-    } else {
-        pool->ReleaseIngress(slot);
-    }
+    pool->ReleaseWorker(slot);
 }
 
 void TqBufferHandle::abandon() {
@@ -108,53 +103,27 @@ TqRelayBufferPool::~TqRelayBufferPool() {
         delete buffer;
     }
     WorkerFree.clear();
-    std::lock_guard<std::mutex> ingressGuard(IngressLock);
-    for (auto* buffer : IngressFree) {
-        delete buffer;
-    }
-    IngressFree.clear();
 }
 
 void TqRelayBufferPool::Reserve(size_t slotCount) {
     const size_t capped = std::min(slotCount, MaxBuffers);
-    Reserve(capped - (capped / 2), capped / 2);
-}
-
-void TqRelayBufferPool::Reserve(size_t workerSlots, size_t ingressSlots) {
-    const size_t total = std::min(workerSlots + ingressSlots, MaxBuffers);
-    {
-        std::lock_guard<std::mutex> workerGuard(WorkerLock);
-        WorkerMaxSlots = std::min(workerSlots, total);
-        while (WorkerAllocated < WorkerMaxSlots) {
-            auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
-            if (buffer == nullptr) {
-                return;
-            }
-            WorkerFree.push_back(buffer);
-            ++WorkerAllocated;
+    std::lock_guard<std::mutex> workerGuard(WorkerLock);
+    WorkerMaxSlots = capped;
+    while (WorkerAllocated < WorkerMaxSlots) {
+        auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
+        if (buffer == nullptr) {
+            return;
         }
-    }
-    {
-        std::lock_guard<std::mutex> guard(IngressLock);
-        IngressMaxSlots = total - std::min(workerSlots, total);
-        while (IngressAllocated < IngressMaxSlots) {
-            auto* buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
-            if (buffer == nullptr) {
-                return;
-            }
-            IngressFree.push_back(buffer);
-            ++IngressAllocated;
-        }
+        WorkerFree.push_back(buffer);
+        ++WorkerAllocated;
     }
 }
 
 TqBufferRef TqRelayBufferPool::Acquire(
     TqBufferDomain domain,
     TqBufferAcquireFailure* failure) {
-    if (domain == TqBufferDomain::Worker) {
-        return AcquireWorker(failure);
-    }
-    return AcquireIngress(failure);
+    (void)domain;
+    return AcquireWorker(failure);
 }
 
 TqBufferRef TqRelayBufferPool::AcquireWorker(TqBufferAcquireFailure* failure) {
@@ -197,63 +166,6 @@ TqBufferRef TqRelayBufferPool::AcquireWorker(TqBufferAcquireFailure* failure) {
     return TqBufferRef(this, buffer, TqBufferDomain::Worker);
 }
 
-TqBufferRef TqRelayBufferPool::AcquireIngress(TqBufferAcquireFailure* failure) {
-    if (failure != nullptr) {
-        *failure = TqBufferAcquireFailure::None;
-    }
-    if (!ReservePending(failure)) {
-        return {};
-    }
-
-    TqRelayBufferSlot* buffer = nullptr;
-    {
-        std::lock_guard<std::mutex> guard(IngressLock);
-        if (!IngressFree.empty()) {
-            buffer = IngressFree.back();
-            IngressFree.pop_back();
-        } else {
-            if (IngressAllocated >= IngressMaxSlots) {
-                ReleasePending();
-                if (failure != nullptr) {
-                    *failure = TqBufferAcquireFailure::SlotLimit;
-                }
-                return {};
-            }
-            buffer = new (std::nothrow) TqRelayBufferSlot(ChunkBytes);
-            if (buffer == nullptr) {
-                ReleasePending();
-                if (failure != nullptr) {
-                    *failure = TqBufferAcquireFailure::AllocationFailure;
-                }
-                return {};
-            }
-            ++IngressAllocated;
-        }
-    }
-
-    buffer->UsedLength = 0;
-    IngressPending.fetch_add(ChunkBytes, std::memory_order_relaxed);
-    Acquires.fetch_add(1, std::memory_order_relaxed);
-    return TqBufferRef(this, buffer, TqBufferDomain::Ingress);
-}
-
-TqBufferRef TqRelayBufferPool::TransferToWorker(TqBufferRef ingress) {
-    if (!ingress || ingress.Pool != this || ingress.Domain != TqBufferDomain::Ingress) {
-        return ingress;
-    }
-    auto* buffer = ingress.Slot;
-    ingress.Pool = nullptr;
-    ingress.Slot = nullptr;
-    const uint64_t ingressBefore = IngressPending.load(std::memory_order_relaxed);
-    if (ingressBefore >= ChunkBytes) {
-        IngressPending.fetch_sub(ChunkBytes, std::memory_order_relaxed);
-    } else {
-        IngressPending.store(0, std::memory_order_relaxed);
-    }
-    WorkerPending.fetch_add(ChunkBytes, std::memory_order_relaxed);
-    return TqBufferRef(this, buffer, TqBufferDomain::Worker);
-}
-
 TqBufferRef TqRelayBufferPool::Acquire() {
     return AcquireWorker();
 }
@@ -264,8 +176,7 @@ size_t TqRelayBufferPool::ChunkSize() const {
 
 size_t TqRelayBufferPool::FreeCount() const {
     std::lock_guard<std::mutex> workerGuard(WorkerLock);
-    std::lock_guard<std::mutex> ingressGuard(IngressLock);
-    return WorkerFree.size() + IngressFree.size();
+    return WorkerFree.size();
 }
 
 uint64_t TqRelayBufferPool::PendingBytes() const {
@@ -327,20 +238,4 @@ void TqRelayBufferPool::ReleaseWorker(TqRelayBufferSlot* buffer) {
     ReleasePending();
     std::lock_guard<std::mutex> workerGuard(WorkerLock);
     WorkerFree.push_back(buffer);
-}
-
-void TqRelayBufferPool::ReleaseIngress(TqRelayBufferSlot* buffer) {
-    if (buffer == nullptr) {
-        return;
-    }
-    buffer->UsedLength = 0;
-    const uint64_t ingressBefore = IngressPending.load(std::memory_order_relaxed);
-    if (ingressBefore >= ChunkBytes) {
-        IngressPending.fetch_sub(ChunkBytes, std::memory_order_relaxed);
-    } else {
-        IngressPending.store(0, std::memory_order_relaxed);
-    }
-    ReleasePending();
-    std::lock_guard<std::mutex> guard(IngressLock);
-    IngressFree.push_back(buffer);
 }

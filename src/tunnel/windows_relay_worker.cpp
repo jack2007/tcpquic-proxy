@@ -87,7 +87,7 @@ struct TqWindowsRelayWorker::RelayContext {
               tuning.RelayIoSize,
               2,
               std::max<uint64_t>(static_cast<uint64_t>(tuning.RelayIoSize) * 2, tuning.RelayIoSize)) {
-        TcpRecvBuffers.Reserve(2, 0);
+        TcpRecvBuffers.Reserve(2);
     }
 
     uint64_t Id{0};

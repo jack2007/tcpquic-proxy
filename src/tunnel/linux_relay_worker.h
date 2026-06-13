@@ -188,11 +188,6 @@ private:
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
     uint64_t FindRelayIdByStream(MsQuicStream* stream);
-    bool CopyQuicReceiveBatchToEvent(
-        uint64_t relayId,
-        const QUIC_BUFFER* buffers,
-        uint32_t bufferCount,
-        bool fin);
     bool QueueDeferredQuicReceive(
         RelayState* relay,
         MsQuicStream* stream,

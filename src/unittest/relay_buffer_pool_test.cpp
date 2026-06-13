@@ -4,7 +4,6 @@
 #include <cassert>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -18,24 +17,18 @@ int main() {
         "TqBufferRef must support ownership transfer");
 
     {
-        TqRelayBufferPool pool(4096, 2, 8192);
-        pool.Reserve(1, 1);
+        TqRelayBufferPool pool(4096, 2, 12288);
+        pool.Reserve(2);
 
         TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;
-        auto worker = pool.Acquire(TqBufferDomain::Worker, &failure);
-        assert(worker);
-        assert(failure == TqBufferAcquireFailure::None);
-        assert(worker->Capacity() == 4096);
-
-        auto callback = pool.Acquire(TqBufferDomain::Ingress, &failure);
-        assert(callback);
-        assert(failure == TqBufferAcquireFailure::None);
-        assert(pool.PendingBytes() == 8192);
-
-        auto denied = pool.Acquire(TqBufferDomain::Worker, &failure);
+        auto first = pool.Acquire(TqBufferDomain::Worker, &failure);
+        auto second = pool.AcquireWorker(&failure);
+        auto denied = pool.AcquireWorker(&failure);
+        assert(first);
+        assert(second);
         assert(!denied);
-        assert(failure == TqBufferAcquireFailure::PendingBytesLimit ||
-            failure == TqBufferAcquireFailure::SlotLimit);
+        assert(failure == TqBufferAcquireFailure::SlotLimit);
+        assert(pool.PendingBytes() == 8192);
     }
 
     {
@@ -67,7 +60,7 @@ int main() {
 
     {
         TqRelayBufferPool pool(64, 2, 512);
-        pool.Reserve(2, 0);
+        pool.Reserve(2);
         TqBufferAcquireFailure reason = TqBufferAcquireFailure::None;
         auto first = pool.AcquireWorker(&reason);
         auto second = pool.AcquireWorker(&reason);
@@ -76,48 +69,6 @@ int main() {
         assert(second);
         assert(!third);
         assert(reason == TqBufferAcquireFailure::SlotLimit);
-    }
-
-    {
-        TqRelayBufferPool pool(64, 4, 512);
-        pool.Reserve(4);
-
-        auto ingress = pool.AcquireIngress();
-        assert(ingress);
-        std::memset(ingress->Data(), 0xCD, ingress->Capacity());
-        ingress->SetLength(17);
-        assert(pool.PendingBytes() == 64);
-
-        auto worker = pool.TransferToWorker(std::move(ingress));
-        assert(worker);
-        assert(!ingress);
-        assert(pool.PendingBytes() == 64);
-        assert(worker->Length() == 17);
-        assert(worker->Data()[0] == 0xCD);
-
-        worker.reset();
-        assert(pool.PendingBytes() == 0);
-    }
-
-    {
-        TqRelayBufferPool ownerPool(64, 4, 512);
-        TqRelayBufferPool otherPool(64, 4, 512);
-        auto worker = ownerPool.AcquireWorker();
-        auto sameWorker = ownerPool.TransferToWorker(std::move(worker));
-        assert(sameWorker);
-        assert(!worker);
-        assert(ownerPool.PendingBytes() == 64);
-        sameWorker.reset();
-        assert(ownerPool.PendingBytes() == 0);
-
-        auto ingress = ownerPool.AcquireIngress();
-        auto rejectedByOtherPool = otherPool.TransferToWorker(std::move(ingress));
-        assert(rejectedByOtherPool);
-        assert(!ingress);
-        assert(ownerPool.PendingBytes() == 64);
-        assert(otherPool.PendingBytes() == 0);
-        rejectedByOtherPool.reset();
-        assert(ownerPool.PendingBytes() == 0);
     }
 
     {
@@ -134,17 +85,15 @@ int main() {
     {
         constexpr size_t ThreadCount = 16;
         TqRelayBufferPool pool(1, ThreadCount, 1);
-        pool.Reserve(0, ThreadCount);
+        pool.Reserve(ThreadCount);
         std::atomic<size_t> successes{0};
         std::atomic<size_t> maxObservedPending{0};
-        std::mutex heldLock;
-        std::vector<TqBufferRef> held;
         std::vector<std::thread> threads;
 
         for (size_t i = 0; i < ThreadCount; ++i) {
             threads.emplace_back([&]() {
                 TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;
-                auto buffer = pool.AcquireIngress(&failure);
+                auto buffer = pool.AcquireWorker(&failure);
                 const size_t pending = static_cast<size_t>(pool.PendingBytes());
                 size_t observed = maxObservedPending.load(std::memory_order_relaxed);
                 while (observed < pending &&
@@ -156,8 +105,6 @@ int main() {
                 }
                 if (buffer) {
                     successes.fetch_add(1, std::memory_order_relaxed);
-                    std::lock_guard<std::mutex> guard(heldLock);
-                    held.push_back(std::move(buffer));
                 } else {
                     assert(failure == TqBufferAcquireFailure::PendingBytesLimit ||
                         failure == TqBufferAcquireFailure::SlotLimit);
@@ -170,17 +117,15 @@ int main() {
 
         assert(successes.load(std::memory_order_relaxed) <= 1);
         assert(maxObservedPending.load(std::memory_order_relaxed) <= 1);
-        assert(pool.PendingBytes() <= 1);
-        assert(pool.AcquireCount() == successes.load(std::memory_order_relaxed));
-        held.clear();
         assert(pool.PendingBytes() == 0);
+        assert(pool.AcquireCount() == successes.load(std::memory_order_relaxed));
     }
 
     {
         constexpr size_t ThreadCount = 8;
         constexpr size_t Iterations = 256;
         TqRelayBufferPool pool(1, ThreadCount, ThreadCount);
-        pool.Reserve(ThreadCount, 0);
+        pool.Reserve(ThreadCount);
         std::atomic<bool> stopReader{false};
         std::atomic<size_t> acquired{0};
         std::thread reader([&]() {

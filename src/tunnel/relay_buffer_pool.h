@@ -10,10 +10,6 @@ class TqRelayBufferPool;
 
 enum class TqBufferDomain {
     Worker,
-    // Ingress represents the callback/producer-side domain free-list. The name is
-    // kept as a compatibility alias for existing Linux relay code; it is not an
-    // OS-specific dependency.
-    Ingress,
 };
 
 enum class TqBufferAcquireFailure {
@@ -97,11 +93,8 @@ public:
     TqRelayBufferPool& operator=(const TqRelayBufferPool&) = delete;
 
     void Reserve(size_t slotCount);
-    void Reserve(size_t workerSlots, size_t ingressSlots);
     TqBufferRef Acquire(TqBufferDomain domain, TqBufferAcquireFailure* failure = nullptr);
     TqBufferRef AcquireWorker(TqBufferAcquireFailure* failure = nullptr);
-    TqBufferRef AcquireIngress(TqBufferAcquireFailure* failure = nullptr);
-    TqBufferRef TransferToWorker(TqBufferRef ingress);
     TqBufferRef Acquire();
     size_t ChunkSize() const;
     size_t FreeCount() const;
@@ -115,22 +108,15 @@ private:
     bool ReservePending(TqBufferAcquireFailure* failure);
     void ReleasePending();
     void ReleaseWorker(TqRelayBufferSlot* slot);
-    void ReleaseIngress(TqRelayBufferSlot* slot);
 
     size_t ChunkBytes;
     size_t MaxBuffers;
     uint64_t MaxBytes;
     std::vector<TqRelayBufferSlot*> WorkerFree;
-    std::vector<TqRelayBufferSlot*> IngressFree;
     size_t WorkerMaxSlots;
-    size_t IngressMaxSlots{0};
     size_t WorkerAllocated{0};
-    size_t IngressAllocated{0};
     std::atomic<uint64_t> WorkerPending{0};
-    std::atomic<uint64_t> IngressPending{0};
     std::atomic<uint64_t> PendingReserved{0};
     std::atomic<uint64_t> Acquires{0};
-    // WorkerLock is always acquired before IngressLock when both free-lists are read.
     mutable std::mutex WorkerLock;
-    mutable std::mutex IngressLock;
 };
