@@ -340,6 +340,121 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
+        config.WorkerSlots = 32;
+        config.IngressSlots = 0;
+        config.MaxPendingBytes = 512 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        auto compressor = TqCreateCompressor(TqCompressAlgo::Zstd, 1);
+        auto decompressor = TqCreateDecompressor(TqCompressAlgo::Zstd);
+        if (!compressor || !decompressor) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Decompressor = decompressor.get();
+        registration.CompressAlgo = TqCompressAlgo::Zstd;
+        registration.EnableQuicSends = false;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        std::vector<uint8_t> plain(1024 * 1024, 0);
+        std::vector<uint8_t> compressed;
+        if (!compressor->Compress(plain.data(), plain.size(), compressed, true) ||
+            compressed.empty()) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        QUIC_BUFFER quicBuffer{};
+        quicBuffer.Buffer = compressed.data();
+        quicBuffer.Length = static_cast<uint32_t>(compressed.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 1;
+        receiveEvent.RECEIVE.Buffers = &quicBuffer;
+        receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+
+        const QUIC_STATUS receiveStatus = worker.DispatchStreamEventForTest(fakeStream, &receiveEvent);
+        if (receiveStatus != QUIC_STATUS_PENDING) {
+            std::fprintf(stderr, "expected compressed pending receive, got %d\n", receiveStatus);
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+
+        std::vector<uint8_t> output;
+        output.reserve(plain.size());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+        uint8_t readBuffer[8192];
+        while (std::chrono::steady_clock::now() < deadline && output.size() < plain.size()) {
+            const ssize_t received = ::recv(fds[1], readBuffer, sizeof(readBuffer), MSG_DONTWAIT);
+            if (received > 0) {
+                output.insert(output.end(), readBuffer, readBuffer + received);
+                continue;
+            }
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                TqLinuxRelayEvent writable{};
+                writable.Type = TqLinuxRelayEventType::TcpWritable;
+                writable.RelayId = registered.RelayId;
+                (void)worker.EnqueueForTest(std::move(writable));
+                (void)worker.DrainForTest(config.EventBudget);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            break;
+        }
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (output != plain ||
+            snapshot.DecompressedTcpBytes < plain.size() ||
+            snapshot.DeferredReceiveCompleteBytes != compressed.size() ||
+            snapshot.PendingBytes != 0) {
+            std::fprintf(stderr, "expected large compressed receive to drain, output=%zu decompressed=%llu complete=%llu/%zu pending=%llu\n",
+                output.size(),
+                static_cast<unsigned long long>(snapshot.DecompressedTcpBytes),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
+                compressed.size(),
+                static_cast<unsigned long long>(snapshot.PendingBytes));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
         config.MaxPendingBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -768,6 +883,7 @@ int main() {
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
+        config.IngressSlots = 0;
         config.MaxPendingBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -795,8 +911,7 @@ int main() {
 
         const std::vector<uint8_t> plain(2048, 0x7C);
         std::vector<uint8_t> compressed;
-        assert(compressor->Compress(plain.data(), plain.size(), compressed, false));
-        assert(compressor->Flush(compressed));
+        assert(compressor->Compress(plain.data(), plain.size(), compressed, true));
         assert(!compressed.empty());
 
         QUIC_BUFFER quicBuffer{};
@@ -809,7 +924,7 @@ int main() {
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
         receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
 
-        assert(QUIC_SUCCEEDED(worker.DispatchStreamEventForTest(fakeStream, &receiveEvent)));
+        assert(worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) == QUIC_STATUS_PENDING);
         assert(worker.DrainForTest(config.EventBudget) >= 1);
 
         std::vector<uint8_t> output(plain.size());

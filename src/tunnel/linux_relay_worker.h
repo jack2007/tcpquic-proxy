@@ -201,6 +201,7 @@ private:
         bool fin);
     void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
     void FlushDeferredQuicReceives(RelayState* relay);
+    bool DrainCompressedQuicReceiveView(RelayState* relay, TqPendingQuicReceive& view);
     void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
     void FlushDeferredReceiveCompletion(TqPendingQuicReceive& view, bool force);
     bool QueueDeferredQuicReceiveFromOffset(

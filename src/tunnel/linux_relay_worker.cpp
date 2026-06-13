@@ -1097,6 +1097,19 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         }
         FlushDeferredReceiveCompletion(*view, false);
 
+        const bool needsDecompress =
+            relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd;
+        if (needsDecompress) {
+            if (DrainCompressedQuicReceiveView(relay, *view)) {
+                if (view->Fin) {
+                    relay->TcpWriteShutdownQueued = true;
+                }
+                relay->PendingQuicReceives.pop_front();
+                continue;
+            }
+            break;
+        }
+
         std::vector<iovec> iov;
         iov.reserve(Config.MaxIov);
         size_t sliceIndex = view->SliceIndex;
@@ -1209,6 +1222,111 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
     if (relay->PendingQuicReceives.empty() && relay->PendingTcpWrites.empty()) {
         ArmTcpWritable(relay, false);
     }
+}
+
+bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
+    RelayState* relay,
+    TqPendingQuicReceive& view) {
+    if (relay == nullptr || relay->Decompressor == nullptr) {
+        return false;
+    }
+
+    while (true) {
+        const bool hasInput = view.SliceIndex < view.Slices.size();
+        const uint8_t* input = nullptr;
+        size_t inputLength = 0;
+        if (hasInput) {
+            const auto& slice = view.Slices[view.SliceIndex];
+            if (view.SliceOffset >= slice.Length) {
+                ++view.SliceIndex;
+                view.SliceOffset = 0;
+                continue;
+            }
+            input = slice.Data + view.SliceOffset;
+            inputLength = slice.Length - view.SliceOffset;
+        }
+
+        TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
+        auto output = relay->Pool.AcquireWorker(&acquireFailure);
+        if (!output) {
+            RecordBufferAcquireFailure(RelayErrorKind::QuicReceiveTcpBufferAcquire, acquireFailure);
+            ArmTcpWritable(relay, true);
+            return false;
+        }
+
+        TqDecompressResult result{};
+        if (!relay->Decompressor->DecompressInto(
+                input,
+                inputLength,
+                output->Data(),
+                output->Capacity(),
+                &result)) {
+            RecordError(RelayErrorKind::QuicReceiveDecompress);
+            if (relay->Handle != nullptr) {
+                relay->Handle->Stop.store(true);
+            }
+            return false;
+        }
+        if (result.InputConsumed > inputLength || result.OutputProduced > output->Capacity()) {
+            RecordError(RelayErrorKind::QuicReceiveDecompress);
+            if (relay->Handle != nullptr) {
+                relay->Handle->Stop.store(true);
+            }
+            return false;
+        }
+
+        if (result.InputConsumed > 0) {
+            view.PendingCompleteBytes += static_cast<uint64_t>(result.InputConsumed);
+            view.CompletedLength += static_cast<uint64_t>(result.InputConsumed);
+            relay->PendingQuicReceiveBytes =
+                relay->PendingQuicReceiveBytes >= static_cast<uint64_t>(result.InputConsumed)
+                    ? relay->PendingQuicReceiveBytes - static_cast<uint64_t>(result.InputConsumed)
+                    : 0;
+            view.SliceOffset += result.InputConsumed;
+            while (view.SliceIndex < view.Slices.size()) {
+                const auto& slice = view.Slices[view.SliceIndex];
+                if (view.SliceOffset < slice.Length) {
+                    break;
+                }
+                view.SliceOffset = 0;
+                ++view.SliceIndex;
+            }
+            FlushDeferredReceiveCompletion(view, false);
+            MaybeResumeQuicReceive(relay);
+        }
+
+        if (result.OutputProduced > 0) {
+            output->SetLength(result.OutputProduced);
+            uint8_t* data = output->Data();
+            relay->PendingTcpWrites.push_back(
+                TqBufferView{data, result.OutputProduced, std::move(output)});
+            DecompressedTcpBytes.fetch_add(result.OutputProduced);
+            FlushTcpWrites(relay);
+            if (!relay->PendingTcpWrites.empty()) {
+                return false;
+            }
+        }
+
+        if (result.InputConsumed == 0 && result.OutputProduced == 0) {
+            if (!hasInput && result.NeedsMoreInput) {
+                break;
+            }
+            RecordError(RelayErrorKind::QuicReceiveDecompress);
+            if (relay->Handle != nullptr) {
+                relay->Handle->Stop.store(true);
+            }
+            return false;
+        }
+
+        if (view.SliceIndex >= view.Slices.size() &&
+            result.OutputProduced == 0 &&
+            result.NeedsMoreInput) {
+            break;
+        }
+    }
+
+    FlushDeferredReceiveCompletion(view, true);
+    return true;
 }
 
 bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
@@ -1641,26 +1759,15 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
             return QUIC_STATUS_SUCCESS;
         }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
-        const bool needsDecompress =
-            relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None;
-        if (!needsDecompress &&
-            QueueDeferredQuicReceive(
+        if (!QueueDeferredQuicReceive(
                 relay,
                 stream,
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
                 fin)) {
-            return QUIC_STATUS_PENDING;
-        }
-        if (!CopyQuicReceiveBatchToEvent(
-                relayId,
-                event->RECEIVE.Buffers,
-                event->RECEIVE.BufferCount,
-                fin)) {
             AbortRelayFromCallback(relayId, stream);
-            return QUIC_STATUS_PENDING;
         }
-        return QUIC_STATUS_SUCCESS;
+        return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
         return QUIC_STATUS_SUCCESS;
