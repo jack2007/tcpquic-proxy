@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -26,6 +27,30 @@
 
 struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
+struct TqWindowsPendingQuicReceive;
+
+struct TqWindowsRelayWorkerSnapshot {
+    uint64_t DeferredReceiveQueued{0};
+    uint64_t DeferredReceiveBytesQueued{0};
+    uint64_t DeferredReceiveCompleteBytes{0};
+    uint64_t DeferredReceiveCompletes{0};
+    uint64_t DeferredReceiveCompletionFlushes{0};
+    uint64_t PendingQuicReceiveBytes{0};
+    uint64_t MaxPendingQuicReceiveBytes{0};
+    uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t MaxPendingQuicReceiveQueueDepth{0};
+    uint64_t QuicReceivePausedCount{0};
+    uint64_t QuicReceiveResumedCount{0};
+    uint64_t TcpSendOperationsPosted{0};
+    uint64_t TcpSendBytes{0};
+    uint64_t TcpSendPartialCompletions{0};
+    uint64_t TcpSendWouldBlockOrPendingCount{0};
+    uint64_t TcpRecvOperationsCreated{0};
+    uint64_t TcpRecvOperationsReused{0};
+    uint64_t TcpRecvBufferPoolPendingBytes{0};
+    uint64_t TcpRecvBufferPoolAcquireCount{0};
+    uint64_t Errors{0};
+};
 
 class TqWindowsRelayWorker {
 public:
@@ -34,6 +59,7 @@ public:
 
     bool Start();
     void Stop();
+    TqWindowsRelayWorkerSnapshot Snapshot() const;
 
     bool RegisterRelay(
         TqSocketHandle tcpFd,
@@ -44,6 +70,20 @@ public:
         const TqTuningConfig& tuning,
         TqCompressAlgo compressAlgo);
 
+#if defined(TQ_UNIT_TESTING)
+    bool RegisterRelayForTest(
+        MsQuicStream* stream,
+        TqRelayHandle* handle,
+        const TqTuningConfig& tuning,
+        TqCompressAlgo compressAlgo);
+    void SetQuicReceiveViewDrainEnabledForTest(bool enabled);
+    bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
+    bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
+    bool TestLateReceiveViewCompletionIgnored(uint64_t relayId, DWORD bytes, uint64_t postedLength);
+    bool TestBufferedTcpSendZeroCompletion(uint64_t relayId);
+    bool TestCloseRelayTcpSocketForPostRecvFailure(uint64_t relayId);
+#endif
+
     void StopRelay(uint64_t relayId);
     static QUIC_STATUS QUIC_API StreamCallback(
         MsQuicStream* stream,
@@ -53,7 +93,7 @@ public:
 private:
     struct RelayContext;
     struct IoOperation;
-    struct CallbackContext;
+    struct CallbackBinding;
 
     void Run();
     void PostStop();
@@ -62,6 +102,32 @@ private:
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
     void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
+    void HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op);
+    bool QueueDeferredQuicReceive(
+        const std::shared_ptr<RelayContext>& relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin);
+    bool PostTcpSendFromReceiveView(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
+    void AdvanceReceiveView(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsPendingQuicReceive& view,
+        uint64_t bytes);
+    void FlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
+    void CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
+    bool FinishReceiveView(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
+    bool CompletePendingQuicReceive(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
+    void CompleteAllPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
+    void SetQuicReceiveEnabled(const std::shared_ptr<RelayContext>& relay, bool enabled);
+    void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
+    void PruneRetiredCallbacks(bool keepNewest);
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
     void CloseRelay(const std::shared_ptr<RelayContext>& relay);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
@@ -70,8 +136,29 @@ private:
     std::thread Thread_;
     std::atomic<bool> Stopping_{false};
     std::atomic<uint64_t> NextRelayId_{1};
-    std::mutex Lock_;
+    std::atomic<uint64_t> DeferredReceiveQueued_{0};
+    std::atomic<uint64_t> DeferredReceiveBytesQueued_{0};
+    std::atomic<uint64_t> DeferredReceiveCompleteBytes_{0};
+    std::atomic<uint64_t> DeferredReceiveCompletes_{0};
+    std::atomic<uint64_t> DeferredReceiveCompletionFlushes_{0};
+    std::atomic<uint64_t> MaxPendingQuicReceiveBytesObserved_{0};
+    std::atomic<uint64_t> MaxPendingQuicReceiveQueueObserved_{0};
+    std::atomic<uint64_t> QuicReceivePausedCount_{0};
+    std::atomic<uint64_t> QuicReceiveResumedCount_{0};
+    std::atomic<uint64_t> TcpSendOperationsPosted_{0};
+    std::atomic<uint64_t> TcpSendBytes_{0};
+    std::atomic<uint64_t> TcpSendPartialCompletions_{0};
+    std::atomic<uint64_t> TcpSendWouldBlockOrPendingCount_{0};
+    std::atomic<uint64_t> TcpRecvOperationsCreated_{0};
+    std::atomic<uint64_t> TcpRecvOperationsReused_{0};
+    std::atomic<uint64_t> Errors_{0};
+#if defined(TQ_UNIT_TESTING)
+    std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
+#endif
+    mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;
+    // Retired bindings keep late callbacks on old stream contexts safe until Stop or ref-counted pruning.
+    std::vector<std::shared_ptr<CallbackBinding>> RetiredCallbacks_;
 };
 
 class TqWindowsRelayRuntime {
