@@ -193,9 +193,6 @@ void TqLinuxRelayWorker::RecordError(RelayErrorKind kind) {
     case RelayErrorKind::QuicSend:
         QuicSendFailures.fetch_add(1);
         break;
-    case RelayErrorKind::QuicReceiveIngressBufferAcquire:
-        QuicReceiveIngressBufferAcquireFailures.fetch_add(1);
-        break;
     case RelayErrorKind::QuicReceiveView:
         QuicReceiveViewFailures.fetch_add(1);
         break;
@@ -247,12 +244,6 @@ void TqLinuxRelayWorker::RecordBufferAcquireFailure(
             TcpToQuicBufferAcquirePendingBudgetFailures,
             TcpToQuicBufferAcquireSlotLimitFailures,
             TcpToQuicBufferAcquireAllocFailures);
-        break;
-    case RelayErrorKind::QuicReceiveIngressBufferAcquire:
-        recordByReason(
-            QuicReceiveIngressBufferAcquirePendingBudgetFailures,
-            QuicReceiveIngressBufferAcquireSlotLimitFailures,
-            QuicReceiveIngressBufferAcquireAllocFailures);
         break;
     case RelayErrorKind::QuicReceiveTcpBufferAcquire:
         recordByReason(
@@ -1193,12 +1184,14 @@ bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
         }
 
         TqDecompressResult result{};
+        ZstdDecompressCalls.fetch_add(1);
         if (!relay->Decompressor->DecompressInto(
                 input,
                 inputLength,
                 output->Data(),
                 output->Capacity(),
                 &result)) {
+            ZstdDecompressFailures.fetch_add(1);
             RecordError(RelayErrorKind::QuicReceiveDecompress);
             if (relay->Handle != nullptr) {
                 relay->Handle->Stop.store(true);
@@ -1206,14 +1199,22 @@ bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
             return false;
         }
         if (result.InputConsumed > inputLength || result.OutputProduced > output->Capacity()) {
+            ZstdDecompressFailures.fetch_add(1);
             RecordError(RelayErrorKind::QuicReceiveDecompress);
             if (relay->Handle != nullptr) {
                 relay->Handle->Stop.store(true);
             }
             return false;
         }
+        if (result.NeedsMoreInput) {
+            ZstdDecompressNeedInput.fetch_add(1);
+        }
+        if (result.NeedsMoreOutput) {
+            ZstdDecompressNeedOutput.fetch_add(1);
+        }
 
         if (result.InputConsumed > 0) {
+            ZstdDecompressInputBytes.fetch_add(result.InputConsumed);
             view.PendingCompleteBytes += static_cast<uint64_t>(result.InputConsumed);
             view.CompletedLength += static_cast<uint64_t>(result.InputConsumed);
             relay->PendingQuicReceiveBytes =
@@ -1239,6 +1240,7 @@ bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
             relay->PendingTcpWrites.push_back(
                 TqBufferView{data, result.OutputProduced, std::move(output)});
             DecompressedTcpBytes.fetch_add(result.OutputProduced);
+            ZstdDecompressOutputBytes.fetch_add(result.OutputProduced);
             FlushTcpWrites(relay);
             if (!relay->PendingTcpWrites.empty()) {
                 return false;
@@ -1249,6 +1251,7 @@ bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
             if (!hasInput && result.NeedsMoreInput) {
                 break;
             }
+            ZstdDecompressFailures.fetch_add(1);
             RecordError(RelayErrorKind::QuicReceiveDecompress);
             if (relay->Handle != nullptr) {
                 relay->Handle->Stop.store(true);
@@ -1296,11 +1299,15 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
     size_t writeLength = length;
     if (relay->Decompressor != nullptr && relay->CompressAlgo != TqCompressAlgo::None) {
         relay->DecompressionOutput.clear();
+        ZstdDecompressCalls.fetch_add(1);
         if (!relay->Decompressor->Decompress(data, length, relay->DecompressionOutput)) {
+            ZstdDecompressFailures.fetch_add(1);
             RecordError(RelayErrorKind::QuicReceiveDecompress);
             return false;
         }
         DecompressedTcpBytes.fetch_add(relay->DecompressionOutput.size());
+        ZstdDecompressInputBytes.fetch_add(length);
+        ZstdDecompressOutputBytes.fetch_add(relay->DecompressionOutput.size());
         writeData = relay->DecompressionOutput.data();
         writeLength = relay->DecompressionOutput.size();
     }
@@ -1525,6 +1532,12 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.StreamLookupScanCount = StreamLookupScanCount.load();
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
+    snapshot.ZstdDecompressInputBytes = ZstdDecompressInputBytes.load();
+    snapshot.ZstdDecompressOutputBytes = ZstdDecompressOutputBytes.load();
+    snapshot.ZstdDecompressCalls = ZstdDecompressCalls.load();
+    snapshot.ZstdDecompressNeedInput = ZstdDecompressNeedInput.load();
+    snapshot.ZstdDecompressNeedOutput = ZstdDecompressNeedOutput.load();
+    snapshot.ZstdDecompressFailures = ZstdDecompressFailures.load();
     snapshot.DeferredReceiveCompleteBytes = DeferredReceiveCompleteBytes.load();
     snapshot.DeferredReceiveCompletes = DeferredReceiveCompletes.load();
     snapshot.DeferredReceiveCompletionFlushes = DeferredReceiveCompletionFlushes.load();
@@ -1554,14 +1567,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.QuicSendBufferTooLargeFailures = QuicSendBufferTooLargeFailures.load();
     snapshot.QuicSendOperationAllocFailures = QuicSendOperationAllocFailures.load();
     snapshot.QuicSendApiFailures = QuicSendApiFailures.load();
-    snapshot.QuicReceiveIngressBufferAcquireFailures =
-        QuicReceiveIngressBufferAcquireFailures.load();
-    snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures =
-        QuicReceiveIngressBufferAcquirePendingBudgetFailures.load();
-    snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures =
-        QuicReceiveIngressBufferAcquireSlotLimitFailures.load();
-    snapshot.QuicReceiveIngressBufferAcquireAllocFailures =
-        QuicReceiveIngressBufferAcquireAllocFailures.load();
     snapshot.QuicReceiveViewFailures = QuicReceiveViewFailures.load();
     snapshot.QuicReceiveViewAllocFailures = QuicReceiveViewAllocFailures.load();
     snapshot.QuicReceiveViewNullBufferFailures = QuicReceiveViewNullBufferFailures.load();
@@ -1793,6 +1798,12 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.ReadDisabledCount += snapshot.ReadDisabledCount;
         total.CompressedTcpBytes += snapshot.CompressedTcpBytes;
         total.DecompressedTcpBytes += snapshot.DecompressedTcpBytes;
+        total.ZstdDecompressInputBytes += snapshot.ZstdDecompressInputBytes;
+        total.ZstdDecompressOutputBytes += snapshot.ZstdDecompressOutputBytes;
+        total.ZstdDecompressCalls += snapshot.ZstdDecompressCalls;
+        total.ZstdDecompressNeedInput += snapshot.ZstdDecompressNeedInput;
+        total.ZstdDecompressNeedOutput += snapshot.ZstdDecompressNeedOutput;
+        total.ZstdDecompressFailures += snapshot.ZstdDecompressFailures;
         total.Errors += snapshot.Errors;
         total.EventQueueFullErrors += snapshot.EventQueueFullErrors;
         total.TcpReadBufferAcquireFailures += snapshot.TcpReadBufferAcquireFailures;
@@ -1815,14 +1826,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.QuicSendBufferTooLargeFailures += snapshot.QuicSendBufferTooLargeFailures;
         total.QuicSendOperationAllocFailures += snapshot.QuicSendOperationAllocFailures;
         total.QuicSendApiFailures += snapshot.QuicSendApiFailures;
-        total.QuicReceiveIngressBufferAcquireFailures +=
-            snapshot.QuicReceiveIngressBufferAcquireFailures;
-        total.QuicReceiveIngressBufferAcquirePendingBudgetFailures +=
-            snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
-        total.QuicReceiveIngressBufferAcquireSlotLimitFailures +=
-            snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures;
-        total.QuicReceiveIngressBufferAcquireAllocFailures +=
-            snapshot.QuicReceiveIngressBufferAcquireAllocFailures;
         total.QuicReceiveViewFailures += snapshot.QuicReceiveViewFailures;
         total.QuicReceiveViewAllocFailures += snapshot.QuicReceiveViewAllocFailures;
         total.QuicReceiveViewNullBufferFailures += snapshot.QuicReceiveViewNullBufferFailures;

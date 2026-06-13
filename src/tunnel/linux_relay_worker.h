@@ -79,6 +79,12 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t StreamLookupScanCount{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
+    uint64_t ZstdDecompressInputBytes{0};
+    uint64_t ZstdDecompressOutputBytes{0};
+    uint64_t ZstdDecompressCalls{0};
+    uint64_t ZstdDecompressNeedInput{0};
+    uint64_t ZstdDecompressNeedOutput{0};
+    uint64_t ZstdDecompressFailures{0};
     uint64_t DeferredReceiveCompleteBytes{0};
     uint64_t DeferredReceiveCompletes{0};
     uint64_t DeferredReceiveCompletionFlushes{0};
@@ -103,10 +109,6 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicSendBufferTooLargeFailures{0};
     uint64_t QuicSendOperationAllocFailures{0};
     uint64_t QuicSendApiFailures{0};
-    uint64_t QuicReceiveIngressBufferAcquireFailures{0};
-    uint64_t QuicReceiveIngressBufferAcquirePendingBudgetFailures{0};
-    uint64_t QuicReceiveIngressBufferAcquireSlotLimitFailures{0};
-    uint64_t QuicReceiveIngressBufferAcquireAllocFailures{0};
     uint64_t QuicReceiveViewFailures{0};
     uint64_t QuicReceiveViewAllocFailures{0};
     uint64_t QuicReceiveViewNullBufferFailures{0};
@@ -160,7 +162,6 @@ private:
         TcpToQuicCompress,
         TcpToQuicBufferAcquire,
         QuicSend,
-        QuicReceiveIngressBufferAcquire,
         QuicReceiveView,
         QuicReceiveDecompress,
         QuicReceiveTcpBufferAcquire,
@@ -257,6 +258,12 @@ private:
     std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
     std::atomic<uint64_t> DecompressedTcpBytes{0};
+    std::atomic<uint64_t> ZstdDecompressInputBytes{0};
+    std::atomic<uint64_t> ZstdDecompressOutputBytes{0};
+    std::atomic<uint64_t> ZstdDecompressCalls{0};
+    std::atomic<uint64_t> ZstdDecompressNeedInput{0};
+    std::atomic<uint64_t> ZstdDecompressNeedOutput{0};
+    std::atomic<uint64_t> ZstdDecompressFailures{0};
     std::atomic<uint64_t> DeferredReceiveCompleteBytes{0};
     std::atomic<uint64_t> DeferredReceiveCompletes{0};
     std::atomic<uint64_t> DeferredReceiveCompletionFlushes{0};
@@ -281,10 +288,6 @@ private:
     std::atomic<uint64_t> QuicSendBufferTooLargeFailures{0};
     std::atomic<uint64_t> QuicSendOperationAllocFailures{0};
     std::atomic<uint64_t> QuicSendApiFailures{0};
-    std::atomic<uint64_t> QuicReceiveIngressBufferAcquireFailures{0};
-    std::atomic<uint64_t> QuicReceiveIngressBufferAcquirePendingBudgetFailures{0};
-    std::atomic<uint64_t> QuicReceiveIngressBufferAcquireSlotLimitFailures{0};
-    std::atomic<uint64_t> QuicReceiveIngressBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> QuicReceiveViewFailures{0};
     std::atomic<uint64_t> QuicReceiveViewAllocFailures{0};
     std::atomic<uint64_t> QuicReceiveViewNullBufferFailures{0};

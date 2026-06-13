@@ -62,6 +62,12 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.ReadDisabledCount = snapshot.ReadDisabledCount;
     metrics.CompressedTcpBytes = snapshot.CompressedTcpBytes;
     metrics.DecompressedTcpBytes = snapshot.DecompressedTcpBytes;
+    metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;
+    metrics.ZstdDecompressOutputBytes = snapshot.ZstdDecompressOutputBytes;
+    metrics.ZstdDecompressCalls = snapshot.ZstdDecompressCalls;
+    metrics.ZstdDecompressNeedInput = snapshot.ZstdDecompressNeedInput;
+    metrics.ZstdDecompressNeedOutput = snapshot.ZstdDecompressNeedOutput;
+    metrics.ZstdDecompressFailures = snapshot.ZstdDecompressFailures;
     metrics.DeferredReceiveCompleteBytes = snapshot.DeferredReceiveCompleteBytes;
     metrics.DeferredReceiveCompletes = snapshot.DeferredReceiveCompletes;
     metrics.DeferredReceiveCompletionFlushes = snapshot.DeferredReceiveCompletionFlushes;
@@ -91,14 +97,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicSendBufferTooLargeFailures = snapshot.QuicSendBufferTooLargeFailures;
     metrics.QuicSendOperationAllocFailures = snapshot.QuicSendOperationAllocFailures;
     metrics.QuicSendApiFailures = snapshot.QuicSendApiFailures;
-    metrics.QuicReceiveIngressBufferAcquireFailures =
-        snapshot.QuicReceiveIngressBufferAcquireFailures;
-    metrics.QuicReceiveIngressBufferAcquirePendingBudgetFailures =
-        snapshot.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
-    metrics.QuicReceiveIngressBufferAcquireSlotLimitFailures =
-        snapshot.QuicReceiveIngressBufferAcquireSlotLimitFailures;
-    metrics.QuicReceiveIngressBufferAcquireAllocFailures =
-        snapshot.QuicReceiveIngressBufferAcquireAllocFailures;
     metrics.QuicReceiveViewFailures = snapshot.QuicReceiveViewFailures;
     metrics.QuicReceiveViewAllocFailures = snapshot.QuicReceiveViewAllocFailures;
     metrics.QuicReceiveViewNullBufferFailures = snapshot.QuicReceiveViewNullBufferFailures;
@@ -137,6 +135,17 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     TqAppendJsonString(out, "linux_relay_backend", metrics.Backend);
     out << ",\"linux_relay_compressed_tcp_bytes\":" << metrics.CompressedTcpBytes;
     out << ",\"linux_relay_decompressed_tcp_bytes\":" << metrics.DecompressedTcpBytes;
+    out << ",\"linux_relay_zstd_decompress_input_bytes\":"
+        << metrics.ZstdDecompressInputBytes;
+    out << ",\"linux_relay_zstd_decompress_output_bytes\":"
+        << metrics.ZstdDecompressOutputBytes;
+    out << ",\"linux_relay_zstd_decompress_calls\":" << metrics.ZstdDecompressCalls;
+    out << ",\"linux_relay_zstd_decompress_need_input\":"
+        << metrics.ZstdDecompressNeedInput;
+    out << ",\"linux_relay_zstd_decompress_need_output\":"
+        << metrics.ZstdDecompressNeedOutput;
+    out << ",\"linux_relay_zstd_decompress_failures\":"
+        << metrics.ZstdDecompressFailures;
     out << ",\"linux_relay_deferred_receive_complete_bytes\":" << metrics.DeferredReceiveCompleteBytes;
     out << ",\"linux_relay_deferred_receive_completes\":" << metrics.DeferredReceiveCompletes;
     out << ",\"linux_relay_deferred_receive_completion_flushes\":" << metrics.DeferredReceiveCompletionFlushes;
@@ -174,14 +183,6 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_quic_send_operation_alloc_failures\":"
         << metrics.QuicSendOperationAllocFailures;
     out << ",\"linux_relay_quic_send_api_failures\":" << metrics.QuicSendApiFailures;
-    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_failures\":"
-        << metrics.QuicReceiveIngressBufferAcquireFailures;
-    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_pending_budget_failures\":"
-        << metrics.QuicReceiveIngressBufferAcquirePendingBudgetFailures;
-    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_slot_limit_failures\":"
-        << metrics.QuicReceiveIngressBufferAcquireSlotLimitFailures;
-    out << ",\"linux_relay_quic_receive_ingress_buffer_acquire_alloc_failures\":"
-        << metrics.QuicReceiveIngressBufferAcquireAllocFailures;
     out << ",\"linux_relay_quic_receive_view_failures\":" << metrics.QuicReceiveViewFailures;
     out << ",\"linux_relay_quic_receive_view_alloc_failures\":"
         << metrics.QuicReceiveViewAllocFailures;

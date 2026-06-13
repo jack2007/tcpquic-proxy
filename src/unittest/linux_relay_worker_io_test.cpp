@@ -432,11 +432,19 @@ int main() {
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (output != plain ||
             snapshot.DecompressedTcpBytes < plain.size() ||
+            snapshot.ZstdDecompressInputBytes != compressed.size() ||
+            snapshot.ZstdDecompressOutputBytes != plain.size() ||
+            snapshot.ZstdDecompressCalls == 0 ||
+            snapshot.ZstdDecompressFailures != 0 ||
             snapshot.DeferredReceiveCompleteBytes != compressed.size() ||
             snapshot.PendingBytes != 0) {
-            std::fprintf(stderr, "expected large compressed receive to drain, output=%zu decompressed=%llu complete=%llu/%zu pending=%llu\n",
+            std::fprintf(stderr, "expected large compressed receive to drain, output=%zu decompressed=%llu zstd=%llu/%llu calls=%llu failures=%llu complete=%llu/%zu pending=%llu\n",
                 output.size(),
                 static_cast<unsigned long long>(snapshot.DecompressedTcpBytes),
+                static_cast<unsigned long long>(snapshot.ZstdDecompressInputBytes),
+                static_cast<unsigned long long>(snapshot.ZstdDecompressOutputBytes),
+                static_cast<unsigned long long>(snapshot.ZstdDecompressCalls),
+                static_cast<unsigned long long>(snapshot.ZstdDecompressFailures),
                 static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
                 compressed.size(),
                 static_cast<unsigned long long>(snapshot.PendingBytes));

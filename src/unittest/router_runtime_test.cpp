@@ -396,6 +396,13 @@ int main() {
 #endif
         if (body.find("\"linux_relay_compressed_tcp_bytes\":") == std::string::npos) return 103;
         if (body.find("\"linux_relay_decompressed_tcp_bytes\":") == std::string::npos) return 104;
+        if (body.find("\"linux_relay_zstd_decompress_input_bytes\":") == std::string::npos) return 147;
+        if (body.find("\"linux_relay_zstd_decompress_output_bytes\":") == std::string::npos) return 148;
+        if (body.find("\"linux_relay_zstd_decompress_calls\":") == std::string::npos) return 149;
+        if (body.find("\"linux_relay_zstd_decompress_need_input\":") == std::string::npos) return 150;
+        if (body.find("\"linux_relay_zstd_decompress_need_output\":") == std::string::npos) return 151;
+        if (body.find("\"linux_relay_zstd_decompress_failures\":") == std::string::npos) return 152;
+        if (body.find("ingress_buffer") != std::string::npos) return 153;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
         if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
