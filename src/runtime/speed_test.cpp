@@ -481,6 +481,29 @@ void TqStopSession(const std::shared_ptr<TqSpeedSession>& session) {
         std::lock_guard<std::mutex> lock(session->Mutex);
         connections = session->Connections;
     }
+
+    if (session->Start.Direction == TqSpeedDirection::Upload) {
+        const auto drainDeadline = TqClock::now() + std::chrono::milliseconds(200);
+        for (;;) {
+            bool allClosed = true;
+            for (const auto& connection : connections) {
+                TqSocketHandle socket = TqInvalidSocket;
+                {
+                    std::lock_guard<std::mutex> lock(connection->Mutex);
+                    socket = connection->Socket;
+                }
+                if (TqSocketValid(socket)) {
+                    allClosed = false;
+                    break;
+                }
+            }
+            if (allClosed || TqClock::now() >= drainDeadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
     for (const auto& connection : connections) {
         TqSocketHandle socket = TqInvalidSocket;
         {
@@ -1103,7 +1126,7 @@ bool TqServerSpeedTestController::StartSession(const TqSpeedStart& start, TqSpee
 }
 
 bool TqServerSpeedTestController::FinishSession(
-    uint32_t sessionId, uint64_t, uint64_t, TqSpeedResult& result) {
+    uint32_t sessionId, uint64_t clientBytes, uint64_t, TqSpeedResult& result) {
     if (Impl_ == nullptr || sessionId == 0) {
         return false;
     }
@@ -1126,6 +1149,16 @@ bool TqServerSpeedTestController::FinishSession(
         static_cast<unsigned long long>(session->ServerBytes.load(std::memory_order_relaxed)),
         session->AcceptedConnections.load(std::memory_order_relaxed),
         session->ClosedConnections.load(std::memory_order_relaxed));
+    if (session->Start.Direction == TqSpeedDirection::Upload && clientBytes > 0) {
+        const auto finishDeadline = TqClock::now() + std::chrono::milliseconds(500);
+        while (TqClock::now() < finishDeadline) {
+            const uint64_t serverBytes = session->ServerBytes.load(std::memory_order_relaxed);
+            if (serverBytes >= clientBytes || session->ClosedConnections.load(std::memory_order_relaxed) > 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
     TqStopSession(session);
 
     const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(

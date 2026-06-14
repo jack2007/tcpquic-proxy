@@ -389,7 +389,7 @@ int main() {
         if (body.find("\"linux_relay_tcp_read_bytes\"") == std::string::npos) return 99;
         if (body.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (body.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
         if (body.find("\"linux_relay_backend\":\"worker\"") == std::string::npos) return 102;
 #else
         if (body.find("\"linux_relay_backend\":\"unsupported\"") == std::string::npos) return 102;
