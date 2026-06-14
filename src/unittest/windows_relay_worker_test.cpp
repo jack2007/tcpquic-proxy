@@ -1,3 +1,4 @@
+#include "compress.h"
 #include "platform_socket.h"
 #include "windows_relay_worker.h"
 
@@ -1108,22 +1109,38 @@ int main() {
         stream->Context = nullptr;
         stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
 
-        TestDecompressor decompressor;
-        TqRelayHandle handle{};
-        TqTuningConfig tuning{};
-        tuning.RelayIoSize = 4096;
-        if (!receiveWorker.RegisterRelay(
-                pair[0], stream, nullptr, &decompressor, &handle, tuning, TqCompressAlgo::Zstd)) {
+        auto compressor = TqCreateCompressor(TqCompressAlgo::Zstd, 1);
+        auto decompressor = TqCreateDecompressor(TqCompressAlgo::Zstd);
+        if (!compressor || !decompressor) {
             receiveWorker.Stop();
+            TqCloseSocket(pair[0]);
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
             return 116;
         }
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!receiveWorker.RegisterRelay(
+                pair[0], stream, nullptr, decompressor.get(), &handle, tuning, TqCompressAlgo::Zstd)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 117;
+        }
 
         std::vector<uint8_t> plain(1024 * 1024, 0x41);
+        std::vector<uint8_t> compressed;
+        if (!compressor->Compress(plain.data(), plain.size(), compressed, true) ||
+            compressed.empty()) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 118;
+        }
         QUIC_BUFFER buffer{};
-        buffer.Buffer = plain.data();
-        buffer.Length = static_cast<uint32_t>(plain.size());
+        buffer.Buffer = compressed.data();
+        buffer.Length = static_cast<uint32_t>(compressed.size());
         QUIC_STREAM_EVENT event{};
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
@@ -1133,7 +1150,7 @@ int main() {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
-            return 117;
+            return 119;
         }
 
         std::vector<uint8_t> output;
@@ -1141,13 +1158,13 @@ int main() {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
-            return 118;
+            return 120;
         }
         if (output != plain) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
-            return 119;
+            return 121;
         }
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
@@ -1160,19 +1177,19 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } while (std::chrono::steady_clock::now() < deadline);
 
-        if (snapshot.ZstdDecompressInputBytes < plain.size() ||
+        if (snapshot.ZstdDecompressInputBytes != compressed.size() ||
             snapshot.ZstdDecompressOutputBytes < plain.size() ||
             snapshot.ZstdDecompressCalls == 0 ||
             snapshot.ZstdDecompressFailures != 0 ||
-            snapshot.DeferredReceiveCompleteBytes != plain.size() ||
+            snapshot.DeferredReceiveCompleteBytes != compressed.size() ||
             snapshot.PendingQuicReceiveBytes != 0 ||
             snapshot.PendingQuicReceiveQueueDepth != 0 ||
-            g_StreamReceiveCompleteBytes != plain.size() ||
+            g_StreamReceiveCompleteBytes != compressed.size() ||
             g_StreamReceiveCompleteCalls == 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
-            return 120;
+            return 122;
         }
 
         receiveWorker.Stop();

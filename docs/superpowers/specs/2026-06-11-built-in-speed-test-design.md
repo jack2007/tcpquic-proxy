@@ -128,7 +128,7 @@ tcpquic-proxy: speed test server bytes=12884901888 elapsed=10.001s throughput=10
 upload 场景：
 
 ```text
-tcpquic-proxy: speed test upload duration=10s quic_connections=4 compress=lz4
+tcpquic-proxy: speed test upload duration=10s quic_connections=4 compress=zstd
 tcpquic-proxy: speed test local bytes=9663676416 elapsed=10.004s throughput=7.73 Gbps
 tcpquic-proxy: speed test server bytes=9663600128 elapsed=10.006s throughput=7.73 Gbps
 ```
@@ -571,7 +571,7 @@ tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.
 覆盖：
 
 - `--compress off`
-- `--compress lz4`
+- `--compress zstd`
 - `--quic-connections 4`
 - server 侧没有外部 HTTP server 的情况下测试仍可运行
 
@@ -583,7 +583,7 @@ tcpquic-proxy client --quic-peer 127.0.0.1:14443 --quic-cert cert/client/client.
 DGX_QUIC_PEER="${DGX_QUIC_PEER:?set to host:port}"
 tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress off --download-test 10
 tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress off --upload-test 10
-tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress lz4 --download-test 10
+tcpquic-proxy client --quic-peer "$DGX_QUIC_PEER" --quic-cert cert/client/client.crt --quic-key cert/client/client.key --quic-ca cert/ca.crt --quic-connections 8 --compress zstd --download-test 10
 ```
 
 记录 local/server bytes 是否接近、吞吐是否稳定、server session 是否在结束后清理。

@@ -26,7 +26,6 @@ struct TqLinuxRelayWorkerConfig {
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
     uint32_t WorkerSlots{128};
-    uint32_t IngressSlots{128};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     uint64_t DeferredReceiveCompleteBatchBytes{0};

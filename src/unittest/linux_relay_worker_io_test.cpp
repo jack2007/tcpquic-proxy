@@ -137,7 +137,6 @@ int main() {
         config.ReadBatchBytes = 4096;
         config.MaxIov = 3;
         config.WorkerSlots = 2;
-        config.IngressSlots = 0;
         config.MaxPendingBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -341,7 +340,6 @@ int main() {
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
         config.WorkerSlots = 32;
-        config.IngressSlots = 0;
         config.MaxPendingBytes = 512 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -550,6 +548,8 @@ int main() {
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
         registration.Stream = fakeStream;
+        TqRelayHandle handle{};
+        registration.Handle = &handle;
         registration.EnableQuicSends = false;
         if (!worker.RegisterRelayForTest(registration)) {
             worker.Stop();
@@ -563,7 +563,7 @@ int main() {
         finEvent.RECEIVE.Buffers = nullptr;
         finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
 
-        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &finEvent))) {
+        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -578,6 +578,19 @@ int main() {
         const ssize_t received = ::read(fds[1], &one, sizeof(one));
         if (received != 0) {
             std::fprintf(stderr, "expected FIN-only receive to half-close TCP, got %zd\n", received);
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.Errors != 0 ||
+            snapshot.QuicReceiveViewEmptyFailures != 0) {
+            std::fprintf(stderr,
+                "FIN-only receive should be graceful, stop=%d errors=%llu empty=%llu\n",
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
+                static_cast<unsigned long long>(snapshot.Errors),
+                static_cast<unsigned long long>(snapshot.QuicReceiveViewEmptyFailures));
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -891,7 +904,6 @@ int main() {
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.IngressSlots = 0;
         config.MaxPendingBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);

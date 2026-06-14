@@ -77,16 +77,15 @@ Upload and download fail when local/server byte counts differ by more than 1% or
 
 For IO throughput tests, use `--compress off`.
 
-When the global client config is left at the normal default `--compress auto`, the speed-test data tunnels are forced to `off`. This avoids measuring compression policy bootstrap behavior instead of tunnel IO throughput. It also keeps the default local smoke commands stable, because `auto` has no prior compression sample and would otherwise choose lz4 for the first stream.
+When the global client config is left at the normal default `--compress auto`, the speed-test data tunnels are forced to `off`. This avoids measuring compression policy bootstrap behavior instead of tunnel IO throughput. It also keeps the default local smoke commands stable, because `auto` has no prior compression sample.
 
 Explicit compression is still honored:
 
 ```bash
-./build/bin/Release/tcpquic-proxy client ... --compress lz4 --download-test 10
 ./build/bin/Release/tcpquic-proxy client ... --compress zstd --download-test 10
 ```
 
-Current caveat: explicit compressed speed tests are useful for debugging the compression path, but they are not the recommended baseline for IO throughput. Multi-connection lz4 download has shown unstable `SPEED_RESULT` completion in local smoke testing and should not be used as the standard pass/fail benchmark until the compression relay FIN path is separately hardened.
+Current caveat: explicit compressed speed tests are useful for debugging the zstd compression path, but they are not the recommended baseline for IO throughput.
 
 ## Platform Scope
 

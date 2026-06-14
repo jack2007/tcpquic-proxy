@@ -328,6 +328,7 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::TcpWritable: {
             auto relay = FindRelayById(event.RelayId);
             if (relay != nullptr) {
+                FlushTcpWrites(relay.get());
                 FlushDeferredQuicReceives(relay.get());
                 FlushTcpWrites(relay.get());
             }
@@ -796,6 +797,7 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
     }
     delete operation;
     if (relay != nullptr && !relay->Closing) {
+        FlushDeferredQuicReceives(relay.get());
         ArmTcpReadable(relay.get(), true);
     }
 }
@@ -869,7 +871,8 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     uint32_t bufferCount,
     uint64_t completedPrefix,
     bool fin) {
-    if (relay == nullptr || relay->Closing || buffers == nullptr || bufferCount == 0) {
+    if (relay == nullptr || relay->Closing ||
+        (bufferCount != 0 && buffers == nullptr)) {
         return false;
     }
 
@@ -909,7 +912,7 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
         view->Slices.push_back(TqQuicReceiveSlice{data, length});
         view->TotalLength += length;
     }
-    if (view->TotalLength == 0) {
+    if (view->TotalLength == 0 && !fin) {
         RecordError(RelayErrorKind::QuicReceiveView);
         QuicReceiveViewEmptyFailures.fetch_add(1);
         return false;
@@ -1623,6 +1626,7 @@ void TqLinuxRelayWorker::Run() {
                     continue;
                 }
                 if ((events[i].events & EPOLLOUT) != 0) {
+                    FlushTcpWrites(relay.get());
                     FlushDeferredQuicReceives(relay.get());
                     FlushTcpWrites(relay.get());
                 }
@@ -1738,7 +1742,6 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
         config.MaxIov = tuning.LinuxRelayMaxIov;
         config.WorkerSlots = tuning.LinuxRelayWorkerSlots;
-        config.IngressSlots = tuning.LinuxRelayIngressSlots;
         config.MaxPendingBytes = tuning.LinuxRelayPerWorkerPendingBytes;
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;

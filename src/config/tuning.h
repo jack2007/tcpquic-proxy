@@ -26,7 +26,6 @@ struct TqTuningConfig {
     uint32_t LinuxRelayMaxIov{16};
     size_t LinuxRelayReadChunkSize{128 * 1024};
     uint32_t LinuxRelayWorkerSlots{128};
-    uint32_t LinuxRelayIngressSlots{128};
     size_t LinuxRelayReadBatchBytes{1024 * 1024};
     size_t LinuxRelayQuicRecvBatchBytes{1024 * 1024};
     uint64_t LinuxRelayGlobalPendingBytes{256ull * 1024 * 1024};

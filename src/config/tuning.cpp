@@ -150,9 +150,6 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideLinuxRelayWorkerSlots > 0) {
         out.LinuxRelayWorkerSlots = cfg.TuningOverrideLinuxRelayWorkerSlots;
     }
-    if (cfg.TuningOverrideLinuxRelayIngressSlots > 0) {
-        out.LinuxRelayIngressSlots = cfg.TuningOverrideLinuxRelayIngressSlots;
-    }
     if (cfg.TuningOverrideQuicFcw > 0) {
         out.ConnFlowControlWindow = cfg.TuningOverrideQuicFcw;
     }
@@ -182,7 +179,6 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
         out.LinuxRelayMaxIov = 8;
         out.LinuxRelayReadChunkSize = 128 * 1024;
         out.LinuxRelayWorkerSlots = 128;
-        out.LinuxRelayIngressSlots = 128;
         out.LinuxRelayReadBatchBytes = 256 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
         out.LinuxRelayWorkerEventBudget = 1024;
@@ -191,7 +187,6 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
         out.LinuxRelayMaxIov = 16;
         out.LinuxRelayReadChunkSize = 128 * 1024;
         out.LinuxRelayWorkerSlots = 128;
-        out.LinuxRelayIngressSlots = 128;
         out.LinuxRelayReadBatchBytes = 1024 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 1024 * 1024;
         out.LinuxRelayWorkerEventBudget = 4096;
@@ -572,7 +567,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "tcpquic-proxy tuning: srw=%u fcw=%u iw=%u initrtt=%ums "
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
-        "read_chunk=%zu worker_slots=%u ingress_slots=%u "
+        "read_chunk=%zu worker_slots=%u "
         "quic_complete_batch=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
@@ -587,7 +582,6 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes),
         tuning.LinuxRelayReadChunkSize,
         tuning.LinuxRelayWorkerSlots,
-        tuning.LinuxRelayIngressSlots,
         static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes));
 }
 

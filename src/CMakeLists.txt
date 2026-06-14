@@ -489,11 +489,12 @@ if(WIN32)
         unittest/windows_relay_worker_test.cpp
         tunnel/windows_relay_worker.cpp
         tunnel/relay_buffer_pool.cpp
+        protocol/compress.cpp
         platform/platform_socket_win.cpp
     )
     tcpquic_target_include_dirs(tcpquic_windows_relay_worker_test)
-    target_link_libraries(tcpquic_windows_relay_worker_test ws2_32 inc warnings msquic logging base_link)
-    target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING)
+    target_link_libraries(tcpquic_windows_relay_worker_test ws2_32 inc warnings msquic logging base_link ${TCPQUIC_TEST_LIBS})
+    target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING ${TCPQUIC_TEST_DEFS})
     list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
 endif()
 

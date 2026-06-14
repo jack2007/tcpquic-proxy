@@ -449,7 +449,6 @@ void TqPrintUsage(FILE* out) {
         "  --relay-inflight-bytes <n> Override relay ideal in-flight bytes\n"
         "  --linux-relay-read-chunk-size <bytes> Override Linux relay TCP read chunk size\n"
         "  --linux-relay-worker-slots <n> Override Linux relay worker buffer slots per tunnel\n"
-        "  --linux-relay-ingress-slots <n> Override Linux relay ingress buffer slots per tunnel\n"
         "  --quic-fcw <bytes>         Override QUIC connection flow window\n"
         "  --quic-srw <bytes>         Override QUIC stream recv window\n"
         "  --quic-iw <packets>        Override QUIC initial window packets\n"
@@ -817,18 +816,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayWorkerSlots) ||
                 cfg.TuningOverrideLinuxRelayWorkerSlots == 0) {
                 err = "invalid value for --linux-relay-worker-slots";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--linux-relay-ingress-slots", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--linux-relay-ingress-slots", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayIngressSlots) ||
-                cfg.TuningOverrideLinuxRelayIngressSlots == 0) {
-                err = "invalid value for --linux-relay-ingress-slots";
                 return false;
             }
         } else if (GetOptionValue(arg, "--quic-fcw", value)) {
