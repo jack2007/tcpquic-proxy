@@ -10,7 +10,7 @@
 - 高延迟、丢包环境下利用 QUIC + BBR 改善传输
 - 可选 zstd 流式压缩降低有效字节数
 
-详细设计见 [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](docs/specs/2026-06-06-tcpquic-proxy-design.md)。
+详细设计见 [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](docs/finished/specs/2026-06-06-tcpquic-proxy-design.md)。
 
 ## 架构
 
@@ -203,7 +203,7 @@ client 再用正常 TCP-over-QUIC tunnel 连接该端口，因此不需要额外
 输出中的 upload 吞吐以 server bytes 为主，download 吞吐以 client local bytes 为主。
 speed test 的默认 `--compress auto` 会在测试 tunnel 内按 `off` 处理；如需验证压缩路径，
 显式传入 `--compress zstd`。详细说明和 caveat 见
-[`docs/built-in-speed-test-20260612.md`](docs/built-in-speed-test-20260612.md)。
+[`docs/finished/built-in-speed-test-20260612.md`](docs/finished/built-in-speed-test-20260612.md)。
 
 ### 并发隧道压测
 
@@ -224,7 +224,7 @@ TUNNELS=128 QUIC_CONNECTIONS=8 COMPRESS=zstd ./scripts/test-tcpquic-concurrent.s
 TUNNELS=100 COMPRESS=zstd ./scripts/test-tcpquic-proxy-dgx.sh
 ```
 
-默认对端 `jack@169.254.59.196`，本机出口 `169.254.250.230`；可通过 `PEER`、`TARGET`、`BIND` 覆盖。2026-06-10 Linux 验证记录见 [`docs/linux-verification-2026-06-10.md`](docs/linux-verification-2026-06-10.md)。
+默认对端 `jack@169.254.59.196`，本机出口 `169.254.250.230`；可通过 `PEER`、`TARGET`、`BIND` 覆盖。2026-06-10 Linux 验证记录见 [`docs/finished/linux-verification-2026-06-10.md`](docs/finished/linux-verification-2026-06-10.md)。
 
 ### 性能基线
 
@@ -455,12 +455,12 @@ src/
 
 | 文档 | 说明 |
 |------|------|
-| [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](docs/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
-| [`docs/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md`](docs/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md) | 独立仓库重构设计 |
-| [`docs/built-in-speed-test-20260612.md`](docs/built-in-speed-test-20260612.md) | 内置 speed test 用法与结果解读 |
-| [`docs/plans/2026-06-06-tcpquic-proxy.md`](docs/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
-| [`docs/plans/2026-06-06-tcpquic-thread-model.md`](docs/plans/2026-06-06-tcpquic-thread-model.md) | 线程模型 |
-| [`docs/plans/2026-06-06-tcpquic-adaptive-tuning.md`](docs/plans/2026-06-06-tcpquic-adaptive-tuning.md) | 自适应调参 |
-| [`docs/plans/2026-06-07-tcpquic-remaining-work.md`](docs/plans/2026-06-07-tcpquic-remaining-work.md) | 剩余工作 |
-| [`docs/plans/2026-06-09-tcpquic-proxy-repo-restructure.md`](docs/plans/2026-06-09-tcpquic-proxy-repo-restructure.md) | 独立仓库迁移计划 |
+| [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](docs/finished/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
+| [`docs/finished/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md`](docs/finished/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md) | 独立仓库重构设计 |
+| [`docs/finished/built-in-speed-test-20260612.md`](docs/finished/built-in-speed-test-20260612.md) | 内置 speed test 用法与结果解读 |
+| [`docs/finished/plans/2026-06-06-tcpquic-proxy.md`](docs/finished/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
+| [`docs/finished/plans/2026-06-06-tcpquic-thread-model.md`](docs/finished/plans/2026-06-06-tcpquic-thread-model.md) | 线程模型 |
+| [`docs/finished/plans/2026-06-06-tcpquic-adaptive-tuning.md`](docs/finished/plans/2026-06-06-tcpquic-adaptive-tuning.md) | 自适应调参 |
+| [`docs/finished/plans/2026-06-07-tcpquic-remaining-work.md`](docs/finished/plans/2026-06-07-tcpquic-remaining-work.md) | 剩余工作 |
+| [`docs/finished/plans/2026-06-09-tcpquic-proxy-repo-restructure.md`](docs/finished/plans/2026-06-09-tcpquic-proxy-repo-restructure.md) | 独立仓库迁移计划 |
 | [`docs/tcpquic_next_steps.md`](docs/tcpquic_next_steps.md) | 后续步骤 |

@@ -3,7 +3,7 @@
 > 状态：草案（待评审）  
 > 日期：2026-06-09  
 > 依据：x86 Win32 Release 构建探测（VS 2022 / CMake 3.30）  
-> 关联：`docs/specs/2026-06-06-tcpquic-proxy-design.md`
+> 关联：`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`
 
 ## 1. 背景与目标
 

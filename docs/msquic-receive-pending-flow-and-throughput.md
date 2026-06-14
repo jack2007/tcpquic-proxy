@@ -405,8 +405,8 @@ tcpquic-proxy 已有部分指标（`relay_metrics.h` / admin JSON）：
 
 | 优化项 | 状态 | 说明 |
 |---|---|---|
-| enqueue 成功后提前 `StreamReceiveComplete` | 未实现 | 这会把“流控释放”从“TCP 已写出”语义中拆出来，可能提升吞吐，但会削弱端到端背压语义，需要单独 A/B 设计 |
-| copy 后返回 `QUIC_STATUS_SUCCESS` | 未实现 | 适合对比 copy 成本 vs flow-control 周转收益；当前 always-pending 主路径仍是借指针零拷贝 |
+| enqueue 成功后提前 `StreamReceiveComplete` | 不做 | 已确认不符合当前主线：receive callback 统一 pending，worker 按实际 TCP 写出进度完成 receive，保留端到端背压语义 |
+| copy 后返回 `QUIC_STATUS_SUCCESS` | 不做 | 已确认不符合当前主线：不回退到 callback copy + sync complete 路径，避免重新引入 callback 重活和额外拷贝 |
 | Multi-receive 效果分解指标 | 部分实现 | Phase 4 已启用/验证过 multi-receive，但 metrics 还没有 outstanding RECEIVE 数、callback batch bytes 分布 |
 | complete 延迟时间指标 | 未实现 | 还缺 receive event 入队时间、first sendmsg 时间、complete 时间的延迟分布 |
 | complete batch A/B 自动报告 | 未实现 | bench 可手工调 `LinuxRelayQuicReceiveCompleteBatchBytes=0` 对比，但脚本尚未自动汇总 complete 平均字节和频率 |

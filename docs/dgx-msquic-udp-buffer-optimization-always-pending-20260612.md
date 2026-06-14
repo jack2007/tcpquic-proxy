@@ -8,7 +8,7 @@
 - 代表 commit：`efcedd6`
 - 方案：deferred receive view + always `QUIC_STATUS_PENDING` + `StreamMultiReceiveEnabled`
 
-本文从 `docs/dgx-msquic-udp-buffer-optimization-20260612.md` 拆分而来，只讨论 always-pending 分支的优化方向。通用结论仍成立：MsQuic 没有应用可配置的 UDP socket buffer knob；Linux epoll datapath 会请求 `SO_RCVBUF = INT32_MAX`，实际值由 `net.core.rmem_max` 封顶；UDP `SO_SNDBUF` 未由 MsQuic 显式设置，发送侧依赖系统 `wmem_*`。
+本文从 `docs/obsolete/dgx-msquic-udp-buffer-optimization-20260612.md` 拆分而来，只讨论 always-pending 分支的优化方向。通用结论仍成立：MsQuic 没有应用可配置的 UDP socket buffer knob；Linux epoll datapath 会请求 `SO_RCVBUF = INT32_MAX`，实际值由 `net.core.rmem_max` 封顶；UDP `SO_SNDBUF` 未由 MsQuic 显式设置，发送侧依赖系统 `wmem_*`。
 
 ## 当前性能画像
 
