@@ -80,6 +80,24 @@ int main() {
         cfg.TuningMode = TqTuningMode::Custom;
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
         cfg.TuningOverrideRelayInflightBytes = 1073741824;
+        cfg.TuningOverrideLinuxRelayReadChunkSize = 131072;
+        cfg.TuningOverrideLinuxRelayWorkerSlots = 2048;
+        cfg.TuningOverrideLinuxRelayIngressSlots = 2048;
+        cfg.TuningOverrideQuicInitRttMs = 100;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        assert(cfg.Tuning.LinuxRelayReadChunkSize == 131072);
+        assert(cfg.Tuning.LinuxRelayWorkerSlots == 2048);
+        assert(cfg.Tuning.LinuxRelayIngressSlots == 2048);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 512ull * 1024 * 1024);
+        assert(cfg.Tuning.InitialRttMs == 100);
+    }
+
+    {
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Custom;
+        cfg.TuningOverrideRelayIoSize = 1024 * 1024;
+        cfg.TuningOverrideRelayInflightBytes = 1073741824;
         cfg.TuningOverrideQuicInitRttMs = 200;
         TqComputeTuning(cfg, cfg.Tuning);
 

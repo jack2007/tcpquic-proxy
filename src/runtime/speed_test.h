@@ -40,6 +40,7 @@ TqConfig TqMakeSpeedClientSessionConfig(const TqConfig& cfg);
 void TqTuneSpeedTestLocalSocket(TqSocketHandle socket);
 uint64_t TqSpeedByteMismatchLimit(uint64_t highBytes);
 bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut);
+bool TqSpeedConnectWaitShouldStop(uint32_t connected, uint32_t needed, bool deadlineReached);
 void TqHandleServerSpeedControlStream(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,

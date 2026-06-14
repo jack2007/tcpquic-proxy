@@ -1,0 +1,8 @@
+471354 ./tcpquic-proxy server --quic-listen 0.0.0.0:4433 --quic-cert certs/server.crt --quic-key certs/server.key --quic-ca certs/ca.crt --allow-targets 127.0.0.1/32 --compress off --admin-listen 127.0.0.1:18081 --tuning custom --quic-fcw 1073741824 --quic-srw 1073741824 --quic-iw 4000 --quic-initrtt-ms 100 --relay-io-size 1048576 --relay-inflight-bytes 1073741824 --max-memory-mb 4096
+471560 bash -c pgrep -af tcpquic-proxy; tail -20 /home/jack/tcpquic-dgx-bin/server-speed-netem.log
+tcpquic-proxy QUIC execution profile: max-throughput
+tcpquic-proxy tuning: srw=1073741824 fcw=1073741824 iw=4000 initrtt=100ms relay_io=1048576 ideal_send=1073741824 inflight=1024 tcp_buf=67108864 relay_pending=536870912 tick_budget=536870912 read_batch=4194304 read_chunk=131072 worker_slots=128 ingress_slots=128 quic_complete_batch=0
+tcpquic-proxy relay memory budget: 4096 MB (pool scales by active tunnels)
+tcpquic-proxy: admin listening on 127.0.0.1:18081
+tcpquic-proxy: QUIC server listening on 0.0.0.0:4433
+Running (non-interactive).

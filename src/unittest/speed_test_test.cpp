@@ -410,8 +410,24 @@ int TestSpeedByteMismatchLimitAllowsConfiguredSocketBuffer() {
     if (limit != expectedLimit) {
         return 61;
     }
+    if (TqSpeedByteMismatchLimit(4ull * 1024ull * 1024ull * 1024ull) != expectedLimit) {
+        return 63;
+    }
     if (TqSpeedByteCountsCloseEnough(localBytes, localBytes - expectedLimit - 1, diff, limit)) {
         return 62;
+    }
+    return 0;
+}
+
+int TestSpeedConnectWaitIgnoresTransientPollMissBeforeDeadline() {
+    if (TqSpeedConnectWaitShouldStop(0, 2, false)) {
+        return 70;
+    }
+    if (!TqSpeedConnectWaitShouldStop(1, 2, true)) {
+        return 71;
+    }
+    if (!TqSpeedConnectWaitShouldStop(2, 2, false)) {
+        return 72;
     }
     return 0;
 }
@@ -442,6 +458,9 @@ int main() {
         return rc;
     }
     if (const int rc = TestSpeedByteMismatchLimitAllowsConfiguredSocketBuffer(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestSpeedConnectWaitIgnoresTransientPollMissBeforeDeadline(); rc != 0) {
         return rc;
     }
     return 0;

@@ -1,0 +1,60 @@
+tcpquic-proxy QUIC execution profile: max-throughput
+tcpquic-proxy tuning: srw=536870912 fcw=500000000 iw=2000 initrtt=100ms relay_io=1048576 ideal_send=67108864 inflight=64 tcp_buf=4194304 relay_pending=4194304 tick_budget=67108864 read_batch=1048576 read_chunk=131072 worker_slots=128 ingress_slots=128 quic_complete_batch=0
+tcpquic-proxy runtime tuning: enabled (RTT/throughput feed next QUIC connection)
+tcpquic-proxy: admin listening on 127.0.0.1:18081
+tcpquic-proxy: QUIC server listening on 169.254.59.196:4433
+Running (non-interactive).
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+tcpquic-proxy: speed server control decoded START session=3312489697 direction=upload
+tcpquic-proxy: speed server START session=3312489697 direction=upload duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3312489697 port=46223
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3312489697 client_bytes=56975003328 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3312489697 bytes=56961675156 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3312489697 bytes=56962618932 elapsed_us=30002797 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3312489697 server_bytes=56962618932
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=3
+tcpquic-proxy: speed server control decoded START session=3348647642 direction=upload
+tcpquic-proxy: speed server START session=3348647642 direction=upload duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3348647642 port=41153
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3348647642 client_bytes=64003047424 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3348647642 bytes=63990487107 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3348647642 bytes=63991116267 elapsed_us=30003014 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3348647642 server_bytes=63991116267
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=5
+tcpquic-proxy: speed server control decoded START session=3384655740 direction=upload
+tcpquic-proxy: speed server START session=3384655740 direction=upload duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3384655740 port=34065
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3384655740 client_bytes=65003978752 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3384655740 bytes=64990959303 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3384655740 bytes=64991537257 elapsed_us=30002836 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3384655740 server_bytes=64991537257
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=7
+tcpquic-proxy: speed server control decoded START session=3445409342 direction=download
+tcpquic-proxy: speed server START session=3445409342 direction=download duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3445409342 port=33929
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3445409342 client_bytes=4131892005 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3445409342 bytes=4650172098 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3445409342 bytes=4650172098 elapsed_us=30004103 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3445409342 server_bytes=4650172098
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=9
+tcpquic-proxy: speed server control decoded START session=3491671158 direction=download
+tcpquic-proxy: speed server START session=3491671158 direction=download duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3491671158 port=40325
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3491671158 client_bytes=367148510 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3491671158 bytes=888405698 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3491671158 bytes=888405698 elapsed_us=30006486 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3491671158 server_bytes=888405698
+tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=11
+tcpquic-proxy: speed server control decoded START session=3537707809 direction=download
+tcpquic-proxy: speed server START session=3537707809 direction=download duration=30 parallel=1
+tcpquic-proxy: speed server READY session=3537707809 port=37161
+tcpquic-proxy TCP socket tuning: requested=4194304 rcv=8388608 snd=8388608 ok_nodelay=1 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed server control decoded FINISH session=3537707809 client_bytes=64192551306 elapsed_us=30000000
+tcpquic-proxy: speed server FINISH begin session=3537707809 bytes=64213024768 accepted=1 closed=0
+tcpquic-proxy: speed server FINISH done session=3537707809 bytes=64213090304 elapsed_us=30002962 accepted=1 closed=1
+tcpquic-proxy: speed server control queued RESULT session=3537707809 server_bytes=64213090304

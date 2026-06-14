@@ -266,6 +266,7 @@ add_executable(tcpquic_speed_test_test
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/relay_buffer_pool.cpp
         tunnel/linux_relay_buffer_pool.cpp
         tunnel/linux_relay_worker.cpp
     )

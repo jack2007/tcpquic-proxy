@@ -27,6 +27,30 @@ client 内置 TCP client
 5. 测试完成后 client 打印本端统计和 server 回传统计，特别是 upload 场景要显示 server 实际接收字节数。
 6. 设计保持跨平台：Linux 与 Windows 共享主要逻辑，socket 操作通过 `platform_socket.*` 和少量平台条件编译完成。
 
+## 平台范围
+
+speed-test 功能设计为跨平台能力，不是 Linux 专用功能。
+
+共享部分包括命令行参数、控制协议、client runner、server controller、临时 loopback TCP server、以及普通 tunnel 数据面。平台相关 socket 操作通过项目已有抽象完成：
+
+- `TqSocketHandle`
+- `TqSocketPair`
+- `TqSetSocketBuffer`
+- `TqGetSocketBuffer`
+- `TqSetNoDelay`
+- `TqShutdownSend` / `TqShutdownBoth`
+
+`TqSocketPair` 同时有 POSIX 与 Windows 实现，分别位于 `src/platform/platform_socket_posix.cpp` 和 `src/platform/platform_socket_win.cpp`。speed-test 的 socket timeout helper 也有平台分支：Windows 使用 `DWORD` timeout，POSIX 使用 `timeval`。
+
+需要区分“功能可跨平台编译运行”和“性能结论可跨平台复用”：
+
+- 2026-06-13 的 DGX 修复与 16-17 Gbps 验证是 Linux 结果。
+- 该修复把内置 loopback producer 与 client socketpair endpoint 从硬编码 `SO_SNDBUF/SO_RCVBUF=256KiB` 改为使用 active TCP throughput buffer。
+- Linux 上 `getsockopt(SO_SNDBUF/SO_RCVBUF)` 常见行为是返回约两倍请求值，因此 high-throughput 停止边界的 client/server byte mismatch 容差需要考虑 socket pipeline 深度。
+- Windows 走同一抽象，但 Windows socket buffer 语义、`TqSocketPair` 替代实现、MsQuic datapath 调度与停止瞬间 byte mismatch 表现尚未用同等测试矩阵验证。
+
+因此：功能目标是跨平台；当前 DGX 吞吐和 socket buffer 修复效果只代表 Linux。Windows 需要单独完成 build、upload/download 功能测试和吞吐验证后，才能把对应性能结论写入设计基线。
+
 ## 非目标
 
 - 不替代 `iperf3` 的全部能力；本工具只提供项目内置的基础上传/下载吞吐测试。

@@ -113,9 +113,9 @@ uint64_t TqSpeedByteMismatchLimit(uint64_t highBytes) {
     const uint64_t minLimit = 16ull * 1024ull * 1024ull;
     const uint64_t activeSocketBuffer = static_cast<uint64_t>(
         std::max(0, TqGetActiveTcpSocketBuffer()));
-    const uint64_t scaledLimit = highBytes / 100ull;
     const uint64_t socketPipelineLimit = (2ull * activeSocketBuffer) + minLimit;
-    return std::max(minLimit, std::min(socketPipelineLimit, scaledLimit));
+    (void)highBytes;
+    return std::max(minLimit, socketPipelineLimit);
 }
 
 bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut) {
@@ -124,6 +124,10 @@ bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uin
     diffOut = high - low;
     limitOut = TqSpeedByteMismatchLimit(high);
     return diffOut <= limitOut;
+}
+
+bool TqSpeedConnectWaitShouldStop(uint32_t connected, uint32_t needed, bool deadlineReached) {
+    return connected >= needed || deadlineReached;
 }
 
 namespace {
@@ -1183,12 +1187,16 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     const uint16_t parallel = static_cast<uint16_t>(std::max<uint32_t>(1, cfg.QuicConnections));
     const uint32_t neededConnections = static_cast<uint32_t>(parallel) + 1u;
     const auto connectDeadline = TqClock::now() + std::chrono::seconds(10);
-    while (quic.ConnectedConnectionCount() < neededConnections) {
-        if (!quic.EnsureAnyConnected(std::chrono::milliseconds(100)) ||
-            TqClock::now() >= connectDeadline) {
+    while (!TqSpeedConnectWaitShouldStop(
+        quic.ConnectedConnectionCount(),
+        neededConnections,
+        TqClock::now() >= connectDeadline)) {
+        (void)quic.EnsureAnyConnected(std::chrono::milliseconds(100));
+        if (TqClock::now() < connectDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } else {
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (quic.ConnectedConnectionCount() < neededConnections) {
         std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");

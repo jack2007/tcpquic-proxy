@@ -1,0 +1,33 @@
+=== start 200ms slots=4096 ===
+482661 ./tcpquic-proxy server --quic-listen 0.0.0.0:4433 --quic-cert certs/server.crt --quic-key certs/server.key --quic-ca certs/ca.crt --allow-targets 127.0.0.1/32 --compress off --admin-listen 127.0.0.1:18081 --tuning custom --quic-fcw 1073741824 --quic-srw 1073741824 --quic-iw 4000 --quic-initrtt-ms 200 --relay-io-size 1048576 --relay-inflight-bytes 1073741824 --linux-relay-read-chunk-size 131072 --linux-relay-worker-slots 4096 --linux-relay-ingress-slots 4096 --max-memory-mb 4096
+482867 bash -c pgrep -af tcpquic-proxy; tail -20 /home/jack/tcpquic-dgx-bin/server-speed-netem-200ms-slots.log
+tcpquic-proxy QUIC execution profile: max-throughput
+tcpquic-proxy tuning: srw=1073741824 fcw=1073741824 iw=4000 initrtt=200ms relay_io=1048576 ideal_send=1073741824 inflight=1024 tcp_buf=67108864 relay_pending=536870912 tick_budget=536870912 read_batch=4194304 read_chunk=131072 worker_slots=128 ingress_slots=128 quic_complete_batch=0
+tcpquic-proxy relay memory budget: 4096 MB (pool scales by active tunnels)
+tcpquic-proxy: admin listening on 127.0.0.1:18081
+tcpquic-proxy: QUIC server listening on 0.0.0.0:4433
+Running (non-interactive).
+qdisc netem 8020: root refcnt 425 limit 1000000 delay 200ms
+--- 169.254.59.196 ping statistics ---
+10 packets transmitted, 10 received, 0% packet loss, time 1813ms
+rtt min/avg/max/mdev = 200.431/201.452/201.966/0.397 ms, pipe 2
+=== 200ms download rc=0 ===
+speed-test download: local_bytes=2348810240 server_bytes=2627148040 local_seconds=30.000 server_seconds=30.205 gbps=0.626 mib_s=74.67 accepted=1 closed=1
+tcpquic-proxy runtime: rtt=202ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+tcpquic-proxy: speed client received READY session=1917377174 port=46485
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed client sending FINISH session=1917377174 client_bytes=2348810240 elapsed_us=30000000
+tcpquic-proxy: speed client waiting for SPEED_RESULT
+tcpquic-proxy: speed client received RESULT session=1917377174 server_bytes=2627148040 elapsed_us=30205369 accepted=1 closed=1
+tcpquic-proxy: download local/server byte mismatch exceeds limit (local=2348810240 server=2627148040 diff=278337800 limit=150994944); throughput uses local bytes
+=== 200ms upload rc=0 ===
+speed-test upload: local_bytes=2278657728 server_bytes=2172649472 local_seconds=30.000 server_seconds=30.214 gbps=0.575 mib_s=68.58 accepted=1 closed=1
+tcpquic-proxy relay memory budget: 4096 MB (pool scales by active tunnels)
+tcpquic-proxy runtime: rtt=203ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+tcpquic-proxy: speed client received READY session=1956853452 port=34085
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy speed socket tuning: requested=67108864 rcv=134217728 snd=134217728 ok_nodelay=0 ok_rcv=1 ok_snd=1
+tcpquic-proxy: speed client sending FINISH session=1956853452 client_bytes=2278657728 elapsed_us=30000000
+tcpquic-proxy: speed client waiting for SPEED_RESULT
+tcpquic-proxy: speed client received RESULT session=1956853452 server_bytes=2172649472 elapsed_us=30213770 accepted=1 closed=1

@@ -88,6 +88,25 @@ Explicit compression is still honored:
 
 Current caveat: explicit compressed speed tests are useful for debugging the compression path, but they are not the recommended baseline for IO throughput. Multi-connection lz4 download has shown unstable `SPEED_RESULT` completion in local smoke testing and should not be used as the standard pass/fail benchmark until the compression relay FIN path is separately hardened.
 
+## Platform Scope
+
+The built-in speed-test feature is designed to be cross-platform, not Linux-only.
+
+The command-line options, control protocol, client runner, server controller, and tunnel data path are shared by Linux and Windows. Local TCP operations go through the project socket abstraction:
+
+- `TqSocketHandle`
+- `TqSocketPair`
+- `TqSetSocketBuffer`
+- `TqGetSocketBuffer`
+- `TqSetNoDelay`
+- `TqShutdownSend` / `TqShutdownBoth`
+
+`TqSocketPair` has both POSIX and Windows implementations in `src/platform/platform_socket_posix.cpp` and `src/platform/platform_socket_win.cpp`. The speed-test timeout helper also has separate Windows and POSIX branches: Windows uses `DWORD` socket timeouts, while POSIX uses `timeval`.
+
+The 2026-06-13 DGX performance fix and 16-17 Gbps validation are Linux-specific measurements. That fix makes the built-in loopback producer and client socketpair endpoints use the active TCP throughput buffer instead of a hard-coded 256 KiB buffer. On Linux, `getsockopt(SO_SNDBUF/SO_RCVBUF)` commonly reports roughly twice the requested value, so byte-count mismatch tolerance accounts for high-throughput socket pipeline depth.
+
+Windows should compile through the same abstraction, but Windows throughput and stop-boundary byte-count behavior have not been validated with the same DGX-style test matrix. Treat Linux/DGX throughput numbers as Linux results until Windows has its own build and upload/download verification.
+
 ## ACL Bypass Scope
 
 The server-side temporary listener is reachable only through the authenticated speed-test control flow. Normal user tunnels still use the configured ACL.

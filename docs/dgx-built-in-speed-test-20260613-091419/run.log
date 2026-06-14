@@ -1,0 +1,15 @@
+[built-in-dgx] out=docs/dgx-built-in-speed-test-20260613-091419 target=169.254.59.196 bind=169.254.250.230 peer=jack@169.254.59.196 duration=12s
+[built-in-dgx] deploy binary
+rsync: [sender] link_stat "/home/jack/src/tcpquic-proxy/build/bin/Release/libmsquic.so.2" failed: No such file or directory (2)
+rsync: [sender] link_stat "/home/jack/src/tcpquic-proxy/build/bin/Release/libmsquic.so.2.6.0" failed: No such file or directory (2)
+rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1347) [sender=3.2.7]
+[built-in-dgx] resume out=docs/dgx-built-in-speed-test-20260613-091419 target=169.254.59.196 bind=169.254.250.230 peer=jack@169.254.59.196 duration=12s
+[built-in-dgx] deploy binary and libmsquic
+[built-in-dgx] generate certs
+[built-in-dgx] start server for download
+[built-in-dgx] run client download
+[built-in-dgx] client download rc=1
+[built-in-dgx] start server for upload
+[built-in-dgx] run client upload
+[built-in-dgx] client upload rc=0
+[built-in-dgx] summary: docs/dgx-built-in-speed-test-20260613-091419/summary.md
