@@ -86,8 +86,15 @@ struct TqWindowsRelayWorker::RelayContext {
           TcpRecvBuffers(
               tuning.RelayIoSize,
               2,
-              std::max<uint64_t>(static_cast<uint64_t>(tuning.RelayIoSize) * 2, tuning.RelayIoSize)) {
+              std::max<uint64_t>(static_cast<uint64_t>(tuning.RelayIoSize) * 2, tuning.RelayIoSize)),
+          TcpSendBuffers(
+              tuning.RelayIoSize,
+              std::max<uint32_t>(2, tuning.RelayMaxInFlightSends),
+              std::max<uint64_t>(
+                  tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay,
+                  static_cast<uint64_t>(tuning.RelayIoSize) * std::max<uint32_t>(2, tuning.RelayMaxInFlightSends))) {
         TcpRecvBuffers.Reserve(2);
+        TcpSendBuffers.Reserve(std::max<uint32_t>(2, tuning.RelayMaxInFlightSends));
     }
 
     uint64_t Id{0};
@@ -98,6 +105,7 @@ struct TqWindowsRelayWorker::RelayContext {
     TqRelayHandle* PublicHandle{nullptr};
     TqTuningConfig Tuning;
     TqRelayBufferPool TcpRecvBuffers;
+    TqRelayBufferPool TcpSendBuffers;
     std::mutex TcpRecvOpsLock;
     std::vector<std::unique_ptr<IoOperation>> TcpRecvOpsFree;
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
@@ -175,6 +183,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
     snapshot.TcpSendWouldBlockOrPendingCount = TcpSendWouldBlockOrPendingCount_.load(std::memory_order_relaxed);
     snapshot.TcpRecvOperationsCreated = TcpRecvOperationsCreated_.load(std::memory_order_relaxed);
     snapshot.TcpRecvOperationsReused = TcpRecvOperationsReused_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressInputBytes = ZstdDecompressInputBytes_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressOutputBytes = ZstdDecompressOutputBytes_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressCalls = ZstdDecompressCalls_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressNeedInput = ZstdDecompressNeedInput_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressNeedOutput = ZstdDecompressNeedOutput_.load(std::memory_order_relaxed);
+    snapshot.ZstdDecompressFailures = ZstdDecompressFailures_.load(std::memory_order_relaxed);
     snapshot.Errors = Errors_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> guard(Lock_);
@@ -186,6 +200,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
                     entry.second->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed);
                 snapshot.TcpRecvBufferPoolPendingBytes += entry.second->TcpRecvBuffers.PendingBytes();
                 snapshot.TcpRecvBufferPoolAcquireCount += entry.second->TcpRecvBuffers.AcquireCount();
+                snapshot.TcpSendBufferPoolPendingBytes += entry.second->TcpSendBuffers.PendingBytes();
+                snapshot.TcpSendBufferPoolAcquireCount += entry.second->TcpSendBuffers.AcquireCount();
             }
         }
     }
@@ -651,6 +667,13 @@ void TqWindowsRelayWorker::HandleQuicReceiveViewQueued(std::unique_ptr<IoOperati
         (void)CompletePendingQuicReceive(relay, view);
         return;
     }
+    if (relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd) {
+        if (!PostTcpSendFromCompressedReceiveView(relay, view)) {
+            (void)CompletePendingQuicReceive(relay, view);
+            CloseRelay(relay);
+        }
+        return;
+    }
     if (!PostTcpSendFromReceiveView(relay, view)) {
         (void)CompletePendingQuicReceive(relay, view);
         CloseRelay(relay);
@@ -834,6 +857,111 @@ bool TqWindowsRelayWorker::PostTcpSendFromReceiveView(
         TcpSendWouldBlockOrPendingCount_.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
+}
+
+bool TqWindowsRelayWorker::PostTcpSendFromCompressedReceiveView(
+    const std::shared_ptr<RelayContext>& relay,
+    const std::shared_ptr<TqWindowsPendingQuicReceive>& view) {
+    if (!relay || !view || relay->Closing.load() || relay->Decompressor == nullptr) {
+        return false;
+    }
+
+    for (;;) {
+        while (view->SliceIndex < view->Slices.size() &&
+               view->SliceOffset >= view->Slices[view->SliceIndex].Length) {
+            view->SliceOffset = 0;
+            ++view->SliceIndex;
+        }
+        const bool hasInput = view->SliceIndex < view->Slices.size();
+        const uint8_t* input = nullptr;
+        size_t inputLength = 0;
+        if (hasInput) {
+            const auto& slice = view->Slices[view->SliceIndex];
+            input = slice.Data + view->SliceOffset;
+            inputLength = slice.Length - view->SliceOffset;
+        }
+
+        TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;
+        auto output = relay->TcpSendBuffers.AcquireWorker(&failure);
+        if (!output) {
+            return true;
+        }
+
+        TqDecompressResult result{};
+        ZstdDecompressCalls_.fetch_add(1, std::memory_order_relaxed);
+        if (!relay->Decompressor->DecompressInto(
+                input,
+                inputLength,
+                output->Data(),
+                output->Capacity(),
+                &result)) {
+            ZstdDecompressFailures_.fetch_add(1, std::memory_order_relaxed);
+            Errors_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (result.InputConsumed > inputLength || result.OutputProduced > output->Capacity()) {
+            ZstdDecompressFailures_.fetch_add(1, std::memory_order_relaxed);
+            Errors_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (result.NeedsMoreInput) {
+            ZstdDecompressNeedInput_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (result.NeedsMoreOutput) {
+            ZstdDecompressNeedOutput_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (result.InputConsumed > 0) {
+            ZstdDecompressInputBytes_.fetch_add(result.InputConsumed, std::memory_order_relaxed);
+            AdvanceReceiveView(relay, *view, result.InputConsumed);
+            FlushDeferredReceiveCompletion(*view, false);
+            MaybeResumeQuicReceive(relay);
+        }
+        if (result.OutputProduced > 0) {
+            output->SetLength(result.OutputProduced);
+            ZstdDecompressOutputBytes_.fetch_add(result.OutputProduced, std::memory_order_relaxed);
+
+            auto op = std::make_unique<IoOperation>();
+            op->Event = TqWindowsRelayEvent::TcpSend;
+            op->Relay = relay;
+            op->ReceiveView = view;
+            op->BufferOwner = std::move(output);
+            op->Offset = 0;
+            op->PostedLength = result.OutputProduced;
+            op->WsaBuffer.buf = reinterpret_cast<char*>(op->BufferOwner->Data());
+            op->WsaBuffer.len = static_cast<ULONG>(result.OutputProduced);
+
+            DWORD sent = 0;
+            relay->InFlightTcpSends.fetch_add(1);
+            IoOperation* raw = op.release();
+            const int rc = ::WSASend(relay->TcpFd, &raw->WsaBuffer, 1, &sent, 0, &raw->Overlapped, nullptr);
+            const int error = rc == 0 ? 0 : ::WSAGetLastError();
+            if (rc != 0 && error != WSA_IO_PENDING) {
+                relay->InFlightTcpSends.fetch_sub(1);
+                delete raw;
+                Errors_.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            TcpSendOperationsPosted_.fetch_add(1, std::memory_order_relaxed);
+            if (error == WSA_IO_PENDING) {
+                TcpSendWouldBlockOrPendingCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return true;
+        }
+
+        if (view->SliceIndex >= view->Slices.size() && result.NeedsMoreInput) {
+            FlushDeferredReceiveCompletion(*view, true);
+            return FinishReceiveView(relay, view);
+        }
+        if (result.InputConsumed == 0) {
+            if (!hasInput && result.NeedsMoreInput) {
+                FlushDeferredReceiveCompletion(*view, true);
+                return FinishReceiveView(relay, view);
+            }
+            ZstdDecompressFailures_.fetch_add(1, std::memory_order_relaxed);
+            Errors_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+    }
 }
 
 void TqWindowsRelayWorker::AdvanceReceiveView(
@@ -1063,10 +1191,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
         if (view->Drained) {
             return;
         }
-        const uint64_t remainingBytes =
-            view->CompletedLength < view->TotalLength ? view->TotalLength - view->CompletedLength : 0;
-        if (bytes == 0 || static_cast<uint64_t>(bytes) > op->PostedLength ||
-            static_cast<uint64_t>(bytes) > remainingBytes) {
+        if (bytes == 0 || static_cast<uint64_t>(bytes) > op->PostedLength) {
             Errors_.fetch_add(1, std::memory_order_relaxed);
             (void)CompletePendingQuicReceive(relay, view);
             CloseRelay(relay);
@@ -1075,18 +1200,53 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
         TcpSendBytes_.fetch_add(bytes, std::memory_order_relaxed);
         if (static_cast<uint64_t>(bytes) < op->PostedLength) {
             TcpSendPartialCompletions_.fetch_add(1, std::memory_order_relaxed);
+            if (!(relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd)) {
+                AdvanceReceiveView(relay, *view, bytes);
+                FlushDeferredReceiveCompletion(*view, false);
+                if (!PostTcpSendFromReceiveView(relay, view)) {
+                    CloseRelay(relay);
+                }
+                return;
+            }
+            op->Offset += bytes;
+            op->PostedLength -= bytes;
+            WSABUF buf{};
+            buf.buf = op->WsaBuffer.buf + bytes;
+            buf.len = static_cast<ULONG>(op->PostedLength);
+            op->WsaBuffer = buf;
+            DWORD sent = 0;
+            relay->InFlightTcpSends.fetch_add(1);
+            IoOperation* raw = op.release();
+            const int rc = ::WSASend(relay->TcpFd, &raw->WsaBuffer, 1, &sent, 0, &raw->Overlapped, nullptr);
+            const int error = rc == 0 ? 0 : ::WSAGetLastError();
+            if (rc != 0 && error != WSA_IO_PENDING) {
+                relay->InFlightTcpSends.fetch_sub(1);
+                delete raw;
+                Errors_.fetch_add(1, std::memory_order_relaxed);
+                (void)CompletePendingQuicReceive(relay, view);
+                CloseRelay(relay);
+            } else if (error == WSA_IO_PENDING) {
+                TcpSendWouldBlockOrPendingCount_.fetch_add(1, std::memory_order_relaxed);
+            }
+            return;
         }
-        AdvanceReceiveView(relay, *view, bytes);
-        const bool viewComplete = view->CompletedLength >= view->TotalLength;
-        FlushDeferredReceiveCompletion(*view, viewComplete);
         if (CloseRelayIfDrained(relay)) {
             return;
         }
         if (relay->Closing.load()) {
             return;
         }
-        if (!PostTcpSendFromReceiveView(relay, view)) {
-            CloseRelay(relay);
+        if (relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd) {
+            if (!PostTcpSendFromCompressedReceiveView(relay, view)) {
+                CloseRelay(relay);
+            }
+        } else {
+            AdvanceReceiveView(relay, *view, bytes);
+            const bool viewComplete = view->CompletedLength >= view->TotalLength;
+            FlushDeferredReceiveCompletion(*view, viewComplete);
+            if (!PostTcpSendFromReceiveView(relay, view)) {
+                CloseRelay(relay);
+            }
         }
         return;
     }
@@ -1207,36 +1367,16 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
 
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
-        if (relay->Decompressor == nullptr && relay->CompressAlgo == TqCompressAlgo::None) {
-            if (!worker->QueueDeferredQuicReceive(
-                    relay,
-                    stream,
-                    event->RECEIVE.Buffers,
-                    event->RECEIVE.BufferCount,
-                    fin)) {
-                worker->CloseRelay(relay);
-                return QUIC_STATUS_SUCCESS;
-            }
-            return QUIC_STATUS_PENDING;
-        }
-
-        auto op = std::make_unique<IoOperation>();
-        op->Event = TqWindowsRelayEvent::QuicReceiveQueued;
-        op->Relay = relay;
-        for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
-            const QUIC_BUFFER& buffer = event->RECEIVE.Buffers[i];
-            op->Buffer.insert(op->Buffer.end(), buffer.Buffer, buffer.Buffer + buffer.Length);
-        }
-        relay->QueuedQuicReceives.fetch_add(1);
-        IoOperation* raw = op.release();
-        if (!::PostQueuedCompletionStatus(
-                static_cast<HANDLE>(worker->Iocp_), 0, 0, &raw->Overlapped)) {
-            relay->QueuedQuicReceives.fetch_sub(1);
-            delete raw;
-            worker->Errors_.fetch_add(1, std::memory_order_relaxed);
+        if (!worker->QueueDeferredQuicReceive(
+                relay,
+                stream,
+                event->RECEIVE.Buffers,
+                event->RECEIVE.BufferCount,
+                fin)) {
             worker->CloseRelay(relay);
+            return QUIC_STATUS_SUCCESS;
         }
-        return QUIC_STATUS_SUCCESS;
+        return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
         return QUIC_STATUS_SUCCESS;
@@ -1277,6 +1417,48 @@ bool TqWindowsRelayRuntime::Start(uint32_t workerCount) {
 void TqWindowsRelayRuntime::Stop() {
     std::lock_guard<std::mutex> guard(Lock_);
     Workers_.clear();
+}
+
+TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
+    TqWindowsRelayWorkerSnapshot total{};
+    std::lock_guard<std::mutex> guard(Lock_);
+    for (const auto& worker : Workers_) {
+        if (!worker) {
+            continue;
+        }
+        const auto snapshot = worker->Snapshot();
+        total.DeferredReceiveQueued += snapshot.DeferredReceiveQueued;
+        total.DeferredReceiveBytesQueued += snapshot.DeferredReceiveBytesQueued;
+        total.DeferredReceiveCompleteBytes += snapshot.DeferredReceiveCompleteBytes;
+        total.DeferredReceiveCompletes += snapshot.DeferredReceiveCompletes;
+        total.DeferredReceiveCompletionFlushes += snapshot.DeferredReceiveCompletionFlushes;
+        total.PendingQuicReceiveBytes += snapshot.PendingQuicReceiveBytes;
+        total.MaxPendingQuicReceiveBytes = std::max(total.MaxPendingQuicReceiveBytes, snapshot.MaxPendingQuicReceiveBytes);
+        total.PendingQuicReceiveQueueDepth += snapshot.PendingQuicReceiveQueueDepth;
+        total.MaxPendingQuicReceiveQueueDepth = std::max(
+            total.MaxPendingQuicReceiveQueueDepth,
+            snapshot.MaxPendingQuicReceiveQueueDepth);
+        total.QuicReceivePausedCount += snapshot.QuicReceivePausedCount;
+        total.QuicReceiveResumedCount += snapshot.QuicReceiveResumedCount;
+        total.TcpSendOperationsPosted += snapshot.TcpSendOperationsPosted;
+        total.TcpSendBytes += snapshot.TcpSendBytes;
+        total.TcpSendPartialCompletions += snapshot.TcpSendPartialCompletions;
+        total.TcpSendWouldBlockOrPendingCount += snapshot.TcpSendWouldBlockOrPendingCount;
+        total.TcpRecvOperationsCreated += snapshot.TcpRecvOperationsCreated;
+        total.TcpRecvOperationsReused += snapshot.TcpRecvOperationsReused;
+        total.TcpRecvBufferPoolPendingBytes += snapshot.TcpRecvBufferPoolPendingBytes;
+        total.TcpRecvBufferPoolAcquireCount += snapshot.TcpRecvBufferPoolAcquireCount;
+        total.TcpSendBufferPoolPendingBytes += snapshot.TcpSendBufferPoolPendingBytes;
+        total.TcpSendBufferPoolAcquireCount += snapshot.TcpSendBufferPoolAcquireCount;
+        total.ZstdDecompressInputBytes += snapshot.ZstdDecompressInputBytes;
+        total.ZstdDecompressOutputBytes += snapshot.ZstdDecompressOutputBytes;
+        total.ZstdDecompressCalls += snapshot.ZstdDecompressCalls;
+        total.ZstdDecompressNeedInput += snapshot.ZstdDecompressNeedInput;
+        total.ZstdDecompressNeedOutput += snapshot.ZstdDecompressNeedOutput;
+        total.ZstdDecompressFailures += snapshot.ZstdDecompressFailures;
+        total.Errors += snapshot.Errors;
+    }
+    return total;
 }
 
 bool TqWindowsRelayRuntime::RegisterRelay(

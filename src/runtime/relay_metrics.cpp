@@ -3,6 +3,9 @@
 #if defined(__linux__)
 #include "linux_relay_worker.h"
 #endif
+#if defined(_WIN32)
+#include "windows_relay_worker.h"
+#endif
 
 #include <sstream>
 
@@ -113,6 +116,27 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpWriteHardErrors = snapshot.TcpWriteHardErrors;
     metrics.LastTcpWriteErrno = snapshot.LastTcpWriteErrno;
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
+#elif defined(_WIN32)
+    const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
+    metrics.Backend = "worker";
+    metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.TcpRecvBufferPoolPendingBytes +
+        snapshot.TcpSendBufferPoolPendingBytes;
+    metrics.TcpReadBytes = snapshot.TcpSendBytes;
+    metrics.TcpWriteBytes = snapshot.TcpSendBytes;
+    metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;
+    metrics.ZstdDecompressOutputBytes = snapshot.ZstdDecompressOutputBytes;
+    metrics.ZstdDecompressCalls = snapshot.ZstdDecompressCalls;
+    metrics.ZstdDecompressNeedInput = snapshot.ZstdDecompressNeedInput;
+    metrics.ZstdDecompressNeedOutput = snapshot.ZstdDecompressNeedOutput;
+    metrics.ZstdDecompressFailures = snapshot.ZstdDecompressFailures;
+    metrics.DeferredReceiveCompleteBytes = snapshot.DeferredReceiveCompleteBytes;
+    metrics.DeferredReceiveCompletes = snapshot.DeferredReceiveCompletes;
+    metrics.DeferredReceiveCompletionFlushes = snapshot.DeferredReceiveCompletionFlushes;
+    metrics.MaxPendingQuicReceiveBytes = snapshot.MaxPendingQuicReceiveBytes;
+    metrics.MaxPendingQuicReceiveQueue = snapshot.MaxPendingQuicReceiveQueueDepth;
+    metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
+    metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
+    metrics.Errors = snapshot.Errors;
 #endif
     return metrics;
 }

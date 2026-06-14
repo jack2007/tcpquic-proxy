@@ -49,6 +49,14 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t TcpRecvOperationsReused{0};
     uint64_t TcpRecvBufferPoolPendingBytes{0};
     uint64_t TcpRecvBufferPoolAcquireCount{0};
+    uint64_t TcpSendBufferPoolPendingBytes{0};
+    uint64_t TcpSendBufferPoolAcquireCount{0};
+    uint64_t ZstdDecompressInputBytes{0};
+    uint64_t ZstdDecompressOutputBytes{0};
+    uint64_t ZstdDecompressCalls{0};
+    uint64_t ZstdDecompressNeedInput{0};
+    uint64_t ZstdDecompressNeedOutput{0};
+    uint64_t ZstdDecompressFailures{0};
     uint64_t Errors{0};
 };
 
@@ -112,6 +120,9 @@ private:
     bool PostTcpSendFromReceiveView(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
+    bool PostTcpSendFromCompressedReceiveView(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
     void AdvanceReceiveView(
         const std::shared_ptr<RelayContext>& relay,
         TqWindowsPendingQuicReceive& view,
@@ -151,6 +162,12 @@ private:
     std::atomic<uint64_t> TcpSendWouldBlockOrPendingCount_{0};
     std::atomic<uint64_t> TcpRecvOperationsCreated_{0};
     std::atomic<uint64_t> TcpRecvOperationsReused_{0};
+    std::atomic<uint64_t> ZstdDecompressInputBytes_{0};
+    std::atomic<uint64_t> ZstdDecompressOutputBytes_{0};
+    std::atomic<uint64_t> ZstdDecompressCalls_{0};
+    std::atomic<uint64_t> ZstdDecompressNeedInput_{0};
+    std::atomic<uint64_t> ZstdDecompressNeedOutput_{0};
+    std::atomic<uint64_t> ZstdDecompressFailures_{0};
     std::atomic<uint64_t> Errors_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
@@ -175,10 +192,11 @@ public:
         TqRelayHandle* handle,
         const TqTuningConfig& tuning,
         TqCompressAlgo compressAlgo);
+    TqWindowsRelayWorkerSnapshot Snapshot() const;
     void StopRelay(TqRelayHandle* handle);
 
 private:
-    std::mutex Lock_;
+    mutable std::mutex Lock_;
     std::vector<std::unique_ptr<TqWindowsRelayWorker>> Workers_;
     std::atomic<uint64_t> NextWorker_{0};
 };

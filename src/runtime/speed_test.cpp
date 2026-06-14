@@ -402,13 +402,13 @@ void TqRunDownloadWorker(
     }
 
     if (session->Stopping.load(std::memory_order_relaxed)) {
-        TqSocketHandle socket = TqInvalidSocket;
+        TqSocketHandle shutdownSocket = TqInvalidSocket;
         {
             std::lock_guard<std::mutex> lock(connection->Mutex);
-            socket = connection->Socket;
+            shutdownSocket = connection->Socket;
         }
-        if (TqSocketValid(socket)) {
-            (void)TqShutdownSend(socket);
+        if (TqSocketValid(shutdownSocket)) {
+            (void)TqShutdownSend(shutdownSocket);
         }
         return;
     }
