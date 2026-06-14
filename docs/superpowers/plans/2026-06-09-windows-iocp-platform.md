@@ -25,7 +25,7 @@
 | Task 7 — IOCP relay data path | **Done** | `dd741ce` |
 | Task 8 — Windows build + unit tests | **Done / awaiting Linux regression** | `quictls` x64 build and key Windows tests pass; `tcpquic_tunnel_test` is ported to platform sockets on Windows |
 | Task 9 — Loopback + interop | **Done for Windows quictls / interop pending** | Windows `quictls` loopback passes `off` / `zstd` / `lz4`; Schannel credential loading remains a hardening item |
-| Task 10 — Final verification | **Done** | Linux regression + DGX dual-host smoke passed 2026-06-10; see [`docs/linux-verification-2026-06-10.md`](../../linux-verification-2026-06-10.md) |
+| Task 10 — Final verification | **Done** | Linux regression + DGX dual-host smoke passed 2026-06-10; see [`docs/finished/linux-verification-2026-06-10.md`](../../finished/linux-verification-2026-06-10.md) |
 
 ### Build environment (validated)
 
@@ -58,7 +58,7 @@ Changes included in the current Windows IOCP/quictls update:
 
 **Current Windows verification:** key x64 targets build and exit 0 from `build-x64-quictls/bin/Release/`: `tcpquic_compress_test`, `tcpquic_tunnel_test`, `tcpquic_windows_relay_worker_test`, and `tcpquic_platform_socket_test`. Windows `quictls` loopback passes `off`, `zstd`, and `lz4` for both HTTP CONNECT and SOCKS5.
 
-**Linux validation (2026-06-10):** unit tests, `scripts/test-tcpquic-proxy.sh`, `scripts/test-tcpquic-concurrent.sh` (100 tunnels), and `scripts/test-tcpquic-proxy-dgx.sh` (100 tunnels + lz4) all PASS. Details: [`docs/linux-verification-2026-06-10.md`](../../linux-verification-2026-06-10.md).
+**Linux validation (2026-06-10):** unit tests, `scripts/test-tcpquic-proxy.sh`, `scripts/test-tcpquic-concurrent.sh` (100 tunnels), and `scripts/test-tcpquic-proxy-dgx.sh` (100 tunnels + lz4) all PASS. Details: [`docs/finished/linux-verification-2026-06-10.md`](../../finished/linux-verification-2026-06-10.md).
 
 **Remaining:** cross-platform Linux ↔ Windows interop when dedicated hosts are available; Schannel credential hardening on Windows.
 
@@ -102,7 +102,7 @@ cmake --build build-x64-quictls --config Release --target tcpquic-proxy
 
 ### Recommended next steps
 
-1. ~~Run Linux regression~~ — **done** (see `docs/linux-verification-2026-06-10.md`).
+1. ~~Run Linux regression~~ — **done** (see `docs/finished/linux-verification-2026-06-10.md`).
 2. Keep `quictls` as the Windows 10 validation/runtime path; only re-test Schannel on Windows Server 2022, Windows 11, or a Windows Insider build with Schannel TLS 1.3 support.
 3. Run Task 9 interop when `TCPQUIC_LINUX_SERVER` / `TCPQUIC_WINDOWS_SERVER` hosts are available.
 

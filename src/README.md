@@ -8,7 +8,7 @@
 - 高延迟、丢包环境下利用 QUIC + BBR 改善传输
 - 可选 zstd 流式压缩降低有效字节数
 
-详细设计见 [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/specs/2026-06-06-tcpquic-proxy-design.md)。
+详细设计见 [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/finished/specs/2026-06-06-tcpquic-proxy-design.md)。
 
 ## 架构
 
@@ -220,6 +220,6 @@ src/
 
 | 文档 | 说明 |
 |------|------|
-| [`docs/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
-| [`docs/plans/2026-06-06-tcpquic-proxy.md`](../docs/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
+| [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](../docs/finished/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
+| [`docs/finished/plans/2026-06-06-tcpquic-proxy.md`](../docs/finished/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
 | [`docs/tcpquic_next_steps.md`](../docs/tcpquic_next_steps.md) | 后续工作 |

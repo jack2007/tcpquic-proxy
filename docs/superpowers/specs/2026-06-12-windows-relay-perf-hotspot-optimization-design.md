@@ -1,6 +1,6 @@
 # Windows Relay 热点性能优化设计
 
-> 参考：`docs/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md` 与 `docs/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`  
+> 参考：`docs/finished/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md` 与 `docs/finished/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`
 > 日期：2026-06-12  
 > 状态：待评审
 
@@ -445,8 +445,8 @@ M4 (后续专项)
 
 ## 10. 参考
 
-- `docs/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md`
-- `docs/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`
+- `docs/finished/superpowers/specs/2026-06-11-relay-perf-hotspot-optimization-design.md`
+- `docs/finished/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`
 - `src/tunnel/windows_relay_worker.cpp`
 - `src/tunnel/windows_relay_worker.h`
 - `src/unittest/windows_relay_worker_test.cpp`

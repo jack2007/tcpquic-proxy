@@ -6,7 +6,7 @@
 
 - `docs/dgx-perf-profile-phase4-comparison-20260612/summary.md`
 - `docs/dgx-perf-profile-analysis.md`
-- `docs/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`
+- `docs/finished/superpowers/plans/2026-06-11-relay-perf-hotspot-optimization.md`
 - Phase 3：`18f5f58`，MPMC event queue，receive 仍 copy 到 ingress buffer
 - Phase 4 always-pending：`efcedd6`，deferred receive view + always `QUIC_STATUS_PENDING` + `StreamMultiReceiveEnabled`
 - Phase 4 sync-write：`115eb06`，callback 内同步 `sendmsg/writev` fast path
