@@ -11,7 +11,7 @@
 
 struct TqConfig;
 class QuicClientSession;
-class MsQuicStream;
+struct MsQuicStream;
 struct MsQuicConnection;
 
 class TqEphemeralTargetAuthorizer {
