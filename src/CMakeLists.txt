@@ -273,6 +273,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/relay_buffer_pool.cpp
         tunnel/windows_relay_worker.cpp
     )
 endif()
@@ -447,6 +448,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/relay_buffer_pool.cpp
         tunnel/linux_relay_buffer_pool.cpp
         tunnel/linux_relay_worker.cpp
+    )
+endif()
+if(WIN32)
+    list(APPEND TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
+        tunnel/relay_buffer_pool.cpp
+        tunnel/windows_relay_worker.cpp
     )
 endif()
 add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES})

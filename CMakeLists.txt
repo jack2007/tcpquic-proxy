@@ -21,9 +21,6 @@ set(QUIC_BUILD_TOOLS OFF CACHE BOOL "Build msquic tools" FORCE)
 set(QUIC_ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 
 set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use" FORCE)
-if(WIN32)
-    set(QUIC_OPENSSL_EXTRA_CONFIG_FLAGS "no-asm" CACHE STRING "Extra OpenSSL/QuicTLS configure flags" FORCE)
-endif()
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
 

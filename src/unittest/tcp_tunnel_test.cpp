@@ -39,6 +39,18 @@ MsQuicConnection* QuicClientSession::PickConnection() {
     return nullptr;
 }
 
+MsQuicConnection* QuicClientSession::PickConnectionAt(size_t) {
+    return nullptr;
+}
+
+MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t) {
+    return nullptr;
+}
+
+uint32_t QuicClientSession::ConnectedConnectionCount() const {
+    return 0;
+}
+
 bool TqTraceEnabled() {
     return false;
 }
