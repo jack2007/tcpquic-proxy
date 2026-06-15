@@ -269,6 +269,8 @@ public:
         const TqAcl* acl,
         const TqEphemeralTargetAuthorizer* authorizer,
         MsQuicConnection* quicConn = nullptr,
+        bool receiveSink = false,
+        std::atomic<uint64_t>* receiveSinkBytes = nullptr,
         TqTunnelCompletionFn onComplete = {},
         TqTunnelAclDeniedFn onAclDenied = {}) :
         Role(role),
@@ -278,6 +280,8 @@ public:
         Acl(acl),
         Authorizer(authorizer),
         QuicConn(quicConn),
+        ReceiveSink(receiveSink),
+        ReceiveSinkBytes(receiveSinkBytes),
         OnComplete(std::move(onComplete)),
         OnAclDenied(std::move(onAclDenied)) {
         TraceIngressProto = 0;
@@ -358,14 +362,17 @@ public:
             tcpFd = TcpFd;
         }
 
-        if (!TqRelayStart(
-                tcpFd,
-                stream,
-                Compressor.get(),
-                Decompressor.get(),
-                &RelayHandle,
-                Config.Tuning,
-                algo)) {
+        const bool relayStarted = ReceiveSink
+            ? TqRelayStartQuicReceiveSink(stream, &RelayHandle, Config.Tuning, ReceiveSinkBytes)
+            : TqRelayStart(
+                  tcpFd,
+                  stream,
+                  Compressor.get(),
+                  Decompressor.get(),
+                  &RelayHandle,
+                  Config.Tuning,
+                  algo);
+        if (!relayStarted) {
             return false;
         }
 
@@ -929,6 +936,8 @@ private:
     const TqAcl* Acl;
     const TqEphemeralTargetAuthorizer* Authorizer;
     MsQuicConnection* QuicConn;
+    bool ReceiveSink{false};
+    std::atomic<uint64_t>* ReceiveSinkBytes{nullptr};
     TqTunnelCompletionFn OnComplete;
     TqTunnelAclDeniedFn OnAclDenied;
     TqRelayHandle RelayHandle;
@@ -981,12 +990,16 @@ void TqReapTunnelContext(TqTunnelContext* ctx) {
     delete ctx;
 }
 
-TqTunnelStartResult TqStartClientTunnel(
+namespace {
+
+TqTunnelStartResult TqStartClientTunnelInternal(
     MsQuicConnection* conn,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
-    const TqConfig& cfg) {
-    if (!TqSocketValid(clientTcpFd)) {
+    const TqConfig& cfg,
+    bool receiveSink,
+    std::atomic<uint64_t>* receiveSinkBytes) {
+    if (!receiveSink && !TqSocketValid(clientTcpFd)) {
         return {false, TqOpenError::Internal};
     }
 
@@ -1006,7 +1019,9 @@ TqTunnelStartResult TqStartClientTunnel(
         cfg,
         nullptr,
         nullptr,
-        conn);
+        conn,
+        receiveSink,
+        receiveSinkBytes);
     if (context == nullptr) {
         return {false, TqOpenError::Internal};
     }
@@ -1071,6 +1086,27 @@ TqTunnelStartResult TqStartClientTunnel(
 
     releaseClientOpenOwner();
     return {true, TqOpenError::Ok, tunnelId};
+}
+
+} // namespace
+
+TqTunnelStartResult TqStartClientTunnel(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg) {
+    return TqStartClientTunnelInternal(conn, req, clientTcpFd, cfg, false, nullptr);
+}
+
+TqTunnelStartResult TqStartClientTunnelReceiveSink(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    const TqConfig& cfg,
+    std::atomic<uint64_t>* receiveBytes) {
+    if (receiveBytes == nullptr) {
+        return {false, TqOpenError::Internal};
+    }
+    return TqStartClientTunnelInternal(conn, req, TqInvalidSocket, cfg, true, receiveBytes);
 }
 
 namespace {
@@ -1210,6 +1246,8 @@ private:
             &Acl_,
             Authorizer_,
             Conn_,
+            false,
+            nullptr,
             std::move(OnComplete_),
             std::move(OnAclDenied_));
         if (context == nullptr) {
@@ -1444,6 +1482,8 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
         cfg,
         nullptr,
         nullptr,
+        nullptr,
+        false,
         nullptr,
         std::move(onComplete));
 }

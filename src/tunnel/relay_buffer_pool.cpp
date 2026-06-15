@@ -179,6 +179,11 @@ size_t TqRelayBufferPool::FreeCount() const {
     return WorkerFree.size();
 }
 
+size_t TqRelayBufferPool::AllocatedCount() const {
+    std::lock_guard<std::mutex> workerGuard(WorkerLock);
+    return WorkerAllocated;
+}
+
 uint64_t TqRelayBufferPool::PendingBytes() const {
     return PendingReserved.load(std::memory_order_relaxed);
 }

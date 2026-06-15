@@ -12,6 +12,7 @@ enum class TqMode { Client, Server };
 enum class TqSpeedTestMode {
     None,
     Download,
+    DownloadSink,
     Upload,
 };
 

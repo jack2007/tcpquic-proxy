@@ -439,6 +439,22 @@ int main() {
         if (body.find("\"linux_relay_hot_relay_pending_quic_receive_bytes\":") == std::string::npos) return 152;
         if (body.find("\"linux_relay_hot_relay_epollout_events\":") == std::string::npos) return 153;
         if (body.find("\"linux_relay_hot_relay_tcp_write_armed\":") == std::string::npos) return 154;
+        if (body.find("\"linux_relay_active_tcp_relays\":") == std::string::npos) return 155;
+        if (body.find("\"linux_relay_active_sink_relays\":") == std::string::npos) return 156;
+        if (body.find("\"linux_relay_active_quic_send_relays\":") == std::string::npos) return 157;
+        if (body.find("\"linux_relay_current_pending_quic_receive_bytes\":") == std::string::npos) return 158;
+        if (body.find("\"linux_relay_current_pending_quic_receive_queue\":") == std::string::npos) return 159;
+        if (body.find("\"linux_relay_worker_slots_allocated\":") == std::string::npos) return 160;
+        if (body.find("\"linux_relay_worker_slots_free\":") == std::string::npos) return 161;
+        if (body.find("\"linux_relay_tcp_read_armed_relays\":") == std::string::npos) return 162;
+        if (body.find("\"linux_relay_tcp_read_disabled_relays\":") == std::string::npos) return 163;
+        if (body.find("\"linux_relay_tcp_write_armed_relays\":") == std::string::npos) return 164;
+        if (body.find("\"linux_relay_closing_relays\":") == std::string::npos) return 165;
+        if (body.find("\"linux_relay_tcp_read_closed_relays\":") == std::string::npos) return 166;
+        if (body.find("\"linux_relay_tcp_write_shutdown_queued_relays\":") == std::string::npos) return 167;
+        if (body.find("\"linux_relay_outstanding_quic_sends\":") == std::string::npos) return 168;
+        if (body.find("\"linux_relay_pending_tcp_write_queue\":") == std::string::npos) return 169;
+        if (body.find("\"linux_relay_pending_tcp_write_bytes\":") == std::string::npos) return 170;
     }
     return 0;
 }

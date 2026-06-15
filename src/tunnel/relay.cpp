@@ -78,6 +78,58 @@ bool TqRelayStart(
 #endif
 }
 
+bool TqRelayStartQuicReceiveSink(
+    MsQuicStream* stream,
+    TqRelayHandle* handle,
+    const TqTuningConfig& profileTuning,
+    std::atomic<uint64_t>* receiveBytes) {
+    if (stream == nullptr || handle == nullptr || handle->Backend != TqRelayBackendType::None) {
+        return false;
+    }
+
+    const uint32_t activeRelays = TqRelayRegisterActive();
+    TqTuningConfig tuning = profileTuning;
+    TqApplyRelayPoolBudget(tuning, activeRelays);
+
+#if defined(__linux__)
+    if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    TqLinuxRelayWorker* worker = TqLinuxRelayRuntime::Instance().PickWorker();
+    if (worker == nullptr) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    TqLinuxRelayRegistration registration{};
+    registration.TcpFd = -1;
+    registration.Stream = stream;
+    registration.Handle = handle;
+    registration.EnableQuicSends = false;
+    registration.SinkQuicReceives = true;
+    registration.SinkQuicReceiveBytes = receiveBytes;
+
+    const auto registered = worker->RegisterRelayWithId(registration);
+    if (!registered.Ok) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    handle->Stop.store(false);
+    handle->Backend = TqRelayBackendType::LinuxWorker;
+    handle->LinuxWorker = worker;
+    handle->LinuxRelayId = registered.RelayId;
+    return true;
+#else
+    (void)profileTuning;
+    (void)receiveBytes;
+    TqRelayUnregisterActive();
+    return false;
+#endif
+}
+
 void TqRelayStop(TqRelayHandle* handle) {
     if (handle == nullptr) {
         return;

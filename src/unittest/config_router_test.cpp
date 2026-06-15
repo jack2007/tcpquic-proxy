@@ -243,6 +243,21 @@ int main() {
         if (err.find("--quic-reconnect-interval-ms") == std::string::npos) return 66;
     }
     {
+        const char* args[] = {"tcpquic-proxy", "client", "--quic-peer", "127.0.0.1:14444", "--download-sink-test", "30", "--quic-cert", "a.crt", "--quic-key", "a.key", "--quic-ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 76;
+        if (cfg.SpeedTestMode != TqSpeedTestMode::DownloadSink) return 77;
+        if (cfg.SpeedTestDurationSec != 30) return 78;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--quic-peer", "127.0.0.1:14444", "--download-test", "30", "--download-sink-test", "30", "--quic-cert", "a.crt", "--quic-key", "a.key", "--quic-ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 79;
+        if (err.find("mutually exclusive") == std::string::npos) return 80;
+    }
+    {
         std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"inherit","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"},{"peer_id":"override","quic_peer":"127.0.0.1:14445","socks_listen":"127.0.0.1:11002","quic_reconnect_interval_ms":5000}]})json");
         const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--quic-reconnect-interval-ms", "4000", "--quic-cert", "a.crt", "--quic-key", "a.key", "--quic-ca", "ca.crt"};
         TqConfig cfg;

@@ -436,6 +436,7 @@ void TqPrintUsage(FILE* out) {
         "  --warmup-target <host:port> Warmup HTTP target (required when --warmup-mb > 0)\n"
         "  --warmup-path <path>       Warmup HTTP GET path (default /)\n"
         "  --download-test <sec>       Client: built-in end-to-end download speed test\n"
+        "  --download-sink-test <sec>  Client: built-in download test that discards QUIC receive data before local TCP write\n"
         "  --upload-test <sec>         Client: built-in end-to-end upload speed test\n"
         "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
         "  --handshake-threads <n>    SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
@@ -645,6 +646,23 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 return false;
             }
             cfg.SpeedTestMode = TqSpeedTestMode::Download;
+            speedTestSpecified = true;
+        } else if (GetOptionValue(arg, "--download-sink-test", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--download-sink-test", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+                err = "speed-test options are mutually exclusive";
+                return false;
+            }
+            if (!ParseUint32InRange(value, 1, 86400, cfg.SpeedTestDurationSec)) {
+                err = "invalid value for --download-sink-test (must be 1..86400)";
+                return false;
+            }
+            cfg.SpeedTestMode = TqSpeedTestMode::DownloadSink;
             speedTestSpecified = true;
         } else if (GetOptionValue(arg, "--upload-test", value)) {
             if (value == nullptr) {

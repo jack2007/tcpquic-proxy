@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 
 #include "acl.h"
@@ -38,6 +39,12 @@ TqTunnelStartResult TqStartClientTunnel(
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg);
+
+TqTunnelStartResult TqStartClientTunnelReceiveSink(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    const TqConfig& cfg,
+    std::atomic<uint64_t>* receiveBytes);
 
 void TqHandleServerPeerStream(
     MsQuicConnection* conn,

@@ -35,5 +35,11 @@ bool TqRelayStart(
     const TqTuningConfig& tuning,
     TqCompressAlgo compressAlgo = TqCompressAlgo::None);
 
+bool TqRelayStartQuicReceiveSink(
+    MsQuicStream* stream,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    std::atomic<uint64_t>* receiveBytes);
+
 void TqRelayStop(TqRelayHandle* handle);
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle);

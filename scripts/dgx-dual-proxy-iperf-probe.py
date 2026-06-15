@@ -21,6 +21,7 @@ Q_PER_LANE = int(os.environ.get("Q_PER_LANE", "8"))
 P_PER_LANE = int(os.environ.get("P_PER_LANE", "8"))
 TCP_WRITE_MAX_BYTES = int(os.environ.get("TCP_WRITE_MAX_BYTES", "0"))
 TCP_WRITE_BURST_BYTES = int(os.environ.get("TCP_WRITE_BURST_BYTES", "0"))
+DIRECTIONS = [item.strip() for item in os.environ.get("DIRECTIONS", "upload,download").split(",") if item.strip()]
 TS = datetime.now().strftime("%Y%m%d-%H%M%S")
 OUT = ROOT / "docs" / f"dgx-dual-proxy-iperf-probe-{TS}"
 CERT_SRC = sorted((ROOT / "docs").glob("dgx-iperf-proxy-bottleneck-*/certs"))[-1]
@@ -308,6 +309,10 @@ def run_case(name, reverse, lanes):
             "lane": i + 1,
             "exit": result["exit"],
             "gbps": result["gbps"],
+            "client_before": before[i]["client"],
+            "server_before": before[i]["server"],
+            "client_after": after[i]["client"],
+            "server_after": after[i]["server"],
             "client_delta": client_delta,
             "server_delta": server_delta,
         })
@@ -333,6 +338,32 @@ def metric_row(case, lane, side, data):
         f"{data.get('linux_relay_quic_receive_paused_count', 0)} | "
         f"{data.get('linux_relay_quic_receive_resumed_count', 0)} | "
         f"{data.get('linux_relay_errors', 0)} |"
+    )
+
+
+def state_row(case, phase, lane, side, data):
+    return (
+        f"| {case} | {phase} | lane{lane} | {side} | "
+        f"{data.get('active_streams', 0)} | "
+        f"{data.get('accepted_connections', data.get('connection_count', 0))} | "
+        f"{data.get('linux_relay_active_relays', 0)} | "
+        f"{data.get('linux_relay_active_tcp_relays', 0)} | "
+        f"{data.get('linux_relay_active_sink_relays', 0)} | "
+        f"{data.get('linux_relay_active_quic_send_relays', 0)} | "
+        f"{data.get('linux_relay_current_pending_quic_receive_bytes', 0)/1024**2:.1f} | "
+        f"{data.get('linux_relay_current_pending_quic_receive_queue', 0)} | "
+        f"{data.get('linux_relay_pending_bytes', 0)/1024**2:.1f} | "
+        f"{data.get('linux_relay_worker_slots_allocated', 0)} | "
+        f"{data.get('linux_relay_worker_slots_free', 0)} | "
+        f"{data.get('linux_relay_tcp_read_armed_relays', 0)} | "
+        f"{data.get('linux_relay_tcp_read_disabled_relays', 0)} | "
+        f"{data.get('linux_relay_tcp_write_armed_relays', 0)} | "
+        f"{data.get('linux_relay_closing_relays', 0)} | "
+        f"{data.get('linux_relay_tcp_read_closed_relays', 0)} | "
+        f"{data.get('linux_relay_tcp_write_shutdown_queued_relays', 0)} | "
+        f"{data.get('linux_relay_outstanding_quic_sends', 0)} | "
+        f"{data.get('linux_relay_pending_tcp_write_queue', 0)} | "
+        f"{data.get('linux_relay_pending_tcp_write_bytes', 0)/1024**2:.1f} |"
     )
 
 
@@ -371,22 +402,40 @@ def summarize(rows):
         for lane in row["lanes"]:
             lines.append(metric_row(row["case"], lane["lane"], "client", lane["client_delta"]))
             lines.append(metric_row(row["case"], lane["lane"], "server", lane["server_delta"]))
+    lines += [
+        "",
+        "## State Snapshots",
+        "",
+        "| Case | Phase | Lane | Side | active_streams | conn/accepted | relays | tcp_relays | sink_relays | quic_send_relays | pending_quic MiB | pending_quic_q | pending MiB | slots_alloc | slots_free | read_armed | read_disabled | write_armed | closing | read_closed | write_shutdown_q | out_quic_sends | pending_tcp_q | pending_tcp MiB |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        for lane in row["lanes"]:
+            lines.append(state_row(row["case"], "before", lane["lane"], "client", lane["client_before"]))
+            lines.append(state_row(row["case"], "before", lane["lane"], "server", lane["server_before"]))
+            lines.append(state_row(row["case"], "after", lane["lane"], "client", lane["client_after"]))
+            lines.append(state_row(row["case"], "after", lane["lane"], "server", lane["server_after"]))
     (OUT / "summary.md").write_text("\n".join(lines) + "\n")
     (OUT / "results.json").write_text(json.dumps(rows, indent=2, sort_keys=True))
     log(f"summary: {OUT / 'summary.md'}")
 
 
 def main():
+    for direction in DIRECTIONS:
+        if direction not in ("upload", "download"):
+            raise RuntimeError(f"invalid DIRECTIONS entry: {direction}")
     OUT.mkdir(parents=True, exist_ok=True)
     run(["rsync", "-az", str(BIN), f"{REMOTE}:{REMOTE_BIN}"])
     run(["rsync", "-az", str(CERT_SRC) + "/", f"{REMOTE}:/home/jack/tcpquic-dgx-certs/"])
     run(["sudo", "ip", "route", "replace", TARGET, "dev", IFACE, "src", BIND], check=False)
     ssh(f"sudo ip route replace {BIND} dev {IFACE} src {TARGET} 2>/dev/null; true", check=False)
     lanes = [start_lane(i) for i in range(LANES)]
-    rows = [
-        run_case("dual-proxy-upload-q8p8-plus-q8p8", False, lanes),
-        run_case("dual-proxy-download-q8p8-plus-q8p8", True, lanes),
-    ]
+    rows = []
+    for direction in DIRECTIONS:
+        if direction == "upload":
+            rows.append(run_case("dual-proxy-upload-q8p8-plus-q8p8", False, lanes))
+        elif direction == "download":
+            rows.append(run_case("dual-proxy-download-q8p8-plus-q8p8", True, lanes))
     summarize(rows)
 
 

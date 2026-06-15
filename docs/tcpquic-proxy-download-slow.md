@@ -953,3 +953,721 @@ Current conclusion:
   three rounds and compare median throughput plus perf samples.
 - Even the best cap only reaches about 20 Gbps, so this is a pacing/cost
   improvement, not a solution to the 100 Gbps gap.
+
+## 2026-06-15 dual-proxy repeat after EPOLLOUT re-arm fix
+
+After the TCP writable re-arm fix, the 2-DGX dual-proxy case was repeated three
+times with the same shape as the original UDP socket fan-out probe:
+
+```text
+2 lanes
+per lane: --quic-connections 8, iperf3 -P 8
+duration: 30s per direction
+compression: off
+linux relay worker slots: 1024
+linux relay read chunk: 1 MiB
+tcp write cap: uncapped
+```
+
+Result directories:
+
+```text
+docs/dgx-dual-proxy-iperf-probe-20260615-211911/
+docs/dgx-dual-proxy-iperf-probe-20260615-212046/
+docs/dgx-dual-proxy-iperf-probe-20260615-212221/
+```
+
+Throughput:
+
+| Run | Upload lane1 | Upload lane2 | Upload total | Download lane1 | Download lane2 | Download total |
+|---|---:|---:|---:|---:|---:|---:|
+| 21:19:11 | 18.788 Gbps | 18.956 Gbps | 37.744 Gbps | 11.497 Gbps | 11.482 Gbps | 22.979 Gbps |
+| 21:20:46 | 19.146 Gbps | 18.161 Gbps | 37.307 Gbps | 11.880 Gbps | 11.588 Gbps | 23.469 Gbps |
+| 21:22:21 | 18.184 Gbps | 18.720 Gbps | 36.904 Gbps | 11.971 Gbps | 11.152 Gbps | 23.123 Gbps |
+
+Summary:
+
+| Direction | Range | Average |
+|---|---:|---:|
+| upload | 36.904-37.744 Gbps | 37.318 Gbps |
+| download | 22.979-23.469 Gbps | 23.190 Gbps |
+
+The new repeat is consistent with the earlier dual-server observation:
+
+- Splitting into two `tcpquic-proxy server` processes and two UDP listening
+  sockets raises upload to about 37 Gbps.
+- The same split does not materially raise download, which stays around
+  23 Gbps.
+- Therefore the download ceiling is unlikely to be primarily caused by the
+  remote server's single UDP socket.
+
+Download client-side TCP write metrics still show strong local backpressure:
+
+| Run | Lane | Client TCP write | sendmsg calls | Avg write | EAGAIN |
+|---|---|---:|---:|---:|---:|
+| 21:19:11 | lane1 | 36.44 GiB | 270746 | 141.1 KiB | 14028 |
+| 21:19:11 | lane2 | 36.23 GiB | 258613 | 146.9 KiB | 20182 |
+| 21:20:46 | lane1 | 37.54 GiB | 283537 | 138.8 KiB | 12801 |
+| 21:20:46 | lane2 | 36.58 GiB | 275477 | 139.2 KiB | 18631 |
+| 21:22:21 | lane1 | 37.92 GiB | 279800 | 142.1 KiB | 12767 |
+| 21:22:21 | lane2 | 35.26 GiB | 269080 | 137.4 KiB | 14066 |
+
+This reinforces the current leading explanation:
+
+- Upload scales when server-side UDP/process pressure is split.
+- Download remains limited by the local client
+  `QUIC receive -> sendmsg(loopback TCP)` path.
+- The re-arm fix removed a pending-queue correctness bug, but the steady-state
+  throughput ceiling remains dominated by local TCP handoff cost/backpressure.
+
+Next focused diagnostic:
+
+- Add a diagnostic-only download receive sink that keeps the remote producer and
+  QUIC receive path active but bypasses the local loopback TCP write on the
+  client.
+- If this sink exceeds the current 20-23 Gbps ceiling, the local TCP handoff is
+  confirmed as the dominant cost.
+- If it remains near 20-23 Gbps, the bottleneck is earlier in the QUIC receive
+  path or worker scheduling, not the local TCP write.
+
+## 2026-06-15 built-in download receive-sink probe
+
+A diagnostic-only client mode was added:
+
+```text
+--download-sink-test <sec>
+```
+
+It uses the normal built-in speed-test control flow and the normal server-side
+download producer. The client opens normal tunnel streams, but the Linux relay
+registers a receive sink instead of a local TCP fd:
+
+- MsQuic receive callback still returns `QUIC_STATUS_PENDING`.
+- The callback only queues the receive view.
+- The Linux relay worker accounts the bytes, calls `StreamReceiveComplete`, and
+  discards the data.
+- No local loopback TCP `sendmsg` is performed on the client side.
+
+Result directory:
+
+```text
+docs/dgx-download-sink-probe-20260615-214934/
+```
+
+2-DGX q16, 30s, compression off, 1MiB read chunk, 1024 worker slots:
+
+| Case | Client local bytes | Server bytes | Throughput |
+|---|---:|---:|---:|
+| normal `--download-test 30` | 60,064,602,547 | 72,433,886,459 | 16.017 Gbps |
+| diagnostic `--download-sink-test 30` | 66,613,521,718 | 79,077,131,609 | 17.764 Gbps |
+
+Interpretation:
+
+- Bypassing local loopback TCP write improved this built-in q16 download run by
+  about 10.9%.
+- That confirms the local TCP handoff has measurable cost.
+- However, the result did not jump to tens of Gbps beyond the normal path. So
+  the client loopback TCP write is not the sole dominant bottleneck for built-in
+  q16 download.
+- The remaining ceiling is earlier or broader in the path: server producer,
+  server TCP-read-to-QUIC-send relay, MsQuic send/receive processing, client
+  receive queue/worker scheduling, or receive-complete pacing.
+
+Updated next direction:
+
+- Capture perf for `--download-sink-test` and normal `--download-test` under
+  the same q16 parameters.
+- If sink perf shifts away from `tcp_sendmsg` but stays around 18 Gbps, focus
+  on MsQuic receive/send and relay worker scheduling rather than local TCP
+  handoff.
+- Add a scripted receive-sink DGX probe so client stdout, server stdout, and
+  full admin metrics JSON are captured without manual `rtk` output truncation.
+
+## 2026-06-15 dual-proxy q1/q2/q8 scaling check
+
+To separate "download direction is slow" from "download does not scale with
+inner parallelism", dual-proxy tests were repeated with two client/server pairs
+and different per-pair concurrency. Upload and download were run in separate
+fresh process sets for q1 and q2 so that one direction did not contaminate the
+next iperf server run.
+
+Common settings:
+
+```text
+2 lanes
+duration: 30s
+compression: off
+linux relay read chunk: 1 MiB
+linux relay worker slots: 1024
+tcp write cap/burst: unset
+```
+
+Results:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total | Result directory |
+|---|---|---:|---:|---:|---|
+| q1/P1 | upload | 15.802 Gbps | 15.727 Gbps | 31.528 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-223200/` |
+| q1/P1 | download | 14.700 Gbps | 16.727 Gbps | 31.427 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-223057/` |
+| q2/P2 | upload | 17.593 Gbps | 17.453 Gbps | 35.046 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-223445/` |
+| q2/P2 | download | 12.796 Gbps | 16.244 Gbps | 29.040 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-223532/` |
+| q8/P8 | upload | 18.2-19.1 Gbps | 18.2-19.0 Gbps | 36.9-37.7 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-211911/` etc. |
+| q8/P8 | download | 11.5-12.0 Gbps | 11.2-11.6 Gbps | 23.0-23.5 Gbps | `docs/dgx-dual-proxy-iperf-probe-20260615-211911/` etc. |
+
+Interpretation:
+
+- q1/P1 dual-proxy is balanced and symmetric: upload and download are both
+  about 31.5 Gbps total, with each lane around 15-17 Gbps.
+- q2/P2 upload improves to about 35 Gbps total, but q2/P2 download drops to
+  about 29 Gbps total and becomes less balanced.
+- q8/P8 upload reaches about 37 Gbps total, but q8/P8 download collapses to
+  about 23 Gbps total, around 11-12 Gbps per lane.
+
+This changes the problem statement:
+
+- Download can scale across two client/server pairs at q1/P1.
+- The gap appears when increasing inner per-pair parallelism from q1/P1 to
+  q2/P2 and especially q8/P8.
+- Therefore the current suspect is not "download direction is inherently slow";
+  it is "download has poor scaling with multiple simultaneous streams per
+  client/server pair".
+
+The next useful probes should target q1/P1 vs q2/P2 vs q8/P8 download on the
+client side:
+
+- per-worker relay bytes/events;
+- per-connection/per-stream distribution if available from MsQuic or local
+  metrics;
+- CPU affinity and RSS/IRQ sharing between the two local client processes;
+- perf comparison for q1/P1 and q8/P8 download, especially MsQuic receive,
+  decrypt, relay worker scheduling, and local TCP write paths.
+
+## 2026-06-15 dual-proxy q2/P2 repeat
+
+The 2-lane q2/P2 case was repeated with upload and download in separate fresh
+process sets:
+
+```text
+LANES=2
+Q_PER_LANE=2
+P_PER_LANE=2
+DURATION_SEC=30
+DIRECTIONS=upload or download
+```
+
+Result directories:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-223848/` for upload
+- `docs/dgx-dual-proxy-iperf-probe-20260615-223936/` for download
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q2/P2 | upload | 17.524 Gbps | 17.842 Gbps | 35.366 Gbps |
+| q2/P2 | download | 16.681 Gbps | 14.684 Gbps | 31.365 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Server tcp_read/write | Server errors |
+|---|---|---:|---:|---:|---:|---:|
+| upload | lane1 | 0.00 GiB | 5 | 0 | 61.17 GiB write | 288 |
+| upload | lane2 | 0.00 GiB | 5 | 0 | 62.31 GiB write | 0 |
+| download | lane1 | 57.24 GiB | 442,116 | 4,346 | 58.27 GiB read | 0 |
+| download | lane2 | 50.42 GiB | 404,447 | 6,669 | 51.29 GiB read | 0 |
+
+Interpretation update:
+
+- q2/P2 is not consistently collapsed. In this repeat, download reached
+  31.365 Gbps, close to q1/P1's 31.427 Gbps, but still below upload's
+  35.366 Gbps.
+- The larger and more repeatable collapse remains q8/P8 download, which was
+  around 23.0-23.5 Gbps in the previous three repeats.
+- The working hypothesis should be narrowed again: the strongest signal is
+  download degradation under higher inner parallelism, especially q8/P8, not a
+  deterministic q2/P2 cliff.
+
+## 2026-06-15 dual-proxy q4/P4 probe
+
+The midpoint between q2/P2 and q8/P8 was tested with the same two-lane topology
+and separate fresh process sets per direction:
+
+```text
+LANES=2
+Q_PER_LANE=4
+P_PER_LANE=4
+DURATION_SEC=30
+DIRECTIONS=upload or download
+```
+
+Result directories:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-224149/` for upload
+- `docs/dgx-dual-proxy-iperf-probe-20260615-224237/` for download
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q4/P4 | upload | 18.503 Gbps | 18.767 Gbps | 37.270 Gbps |
+| q4/P4 | download | 15.943 Gbps | 15.892 Gbps | 31.835 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Client pause/resume | Server tcp_read/write | Server errors |
+|---|---|---:|---:|---:|---:|---:|---:|
+| upload | lane1 | 0.00 GiB | 5 | 0 | 0/0 | 64.61 GiB write | 94 |
+| upload | lane2 | 0.00 GiB | 5 | 0 | 0/0 | 65.49 GiB write | 502 |
+| download | lane1 | 53.55 GiB | 434,372 | 15,190 | 3/3 | 55.69 GiB read | 0 |
+| download | lane2 | 53.54 GiB | 411,927 | 14,613 | 1/1 | 55.51 GiB read | 0 |
+
+Interpretation update:
+
+- q4/P4 download is balanced across both lanes and reaches 31.835 Gbps, close
+  to q1/P1 and the q2/P2 repeat.
+- q4/P4 upload reaches 37.270 Gbps, essentially the same level as q8/P8 upload.
+- The download gap is still visible against upload, but q4/P4 does not show the
+  severe q8/P8 download collapse.
+- Current best boundary: q1/P1, q2/P2, and q4/P4 download are around
+  31-32 Gbps in the two-lane topology; q8/P8 download drops to around
+  23-24 Gbps. The next diagnosis should compare q4/P4 vs q8/P8 client-side
+  scheduling, per-stream fairness, receive queue pressure, and TCP write
+  behavior.
+
+## 2026-06-15 dual-proxy q6/P6 probe
+
+The q6/P6 midpoint between q4/P4 and q8/P8 was tested with the same two-lane
+topology and separate fresh process sets per direction:
+
+```text
+LANES=2
+Q_PER_LANE=6
+P_PER_LANE=6
+DURATION_SEC=30
+DIRECTIONS=upload or download
+```
+
+Result directories:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-224648/` for upload
+- `docs/dgx-dual-proxy-iperf-probe-20260615-224740/` for download
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q6/P6 | upload | 17.922 Gbps | 18.688 Gbps | 36.610 Gbps |
+| q6/P6 | download | 17.942 Gbps | 12.606 Gbps | 30.547 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Client pause/resume | Server tcp_read/write | Server errors |
+|---|---|---:|---:|---:|---:|---:|---:|
+| upload | lane1 | 0.00 GiB | 6 | 0 | 0/0 | 62.55 GiB write | 150 |
+| upload | lane2 | 0.00 GiB | 6 | 0 | 0/0 | 65.00 GiB write | 1044 |
+| download | lane1 | 59.64 GiB | 467,601 | 22,173 | 3/3 | 62.99 GiB read | 0 |
+| download | lane2 | 40.93 GiB | 369,990 | 23,446 | 4/4 | 44.03 GiB read | 0 |
+
+Interpretation update:
+
+- q6/P6 upload remains near the q4/P4 and q8/P8 upload ceiling.
+- q6/P6 download is still much better than the q8/P8 download repeats, but it
+  becomes visibly imbalanced: lane1 reached 17.942 Gbps while lane2 only reached
+  12.606 Gbps.
+- Client-side TCP write EAGAIN counts are high on both download lanes, but the
+  lower-throughput lane did not have a uniquely higher EAGAIN count. That points
+  to broader scheduling/fairness or QUIC receive distribution effects, not just
+  one local TCP fd being backpressured.
+- The transition now looks gradual: q4/P4 is balanced around 31.8 Gbps total,
+  q6/P6 remains around 30.5 Gbps but becomes imbalanced, and q8/P8 drops to
+  23-24 Gbps total. The next probe should capture q6/P6 and q8/P8 perf plus
+  per-connection/per-stream counters if available.
+
+## 2026-06-15 dual-proxy q8/P8 fresh-process repeat
+
+q8/P8 was repeated with the same method used for q2/q4/q6: upload and download
+were run in separate fresh process sets instead of running both directions back
+to back in the same proxy/iperf server set.
+
+```text
+LANES=2
+Q_PER_LANE=8
+P_PER_LANE=8
+DURATION_SEC=30
+DIRECTIONS=upload or download
+```
+
+Result directories:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-225008/` for upload
+- `docs/dgx-dual-proxy-iperf-probe-20260615-225100/` for download
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q8/P8 | upload | 18.621 Gbps | 19.131 Gbps | 37.751 Gbps |
+| q8/P8 | download | 16.281 Gbps | 17.767 Gbps | 34.048 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Client pause/resume | Server tcp_read/write | Server pending |
+|---|---|---:|---:|---:|---:|---:|---:|
+| upload | lane1 | 0.00 GiB | 5 | 0 | 0/0 | 65.04 GiB write | 0.0 MiB |
+| upload | lane2 | 0.00 GiB | 5 | 0 | 0/0 | 66.80 GiB write | 0.0 MiB |
+| download | lane1 | 52.80 GiB | 398,906 | 27,608 | 6/6 | 56.87 GiB read | 169.0 MiB |
+| download | lane2 | 57.86 GiB | 447,683 | 33,655 | 7/7 | 62.06 GiB read | 113.0 MiB |
+
+Interpretation update:
+
+- This fresh-process q8/P8 download run did not reproduce the previous
+  23-24 Gbps result. It reached 34.048 Gbps and both lanes were reasonably
+  balanced.
+- The earlier low q8/P8 runs were collected by running upload and download
+  back to back in the same process set. Given the fresh-process repeat, those
+  earlier results likely include test orchestration or process-reuse effects,
+  not only steady-state relay behavior.
+- The stronger current signal is:
+  - upload scales from q1/P1 to q8/P8 and reaches about 37-38 Gbps;
+  - fresh-process download also scales above 30 Gbps, but remains several Gbps
+    below upload;
+  - download shows high client-side TCP write EAGAIN and occasional pause/resume
+    at q4/q6/q8, so client-side QUIC receive to local TCP write remains an
+    important cost center.
+- The next diagnosis should avoid mixed-direction process reuse unless that is
+  explicitly the scenario being tested. If the old q8/P8 collapse is still
+  important, it should be treated as a separate "upload then download reuse"
+  bug and reproduced with targeted state/log capture.
+
+## 2026-06-15 q8/P8 mixed-direction process-reuse reproduction
+
+The original test shape was repeated explicitly: start one two-lane proxy/iperf
+server process set, run upload first, then run download on the same process set
+without restarting the proxy or iperf servers.
+
+```text
+LANES=2
+Q_PER_LANE=8
+P_PER_LANE=8
+DURATION_SEC=30
+DIRECTIONS=upload,download
+```
+
+Result directory:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-225918/`
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q8/P8 | upload first | 19.126 Gbps | 19.248 Gbps | 38.375 Gbps |
+| q8/P8 | download second, same processes | 10.586 Gbps | 11.148 Gbps | 21.734 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Client pending | Client pause/resume | Server tcp_read/write |
+|---|---|---:|---:|---:|---:|---:|---:|
+| upload first | lane1 | 0.00 GiB | 6 | 0 | 80.0 MiB | 0/0 | 66.72 GiB write |
+| upload first | lane2 | 0.00 GiB | 5 | 0 | 15.0 MiB | 0/0 | 67.23 GiB write |
+| download second | lane1 | 33.25 GiB | 252,037 | 25,037 | 6.0 MiB | 1/1 | 36.98 GiB read |
+| download second | lane2 | 35.29 GiB | 264,055 | 22,057 | 5.0 MiB | 1/1 | 39.04 GiB read |
+
+Comparison with fresh-process q8/P8:
+
+| Method | Upload total | Download total |
+|---|---:|---:|
+| Fresh upload-only/download-only process sets | 37.751 Gbps | 34.048 Gbps |
+| Upload then download on same process set | 38.375 Gbps | 21.734 Gbps |
+
+Interpretation update:
+
+- The old q8/P8 collapse is reproducible when download runs second in the same
+  process set after upload.
+- The same q8/P8 download shape reaches 34.048 Gbps when run in a fresh process
+  set. Therefore the 21-24 Gbps collapse is not a steady-state q8/P8 download
+  ceiling.
+- The problem should now be split:
+  1. steady-state fresh-process download is still lower than upload by several
+     Gbps;
+  2. mixed-direction process reuse has a much larger regression when switching
+     from upload to download without restart.
+- For the process-reuse regression, the next evidence should be captured around
+  the transition point after upload completes and before download starts:
+  client/server metrics snapshot, per-tunnel lifecycle counters, active stream
+  count, worker slot occupancy, pending receive/send counters, and iperf server
+  state.
+
+## 2026-06-15 q8/P8 reverse-order process-reuse check
+
+The mixed-direction process-reuse test was repeated in the opposite direction:
+start one two-lane proxy/iperf server process set, run download first, then run
+upload on the same process set without restart.
+
+The probe script was fixed so `DIRECTIONS` order is honored. Before that fix,
+one accidental repeat still ran in the old upload-then-download order:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-230714/`
+- upload first: 37.795 Gbps
+- download second: 22.770 Gbps
+
+That accidental repeat further confirms the upload-then-download regression.
+
+The intended reverse-order result:
+
+```text
+LANES=2
+Q_PER_LANE=8
+P_PER_LANE=8
+DURATION_SEC=30
+DIRECTIONS=download,upload
+```
+
+Result directory:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-230915/`
+
+Throughput:
+
+| Per lane | Direction | Lane 1 | Lane 2 | Total |
+|---|---|---:|---:|---:|
+| q8/P8 | download first | 17.981 Gbps | 17.406 Gbps | 35.387 Gbps |
+| q8/P8 | upload second, same processes | 18.361 Gbps | 17.829 Gbps | 36.189 Gbps |
+
+Selected relay metrics:
+
+| Direction | Lane | Client tcp_write | Client sendmsg | Client EAGAIN | Client pending | Client pause/resume | Server tcp_read/write |
+|---|---|---:|---:|---:|---:|---:|---:|
+| download first | lane1 | 58.78 GiB | 432,470 | 25,229 | 0.0 MiB | 0/0 | 62.82 GiB read |
+| download first | lane2 | 56.72 GiB | 447,010 | 13,271 | 0.0 MiB | 0/0 | 60.79 GiB read |
+| upload second | lane1 | 0.00 GiB | 6 | 0 | 126.0 MiB | 0/0 | 63.58 GiB write |
+| upload second | lane2 | 0.00 GiB | 6 | 0 | 45.0 MiB | 0/0 | 61.90 GiB write |
+
+Comparison:
+
+| Method | First direction | Second direction |
+|---|---:|---:|
+| Fresh process sets | upload 37.751 Gbps | download 34.048 Gbps |
+| Same process set, upload then download | upload 38.375 Gbps | download 21.734 Gbps |
+| Same process set, download then upload | download 35.387 Gbps | upload 36.189 Gbps |
+
+Interpretation update:
+
+- Direction switching is asymmetric. Download first is healthy, and upload
+  after download remains healthy.
+- Upload first is healthy, but download after upload collapses to about
+  21-23 Gbps.
+- This points away from a generic "second run is slow" effect and toward
+  upload-path state affecting the later download path.
+- The next focused reproduction should instrument the boundary between upload
+  completion and the following download start, especially lingering tunnels,
+  stream/connection state, worker pending state, iperf server accepted
+  connections, and whether old upload-side relay registrations remain active or
+  consume scheduling/slot capacity.
+
+## 2026-06-15 process-reuse diagnostics metrics
+
+Additional relay state metrics were added to make the direction-switch boundary
+observable from `/metrics`:
+
+- active relay shape:
+  - `linux_relay_active_tcp_relays`
+  - `linux_relay_active_sink_relays`
+  - `linux_relay_active_quic_send_relays`
+- current queue/slot pressure:
+  - `linux_relay_current_pending_quic_receive_bytes`
+  - `linux_relay_current_pending_quic_receive_queue`
+  - `linux_relay_worker_slots_allocated`
+  - `linux_relay_worker_slots_free`
+  - `linux_relay_pending_tcp_write_queue`
+  - `linux_relay_pending_tcp_write_bytes`
+- current fd/lifecycle state:
+  - `linux_relay_tcp_read_armed_relays`
+  - `linux_relay_tcp_read_disabled_relays`
+  - `linux_relay_tcp_write_armed_relays`
+  - `linux_relay_closing_relays`
+  - `linux_relay_tcp_read_closed_relays`
+  - `linux_relay_tcp_write_shutdown_queued_relays`
+  - `linux_relay_outstanding_quic_sends`
+
+The dual-proxy probe summary now includes a "State Snapshots" table with before
+and after snapshots for each direction. That makes the second direction's
+`before` rows the exact process-reuse transition state.
+
+Validation commands:
+
+```text
+cmake --build build --config Release --target tcpquic-proxy tcpquic_router_runtime_test tcpquic_linux_relay_worker_io_test -j$(nproc)
+build/bin/Release/tcpquic_router_runtime_test
+build/bin/Release/tcpquic_linux_relay_worker_io_test
+python3 -m py_compile scripts/dgx-dual-proxy-iperf-probe.py
+git diff --check
+```
+
+`tcpquic_linux_relay_worker_io_test` had one transient timing-sensitive failure
+on first run, then passed when rerun.
+
+### q8/P8 upload then download with diagnostics
+
+Result directory:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-232701/`
+
+Throughput:
+
+| Direction | Lane 1 | Lane 2 | Total |
+|---|---:|---:|---:|
+| upload first | 18.256 Gbps | 18.313 Gbps | 36.569 Gbps |
+| download second | 12.023 Gbps | 11.426 Gbps | 23.448 Gbps |
+
+Key transition state: download `before`, i.e. immediately after upload completed
+and before download started.
+
+| Side | Lane | active relays | pending MiB | slots allocated/free | read armed/disabled | read closed | closing | outstanding sends |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| client | 1 | 8 | 81.0 | 8192 / 8119 | 6 / 2 | 8 | 0 | 0 |
+| client | 2 | 8 | 48.0 | 8192 / 8146 | 3 / 5 | 8 | 0 | 0 |
+| server | 1 | 2 | 0.0 | 2048 / 2048 | 0 / 2 | 2 | 0 | 0 |
+| server | 2 | 3 | 0.0 | 3072 / 3072 | 0 / 3 | 3 | 0 | 0 |
+
+Interpretation:
+
+- The upload-to-download collapse is reproduced with the new metrics:
+  download second was 23.448 Gbps.
+- The transition state is not clean. After upload, the client still has eight
+  active relays per lane, and the server still has two or three active relays
+  per lane.
+- Those relays have `tcp_read_closed` set, but `closing` is still zero.
+  This is the strongest current signal: the TCP read side has observed closure,
+  but the relay has not entered/finished the cleanup path.
+- The lingering client relays still reserve worker slots and pending bytes
+  (about 48-81 MiB in this run). Even though pending TCP write queue and
+  pending QUIC receive queue are zero, the relay registrations remain live and
+  continue to count as active scheduling state.
+- During the degraded download, client-side TCP write EAGAIN is again high
+  (27,497 and 24,355), but the newly added transition metrics show the
+  regression begins before download data transfer: the process starts download
+  with stale upload relays still active.
+
+Updated working hypothesis:
+
+- Upload completion leaves relay registrations alive after `TcpReadClosed`.
+- They are not marked `Closing`, not unregistered, and their buffer pools remain
+  allocated.
+- Later download creates additional server-side relay registrations on top of
+  the stale state. This explains why fresh-process download is healthy while
+  upload-then-download process reuse collapses.
+
+Next code-level check:
+
+- Trace the TCP EOF / FIN path in `DrainTcpReadable` and related QUIC FIN send
+  completion handling.
+- Verify that after `TcpReadClosed` and outstanding QUIC sends reach zero, the
+  relay calls the same unregister/retire path used by explicit tunnel close.
+- Add a unit test for "TCP EOF after upload drains relay registration" before
+  changing cleanup behavior.
+
+## 2026-06-15 root cause and fix
+
+Root cause:
+
+- `DrainTcpReadable()` correctly detected TCP EOF and set `TcpReadClosed`.
+- It then called `FinishTcpToQuic()` to send QUIC FIN.
+- For the common FIN-only case, `SubmitTcpBatchToQuic()` called
+  `Stream->Send(nullptr, 0, QUIC_SEND_FLAG_FIN, nullptr)`.
+- Because the send had no relay send context, there was no
+  `SEND_COMPLETE.ClientContext` for `CompleteQuicSend()` to use.
+- The relay never recorded that the TCP-to-QUIC FIN had completed.
+- Separately, after QUIC receive FIN was drained to TCP and `shutdown(SHUT_WR)`
+  was called, the relay did not retain a `TcpWriteClosed` state.
+- As a result, the worker could observe `TcpReadClosed=1` and no pending data,
+  but it had no state-machine condition that meant "both halves are done".
+- `RelayHandle.Stop` stayed false, so `TqTunnelReaper` never called
+  `TqRelayStop()`. The stale relay registrations remained active until process
+  restart.
+
+This exactly matched the DGX transition metrics before the fix:
+
+| Side | Lane | active relays | pending MiB | read armed/disabled | read closed | closing |
+|---|---:|---:|---:|---:|---:|---:|
+| client | 1 | 8 | 81.0 | 6 / 2 | 8 | 0 |
+| client | 2 | 8 | 48.0 | 3 / 5 | 8 | 0 |
+| server | 1 | 2 | 0.0 | 0 / 2 | 2 | 0 |
+| server | 2 | 3 | 0.0 | 0 / 3 | 3 | 0 |
+
+Fix:
+
+- Added relay lifecycle state:
+  - `QuicSendFinSubmitted`
+  - `QuicSendFinCompleted`
+  - `TcpWriteClosed`
+- FIN-only QUIC sends are marked completed immediately after successful
+  `Stream->Send(... FIN ...)`, because there is no payload buffer context to
+  wait for.
+- FIN sends with data mark `QuicSendFinCompleted` in
+  `CompleteQuicSend()` when the send-complete event arrives.
+- QUIC receive FIN now records `TcpWriteClosed` after the pending TCP writes are
+  drained and `shutdown(SHUT_WR)` is issued.
+- `MaybeStopFullyClosedRelay()` sets `RelayHandle.Stop=true` only when:
+  - TCP read side is closed;
+  - TCP write side is closed;
+  - QUIC send FIN has been submitted and completed;
+  - no outstanding QUIC sends remain;
+  - no pending TCP writes, pending QUIC receives, or pending receive bytes
+    remain.
+
+Regression test:
+
+- Added a Linux relay worker unit test that simulates:
+  1. local TCP half-close;
+  2. TCP-to-QUIC FIN;
+  3. remote QUIC FIN-only receive;
+  4. TCP write half-close;
+  5. expected `RelayHandle.Stop=true`.
+- Before the fix it failed with:
+
+```text
+expected relay stop after both TCP read and QUIC receive FIN,
+active=1 read_closed=1 write_shutdown=0 closing=0 sends=0 pending=0
+```
+
+After the fix it passes.
+
+### DGX validation after fix
+
+Result directory:
+
+- `docs/dgx-dual-proxy-iperf-probe-20260615-233737/`
+
+Same q8/P8 mixed-direction process-reuse test:
+
+```text
+LANES=2
+Q_PER_LANE=8
+P_PER_LANE=8
+DURATION_SEC=30
+DIRECTIONS=upload,download
+```
+
+Throughput:
+
+| Direction | Lane 1 | Lane 2 | Total |
+|---|---:|---:|---:|
+| upload first | 18.287 Gbps | 18.126 Gbps | 36.413 Gbps |
+| download second | 17.433 Gbps | 17.330 Gbps | 34.763 Gbps |
+
+Key transition state: download `before`, after upload completed and before
+download started.
+
+| Side | Lane | active relays | pending MiB | read closed | closing |
+|---|---:|---:|---:|---:|---:|
+| client | 1 | 0 | 0.0 | 0 | 0 |
+| client | 2 | 0 | 0.0 | 0 | 0 |
+| server | 1 | 0 | 0.0 | 0 | 0 |
+| server | 2 | 0 | 0.0 | 0 | 0 |
+
+The original symptom is resolved in this run:
+
+- Before fix: upload then download q8/P8 was about 21-23 Gbps.
+- After fix: upload then download q8/P8 reached 34.763 Gbps.
+- The second run starts from a clean relay state instead of inheriting stale
+  upload relays.

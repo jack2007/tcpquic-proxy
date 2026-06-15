@@ -55,6 +55,22 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.PendingEvents = snapshot.PendingEvents;
     metrics.PendingBytes = snapshot.PendingBytes;
     metrics.ActiveRelays = snapshot.ActiveRelays;
+    metrics.ActiveTcpRelays = snapshot.ActiveTcpRelays;
+    metrics.ActiveSinkRelays = snapshot.ActiveSinkRelays;
+    metrics.ActiveQuicSendRelays = snapshot.ActiveQuicSendRelays;
+    metrics.CurrentPendingQuicReceiveBytes = snapshot.CurrentPendingQuicReceiveBytes;
+    metrics.CurrentPendingQuicReceiveQueue = snapshot.CurrentPendingQuicReceiveQueue;
+    metrics.WorkerSlotsAllocated = snapshot.WorkerSlotsAllocated;
+    metrics.WorkerSlotsFree = snapshot.WorkerSlotsFree;
+    metrics.TcpReadArmedRelays = snapshot.TcpReadArmedRelays;
+    metrics.TcpReadDisabledRelays = snapshot.TcpReadDisabledRelays;
+    metrics.TcpWriteArmedRelays = snapshot.TcpWriteArmedRelays;
+    metrics.ClosingRelays = snapshot.ClosingRelays;
+    metrics.TcpReadClosedRelays = snapshot.TcpReadClosedRelays;
+    metrics.TcpWriteShutdownQueuedRelays = snapshot.TcpWriteShutdownQueuedRelays;
+    metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
+    metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
+    metrics.PendingTcpWriteBytes = snapshot.PendingTcpWriteBytes;
     metrics.MaxWorkerPendingBytes = snapshot.MaxWorkerPendingBytes;
     metrics.MaxWorkerActiveRelays = snapshot.MaxWorkerActiveRelays;
     metrics.MaxRelayPendingQuicReceiveBytes = snapshot.MaxRelayPendingQuicReceiveBytes;
@@ -191,6 +207,25 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_pending_events\":" << metrics.PendingEvents;
     out << ",\"linux_relay_pending_bytes\":" << metrics.PendingBytes;
     out << ",\"linux_relay_active_relays\":" << metrics.ActiveRelays;
+    out << ",\"linux_relay_active_tcp_relays\":" << metrics.ActiveTcpRelays;
+    out << ",\"linux_relay_active_sink_relays\":" << metrics.ActiveSinkRelays;
+    out << ",\"linux_relay_active_quic_send_relays\":" << metrics.ActiveQuicSendRelays;
+    out << ",\"linux_relay_current_pending_quic_receive_bytes\":"
+        << metrics.CurrentPendingQuicReceiveBytes;
+    out << ",\"linux_relay_current_pending_quic_receive_queue\":"
+        << metrics.CurrentPendingQuicReceiveQueue;
+    out << ",\"linux_relay_worker_slots_allocated\":" << metrics.WorkerSlotsAllocated;
+    out << ",\"linux_relay_worker_slots_free\":" << metrics.WorkerSlotsFree;
+    out << ",\"linux_relay_tcp_read_armed_relays\":" << metrics.TcpReadArmedRelays;
+    out << ",\"linux_relay_tcp_read_disabled_relays\":" << metrics.TcpReadDisabledRelays;
+    out << ",\"linux_relay_tcp_write_armed_relays\":" << metrics.TcpWriteArmedRelays;
+    out << ",\"linux_relay_closing_relays\":" << metrics.ClosingRelays;
+    out << ",\"linux_relay_tcp_read_closed_relays\":" << metrics.TcpReadClosedRelays;
+    out << ",\"linux_relay_tcp_write_shutdown_queued_relays\":"
+        << metrics.TcpWriteShutdownQueuedRelays;
+    out << ",\"linux_relay_outstanding_quic_sends\":" << metrics.OutstandingQuicSends;
+    out << ",\"linux_relay_pending_tcp_write_queue\":" << metrics.PendingTcpWriteQueue;
+    out << ",\"linux_relay_pending_tcp_write_bytes\":" << metrics.PendingTcpWriteBytes;
     out << ",\"linux_relay_max_worker_pending_bytes\":" << metrics.MaxWorkerPendingBytes;
     out << ",\"linux_relay_max_worker_active_relays\":" << metrics.MaxWorkerActiveRelays;
     out << ",\"linux_relay_max_relay_pending_quic_receive_bytes\":"

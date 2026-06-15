@@ -98,7 +98,7 @@ int main() {
         config.MaxPendingBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
-        if (!worker.Start()) {
+        if (!worker.StartForTest()) {
             return 1;
         }
 
@@ -231,7 +231,7 @@ int main() {
         config.MaxPendingQuicReceiveBytesPerRelay = 32 * 1024;
 
         TqLinuxRelayWorker worker(config);
-        if (!worker.Start()) {
+        if (!worker.StartForTest()) {
             return 1;
         }
 
@@ -333,6 +333,190 @@ int main() {
 
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = true;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        if (::shutdown(fds[1], SHUT_WR) != 0) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        const auto readClosedDeadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (std::chrono::steady_clock::now() < readClosedDeadline) {
+            const auto snapshot = worker.Snapshot();
+            if (snapshot.TcpReadClosedRelays == 1) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        QUIC_STREAM_EVENT finEvent{};
+        finEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        finEvent.RECEIVE.BufferCount = 0;
+        finEvent.RECEIVE.Buffers = nullptr;
+        finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+        CompleteFakeSends(worker, fakeStream);
+        (void)worker.DrainForTest(config.EventBudget);
+
+        const auto stopDeadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (std::chrono::steady_clock::now() < stopDeadline &&
+               !handle.Stop.load(std::memory_order_acquire)) {
+            (void)worker.DrainForTest(config.EventBudget);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr,
+                "expected relay stop after both TCP read and QUIC receive FIN, active=%llu read_closed=%llu write_shutdown=%llu closing=%llu sends=%llu pending=%llu\n",
+                static_cast<unsigned long long>(snapshot.ActiveRelays),
+                static_cast<unsigned long long>(snapshot.TcpReadClosedRelays),
+                static_cast<unsigned long long>(snapshot.TcpWriteShutdownQueuedRelays),
+                static_cast<unsigned long long>(snapshot.ClosingRelays),
+                static_cast<unsigned long long>(snapshot.OutstandingQuicSends),
+                static_cast<unsigned long long>(snapshot.PendingBytes));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        TqRelayHandle handle{};
+        std::atomic<uint64_t> sinkBytes{0};
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = -1;
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        registration.SinkQuicReceives = true;
+        registration.SinkQuicReceiveBytes = &sinkBytes;
+        if (!worker.RegisterRelayForTest(registration)) {
+            std::fprintf(stderr, "expected sink relay registration without TCP fd\n");
+            worker.Stop();
+            return 1;
+        }
+
+        const std::vector<uint8_t> first(64 * 1024, 0x21);
+        const std::vector<uint8_t> second(32 * 1024, 0x22);
+        QUIC_BUFFER quicBuffers[2]{};
+        quicBuffers[0].Buffer = const_cast<uint8_t*>(first.data());
+        quicBuffers[0].Length = static_cast<uint32_t>(first.size());
+        quicBuffers[1].Buffer = const_cast<uint8_t*>(second.data());
+        quicBuffers[1].Length = static_cast<uint32_t>(second.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 2;
+        receiveEvent.RECEIVE.Buffers = quicBuffers;
+
+        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING) {
+            worker.Stop();
+            return 1;
+        }
+        if (worker.DrainForTest(config.EventBudget) != 1) {
+            worker.Stop();
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        const uint64_t expectedBytes = first.size() + second.size();
+        if (sinkBytes.load(std::memory_order_relaxed) != expectedBytes ||
+            snapshot.DeferredReceiveCompleteBytes != expectedBytes ||
+            snapshot.QuicReceiveViewCount != 1 ||
+            snapshot.MaxQuicReceiveViewSlices != 2 ||
+            snapshot.TcpWriteBytes != 0 ||
+            snapshot.TcpWriteSendmsgCalls != 0 ||
+            snapshot.PendingBytes != 0 ||
+            handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr,
+                "expected sink relay to discard and complete receive, sink=%llu complete=%llu views=%llu slices=%llu tcp_write=%llu calls=%llu pending=%llu stop=%d\n",
+                static_cast<unsigned long long>(sinkBytes.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(snapshot.QuicReceiveViewCount),
+                static_cast<unsigned long long>(snapshot.MaxQuicReceiveViewSlices),
+                static_cast<unsigned long long>(snapshot.TcpWriteBytes),
+                static_cast<unsigned long long>(snapshot.TcpWriteSendmsgCalls),
+                static_cast<unsigned long long>(snapshot.PendingBytes),
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0);
+            worker.Stop();
+            return 1;
+        }
+
+        worker.Stop();
     }
 
     {

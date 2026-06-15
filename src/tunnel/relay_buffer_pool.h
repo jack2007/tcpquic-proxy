@@ -98,6 +98,7 @@ public:
     TqBufferRef Acquire();
     size_t ChunkSize() const;
     size_t FreeCount() const;
+    size_t AllocatedCount() const;
     uint64_t PendingBytes() const;
     uint64_t AcquireCount() const;
     uint64_t MaxPendingBytes() const;

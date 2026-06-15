@@ -45,6 +45,8 @@ struct TqLinuxRelayRegistration {
     ITqDecompressor* Decompressor{nullptr};
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     bool EnableQuicSends{true};
+    bool SinkQuicReceives{false};
+    std::atomic<uint64_t>* SinkQuicReceiveBytes{nullptr};
 };
 
 struct TqLinuxRelayRegistrationResult {
@@ -57,6 +59,7 @@ struct TqLinuxRelaySendOperation {
 
     uint64_t Magic{MagicValue};
     uint64_t RelayId{0};
+    bool Fin{false};
     std::vector<TqBufferView> Views;
     std::vector<QUIC_BUFFER> QuicBuffers;
 };
@@ -67,6 +70,22 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t PendingEvents{0};
     uint64_t PendingBytes{0};
     uint64_t ActiveRelays{0};
+    uint64_t ActiveTcpRelays{0};
+    uint64_t ActiveSinkRelays{0};
+    uint64_t ActiveQuicSendRelays{0};
+    uint64_t CurrentPendingQuicReceiveBytes{0};
+    uint64_t CurrentPendingQuicReceiveQueue{0};
+    uint64_t WorkerSlotsAllocated{0};
+    uint64_t WorkerSlotsFree{0};
+    uint64_t TcpReadArmedRelays{0};
+    uint64_t TcpReadDisabledRelays{0};
+    uint64_t TcpWriteArmedRelays{0};
+    uint64_t ClosingRelays{0};
+    uint64_t TcpReadClosedRelays{0};
+    uint64_t TcpWriteShutdownQueuedRelays{0};
+    uint64_t OutstandingQuicSends{0};
+    uint64_t PendingTcpWriteQueue{0};
+    uint64_t PendingTcpWriteBytes{0};
     uint64_t MaxWorkerPendingBytes{0};
     uint64_t MaxWorkerActiveRelays{0};
     uint64_t MaxRelayPendingQuicReceiveBytes{0};
@@ -232,6 +251,7 @@ private:
         std::vector<TqBufferView>& input,
         std::vector<TqBufferView>& output);
     bool FinishTcpToQuic(RelayState* relay);
+    void MaybeStopFullyClosedRelay(RelayState* relay);
     bool SubmitTcpBatchToQuic(
         RelayState* relay,
         std::vector<TqBufferView>& views,

@@ -1284,6 +1284,8 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     }
 
     std::vector<TqPumpWorker> workers(parallel);
+    std::vector<std::atomic<uint64_t>> sinkBytes(parallel);
+    const bool receiveSink = cfg.SpeedTestMode == TqSpeedTestMode::DownloadSink;
     bool ok = false;
     const auto startedAt = TqClock::now();
     const auto deadline = startedAt + std::chrono::seconds(cfg.SpeedTestDurationSec);
@@ -1294,6 +1296,13 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         uint64_t total = 0;
         for (const auto& worker : workers) {
             total += worker.Bytes;
+        }
+        return total;
+    };
+    auto countSinkBytes = [&sinkBytes]() {
+        uint64_t total = 0;
+        for (const auto& bytes : sinkBytes) {
+            total += bytes.load(std::memory_order_relaxed);
         }
         return total;
     };
@@ -1312,12 +1321,14 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
 
     for (uint16_t i = 0; i < parallel; ++i) {
         TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
-        if (!TqSocketPair(pair)) {
+        if (!receiveSink && !TqSocketPair(pair)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to create speed test socket pair %u\n", i);
             goto cleanup;
         }
-        TqTuneSpeedTestLocalSocket(pair[0]);
-        TqTuneSpeedTestLocalSocket(pair[1]);
+        if (!receiveSink) {
+            TqTuneSpeedTestLocalSocket(pair[0]);
+            TqTuneSpeedTestLocalSocket(pair[1]);
+        }
 
         if (!quic.EnsureAnyConnected()) {
             std::fprintf(stderr, "tcpquic-proxy: speed test lost all QUIC connections\n");
@@ -1333,7 +1344,9 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
             goto cleanup;
         }
 
-        const TqTunnelStartResult started = TqStartClientTunnel(dataConn, req, pair[0], tunnelCfg);
+        const TqTunnelStartResult started = receiveSink
+            ? TqStartClientTunnelReceiveSink(dataConn, req, tunnelCfg, &sinkBytes[i])
+            : TqStartClientTunnel(dataConn, req, pair[0], tunnelCfg);
         if (!started.Ok) {
             std::fprintf(stderr,
                 "tcpquic-proxy: failed to start speed tunnel %u (error=%u)\n",
@@ -1347,16 +1360,20 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         workers[i].Socket = pair[1];
     }
 
-    for (auto& worker : workers) {
-        if (start.Direction == TqSpeedDirection::Upload) {
-            worker.Thread = std::thread(TqRunUploadPump, &worker, &stop, deadline);
-        } else {
-            worker.Thread = std::thread(TqRunDownloadPump, &worker, &stop);
+    if (!receiveSink) {
+        for (auto& worker : workers) {
+            if (start.Direction == TqSpeedDirection::Upload) {
+                worker.Thread = std::thread(TqRunUploadPump, &worker, &stop, deadline);
+            } else {
+                worker.Thread = std::thread(TqRunDownloadPump, &worker, &stop);
+            }
         }
     }
 
     std::this_thread::sleep_until(deadline);
-    if (start.Direction == TqSpeedDirection::Upload) {
+    if (receiveSink) {
+        finishClientBytes = countSinkBytes();
+    } else if (start.Direction == TqSpeedDirection::Upload) {
         stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
@@ -1391,7 +1408,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         goto cleanup;
     }
 
-    if (start.Direction == TqSpeedDirection::Download) {
+    if (start.Direction == TqSpeedDirection::Download && !receiveSink) {
         const auto drainDeadline = TqClock::now() + std::chrono::seconds(5);
         for (;;) {
             bool allDone = true;
@@ -1425,8 +1442,9 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
 
     {
         const uint64_t localBytes = measuredLocalBytes;
-        const char* modeName =
-            start.Direction == TqSpeedDirection::Upload ? "upload" : "download";
+        const char* modeName = receiveSink
+            ? "download-sink"
+            : (start.Direction == TqSpeedDirection::Upload ? "upload" : "download");
         const uint64_t throughputBytes =
             start.Direction == TqSpeedDirection::Upload ? result.ServerBytes : localBytes;
         const uint64_t throughputElapsedUs =
