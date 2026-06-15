@@ -336,6 +336,26 @@ static void TqUnregisterClientTraceConnection(MsQuicConnection* connection) {
     g_clientTraceConnIds.erase(connection->Handle);
 }
 
+static bool TqClientDebugEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("TQ_QUIC_CLIENT_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+static void TqClientDebugLog(const char* message, size_t slotIndex, const void* connection, QUIC_STATUS status = QUIC_STATUS_SUCCESS) {
+    if (!TqClientDebugEnabled()) {
+        return;
+    }
+    std::fprintf(stderr,
+        "tcpquic-proxy quic-client-debug: %s slot=%zu conn=%p status=0x%x\n",
+        message,
+        slotIndex + 1,
+        connection,
+        status);
+}
+
 QuicClientSession::~QuicClientSession() {
     Stop();
 }
@@ -531,6 +551,8 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> guard(State->Lock);
     while (State->Started && !State->Stopping) {
         bool anyConnected = false;
+        auto nextWake = deadline;
+        const auto now = std::chrono::steady_clock::now();
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             auto& slot = State->Slots[i];
             if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
@@ -538,6 +560,12 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
                 continue;
             }
             if (slot.ReconnectNeeded || !slot.Connection) {
+                if (slot.ReconnectNeeded &&
+                    slot.NextReconnectAt != std::chrono::steady_clock::time_point{} &&
+                    now < slot.NextReconnectAt) {
+                    nextWake = std::min(nextWake, slot.NextReconnectAt);
+                    continue;
+                }
                 guard.unlock();
                 StartSlotLocked(i);
                 guard.lock();
@@ -549,7 +577,7 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
         if (State->Slots.empty() || std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
-        State->StateChanged.wait_until(guard, deadline);
+        State->StateChanged.wait_until(guard, nextWake);
     }
     return false;
 }
@@ -668,13 +696,22 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
         }
 
         auto& slot = state->Slots[index];
+        const auto now = std::chrono::steady_clock::now();
+        if (slot.ReconnectNeeded &&
+            slot.NextReconnectAt != std::chrono::steady_clock::time_point{} &&
+            now < slot.NextReconnectAt) {
+            return false;
+        }
         oldConnection = std::move(slot.Connection);
         slot.Context = nullptr;
         slot.Connected = false;
         slot.ReconnectNeeded = false;
+        slot.NextReconnectAt = {};
+        TqClientDebugLog("slot-reset", index, oldConnection.get());
     }
 
     if (oldConnection) {
+        TqClientDebugLog("old-shutdown", index, oldConnection.get());
         oldConnection->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
         std::lock_guard<std::mutex> guard(state->Lock);
         state->OrphanedConnections.push_back(std::move(oldConnection));
@@ -718,15 +755,20 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
             delete newContext;
             slot.Connection.reset();
             slot.ReconnectNeeded = true;
+            slot.NextReconnectAt = std::chrono::steady_clock::now() + state->ReconnectInterval;
             return false;
         }
 
         slot.Context = newContext;
         connectionToStart = slot.Connection.get();
+        TqClientDebugLog("connection-opened", index, connectionToStart,
+            slot.Connection->GetInitStatus());
     }
 
+    TqClientDebugLog("connection-start-before", index, connectionToStart);
     const QUIC_STATUS startStatus =
         connectionToStart->Start(*Configuration, PeerHost.c_str(), PeerPort);
+    TqClientDebugLog("connection-start-after", index, connectionToStart, startStatus);
 
     if (TqTraceEnabled()) {
         const std::string peer = PeerHost + ":" + std::to_string(PeerPort);
@@ -750,6 +792,7 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
             delete newContext;
             slot.Connection.reset();
             slot.ReconnectNeeded = true;
+            slot.NextReconnectAt = std::chrono::steady_clock::now() + state->ReconnectInterval;
             return false;
         }
     }
@@ -771,6 +814,7 @@ QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnecte
     if (slot.Connection.get() == connection) {
         slot.Connected = true;
         slot.ReconnectNeeded = false;
+        slot.NextReconnectAt = {};
     }
     const bool isConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (wasConnected != isConnected) {
@@ -794,6 +838,9 @@ QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotDisconne
     if (slot.Connection.get() == connection) {
         slot.Connected = false;
         slot.ReconnectNeeded = !state->Stopping;
+        slot.NextReconnectAt = state->Stopping
+            ? std::chrono::steady_clock::time_point{}
+            : std::chrono::steady_clock::now() + state->ReconnectInterval;
     }
     const bool isConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (wasConnected != isConnected) {
@@ -817,6 +864,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED:
+        TqClientDebugLog("event-connected", slotIndex, connection);
         TqSampleConnectionRtt(connection);
         if (state) {
             auto notification = QuicClientSession::OnSlotConnected(state, slotIndex, connection);
@@ -849,6 +897,8 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
+        TqClientDebugLog("event-shutdown-transport", slotIndex, connection,
+            event->SHUTDOWN_INITIATED_BY_TRANSPORT.Status);
         (void)TqAbortConnectionTunnels(connection);
         TqSampleConnectionRtt(connection);
         if (TqTraceEnabled()) {
@@ -866,6 +916,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
+        TqClientDebugLog("event-shutdown-peer", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
         TqSampleConnectionRtt(connection);
         if (TqTraceEnabled()) {
@@ -882,6 +933,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
         if (TqTraceEnabled()) {
             TqUnregisterClientTraceConnection(connection);

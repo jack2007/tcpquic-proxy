@@ -60,6 +60,7 @@ private:
         std::unique_ptr<MsQuicConnection> Connection;
         bool Connected{false};
         bool ReconnectNeeded{false};
+        std::chrono::steady_clock::time_point NextReconnectAt{};
     };
 
     struct ConnectionStateNotification {
