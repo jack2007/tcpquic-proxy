@@ -13,6 +13,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,12 +21,15 @@ struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 
 struct TqLinuxRelayWorkerConfig {
+    uint32_t WorkerIndex{0};
     uint32_t EventBudget{4096};
     uint64_t ByteBudgetPerTick{64ull * 1024 * 1024};
     size_t ReadChunkSize{128 * 1024};
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
     uint32_t WorkerSlots{128};
+    uint64_t TcpWriteMaxBytes{0};
+    uint64_t TcpWriteBurstBytes{0};
     uint64_t MaxPendingBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     uint64_t DeferredReceiveCompleteBatchBytes{0};
@@ -62,6 +66,24 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
     uint64_t PendingBytes{0};
+    uint64_t ActiveRelays{0};
+    uint64_t MaxWorkerPendingBytes{0};
+    uint64_t MaxWorkerActiveRelays{0};
+    uint64_t MaxRelayPendingQuicReceiveBytes{0};
+    uint64_t MaxRelayPendingQuicReceiveQueue{0};
+    uint64_t MaxRelayTcpWriteEagainCount{0};
+    uint64_t HotRelayId{0};
+    uint32_t HotRelayWorkerIndex{0};
+    int HotRelayTcpFd{-1};
+    uint64_t HotRelayPendingQuicReceiveBytes{0};
+    uint64_t HotRelayPendingQuicReceiveQueue{0};
+    uint64_t HotRelayTcpWriteBytes{0};
+    uint64_t HotRelayTcpWriteEagainCount{0};
+    uint64_t HotRelayEpollOutEvents{0};
+    bool HotRelayTcpReadArmed{false};
+    bool HotRelayTcpWriteArmed{false};
+    std::string HotRelayLocalAddress;
+    std::string HotRelayPeerAddress;
     uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
     uint64_t QuicSendOperations{0};
@@ -70,9 +92,22 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpWriteBytes{0};
     uint64_t MaxTcpWriteIovUsed{0};
     uint64_t TcpWriteSendmsgCalls{0};
+    uint64_t TcpWriteAttemptBytes{0};
+    uint64_t MaxTcpWriteAttemptBytes{0};
     uint64_t MaxTcpWriteSendmsgBytes{0};
+    uint64_t TcpWriteAttemptBytesLe64K{0};
+    uint64_t TcpWriteAttemptBytesLe256K{0};
+    uint64_t TcpWriteAttemptBytesLe1M{0};
+    uint64_t TcpWriteAttemptBytesLe4M{0};
+    uint64_t TcpWriteAttemptBytesGt4M{0};
+    uint64_t TcpWriteReturnedBytesLe64K{0};
+    uint64_t TcpWriteReturnedBytesLe256K{0};
+    uint64_t TcpWriteReturnedBytesLe1M{0};
+    uint64_t TcpWriteReturnedBytesLe4M{0};
+    uint64_t TcpWriteReturnedBytesGt4M{0};
     uint64_t TcpWriteEagainCount{0};
     uint64_t TcpWritePartialCount{0};
+    uint64_t TcpWriteBurstStops{0};
     uint64_t ReadDisabledCount{0};
     uint64_t BufferAcquireCount{0};
     uint64_t StreamLookupScanCount{0};
@@ -89,6 +124,19 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t DeferredReceiveCompletionFlushes{0};
     uint64_t MaxPendingQuicReceiveBytes{0};
     uint64_t MaxPendingQuicReceiveQueue{0};
+    uint64_t QuicReceiveViewCount{0};
+    uint64_t QuicReceiveViewBytes{0};
+    uint64_t MaxQuicReceiveViewBytes{0};
+    uint64_t MaxQuicReceiveViewSlices{0};
+    uint64_t QuicReceiveViewBytesLe64K{0};
+    uint64_t QuicReceiveViewBytesLe256K{0};
+    uint64_t QuicReceiveViewBytesLe1M{0};
+    uint64_t QuicReceiveViewBytesLe4M{0};
+    uint64_t QuicReceiveViewBytesGt4M{0};
+    uint64_t QuicReceiveViewSlices1{0};
+    uint64_t QuicReceiveViewSlices2To4{0};
+    uint64_t QuicReceiveViewSlices5To16{0};
+    uint64_t QuicReceiveViewSlicesGt16{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
@@ -147,6 +195,7 @@ public:
     bool WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs);
     std::vector<uint8_t> TakeCapturedQuicBytesForTest(int tcpFd);
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
+    bool FlushTcpWritableForTest(int tcpFd);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
 
     static QUIC_STATUS QUIC_API StreamCallback(
@@ -171,6 +220,9 @@ private:
     struct StreamRelayBinding;
     void RecordError(RelayErrorKind kind);
     void RecordBufferAcquireFailure(RelayErrorKind kind, TqBufferAcquireFailure failure);
+    void RecordTcpWriteAttempt(uint64_t bytes);
+    void RecordTcpWriteReturned(uint64_t bytes);
+    void RecordQuicReceiveView(uint64_t bytes, uint64_t slices);
     void Wake();
     void RecordEventProducer();
     size_t DrainEvents(size_t budget);
@@ -250,9 +302,22 @@ private:
     std::atomic<uint64_t> TcpWriteBytes{0};
     std::atomic<uint64_t> MaxTcpWriteIovUsed{0};
     std::atomic<uint64_t> TcpWriteSendmsgCalls{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytes{0};
+    std::atomic<uint64_t> MaxTcpWriteAttemptBytes{0};
     std::atomic<uint64_t> MaxTcpWriteSendmsgBytes{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytesLe64K{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytesLe256K{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytesLe1M{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytesLe4M{0};
+    std::atomic<uint64_t> TcpWriteAttemptBytesGt4M{0};
+    std::atomic<uint64_t> TcpWriteReturnedBytesLe64K{0};
+    std::atomic<uint64_t> TcpWriteReturnedBytesLe256K{0};
+    std::atomic<uint64_t> TcpWriteReturnedBytesLe1M{0};
+    std::atomic<uint64_t> TcpWriteReturnedBytesLe4M{0};
+    std::atomic<uint64_t> TcpWriteReturnedBytesGt4M{0};
     std::atomic<uint64_t> TcpWriteEagainCount{0};
     std::atomic<uint64_t> TcpWritePartialCount{0};
+    std::atomic<uint64_t> TcpWriteBurstStops{0};
     std::atomic<uint64_t> ReadDisabledCount{0};
     std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
@@ -268,6 +333,19 @@ private:
     std::atomic<uint64_t> DeferredReceiveCompletionFlushes{0};
     std::atomic<uint64_t> MaxPendingQuicReceiveBytesObserved{0};
     std::atomic<uint64_t> MaxPendingQuicReceiveQueueObserved{0};
+    std::atomic<uint64_t> QuicReceiveViewCount{0};
+    std::atomic<uint64_t> QuicReceiveViewBytes{0};
+    std::atomic<uint64_t> MaxQuicReceiveViewBytes{0};
+    std::atomic<uint64_t> MaxQuicReceiveViewSlices{0};
+    std::atomic<uint64_t> QuicReceiveViewBytesLe64K{0};
+    std::atomic<uint64_t> QuicReceiveViewBytesLe256K{0};
+    std::atomic<uint64_t> QuicReceiveViewBytesLe1M{0};
+    std::atomic<uint64_t> QuicReceiveViewBytesLe4M{0};
+    std::atomic<uint64_t> QuicReceiveViewBytesGt4M{0};
+    std::atomic<uint64_t> QuicReceiveViewSlices1{0};
+    std::atomic<uint64_t> QuicReceiveViewSlices2To4{0};
+    std::atomic<uint64_t> QuicReceiveViewSlices5To16{0};
+    std::atomic<uint64_t> QuicReceiveViewSlicesGt16{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};

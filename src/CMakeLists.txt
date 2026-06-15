@@ -392,6 +392,26 @@ if(NOT WIN32)
     set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
     list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_blocking_relay_demo_test)
+
+    add_executable(tcpquic_tcp_sink_bench_test
+        unittest/tcp_sink_bench_test.cpp
+        runtime/tcp_sink_bench.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_tcp_sink_bench_test)
+    target_link_libraries(tcpquic_tcp_sink_bench_test Threads::Threads)
+    set_property(TARGET tcpquic_tcp_sink_bench_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_tcp_sink_bench_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_tcp_sink_bench
+        runtime/tcp_sink_bench_main.cpp
+        runtime/tcp_sink_bench.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_tcp_sink_bench)
+    target_link_libraries(tcpquic_tcp_sink_bench Threads::Threads)
+    set_property(TARGET tcpquic_tcp_sink_bench PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_tcp_sink_bench APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_tcp_sink_bench_test)
 endif()
 
 add_executable(tcpquic_http_connect_test

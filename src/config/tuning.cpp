@@ -150,6 +150,12 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideLinuxRelayWorkerSlots > 0) {
         out.LinuxRelayWorkerSlots = cfg.TuningOverrideLinuxRelayWorkerSlots;
     }
+    if (cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes > 0) {
+        out.LinuxRelayTcpWriteMaxBytes = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
+    }
+    if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes > 0) {
+        out.LinuxRelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
+    }
     if (cfg.TuningOverrideQuicFcw > 0) {
         out.ConnFlowControlWindow = cfg.TuningOverrideQuicFcw;
     }
@@ -568,7 +574,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
         "read_chunk=%zu worker_slots=%u "
-        "quic_complete_batch=%llu\n",
+        "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -582,6 +588,8 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes),
         tuning.LinuxRelayReadChunkSize,
         tuning.LinuxRelayWorkerSlots,
+        static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteMaxBytes),
+        static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteBurstBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes));
 }
 

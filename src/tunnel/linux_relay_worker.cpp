@@ -13,6 +13,8 @@
 #include <thread>
 
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
@@ -48,6 +50,41 @@ void UpdateAtomicMax(std::atomic<uint64_t>& target, uint64_t value) {
     }
 }
 
+std::string SocketAddressToString(const sockaddr_storage& storage, socklen_t length) {
+    char host[INET6_ADDRSTRLEN]{};
+    uint16_t port = 0;
+    if (storage.ss_family == AF_INET && length >= sizeof(sockaddr_in)) {
+        const auto* addr = reinterpret_cast<const sockaddr_in*>(&storage);
+        if (::inet_ntop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
+            return "inet:unknown";
+        }
+        port = ntohs(addr->sin_port);
+    } else if (storage.ss_family == AF_INET6 && length >= sizeof(sockaddr_in6)) {
+        const auto* addr = reinterpret_cast<const sockaddr_in6*>(&storage);
+        if (::inet_ntop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
+            return "inet6:unknown";
+        }
+        port = ntohs(addr->sin6_port);
+    } else if (storage.ss_family == AF_UNIX) {
+        return "unix";
+    } else {
+        return "family:" + std::to_string(storage.ss_family);
+    }
+    return std::string(host) + ":" + std::to_string(port);
+}
+
+std::string GetSocketNameString(int fd, bool peer) {
+    sockaddr_storage storage{};
+    socklen_t length = sizeof(storage);
+    const int rc = peer
+        ? ::getpeername(fd, reinterpret_cast<sockaddr*>(&storage), &length)
+        : ::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &length);
+    if (rc != 0) {
+        return peer ? "peer:unknown" : "local:unknown";
+    }
+    return SocketAddressToString(storage, length);
+}
+
 }  // namespace
 
 struct TqLinuxRelayWorker::StreamRelayBinding {
@@ -79,6 +116,9 @@ struct TqLinuxRelayWorker::RelayState {
     bool TcpWriteShutdownQueued{false};
     bool TcpReadArmed{true};
     bool TcpWriteArmed{false};
+    uint64_t TcpWriteBytes{0};
+    uint64_t TcpWriteEagainCount{0};
+    uint64_t EpollOutEvents{0};
     StreamRelayBinding* StreamBinding{nullptr};
     TqLinuxRelayBufferPool Pool;
 
@@ -141,6 +181,24 @@ bool TqLinuxRelayWorker::StartForTest() {
     }
     WakeFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (WakeFd < 0) {
+        Running.store(false);
+        return false;
+    }
+    EpollFd = ::epoll_create1(EPOLL_CLOEXEC);
+    if (EpollFd < 0) {
+        ::close(WakeFd);
+        WakeFd = -1;
+        Running.store(false);
+        return false;
+    }
+    epoll_event event{};
+    event.events = EPOLLIN;
+    event.data.fd = WakeFd;
+    if (::epoll_ctl(EpollFd, EPOLL_CTL_ADD, WakeFd, &event) != 0) {
+        ::close(EpollFd);
+        ::close(WakeFd);
+        EpollFd = -1;
+        WakeFd = -1;
         Running.store(false);
         return false;
     }
@@ -253,6 +311,70 @@ void TqLinuxRelayWorker::RecordBufferAcquireFailure(
         break;
     default:
         break;
+    }
+}
+
+void TqLinuxRelayWorker::RecordTcpWriteAttempt(uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    TcpWriteAttemptBytes.fetch_add(bytes);
+    UpdateAtomicMax(MaxTcpWriteAttemptBytes, bytes);
+    if (bytes <= 64ull * 1024) {
+        TcpWriteAttemptBytesLe64K.fetch_add(1);
+    } else if (bytes <= 256ull * 1024) {
+        TcpWriteAttemptBytesLe256K.fetch_add(1);
+    } else if (bytes <= 1024ull * 1024) {
+        TcpWriteAttemptBytesLe1M.fetch_add(1);
+    } else if (bytes <= 4ull * 1024 * 1024) {
+        TcpWriteAttemptBytesLe4M.fetch_add(1);
+    } else {
+        TcpWriteAttemptBytesGt4M.fetch_add(1);
+    }
+}
+
+void TqLinuxRelayWorker::RecordTcpWriteReturned(uint64_t bytes) {
+    if (bytes == 0) {
+        return;
+    }
+    if (bytes <= 64ull * 1024) {
+        TcpWriteReturnedBytesLe64K.fetch_add(1);
+    } else if (bytes <= 256ull * 1024) {
+        TcpWriteReturnedBytesLe256K.fetch_add(1);
+    } else if (bytes <= 1024ull * 1024) {
+        TcpWriteReturnedBytesLe1M.fetch_add(1);
+    } else if (bytes <= 4ull * 1024 * 1024) {
+        TcpWriteReturnedBytesLe4M.fetch_add(1);
+    } else {
+        TcpWriteReturnedBytesGt4M.fetch_add(1);
+    }
+}
+
+void TqLinuxRelayWorker::RecordQuicReceiveView(uint64_t bytes, uint64_t slices) {
+    QuicReceiveViewCount.fetch_add(1);
+    QuicReceiveViewBytes.fetch_add(bytes);
+    UpdateAtomicMax(MaxQuicReceiveViewBytes, bytes);
+    UpdateAtomicMax(MaxQuicReceiveViewSlices, slices);
+    if (bytes <= 64ull * 1024) {
+        QuicReceiveViewBytesLe64K.fetch_add(1);
+    } else if (bytes <= 256ull * 1024) {
+        QuicReceiveViewBytesLe256K.fetch_add(1);
+    } else if (bytes <= 1024ull * 1024) {
+        QuicReceiveViewBytesLe1M.fetch_add(1);
+    } else if (bytes <= 4ull * 1024 * 1024) {
+        QuicReceiveViewBytesLe4M.fetch_add(1);
+    } else {
+        QuicReceiveViewBytesGt4M.fetch_add(1);
+    }
+
+    if (slices <= 1) {
+        QuicReceiveViewSlices1.fetch_add(1);
+    } else if (slices <= 4) {
+        QuicReceiveViewSlices2To4.fetch_add(1);
+    } else if (slices <= 16) {
+        QuicReceiveViewSlices5To16.fetch_add(1);
+    } else {
+        QuicReceiveViewSlicesGt16.fetch_add(1);
     }
 }
 
@@ -917,6 +1039,7 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
         QuicReceiveViewEmptyFailures.fetch_add(1);
         return false;
     }
+    RecordQuicReceiveView(view->TotalLength, view->Slices.size());
 
     TqLinuxRelayEvent event{};
     event.Type = TqLinuxRelayEventType::QuicReceiveView;
@@ -1021,7 +1144,14 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         return;
     }
 
+    uint64_t burstBytes = 0;
     while (!relay->PendingQuicReceives.empty()) {
+        if (Config.TcpWriteBurstBytes != 0 && burstBytes >= Config.TcpWriteBurstBytes) {
+            TcpWriteBurstStops.fetch_add(1);
+            ArmTcpWritable(relay, true);
+            break;
+        }
+
         auto& view = relay->PendingQuicReceives.front();
         if (!view) {
             relay->PendingQuicReceives.pop_front();
@@ -1046,17 +1176,35 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         iov.reserve(Config.MaxIov);
         size_t sliceIndex = view->SliceIndex;
         size_t sliceOffset = view->SliceOffset;
-        while (sliceIndex < view->Slices.size() && iov.size() < Config.MaxIov) {
+        uint64_t attemptedBytes = 0;
+        uint64_t maxWriteBytes = Config.TcpWriteMaxBytes;
+        if (Config.TcpWriteBurstBytes != 0) {
+            const uint64_t remainingBurst = Config.TcpWriteBurstBytes - burstBytes;
+            maxWriteBytes = maxWriteBytes == 0
+                ? remainingBurst
+                : std::min(maxWriteBytes, remainingBurst);
+        }
+        while (sliceIndex < view->Slices.size() &&
+               iov.size() < Config.MaxIov &&
+               (maxWriteBytes == 0 || attemptedBytes < maxWriteBytes)) {
             const auto& slice = view->Slices[sliceIndex];
             if (sliceOffset >= slice.Length) {
                 ++sliceIndex;
                 sliceOffset = 0;
                 continue;
             }
+            uint64_t length = slice.Length - sliceOffset;
+            if (maxWriteBytes != 0 && attemptedBytes + length > maxWriteBytes) {
+                length = maxWriteBytes - attemptedBytes;
+            }
+            if (length == 0) {
+                break;
+            }
             iovec item{};
             item.iov_base = const_cast<uint8_t*>(slice.Data + sliceOffset);
-            item.iov_len = slice.Length - sliceOffset;
+            item.iov_len = static_cast<size_t>(length);
             iov.push_back(item);
+            attemptedBytes += length;
             ++sliceIndex;
             sliceOffset = 0;
         }
@@ -1070,18 +1218,17 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
             continue;
         }
 
-        uint64_t attemptedBytes = 0;
-        for (const auto& item : iov) {
-            attemptedBytes += static_cast<uint64_t>(item.iov_len);
-        }
-
+        RecordTcpWriteAttempt(attemptedBytes);
         const ssize_t sent = WritevNoSignal(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (sent > 0) {
             size_t remaining = static_cast<size_t>(sent);
+            burstBytes += static_cast<uint64_t>(sent);
+            relay->TcpWriteBytes += static_cast<uint64_t>(sent);
             TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent));
             TcpWriteBatches.fetch_add(1);
             TcpWriteSendmsgCalls.fetch_add(1);
             UpdateAtomicMax(MaxTcpWriteSendmsgBytes, static_cast<uint64_t>(sent));
+            RecordTcpWriteReturned(static_cast<uint64_t>(sent));
             if (static_cast<uint64_t>(sent) < attemptedBytes) {
                 TcpWritePartialCount.fetch_add(1);
             }
@@ -1120,6 +1267,13 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
                 }
                 relay->PendingQuicReceives.pop_front();
             }
+            if (Config.TcpWriteBurstBytes != 0 &&
+                burstBytes >= Config.TcpWriteBurstBytes &&
+                !relay->PendingQuicReceives.empty()) {
+                TcpWriteBurstStops.fetch_add(1);
+                ArmTcpWritable(relay, true);
+                break;
+            }
             continue;
         }
         if (sent < 0 && errno == EINTR) {
@@ -1127,6 +1281,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             TcpWriteEagainCount.fetch_add(1);
+            relay->TcpWriteEagainCount += 1;
             ArmTcpWritable(relay, true);
             break;
         }
@@ -1289,6 +1444,17 @@ bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
     return true;
 }
 
+bool TqLinuxRelayWorker::FlushTcpWritableForTest(int tcpFd) {
+    auto relay = FindRelayByFd(tcpFd);
+    if (relay == nullptr) {
+        return false;
+    }
+    FlushTcpWrites(relay.get());
+    FlushDeferredQuicReceives(relay.get());
+    FlushTcpWrites(relay.get());
+    return true;
+}
+
 bool TqLinuxRelayWorker::EnqueueQuicReceive(
     RelayState* relay,
     const uint8_t* data,
@@ -1342,31 +1508,57 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
         return;
     }
 
+    uint64_t burstBytes = 0;
     while (!relay->PendingTcpWrites.empty()) {
+        if (Config.TcpWriteBurstBytes != 0 && burstBytes >= Config.TcpWriteBurstBytes) {
+            TcpWriteBurstStops.fetch_add(1);
+            ArmTcpWritable(relay, true);
+            break;
+        }
+
         std::vector<iovec> iov;
         iov.reserve(Config.MaxIov);
+        uint64_t attemptedBytes = 0;
+        uint64_t maxWriteBytes = Config.TcpWriteMaxBytes;
+        if (Config.TcpWriteBurstBytes != 0) {
+            const uint64_t remainingBurst = Config.TcpWriteBurstBytes - burstBytes;
+            maxWriteBytes = maxWriteBytes == 0
+                ? remainingBurst
+                : std::min(maxWriteBytes, remainingBurst);
+        }
         for (const auto& view : relay->PendingTcpWrites) {
-            if (iov.size() >= Config.MaxIov) {
+            if (iov.size() >= Config.MaxIov ||
+                (maxWriteBytes != 0 && attemptedBytes >= maxWriteBytes)) {
+                break;
+            }
+            uint64_t length = view.Len;
+            if (maxWriteBytes != 0 && attemptedBytes + length > maxWriteBytes) {
+                length = maxWriteBytes - attemptedBytes;
+            }
+            if (length == 0) {
                 break;
             }
             iovec item{};
             item.iov_base = view.Data;
-            item.iov_len = view.Len;
+            item.iov_len = static_cast<size_t>(length);
             iov.push_back(item);
+            attemptedBytes += length;
         }
 
-        uint64_t attemptedBytes = 0;
-        for (const auto& item : iov) {
-            attemptedBytes += static_cast<uint64_t>(item.iov_len);
+        if (iov.empty()) {
+            break;
         }
-
+        RecordTcpWriteAttempt(attemptedBytes);
         const ssize_t sent = WritevNoSignal(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (sent > 0) {
             size_t remaining = static_cast<size_t>(sent);
+            burstBytes += static_cast<uint64_t>(sent);
+            relay->TcpWriteBytes += static_cast<uint64_t>(sent);
             TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent));
             TcpWriteBatches.fetch_add(1);
             TcpWriteSendmsgCalls.fetch_add(1);
             UpdateAtomicMax(MaxTcpWriteSendmsgBytes, static_cast<uint64_t>(sent));
+            RecordTcpWriteReturned(static_cast<uint64_t>(sent));
             if (static_cast<uint64_t>(sent) < attemptedBytes) {
                 TcpWritePartialCount.fetch_add(1);
             }
@@ -1385,6 +1577,13 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
                     remaining = 0;
                 }
             }
+            if (Config.TcpWriteBurstBytes != 0 &&
+                burstBytes >= Config.TcpWriteBurstBytes &&
+                !relay->PendingTcpWrites.empty()) {
+                TcpWriteBurstStops.fetch_add(1);
+                ArmTcpWritable(relay, true);
+                break;
+            }
             continue;
         }
         if (sent < 0 && errno == EINTR) {
@@ -1392,6 +1591,7 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             TcpWriteEagainCount.fetch_add(1);
+            relay->TcpWriteEagainCount += 1;
             ArmTcpWritable(relay, true);
             break;
         }
@@ -1404,7 +1604,7 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
         ::shutdown(relay->TcpFd, SHUT_WR);
         relay->TcpWriteShutdownQueued = false;
     }
-    if (relay->PendingTcpWrites.empty()) {
+    if (relay->PendingTcpWrites.empty() && relay->PendingQuicReceives.empty()) {
         ArmTcpWritable(relay, false);
     }
 }
@@ -1528,9 +1728,22 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpWriteBytes = TcpWriteBytes.load();
     snapshot.MaxTcpWriteIovUsed = MaxTcpWriteIovUsed.load();
     snapshot.TcpWriteSendmsgCalls = TcpWriteSendmsgCalls.load();
+    snapshot.TcpWriteAttemptBytes = TcpWriteAttemptBytes.load();
+    snapshot.MaxTcpWriteAttemptBytes = MaxTcpWriteAttemptBytes.load();
     snapshot.MaxTcpWriteSendmsgBytes = MaxTcpWriteSendmsgBytes.load();
+    snapshot.TcpWriteAttemptBytesLe64K = TcpWriteAttemptBytesLe64K.load();
+    snapshot.TcpWriteAttemptBytesLe256K = TcpWriteAttemptBytesLe256K.load();
+    snapshot.TcpWriteAttemptBytesLe1M = TcpWriteAttemptBytesLe1M.load();
+    snapshot.TcpWriteAttemptBytesLe4M = TcpWriteAttemptBytesLe4M.load();
+    snapshot.TcpWriteAttemptBytesGt4M = TcpWriteAttemptBytesGt4M.load();
+    snapshot.TcpWriteReturnedBytesLe64K = TcpWriteReturnedBytesLe64K.load();
+    snapshot.TcpWriteReturnedBytesLe256K = TcpWriteReturnedBytesLe256K.load();
+    snapshot.TcpWriteReturnedBytesLe1M = TcpWriteReturnedBytesLe1M.load();
+    snapshot.TcpWriteReturnedBytesLe4M = TcpWriteReturnedBytesLe4M.load();
+    snapshot.TcpWriteReturnedBytesGt4M = TcpWriteReturnedBytesGt4M.load();
     snapshot.TcpWriteEagainCount = TcpWriteEagainCount.load();
     snapshot.TcpWritePartialCount = TcpWritePartialCount.load();
+    snapshot.TcpWriteBurstStops = TcpWriteBurstStops.load();
     snapshot.ReadDisabledCount = ReadDisabledCount.load();
     snapshot.StreamLookupScanCount = StreamLookupScanCount.load();
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
@@ -1546,6 +1759,19 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.DeferredReceiveCompletionFlushes = DeferredReceiveCompletionFlushes.load();
     snapshot.MaxPendingQuicReceiveBytes = MaxPendingQuicReceiveBytesObserved.load();
     snapshot.MaxPendingQuicReceiveQueue = MaxPendingQuicReceiveQueueObserved.load();
+    snapshot.QuicReceiveViewCount = QuicReceiveViewCount.load();
+    snapshot.QuicReceiveViewBytes = QuicReceiveViewBytes.load();
+    snapshot.MaxQuicReceiveViewBytes = MaxQuicReceiveViewBytes.load();
+    snapshot.MaxQuicReceiveViewSlices = MaxQuicReceiveViewSlices.load();
+    snapshot.QuicReceiveViewBytesLe64K = QuicReceiveViewBytesLe64K.load();
+    snapshot.QuicReceiveViewBytesLe256K = QuicReceiveViewBytesLe256K.load();
+    snapshot.QuicReceiveViewBytesLe1M = QuicReceiveViewBytesLe1M.load();
+    snapshot.QuicReceiveViewBytesLe4M = QuicReceiveViewBytesLe4M.load();
+    snapshot.QuicReceiveViewBytesGt4M = QuicReceiveViewBytesGt4M.load();
+    snapshot.QuicReceiveViewSlices1 = QuicReceiveViewSlices1.load();
+    snapshot.QuicReceiveViewSlices2To4 = QuicReceiveViewSlices2To4.load();
+    snapshot.QuicReceiveViewSlices5To16 = QuicReceiveViewSlices5To16.load();
+    snapshot.QuicReceiveViewSlicesGt16 = QuicReceiveViewSlicesGt16.load();
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
     snapshot.Errors = Errors.load();
@@ -1592,14 +1818,47 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
 
     {
         std::lock_guard<std::mutex> relayGuard(RelayLock);
+        snapshot.ActiveRelays = Relays.size();
+        snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
+        bool hasHotRelay = false;
         for (const auto& relay : Relays) {
+            uint64_t relayPendingBytes = 0;
             snapshot.BufferAcquireCount += relay->Pool.AcquireCount();
-            snapshot.PendingBytes += relay->Pool.PendingBytes();
+            relayPendingBytes += relay->Pool.PendingBytes();
             for (const auto& view : relay->PendingTcpWrites) {
-                snapshot.PendingBytes += view.Len;
+                relayPendingBytes += view.Len;
             }
-            snapshot.PendingBytes += relay->PendingQuicReceiveBytes;
+            relayPendingBytes += relay->PendingQuicReceiveBytes;
+            snapshot.PendingBytes += relayPendingBytes;
+            snapshot.MaxRelayPendingQuicReceiveBytes = std::max(
+                snapshot.MaxRelayPendingQuicReceiveBytes,
+                relay->PendingQuicReceiveBytes);
+            snapshot.MaxRelayPendingQuicReceiveQueue = std::max<uint64_t>(
+                snapshot.MaxRelayPendingQuicReceiveQueue,
+                relay->PendingQuicReceives.size());
+            snapshot.MaxRelayTcpWriteEagainCount = std::max(
+                snapshot.MaxRelayTcpWriteEagainCount,
+                relay->TcpWriteEagainCount);
+            if (!hasHotRelay ||
+                relay->PendingQuicReceiveBytes > snapshot.HotRelayPendingQuicReceiveBytes ||
+                (relay->PendingQuicReceiveBytes == snapshot.HotRelayPendingQuicReceiveBytes &&
+                 relay->TcpWriteEagainCount > snapshot.HotRelayTcpWriteEagainCount)) {
+                hasHotRelay = true;
+                snapshot.HotRelayId = relay->Id;
+                snapshot.HotRelayWorkerIndex = Config.WorkerIndex;
+                snapshot.HotRelayTcpFd = relay->TcpFd;
+                snapshot.HotRelayPendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
+                snapshot.HotRelayPendingQuicReceiveQueue = relay->PendingQuicReceives.size();
+                snapshot.HotRelayTcpWriteBytes = relay->TcpWriteBytes;
+                snapshot.HotRelayTcpWriteEagainCount = relay->TcpWriteEagainCount;
+                snapshot.HotRelayEpollOutEvents = relay->EpollOutEvents;
+                snapshot.HotRelayTcpReadArmed = relay->TcpReadArmed;
+                snapshot.HotRelayTcpWriteArmed = relay->TcpWriteArmed;
+                snapshot.HotRelayLocalAddress = GetSocketNameString(relay->TcpFd, false);
+                snapshot.HotRelayPeerAddress = GetSocketNameString(relay->TcpFd, true);
+            }
         }
+        snapshot.MaxWorkerPendingBytes = snapshot.PendingBytes;
     }
     return snapshot;
 }
@@ -1626,6 +1885,7 @@ void TqLinuxRelayWorker::Run() {
                     continue;
                 }
                 if ((events[i].events & EPOLLOUT) != 0) {
+                    relay->EpollOutEvents += 1;
                     FlushTcpWrites(relay.get());
                     FlushDeferredQuicReceives(relay.get());
                     FlushTcpWrites(relay.get());
@@ -1737,11 +1997,14 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
     for (uint32_t i = 0; i < workerCount; ++i) {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = tuning.LinuxRelayWorkerEventBudget;
+        config.WorkerIndex = i;
         config.ByteBudgetPerTick = tuning.LinuxRelayWorkerByteBudgetPerTick;
         config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
         config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
         config.MaxIov = tuning.LinuxRelayMaxIov;
         config.WorkerSlots = tuning.LinuxRelayWorkerSlots;
+        config.TcpWriteMaxBytes = tuning.LinuxRelayTcpWriteMaxBytes;
+        config.TcpWriteBurstBytes = tuning.LinuxRelayTcpWriteBurstBytes;
         config.MaxPendingBytes = tuning.LinuxRelayPerWorkerPendingBytes;
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
@@ -1780,6 +2043,30 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.WakeupWrites += snapshot.WakeupWrites;
         total.PendingEvents += snapshot.PendingEvents;
         total.PendingBytes += snapshot.PendingBytes;
+        total.ActiveRelays += snapshot.ActiveRelays;
+        total.MaxWorkerPendingBytes = std::max(total.MaxWorkerPendingBytes, snapshot.MaxWorkerPendingBytes);
+        total.MaxWorkerActiveRelays = std::max(total.MaxWorkerActiveRelays, snapshot.MaxWorkerActiveRelays);
+        total.MaxRelayPendingQuicReceiveBytes = std::max(total.MaxRelayPendingQuicReceiveBytes, snapshot.MaxRelayPendingQuicReceiveBytes);
+        total.MaxRelayPendingQuicReceiveQueue = std::max(total.MaxRelayPendingQuicReceiveQueue, snapshot.MaxRelayPendingQuicReceiveQueue);
+        total.MaxRelayTcpWriteEagainCount = std::max(total.MaxRelayTcpWriteEagainCount, snapshot.MaxRelayTcpWriteEagainCount);
+        if (snapshot.HotRelayId != 0 &&
+            (total.HotRelayId == 0 ||
+             snapshot.HotRelayPendingQuicReceiveBytes > total.HotRelayPendingQuicReceiveBytes ||
+             (snapshot.HotRelayPendingQuicReceiveBytes == total.HotRelayPendingQuicReceiveBytes &&
+              snapshot.HotRelayTcpWriteEagainCount > total.HotRelayTcpWriteEagainCount))) {
+            total.HotRelayId = snapshot.HotRelayId;
+            total.HotRelayWorkerIndex = snapshot.HotRelayWorkerIndex;
+            total.HotRelayTcpFd = snapshot.HotRelayTcpFd;
+            total.HotRelayPendingQuicReceiveBytes = snapshot.HotRelayPendingQuicReceiveBytes;
+            total.HotRelayPendingQuicReceiveQueue = snapshot.HotRelayPendingQuicReceiveQueue;
+            total.HotRelayTcpWriteBytes = snapshot.HotRelayTcpWriteBytes;
+            total.HotRelayTcpWriteEagainCount = snapshot.HotRelayTcpWriteEagainCount;
+            total.HotRelayEpollOutEvents = snapshot.HotRelayEpollOutEvents;
+            total.HotRelayTcpReadArmed = snapshot.HotRelayTcpReadArmed;
+            total.HotRelayTcpWriteArmed = snapshot.HotRelayTcpWriteArmed;
+            total.HotRelayLocalAddress = snapshot.HotRelayLocalAddress;
+            total.HotRelayPeerAddress = snapshot.HotRelayPeerAddress;
+        }
         total.TcpReadBatches += snapshot.TcpReadBatches;
         total.TcpReadBytes += snapshot.TcpReadBytes;
         total.QuicSendOperations += snapshot.QuicSendOperations;
@@ -1788,14 +2075,40 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpWriteBytes += snapshot.TcpWriteBytes;
         total.MaxTcpWriteIovUsed = std::max(total.MaxTcpWriteIovUsed, snapshot.MaxTcpWriteIovUsed);
         total.TcpWriteSendmsgCalls += snapshot.TcpWriteSendmsgCalls;
+        total.TcpWriteAttemptBytes += snapshot.TcpWriteAttemptBytes;
+        total.MaxTcpWriteAttemptBytes = std::max(total.MaxTcpWriteAttemptBytes, snapshot.MaxTcpWriteAttemptBytes);
         total.MaxTcpWriteSendmsgBytes = std::max(total.MaxTcpWriteSendmsgBytes, snapshot.MaxTcpWriteSendmsgBytes);
+        total.TcpWriteAttemptBytesLe64K += snapshot.TcpWriteAttemptBytesLe64K;
+        total.TcpWriteAttemptBytesLe256K += snapshot.TcpWriteAttemptBytesLe256K;
+        total.TcpWriteAttemptBytesLe1M += snapshot.TcpWriteAttemptBytesLe1M;
+        total.TcpWriteAttemptBytesLe4M += snapshot.TcpWriteAttemptBytesLe4M;
+        total.TcpWriteAttemptBytesGt4M += snapshot.TcpWriteAttemptBytesGt4M;
+        total.TcpWriteReturnedBytesLe64K += snapshot.TcpWriteReturnedBytesLe64K;
+        total.TcpWriteReturnedBytesLe256K += snapshot.TcpWriteReturnedBytesLe256K;
+        total.TcpWriteReturnedBytesLe1M += snapshot.TcpWriteReturnedBytesLe1M;
+        total.TcpWriteReturnedBytesLe4M += snapshot.TcpWriteReturnedBytesLe4M;
+        total.TcpWriteReturnedBytesGt4M += snapshot.TcpWriteReturnedBytesGt4M;
         total.TcpWriteEagainCount += snapshot.TcpWriteEagainCount;
         total.TcpWritePartialCount += snapshot.TcpWritePartialCount;
+        total.TcpWriteBurstStops += snapshot.TcpWriteBurstStops;
         total.DeferredReceiveCompleteBytes += snapshot.DeferredReceiveCompleteBytes;
         total.DeferredReceiveCompletes += snapshot.DeferredReceiveCompletes;
         total.DeferredReceiveCompletionFlushes += snapshot.DeferredReceiveCompletionFlushes;
         total.MaxPendingQuicReceiveBytes = std::max(total.MaxPendingQuicReceiveBytes, snapshot.MaxPendingQuicReceiveBytes);
         total.MaxPendingQuicReceiveQueue = std::max(total.MaxPendingQuicReceiveQueue, snapshot.MaxPendingQuicReceiveQueue);
+        total.QuicReceiveViewCount += snapshot.QuicReceiveViewCount;
+        total.QuicReceiveViewBytes += snapshot.QuicReceiveViewBytes;
+        total.MaxQuicReceiveViewBytes = std::max(total.MaxQuicReceiveViewBytes, snapshot.MaxQuicReceiveViewBytes);
+        total.MaxQuicReceiveViewSlices = std::max(total.MaxQuicReceiveViewSlices, snapshot.MaxQuicReceiveViewSlices);
+        total.QuicReceiveViewBytesLe64K += snapshot.QuicReceiveViewBytesLe64K;
+        total.QuicReceiveViewBytesLe256K += snapshot.QuicReceiveViewBytesLe256K;
+        total.QuicReceiveViewBytesLe1M += snapshot.QuicReceiveViewBytesLe1M;
+        total.QuicReceiveViewBytesLe4M += snapshot.QuicReceiveViewBytesLe4M;
+        total.QuicReceiveViewBytesGt4M += snapshot.QuicReceiveViewBytesGt4M;
+        total.QuicReceiveViewSlices1 += snapshot.QuicReceiveViewSlices1;
+        total.QuicReceiveViewSlices2To4 += snapshot.QuicReceiveViewSlices2To4;
+        total.QuicReceiveViewSlices5To16 += snapshot.QuicReceiveViewSlices5To16;
+        total.QuicReceiveViewSlicesGt16 += snapshot.QuicReceiveViewSlicesGt16;
         total.QuicReceivePausedCount += snapshot.QuicReceivePausedCount;
         total.QuicReceiveResumedCount += snapshot.QuicReceiveResumedCount;
         total.ReadDisabledCount += snapshot.ReadDisabledCount;

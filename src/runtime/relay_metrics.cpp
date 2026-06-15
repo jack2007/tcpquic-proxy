@@ -54,14 +54,45 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = snapshot.PendingEvents;
     metrics.PendingBytes = snapshot.PendingBytes;
+    metrics.ActiveRelays = snapshot.ActiveRelays;
+    metrics.MaxWorkerPendingBytes = snapshot.MaxWorkerPendingBytes;
+    metrics.MaxWorkerActiveRelays = snapshot.MaxWorkerActiveRelays;
+    metrics.MaxRelayPendingQuicReceiveBytes = snapshot.MaxRelayPendingQuicReceiveBytes;
+    metrics.MaxRelayPendingQuicReceiveQueue = snapshot.MaxRelayPendingQuicReceiveQueue;
+    metrics.MaxRelayTcpWriteEagainCount = snapshot.MaxRelayTcpWriteEagainCount;
+    metrics.HotRelayId = snapshot.HotRelayId;
+    metrics.HotRelayWorkerIndex = snapshot.HotRelayWorkerIndex;
+    metrics.HotRelayTcpFd = snapshot.HotRelayTcpFd;
+    metrics.HotRelayPendingQuicReceiveBytes = snapshot.HotRelayPendingQuicReceiveBytes;
+    metrics.HotRelayPendingQuicReceiveQueue = snapshot.HotRelayPendingQuicReceiveQueue;
+    metrics.HotRelayTcpWriteBytes = snapshot.HotRelayTcpWriteBytes;
+    metrics.HotRelayTcpWriteEagainCount = snapshot.HotRelayTcpWriteEagainCount;
+    metrics.HotRelayEpollOutEvents = snapshot.HotRelayEpollOutEvents;
+    metrics.HotRelayTcpReadArmed = snapshot.HotRelayTcpReadArmed;
+    metrics.HotRelayTcpWriteArmed = snapshot.HotRelayTcpWriteArmed;
+    metrics.HotRelayLocalAddress = snapshot.HotRelayLocalAddress;
+    metrics.HotRelayPeerAddress = snapshot.HotRelayPeerAddress;
     metrics.TcpReadBytes = snapshot.TcpReadBytes;
     metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
     metrics.MaxTcpReadIovUsed = snapshot.MaxTcpReadIovUsed;
     metrics.MaxTcpWriteIovUsed = snapshot.MaxTcpWriteIovUsed;
     metrics.TcpWriteSendmsgCalls = snapshot.TcpWriteSendmsgCalls;
+    metrics.TcpWriteAttemptBytes = snapshot.TcpWriteAttemptBytes;
+    metrics.MaxTcpWriteAttemptBytes = snapshot.MaxTcpWriteAttemptBytes;
     metrics.MaxTcpWriteSendmsgBytes = snapshot.MaxTcpWriteSendmsgBytes;
+    metrics.TcpWriteAttemptBytesLe64K = snapshot.TcpWriteAttemptBytesLe64K;
+    metrics.TcpWriteAttemptBytesLe256K = snapshot.TcpWriteAttemptBytesLe256K;
+    metrics.TcpWriteAttemptBytesLe1M = snapshot.TcpWriteAttemptBytesLe1M;
+    metrics.TcpWriteAttemptBytesLe4M = snapshot.TcpWriteAttemptBytesLe4M;
+    metrics.TcpWriteAttemptBytesGt4M = snapshot.TcpWriteAttemptBytesGt4M;
+    metrics.TcpWriteReturnedBytesLe64K = snapshot.TcpWriteReturnedBytesLe64K;
+    metrics.TcpWriteReturnedBytesLe256K = snapshot.TcpWriteReturnedBytesLe256K;
+    metrics.TcpWriteReturnedBytesLe1M = snapshot.TcpWriteReturnedBytesLe1M;
+    metrics.TcpWriteReturnedBytesLe4M = snapshot.TcpWriteReturnedBytesLe4M;
+    metrics.TcpWriteReturnedBytesGt4M = snapshot.TcpWriteReturnedBytesGt4M;
     metrics.TcpWriteEagainCount = snapshot.TcpWriteEagainCount;
     metrics.TcpWritePartialCount = snapshot.TcpWritePartialCount;
+    metrics.TcpWriteBurstStops = snapshot.TcpWriteBurstStops;
     metrics.ReadDisabledCount = snapshot.ReadDisabledCount;
     metrics.CompressedTcpBytes = snapshot.CompressedTcpBytes;
     metrics.DecompressedTcpBytes = snapshot.DecompressedTcpBytes;
@@ -76,6 +107,19 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.DeferredReceiveCompletionFlushes = snapshot.DeferredReceiveCompletionFlushes;
     metrics.MaxPendingQuicReceiveBytes = snapshot.MaxPendingQuicReceiveBytes;
     metrics.MaxPendingQuicReceiveQueue = snapshot.MaxPendingQuicReceiveQueue;
+    metrics.QuicReceiveViewCount = snapshot.QuicReceiveViewCount;
+    metrics.QuicReceiveViewBytes = snapshot.QuicReceiveViewBytes;
+    metrics.MaxQuicReceiveViewBytes = snapshot.MaxQuicReceiveViewBytes;
+    metrics.MaxQuicReceiveViewSlices = snapshot.MaxQuicReceiveViewSlices;
+    metrics.QuicReceiveViewBytesLe64K = snapshot.QuicReceiveViewBytesLe64K;
+    metrics.QuicReceiveViewBytesLe256K = snapshot.QuicReceiveViewBytesLe256K;
+    metrics.QuicReceiveViewBytesLe1M = snapshot.QuicReceiveViewBytesLe1M;
+    metrics.QuicReceiveViewBytesLe4M = snapshot.QuicReceiveViewBytesLe4M;
+    metrics.QuicReceiveViewBytesGt4M = snapshot.QuicReceiveViewBytesGt4M;
+    metrics.QuicReceiveViewSlices1 = snapshot.QuicReceiveViewSlices1;
+    metrics.QuicReceiveViewSlices2To4 = snapshot.QuicReceiveViewSlices2To4;
+    metrics.QuicReceiveViewSlices5To16 = snapshot.QuicReceiveViewSlices5To16;
+    metrics.QuicReceiveViewSlicesGt16 = snapshot.QuicReceiveViewSlicesGt16;
     metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
     metrics.Errors = snapshot.Errors;
@@ -146,14 +190,57 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_events_processed\":" << metrics.EventsProcessed;
     out << ",\"linux_relay_pending_events\":" << metrics.PendingEvents;
     out << ",\"linux_relay_pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"linux_relay_active_relays\":" << metrics.ActiveRelays;
+    out << ",\"linux_relay_max_worker_pending_bytes\":" << metrics.MaxWorkerPendingBytes;
+    out << ",\"linux_relay_max_worker_active_relays\":" << metrics.MaxWorkerActiveRelays;
+    out << ",\"linux_relay_max_relay_pending_quic_receive_bytes\":"
+        << metrics.MaxRelayPendingQuicReceiveBytes;
+    out << ",\"linux_relay_max_relay_pending_quic_receive_queue\":"
+        << metrics.MaxRelayPendingQuicReceiveQueue;
+    out << ",\"linux_relay_max_relay_tcp_write_eagain_count\":"
+        << metrics.MaxRelayTcpWriteEagainCount;
+    out << ",\"linux_relay_hot_relay_id\":" << metrics.HotRelayId;
+    out << ",\"linux_relay_hot_relay_worker_index\":" << metrics.HotRelayWorkerIndex;
+    out << ",\"linux_relay_hot_relay_tcp_fd\":" << metrics.HotRelayTcpFd;
+    out << ",\"linux_relay_hot_relay_pending_quic_receive_bytes\":"
+        << metrics.HotRelayPendingQuicReceiveBytes;
+    out << ",\"linux_relay_hot_relay_pending_quic_receive_queue\":"
+        << metrics.HotRelayPendingQuicReceiveQueue;
+    out << ",\"linux_relay_hot_relay_tcp_write_bytes\":"
+        << metrics.HotRelayTcpWriteBytes;
+    out << ",\"linux_relay_hot_relay_tcp_write_eagain_count\":"
+        << metrics.HotRelayTcpWriteEagainCount;
+    out << ",\"linux_relay_hot_relay_epollout_events\":"
+        << metrics.HotRelayEpollOutEvents;
+    out << ",\"linux_relay_hot_relay_tcp_read_armed\":"
+        << (metrics.HotRelayTcpReadArmed ? "true" : "false");
+    out << ",\"linux_relay_hot_relay_tcp_write_armed\":"
+        << (metrics.HotRelayTcpWriteArmed ? "true" : "false");
+    out << ',';
+    TqAppendJsonString(out, "linux_relay_hot_relay_local", metrics.HotRelayLocalAddress);
+    out << ',';
+    TqAppendJsonString(out, "linux_relay_hot_relay_peer", metrics.HotRelayPeerAddress);
     out << ",\"linux_relay_tcp_read_bytes\":" << metrics.TcpReadBytes;
     out << ",\"linux_relay_tcp_write_bytes\":" << metrics.TcpWriteBytes;
     out << ",\"linux_relay_max_tcp_read_iov_used\":" << metrics.MaxTcpReadIovUsed;
     out << ",\"linux_relay_max_tcp_write_iov_used\":" << metrics.MaxTcpWriteIovUsed;
     out << ",\"linux_relay_tcp_write_sendmsg_calls\":" << metrics.TcpWriteSendmsgCalls;
+    out << ",\"linux_relay_tcp_write_attempt_bytes\":" << metrics.TcpWriteAttemptBytes;
+    out << ",\"linux_relay_max_tcp_write_attempt_bytes\":" << metrics.MaxTcpWriteAttemptBytes;
     out << ",\"linux_relay_max_tcp_write_sendmsg_bytes\":" << metrics.MaxTcpWriteSendmsgBytes;
+    out << ",\"linux_relay_tcp_write_attempt_bytes_le_64k\":" << metrics.TcpWriteAttemptBytesLe64K;
+    out << ",\"linux_relay_tcp_write_attempt_bytes_le_256k\":" << metrics.TcpWriteAttemptBytesLe256K;
+    out << ",\"linux_relay_tcp_write_attempt_bytes_le_1m\":" << metrics.TcpWriteAttemptBytesLe1M;
+    out << ",\"linux_relay_tcp_write_attempt_bytes_le_4m\":" << metrics.TcpWriteAttemptBytesLe4M;
+    out << ",\"linux_relay_tcp_write_attempt_bytes_gt_4m\":" << metrics.TcpWriteAttemptBytesGt4M;
+    out << ",\"linux_relay_tcp_write_returned_bytes_le_64k\":" << metrics.TcpWriteReturnedBytesLe64K;
+    out << ",\"linux_relay_tcp_write_returned_bytes_le_256k\":" << metrics.TcpWriteReturnedBytesLe256K;
+    out << ",\"linux_relay_tcp_write_returned_bytes_le_1m\":" << metrics.TcpWriteReturnedBytesLe1M;
+    out << ",\"linux_relay_tcp_write_returned_bytes_le_4m\":" << metrics.TcpWriteReturnedBytesLe4M;
+    out << ",\"linux_relay_tcp_write_returned_bytes_gt_4m\":" << metrics.TcpWriteReturnedBytesGt4M;
     out << ",\"linux_relay_tcp_write_eagain_count\":" << metrics.TcpWriteEagainCount;
     out << ",\"linux_relay_tcp_write_partial_count\":" << metrics.TcpWritePartialCount;
+    out << ",\"linux_relay_tcp_write_burst_stops\":" << metrics.TcpWriteBurstStops;
     out << ",\"linux_relay_read_disabled_count\":" << metrics.ReadDisabledCount;
     out << ',';
     TqAppendJsonString(out, "linux_relay_backend", metrics.Backend);
@@ -175,6 +262,19 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_deferred_receive_completion_flushes\":" << metrics.DeferredReceiveCompletionFlushes;
     out << ",\"linux_relay_max_pending_quic_receive_bytes\":" << metrics.MaxPendingQuicReceiveBytes;
     out << ",\"linux_relay_max_pending_quic_receive_queue\":" << metrics.MaxPendingQuicReceiveQueue;
+    out << ",\"linux_relay_quic_receive_view_count\":" << metrics.QuicReceiveViewCount;
+    out << ",\"linux_relay_quic_receive_view_bytes\":" << metrics.QuicReceiveViewBytes;
+    out << ",\"linux_relay_max_quic_receive_view_bytes\":" << metrics.MaxQuicReceiveViewBytes;
+    out << ",\"linux_relay_max_quic_receive_view_slices\":" << metrics.MaxQuicReceiveViewSlices;
+    out << ",\"linux_relay_quic_receive_view_bytes_le_64k\":" << metrics.QuicReceiveViewBytesLe64K;
+    out << ",\"linux_relay_quic_receive_view_bytes_le_256k\":" << metrics.QuicReceiveViewBytesLe256K;
+    out << ",\"linux_relay_quic_receive_view_bytes_le_1m\":" << metrics.QuicReceiveViewBytesLe1M;
+    out << ",\"linux_relay_quic_receive_view_bytes_le_4m\":" << metrics.QuicReceiveViewBytesLe4M;
+    out << ",\"linux_relay_quic_receive_view_bytes_gt_4m\":" << metrics.QuicReceiveViewBytesGt4M;
+    out << ",\"linux_relay_quic_receive_view_slices_1\":" << metrics.QuicReceiveViewSlices1;
+    out << ",\"linux_relay_quic_receive_view_slices_2_to_4\":" << metrics.QuicReceiveViewSlices2To4;
+    out << ",\"linux_relay_quic_receive_view_slices_5_to_16\":" << metrics.QuicReceiveViewSlices5To16;
+    out << ",\"linux_relay_quic_receive_view_slices_gt_16\":" << metrics.QuicReceiveViewSlicesGt16;
     out << ",\"linux_relay_quic_receive_paused_count\":" << metrics.QuicReceivePausedCount;
     out << ",\"linux_relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
     out << ",\"linux_relay_errors\":" << metrics.Errors;

@@ -449,6 +449,8 @@ void TqPrintUsage(FILE* out) {
         "  --relay-inflight-bytes <n> Override relay ideal in-flight bytes\n"
         "  --linux-relay-read-chunk-size <bytes> Override Linux relay TCP read chunk size\n"
         "  --linux-relay-worker-slots <n> Override Linux relay worker buffer slots per tunnel\n"
+        "  --linux-relay-tcp-write-max-bytes <bytes> Cap each Linux relay TCP sendmsg\n"
+        "  --linux-relay-tcp-write-burst-bytes <bytes> Cap bytes per Linux relay TCP write flush\n"
         "  --quic-fcw <bytes>         Override QUIC connection flow window\n"
         "  --quic-srw <bytes>         Override QUIC stream recv window\n"
         "  --quic-iw <packets>        Override QUIC initial window packets\n"
@@ -816,6 +818,30 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayWorkerSlots) ||
                 cfg.TuningOverrideLinuxRelayWorkerSlots == 0) {
                 err = "invalid value for --linux-relay-worker-slots";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--linux-relay-tcp-write-max-bytes", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--linux-relay-tcp-write-max-bytes", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes) ||
+                cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes == 0) {
+                err = "invalid value for --linux-relay-tcp-write-max-bytes";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--linux-relay-tcp-write-burst-bytes", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--linux-relay-tcp-write-burst-bytes", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes) ||
+                cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes == 0) {
+                err = "invalid value for --linux-relay-tcp-write-burst-bytes";
                 return false;
             }
         } else if (GetOptionValue(arg, "--quic-fcw", value)) {

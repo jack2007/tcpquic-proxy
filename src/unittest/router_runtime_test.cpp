@@ -343,6 +343,12 @@ int main() {
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 84;
         if (body.find("\"linux_relay_deferred_receive_complete_bytes\":") == std::string::npos) return 85;
         if (body.find("\"linux_relay_max_pending_quic_receive_bytes\":") == std::string::npos) return 87;
+        if (body.find("\"linux_relay_active_relays\":") == std::string::npos) return 88;
+        if (body.find("\"linux_relay_max_worker_pending_bytes\":") == std::string::npos) return 89;
+        if (body.find("\"linux_relay_max_relay_pending_quic_receive_bytes\":") == std::string::npos) return 90;
+        if (body.find("\"linux_relay_hot_relay_id\":") == std::string::npos) return 91;
+        if (body.find("\"linux_relay_hot_relay_local\":") == std::string::npos) return 92;
+        if (body.find("\"linux_relay_hot_relay_peer\":") == std::string::npos) return 93;
     }
     {
         TqServerMetrics serverMetrics;
@@ -425,6 +431,14 @@ int main() {
         if (body.find("\"linux_relay_tcp_write_partial_count\":") == std::string::npos) return 129;
         if (body.find("\"linux_relay_deferred_receive_completion_flushes\":") == std::string::npos) return 130;
         if (body.find("\"linux_relay_max_pending_quic_receive_queue\":") == std::string::npos) return 131;
+        if (body.find("\"linux_relay_max_worker_active_relays\":") == std::string::npos) return 147;
+        if (body.find("\"linux_relay_max_relay_pending_quic_receive_queue\":") == std::string::npos) return 148;
+        if (body.find("\"linux_relay_max_relay_tcp_write_eagain_count\":") == std::string::npos) return 149;
+        if (body.find("\"linux_relay_hot_relay_worker_index\":") == std::string::npos) return 150;
+        if (body.find("\"linux_relay_hot_relay_tcp_write_eagain_count\":") == std::string::npos) return 151;
+        if (body.find("\"linux_relay_hot_relay_pending_quic_receive_bytes\":") == std::string::npos) return 152;
+        if (body.find("\"linux_relay_hot_relay_epollout_events\":") == std::string::npos) return 153;
+        if (body.find("\"linux_relay_hot_relay_tcp_write_armed\":") == std::string::npos) return 154;
     }
     return 0;
 }

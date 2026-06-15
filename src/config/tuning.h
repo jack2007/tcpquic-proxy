@@ -28,6 +28,8 @@ struct TqTuningConfig {
     uint32_t LinuxRelayWorkerSlots{128};
     size_t LinuxRelayReadBatchBytes{1024 * 1024};
     size_t LinuxRelayQuicRecvBatchBytes{1024 * 1024};
+    uint64_t LinuxRelayTcpWriteMaxBytes{0};
+    uint64_t LinuxRelayTcpWriteBurstBytes{0};
     uint64_t LinuxRelayGlobalPendingBytes{256ull * 1024 * 1024};
     uint64_t LinuxRelayPerWorkerPendingBytes{32ull * 1024 * 1024};
     uint64_t LinuxRelayPerTunnelPendingBytes{4ull * 1024 * 1024};

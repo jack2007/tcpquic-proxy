@@ -269,6 +269,32 @@ int main() {
         TqConfig cfg{};
         std::string err;
         char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--quic-peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--quic-cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--quic-key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--quic-ca";
+        char arg9[] = "ca.pem";
+        char arg10[] = "--linux-relay-tcp-write-max-bytes";
+        char arg11[] = "4194304";
+        char arg12[] = "--linux-relay-tcp-write-burst-bytes";
+        char arg13[] = "16777216";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+            arg8, arg9, arg10, arg11, arg12, arg13};
+        assert(TqParseArgs(14, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        assert(cfg.Tuning.LinuxRelayTcpWriteMaxBytes == 4194304);
+        assert(cfg.Tuning.LinuxRelayTcpWriteBurstBytes == 16777216);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
         char arg1[] = "server";
         char arg2[] = "--quic-listen";
         char arg3[] = "127.0.0.1:4433";
