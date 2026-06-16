@@ -21,6 +21,7 @@ QUIC_PORT="${QUIC_PORT:-4433}"
 PERF_PORT="${PERF_PORT:-4434}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 DURATION_SEC="${DURATION_SEC:-30}"
+PROXY_EXTRA_ARGS="${PROXY_EXTRA_ARGS:-}"
 REPORT="${REPORT:-/tmp/dgx-msquic-vs-proxy-$(date +%Y%m%d-%H%M%S).md}"
 
 TMP="/tmp/dgx-msquic-proxy-$$"
@@ -155,7 +156,7 @@ proxy_args() {
     printf '%s' \
         "--tuning custom --quic-fcw 1073741824 --quic-srw 1073741824 --quic-iw 4000 \
         --quic-initrtt-ms ${initrtt} --relay-io-size 1048576 --relay-inflight-bytes 1073741824 \
-        --max-memory-mb 4096 --quic-connections ${quic_conns} --compress off"
+        --max-memory-mb 4096 --quic-connections ${quic_conns} --compress off ${PROXY_EXTRA_ARGS}"
 }
 
 start_proxy_stack() {
@@ -218,7 +219,10 @@ PY
 
 run_proxy_case() {
     local label="$1" initrtt="$2" quic_conns="$3" parallel="$4"
-    start_proxy_stack "$initrtt" "$quic_conns"
+    if ! start_proxy_stack "$initrtt" "$quic_conns"; then
+        log "tcpquic-proxy ${label}: failed to start proxy stack"
+        return 1
+    fi
     sleep 1
     local bps
     if [[ "$parallel" == "1" ]]; then
@@ -263,6 +267,7 @@ generate_certs
     echo "- 本机: ${BIND} | 对端: ${TARGET}"
     echo "- secnetperf: \`-exec:maxtput -down:${DURATION_SEC}s\`（server bind 为 \`ip:port\`）"
     echo "- 同一套 libmsquic: ${MSQUIC_LIB_DIR}"
+    echo "- tcpquic-proxy extra args: \`${PROXY_EXTRA_ARGS:-none}\`"
     echo ""
 } > "$REPORT"
 

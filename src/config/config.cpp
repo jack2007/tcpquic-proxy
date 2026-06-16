@@ -439,6 +439,7 @@ void TqPrintUsage(FILE* out) {
         "  --download-sink-test <sec>  Client: built-in download test that discards QUIC receive data before local TCP write\n"
         "  --upload-test <sec>         Client: built-in end-to-end upload speed test\n"
         "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
+        "  --quic-disable-1rtt-encryption Disable QUIC 1-RTT packet encryption (insecure lab use only)\n"
         "  --handshake-threads <n>    SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
         "  --compress <mode>          auto|zstd|off (default auto)\n"
         "  --compress-level <n>       Compression level (default 1)\n"
@@ -696,6 +697,8 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --quic-profile (max-throughput|low-latency)";
                 return false;
             }
+        } else if (std::strcmp(arg, "--quic-disable-1rtt-encryption") == 0) {
+            cfg.QuicDisable1RttEncryption = true;
         } else if (GetOptionValue(arg, "--handshake-threads", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--handshake-threads", err);

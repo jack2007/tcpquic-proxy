@@ -257,6 +257,22 @@ bool InitConfiguration(
     return true;
 }
 
+bool TqSetDisable1RttEncryption(MsQuicConnection* connection, const char* role) {
+    const uint8_t value = TRUE;
+    const QUIC_STATUS status = connection->SetParam(
+        QUIC_PARAM_CONN_DISABLE_1RTT_ENCRYPTION,
+        sizeof(value),
+        &value);
+    if (QUIC_FAILED(status)) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: failed to disable QUIC 1-RTT encryption on %s connection, 0x%x\n",
+            role,
+            status);
+        return false;
+    }
+    return true;
+}
+
 std::mutex g_serverConnIdLock;
 std::unordered_map<HQUIC, uint32_t> g_serverConnIds;
 std::atomic<uint32_t> g_nextServerConnId{1};
@@ -554,6 +570,9 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
         auto nextWake = deadline;
         const auto now = std::chrono::steady_clock::now();
         for (size_t i = 0; i < State->Slots.size(); ++i) {
+            if (ConnectedCountLocked(*State) > 0) {
+                return true;
+            }
             auto& slot = State->Slots[i];
             if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
                 anyConnected = true;
@@ -569,6 +588,11 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
                 guard.unlock();
                 StartSlotLocked(i);
                 guard.lock();
+                if (ConnectedCountLocked(*State) > 0) {
+                    return true;
+                }
+                nextWake = std::min(nextWake, std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+                break;
             }
         }
         if (anyConnected) {
@@ -682,6 +706,20 @@ void QuicClientSession::RunReconnectLoop(
             return;
         }
         (void)gate->Session->EnsureConnected(std::chrono::milliseconds(100));
+        gate->Session->StartAllDueSlots();
+    }
+}
+
+void QuicClientSession::StartAllDueSlots() {
+    const size_t count = Config.QuicConnections;
+    for (size_t i = 0; i < count; ++i) {
+        {
+            std::lock_guard<std::mutex> guard(State->Lock);
+            if (!State->Started || State->Stopping) {
+                return;
+            }
+        }
+        (void)StartSlotLocked(i);
     }
 }
 
@@ -696,6 +734,9 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
         }
 
         auto& slot = state->Slots[index];
+        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+            return true;
+        }
         const auto now = std::chrono::steady_clock::now();
         if (slot.ReconnectNeeded &&
             slot.NextReconnectAt != std::chrono::steady_clock::time_point{} &&
@@ -761,6 +802,15 @@ bool QuicClientSession::StartSlotLocked(size_t index) {
 
         slot.Context = newContext;
         connectionToStart = slot.Connection.get();
+        if (Config.QuicDisable1RttEncryption &&
+            !TqSetDisable1RttEncryption(connectionToStart, "client")) {
+            slot.Context = nullptr;
+            delete newContext;
+            slot.Connection.reset();
+            slot.ReconnectNeeded = true;
+            slot.NextReconnectAt = std::chrono::steady_clock::now() + state->ReconnectInterval;
+            return false;
+        }
         TqClientDebugLog("connection-opened", index, connectionToStart,
             slot.Connection->GetInitStatus());
     }
@@ -1089,6 +1139,13 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         session);
     if (connection == nullptr) {
         return QUIC_STATUS_OUT_OF_MEMORY;
+    }
+
+    if (session->Config.QuicDisable1RttEncryption &&
+        !TqSetDisable1RttEncryption(connection, "server")) {
+        connection->Handle = nullptr;
+        delete connection;
+        return QUIC_STATUS_INVALID_STATE;
     }
 
     if (QUIC_FAILED(connection->SetConfiguration(*session->Configuration))) {

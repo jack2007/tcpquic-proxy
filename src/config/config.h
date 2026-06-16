@@ -54,6 +54,7 @@ struct TqConfig {
     TqSpeedTestMode SpeedTestMode{TqSpeedTestMode::None};
     uint32_t SpeedTestDurationSec{0};
     TqQuicProfile QuicProfile{TqQuicProfile::MaxThroughput};
+    bool QuicDisable1RttEncryption{false};
     uint32_t HandshakeThreads = 8;
     std::string Compress = "auto";
     int CompressLevel = 1;

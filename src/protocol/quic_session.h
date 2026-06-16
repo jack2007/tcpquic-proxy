@@ -1,5 +1,6 @@
 #pragma once
 
+#define QUIC_API_ENABLE_INSECURE_FEATURES 1
 #define QUIC_API_ENABLE_PREVIEW_FEATURES 1
 
 #include "config.h"
@@ -96,6 +97,7 @@ private:
 
     void Stop(bool clearHandlers);
     bool StartSlotLocked(size_t index);
+    void StartAllDueSlots();
     void StartReconnectLoop();
     void StopReconnectLoop(const std::shared_ptr<ClientSharedState>& state);
     static void RunReconnectLoop(

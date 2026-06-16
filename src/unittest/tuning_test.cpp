@@ -205,6 +205,26 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
+        char arg2[] = "--quic-disable-1rtt-encryption";
+        char arg3[] = "--quic-peer";
+        char arg4[] = "127.0.0.1:4433";
+        char arg5[] = "--quic-cert";
+        char arg6[] = "cert.pem";
+        char arg7[] = "--quic-key";
+        char arg8[] = "key.pem";
+        char arg9[] = "--quic-ca";
+        char arg10[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10};
+        if (!TqParseArgs(11, argv, cfg, err) || !cfg.QuicDisable1RttEncryption) {
+            return 2;
+        }
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
         char arg2[] = "--quic-profile";
         char arg3[] = "low-latency";
         char arg4[] = "--quic-peer";
