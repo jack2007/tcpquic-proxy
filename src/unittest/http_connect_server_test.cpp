@@ -1,4 +1,5 @@
 #include "http_connect_server.h"
+#include "proxy_auth.h"
 
 #include <cassert>
 #include <cstring>
@@ -55,6 +56,19 @@ int main() {
     assert(TqHttpStatusForOpenError(TqOpenError::TcpRefused) == 502);
     assert(TqHttpStatusForOpenError(TqOpenError::TcpTimeout) == 504);
     assert(TqHttpStatusForOpenError(TqOpenError::Internal) == 500);
+
+    {
+        TqProxyAuthTable auth(std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+        const std::string authorized =
+            "CONNECT example.test:443 HTTP/1.1\r\n"
+            "Proxy-Authorization: Basic YWxpY2U6c2VjcmV0LWE=\r\n"
+            "\r\n";
+        assert(TqHttpConnectRequestAuthorized(authorized, auth));
+        const std::string unauthorized =
+            "CONNECT example.test:443 HTTP/1.1\r\n"
+            "\r\n";
+        assert(!TqHttpConnectRequestAuthorized(unauthorized, auth));
+    }
 
     return 0;
 }

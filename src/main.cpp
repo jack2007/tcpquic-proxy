@@ -30,6 +30,10 @@ struct TqTunnelReaperGuard {
     ~TqTunnelReaperGuard() { TqTunnelReaper::Instance().Stop(); }
 };
 
+std::shared_ptr<const TqProxyAuthTable> TqMakeProxyAuthTable(const TqRouterConfig& router) {
+    return std::make_shared<TqProxyAuthTable>(router.ProxyAuth);
+}
+
 class TqMultiPeerRuntimeAdapter : public TqPeerRuntimeAdapter {
 public:
     explicit TqMultiPeerRuntimeAdapter(const TqConfig& baseConfig) : BaseConfig(baseConfig) {}
@@ -176,14 +180,15 @@ private:
                 return false;
             }
 
-            auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, Pool.get());
+            const auto auth = TqMakeProxyAuthTable(Config.Router);
+            auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, Pool.get(), auth);
             if (!socks->Start(err)) {
                 return false;
             }
 
             std::unique_ptr<TqHttpConnectServer> http;
             if (!Config.HttpListen.empty()) {
-                http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, Pool.get());
+                http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, Pool.get(), auth);
                 if (!http->Start(err)) {
                     socks->Stop();
                     return false;
@@ -311,14 +316,15 @@ struct TqSinglePeerClientRuntime {
             return false;
         }
 
-        auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, &Pool);
+        auto auth = TqMakeProxyAuthTable(Config.Router);
+        auto socks = std::make_unique<TqSocks5Server>(Config.SocksListen, StartTunnel, &Pool, auth);
         if (!socks->Start(err)) {
             return false;
         }
 
         std::unique_ptr<TqHttpConnectServer> http;
         if (!Config.HttpListen.empty()) {
-            http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, &Pool);
+            http = std::make_unique<TqHttpConnectServer>(Config.HttpListen, StartTunnel, &Pool, auth);
             if (!http->Start(err)) {
                 socks->Stop();
                 return false;
@@ -544,7 +550,9 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
     }
 
     out = cfg;
+    const std::vector<TqProxyAuthUser> proxyAuth = cfg.Router.ProxyAuth;
     out.Router = TqRouterConfig{};
+    out.Router.ProxyAuth = proxyAuth;
     out.ClientConfigPath.clear();
     out.QuicPeer = selected->QuicPeer;
     out.SocksListen = selected->SocksListen.empty() ? cfg.SocksListen : selected->SocksListen;

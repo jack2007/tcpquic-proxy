@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include "acl.h"
+#include "proxy_auth.h"
 #include "tuning.h"
 
 #include <spdlog/spdlog.h>
@@ -168,6 +169,10 @@ public:
                 }
             } else if (key == "peers") {
                 if (!ParsePeers(router.Peers)) {
+                    return false;
+                }
+            } else if (key == "proxy_auth") {
+                if (!ParseProxyAuth(router.ProxyAuth)) {
                     return false;
                 }
             } else if (!SkipValue()) {
@@ -603,6 +608,47 @@ private:
             return Error("quic_reconnect_interval_ms out of range");
         }
         return Consume('}') || Error("malformed peer object");
+    }
+
+    bool ParseProxyAuth(std::vector<TqProxyAuthUser>& users) {
+        users.clear();
+        if (!Consume('[')) {
+            return Error("proxy_auth must be an array");
+        }
+        if (Consume(']')) {
+            return true;
+        }
+        do {
+            TqProxyAuthUser user;
+            if (!ParseProxyAuthUser(user)) {
+                return false;
+            }
+            users.push_back(std::move(user));
+        } while (Consume(','));
+        return Consume(']') || Error("malformed proxy_auth array");
+    }
+
+    bool ParseProxyAuthUser(TqProxyAuthUser& user) {
+        if (!Consume('{')) {
+            return Error("proxy_auth entry must be an object");
+        }
+        if (Consume('}')) {
+            return true;
+        }
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) {
+                return Error("malformed proxy_auth object");
+            }
+            if (key == "username") {
+                if (!ParseString(user.Username)) return Error("invalid proxy_auth.username");
+            } else if (key == "password") {
+                if (!ParseString(user.Password)) return Error("invalid proxy_auth.password");
+            } else {
+                return Error(("unknown proxy_auth key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed proxy_auth object");
     }
 
     bool ParseString(std::string& out) {
@@ -1506,6 +1552,9 @@ bool TqLoadClientConfig(const std::string& path, TqRouterConfig& router, std::st
 bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
     if (router.Version != 1) {
         err = "client config version must be 1";
+        return false;
+    }
+    if (!TqValidateProxyAuthUsers(router.ProxyAuth, err)) {
         return false;
     }
     std::set<std::string> peerIds;

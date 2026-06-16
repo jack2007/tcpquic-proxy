@@ -21,6 +21,7 @@ namespace {
 
 constexpr uint8_t TqSocks5Version = 0x05;
 constexpr uint8_t TqSocks5AuthNone = 0x00;
+constexpr uint8_t TqSocks5AuthUserPass = 0x02;
 constexpr uint8_t TqSocks5AuthNoAcceptable = 0xFF;
 constexpr uint8_t TqSocks5CmdConnect = 0x01;
 constexpr uint8_t TqSocks5Rsv = 0x00;
@@ -189,7 +190,38 @@ bool TqCreateListenSocket(const std::string& listenHostPort, TqSocketHandle& lis
     return false;
 }
 
-bool TqReadSocks5Greeting(TqSocketHandle clientFd) {
+bool TqReadSocks5UsernamePasswordAuth(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
+    uint8_t header[2]{};
+    if (!TqRecvAll(clientFd, header, sizeof(header)) || header[0] != 0x01) {
+        return false;
+    }
+
+    const uint8_t ulen = header[1];
+    if (ulen == 0 || ulen > TqProxyAuthTable::kMaxFieldBytes) {
+        return false;
+    }
+
+    std::string username(static_cast<size_t>(ulen), '\0');
+    if (!TqRecvAll(clientFd, reinterpret_cast<uint8_t*>(username.data()), ulen)) {
+        return false;
+    }
+
+    uint8_t plen = 0;
+    if (!TqRecvAll(clientFd, &plen, 1) || plen == 0 || plen > TqProxyAuthTable::kMaxFieldBytes) {
+        return false;
+    }
+
+    std::string password(static_cast<size_t>(plen), '\0');
+    if (!TqRecvAll(clientFd, reinterpret_cast<uint8_t*>(password.data()), plen)) {
+        return false;
+    }
+
+    const uint8_t status = auth.Validate(username, password) ? 0x00 : 0x01;
+    const uint8_t response[] = {0x01, status};
+    return status == 0x00 && TqSendAll(clientFd, response, sizeof(response));
+}
+
+bool TqReadSocks5Greeting(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
     uint8_t header[2]{};
     if (!TqRecvAll(clientFd, header, sizeof(header)) || header[0] != TqSocks5Version || header[1] == 0) {
         return false;
@@ -200,14 +232,31 @@ bool TqReadSocks5Greeting(TqSocketHandle clientFd) {
         return false;
     }
 
-    for (uint8_t i = 0; i < header[1]; ++i) {
-        if (methods[i] == TqSocks5AuthNone) {
-            return TqSendSocks5Method(clientFd, TqSocks5AuthNone);
+    if (!auth.Enabled()) {
+        for (uint8_t i = 0; i < header[1]; ++i) {
+            if (methods[i] == TqSocks5AuthNone) {
+                return TqSendSocks5Method(clientFd, TqSocks5AuthNone);
+            }
         }
+        (void)TqSendSocks5Method(clientFd, TqSocks5AuthNoAcceptable);
+        return false;
     }
 
-    (void)TqSendSocks5Method(clientFd, TqSocks5AuthNoAcceptable);
-    return false;
+    bool wantsUserPass = false;
+    for (uint8_t i = 0; i < header[1]; ++i) {
+        if (methods[i] == TqSocks5AuthUserPass) {
+            wantsUserPass = true;
+            break;
+        }
+    }
+    if (!wantsUserPass) {
+        (void)TqSendSocks5Method(clientFd, TqSocks5AuthNoAcceptable);
+        return false;
+    }
+    if (!TqSendSocks5Method(clientFd, TqSocks5AuthUserPass)) {
+        return false;
+    }
+    return TqReadSocks5UsernamePasswordAuth(clientFd, auth);
 }
 
 bool TqReadSocks5ConnectRequest(TqSocketHandle clientFd, TunnelRequest& out, uint8_t& rep) {
@@ -270,10 +319,13 @@ bool TqReadSocks5ConnectRequest(TqSocketHandle clientFd, TunnelRequest& out, uin
     return true;
 }
 
-void TqHandleSocks5Client(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
+void TqHandleSocks5Client(
+    TqSocketHandle clientFd,
+    const TunnelStartFn& onTunnel,
+    const TqProxyAuthTable& auth) {
     TqTraceProxyAccepted(TqTraceProxyProto::Socks, clientFd);
 
-    if (!TqReadSocks5Greeting(clientFd)) {
+    if (!TqReadSocks5Greeting(clientFd, auth)) {
         TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -410,10 +462,19 @@ bool TqParseSocks5ConnectRequest(const std::vector<uint8_t>& request, TunnelRequ
     return true;
 }
 
-TqSocks5Server::TqSocks5Server(std::string listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool) :
+TqSocks5Server::TqSocks5Server(
+    std::string listenHostPort,
+    TunnelStartFn onTunnel,
+    TqThreadPool* pool,
+    std::shared_ptr<const TqProxyAuthTable> auth) :
     ListenHostPort(std::move(listenHostPort)),
     OnTunnel(std::move(onTunnel)),
-    Pool(pool) {}
+    Pool(pool),
+    Auth(std::move(auth)) {
+    if (!Auth) {
+        Auth = std::make_shared<TqProxyAuthTable>();
+    }
+}
 
 TqSocks5Server::~TqSocks5Server() {
     Stop();
@@ -466,15 +527,21 @@ void TqSocks5Server::Run() {
             continue;
         }
 
-        if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel]() { TqHandleSocks5Client(clientFd, onTunnel); })) {
+        if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel, auth = Auth]() {
+                TqHandleSocks5Client(clientFd, onTunnel, *auth);
+            })) {
             TqCloseSocket(clientFd);
         }
     }
 }
 
-void RunSocks5Server(const std::string& listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool) {
+void RunSocks5Server(
+    const std::string& listenHostPort,
+    TunnelStartFn onTunnel,
+    TqThreadPool* pool,
+    std::shared_ptr<const TqProxyAuthTable> auth) {
     std::string err;
-    TqSocks5Server server(listenHostPort, std::move(onTunnel), pool);
+    TqSocks5Server server(listenHostPort, std::move(onTunnel), pool, std::move(auth));
     if (!server.Start(err)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
         return;
