@@ -392,6 +392,7 @@ int main() {
         if (body.find("\"linux_relay_events_processed\"") == std::string::npos) return 96;
         if (body.find("\"linux_relay_pending_events\"") == std::string::npos) return 97;
         if (body.find("\"linux_relay_pending_bytes\"") == std::string::npos) return 98;
+        if (body.find("\"linux_relay_buffer_bytes_in_use\":") == std::string::npos) return 171;
         if (body.find("\"linux_relay_tcp_read_bytes\"") == std::string::npos) return 99;
         if (body.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (body.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
@@ -413,7 +414,6 @@ int main() {
         if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":") == std::string::npos) return 137;
-        if (body.find("\"linux_relay_tcp_read_buffer_acquire_slot_limit_failures\":") == std::string::npos) return 138;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":") == std::string::npos) return 139;
         if (body.find("\"linux_relay_quic_send_failures\":") == std::string::npos) return 134;
         if (body.find("\"linux_relay_quic_send_buffer_too_large_failures\":") == std::string::npos) return 140;
@@ -444,8 +444,6 @@ int main() {
         if (body.find("\"linux_relay_active_quic_send_relays\":") == std::string::npos) return 157;
         if (body.find("\"linux_relay_current_pending_quic_receive_bytes\":") == std::string::npos) return 158;
         if (body.find("\"linux_relay_current_pending_quic_receive_queue\":") == std::string::npos) return 159;
-        if (body.find("\"linux_relay_worker_slots_allocated\":") == std::string::npos) return 160;
-        if (body.find("\"linux_relay_worker_slots_free\":") == std::string::npos) return 161;
         if (body.find("\"linux_relay_tcp_read_armed_relays\":") == std::string::npos) return 162;
         if (body.find("\"linux_relay_tcp_read_disabled_relays\":") == std::string::npos) return 163;
         if (body.find("\"linux_relay_tcp_write_armed_relays\":") == std::string::npos) return 164;

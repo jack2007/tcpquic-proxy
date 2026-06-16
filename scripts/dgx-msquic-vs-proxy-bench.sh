@@ -91,8 +91,15 @@ remote_kill_all() {
 
 deploy_msquic_perf() {
     ssh -o BatchMode=yes "$PEER" "mkdir -p ${REMOTE_DIR}"
-    rsync -az "${SECNETPERF}" "${MSQUIC_LIB_DIR}/libmsquic.so"* "${PEER}:${REMOTE_DIR}/"
-    ssh -o BatchMode=yes "$PEER" "cd ${REMOTE_DIR} && ln -sf libmsquic.so.2.5.9 libmsquic.so.2 2>/dev/null || ln -sf \$(ls libmsquic.so.2.* | head -1) libmsquic.so.2"
+    shopt -s nullglob
+    local msquic_sos=("${MSQUIC_LIB_DIR}"/libmsquic.so*)
+    shopt -u nullglob
+    if ((${#msquic_sos[@]})); then
+        rsync -az "${SECNETPERF}" "${msquic_sos[@]}" "${PEER}:${REMOTE_DIR}/"
+        ssh -o BatchMode=yes "$PEER" "cd ${REMOTE_DIR} && ln -sf libmsquic.so.2.5.9 libmsquic.so.2 2>/dev/null || ln -sf \$(ls libmsquic.so.2.* | head -1) libmsquic.so.2"
+    else
+        rsync -az "${SECNETPERF}" "${PEER}:${REMOTE_DIR}/"
+    fi
     rsync -az "${BIN}" "${PEER}:${REMOTE_BIN}"
 }
 
@@ -123,9 +130,13 @@ generate_certs() {
 
 run_secnetperf_server() {
     remote_kill_all
+    local remote_ld=""
+    if ssh -o BatchMode=yes "$PEER" "test -e ${REMOTE_DIR}/libmsquic.so.2 || test -e ${REMOTE_DIR}/libmsquic.so"; then
+        remote_ld="LD_LIBRARY_PATH=${REMOTE_DIR} "
+    fi
     # -port 在同时传 -bind 时会被忽略，必须写成 bind:ip:port
     ssh -o BatchMode=yes "$PEER" \
-        "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_DIR}/secnetperf \
+        "${remote_ld}nohup ${REMOTE_DIR}/secnetperf \
         -exec:maxtput -bind:${TARGET}:${PERF_PORT} \
         </dev/null >/tmp/dgx-secnetperf-server.log 2>&1 &"
     sleep 2
@@ -138,7 +149,11 @@ run_secnetperf_client() {
     if [[ "$streams" -gt 0 ]]; then
         extra+=("-streams:${streams}")
     fi
-    LD_LIBRARY_PATH="${MSQUIC_LIB_DIR}" "${SECNETPERF}" \
+    local -a secnetperf_env=()
+    if compgen -G "${MSQUIC_LIB_DIR}/libmsquic.so"* >/dev/null; then
+        secnetperf_env=(env "LD_LIBRARY_PATH=${MSQUIC_LIB_DIR}")
+    fi
+    "${secnetperf_env[@]}" "${SECNETPERF}" \
         -target:"${TARGET}" -bind:"${BIND}" -port:"${PERF_PORT}" \
         -exec:maxtput -conns:"${conns}" "${extra[@]}" \
         -down:"${DURATION_SEC}s" -ptput:1 \

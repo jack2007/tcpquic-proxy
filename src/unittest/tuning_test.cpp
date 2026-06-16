@@ -63,13 +63,11 @@ int main() {
         cfg.TargetRttMs = 50;
         cfg.TuningOverrideRelayIoSize = 512 * 1024;
         cfg.TuningOverrideLinuxRelayReadChunkSize = 256 * 1024;
-        cfg.TuningOverrideLinuxRelayWorkerSlots = 192;
         cfg.TuningOverrideQuicInitRttMs = 50;
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.RelayIoSize == 512 * 1024);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 256 * 1024);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 192);
         assert(cfg.Tuning.InitialRttMs == 50);
     }
 
@@ -79,12 +77,10 @@ int main() {
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
         cfg.TuningOverrideRelayInflightBytes = 1073741824;
         cfg.TuningOverrideLinuxRelayReadChunkSize = 131072;
-        cfg.TuningOverrideLinuxRelayWorkerSlots = 2048;
         cfg.TuningOverrideQuicInitRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 131072);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 2048);
         assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 512ull * 1024 * 1024);
         assert(cfg.Tuning.InitialRttMs == 100);
     }
@@ -274,15 +270,12 @@ int main() {
         char arg9[] = "ca.pem";
         char arg10[] = "--linux-relay-read-chunk-size";
         char arg11[] = "262144";
-        char arg12[] = "--linux-relay-worker-slots";
-        char arg13[] = "192";
         char* argv[] = {
             arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
-            arg8, arg9, arg10, arg11, arg12, arg13};
-        assert(TqParseArgs(14, argv, cfg, err));
+            arg8, arg9, arg10, arg11};
+        assert(TqParseArgs(12, argv, cfg, err));
         TqFinalizeConfig(cfg);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 262144);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 192);
     }
 
     {
@@ -328,15 +321,12 @@ int main() {
         char arg11[] = "127.0.0.0/8";
         char arg12[] = "--linux-relay-read-chunk-size";
         char arg13[] = "131072";
-        char arg14[] = "--linux-relay-worker-slots";
-        char arg15[] = "160";
         char* argv[] = {
             arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8,
-            arg9, arg10, arg11, arg12, arg13, arg14, arg15};
-        assert(TqParseArgs(16, argv, cfg, err));
+            arg9, arg10, arg11, arg12, arg13};
+        assert(TqParseArgs(14, argv, cfg, err));
         TqFinalizeConfig(cfg);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 131072);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 160);
     }
 
     {
@@ -369,7 +359,6 @@ int main() {
         assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
         assert(cfg.Tuning.LinuxRelayMaxIov == 16);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 128);
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 4096);
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
@@ -378,7 +367,7 @@ int main() {
         if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0) {
             return 1;
         }
-        assert(cfg.Tuning.LinuxRelayPerWorkerPendingBytes >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
+        assert(cfg.Tuning.MaxPendingBufferBytesPerRelay >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
 
         TqSetRelayMemoryBudget(0);
     }
@@ -390,7 +379,6 @@ int main() {
 
         assert(cfg.Tuning.LinuxRelayMaxIov == 8);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
-        assert(cfg.Tuning.LinuxRelayWorkerSlots == 128);
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 256 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 1024);
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 16u * 1024 * 1024);

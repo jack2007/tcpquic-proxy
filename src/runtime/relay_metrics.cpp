@@ -54,14 +54,13 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = snapshot.PendingEvents;
     metrics.PendingBytes = snapshot.PendingBytes;
+    metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;
     metrics.ActiveRelays = snapshot.ActiveRelays;
     metrics.ActiveTcpRelays = snapshot.ActiveTcpRelays;
     metrics.ActiveSinkRelays = snapshot.ActiveSinkRelays;
     metrics.ActiveQuicSendRelays = snapshot.ActiveQuicSendRelays;
     metrics.CurrentPendingQuicReceiveBytes = snapshot.CurrentPendingQuicReceiveBytes;
     metrics.CurrentPendingQuicReceiveQueue = snapshot.CurrentPendingQuicReceiveQueue;
-    metrics.WorkerSlotsAllocated = snapshot.WorkerSlotsAllocated;
-    metrics.WorkerSlotsFree = snapshot.WorkerSlotsFree;
     metrics.TcpReadArmedRelays = snapshot.TcpReadArmedRelays;
     metrics.TcpReadDisabledRelays = snapshot.TcpReadDisabledRelays;
     metrics.TcpWriteArmedRelays = snapshot.TcpWriteArmedRelays;
@@ -143,8 +142,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpReadBufferAcquireFailures = snapshot.TcpReadBufferAcquireFailures;
     metrics.TcpReadBufferAcquirePendingBudgetFailures =
         snapshot.TcpReadBufferAcquirePendingBudgetFailures;
-    metrics.TcpReadBufferAcquireSlotLimitFailures =
-        snapshot.TcpReadBufferAcquireSlotLimitFailures;
     metrics.TcpReadBufferAcquireAllocFailures = snapshot.TcpReadBufferAcquireAllocFailures;
     metrics.TcpToQuicCompressFailures = snapshot.TcpToQuicCompressFailures;
     metrics.TcpToQuicCompressUpdateFailures = snapshot.TcpToQuicCompressUpdateFailures;
@@ -152,8 +149,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpToQuicBufferAcquireFailures = snapshot.TcpToQuicBufferAcquireFailures;
     metrics.TcpToQuicBufferAcquirePendingBudgetFailures =
         snapshot.TcpToQuicBufferAcquirePendingBudgetFailures;
-    metrics.TcpToQuicBufferAcquireSlotLimitFailures =
-        snapshot.TcpToQuicBufferAcquireSlotLimitFailures;
     metrics.TcpToQuicBufferAcquireAllocFailures =
         snapshot.TcpToQuicBufferAcquireAllocFailures;
     metrics.QuicSendFailures = snapshot.QuicSendFailures;
@@ -169,8 +164,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicReceiveTcpBufferAcquireFailures = snapshot.QuicReceiveTcpBufferAcquireFailures;
     metrics.QuicReceiveTcpBufferAcquirePendingBudgetFailures =
         snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
-    metrics.QuicReceiveTcpBufferAcquireSlotLimitFailures =
-        snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures;
     metrics.QuicReceiveTcpBufferAcquireAllocFailures =
         snapshot.QuicReceiveTcpBufferAcquireAllocFailures;
     metrics.TcpWriteHardErrors = snapshot.TcpWriteHardErrors;
@@ -206,6 +199,7 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_events_processed\":" << metrics.EventsProcessed;
     out << ",\"linux_relay_pending_events\":" << metrics.PendingEvents;
     out << ",\"linux_relay_pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"linux_relay_buffer_bytes_in_use\":" << metrics.RelayBufferBytesInUse;
     out << ",\"linux_relay_active_relays\":" << metrics.ActiveRelays;
     out << ",\"linux_relay_active_tcp_relays\":" << metrics.ActiveTcpRelays;
     out << ",\"linux_relay_active_sink_relays\":" << metrics.ActiveSinkRelays;
@@ -214,8 +208,6 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.CurrentPendingQuicReceiveBytes;
     out << ",\"linux_relay_current_pending_quic_receive_queue\":"
         << metrics.CurrentPendingQuicReceiveQueue;
-    out << ",\"linux_relay_worker_slots_allocated\":" << metrics.WorkerSlotsAllocated;
-    out << ",\"linux_relay_worker_slots_free\":" << metrics.WorkerSlotsFree;
     out << ",\"linux_relay_tcp_read_armed_relays\":" << metrics.TcpReadArmedRelays;
     out << ",\"linux_relay_tcp_read_disabled_relays\":" << metrics.TcpReadDisabledRelays;
     out << ",\"linux_relay_tcp_write_armed_relays\":" << metrics.TcpWriteArmedRelays;
@@ -318,8 +310,6 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.TcpReadBufferAcquireFailures;
     out << ",\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":"
         << metrics.TcpReadBufferAcquirePendingBudgetFailures;
-    out << ",\"linux_relay_tcp_read_buffer_acquire_slot_limit_failures\":"
-        << metrics.TcpReadBufferAcquireSlotLimitFailures;
     out << ",\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":"
         << metrics.TcpReadBufferAcquireAllocFailures;
     out << ",\"linux_relay_tcp_to_quic_compress_failures\":"
@@ -332,8 +322,6 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.TcpToQuicBufferAcquireFailures;
     out << ",\"linux_relay_tcp_to_quic_buffer_acquire_pending_budget_failures\":"
         << metrics.TcpToQuicBufferAcquirePendingBudgetFailures;
-    out << ",\"linux_relay_tcp_to_quic_buffer_acquire_slot_limit_failures\":"
-        << metrics.TcpToQuicBufferAcquireSlotLimitFailures;
     out << ",\"linux_relay_tcp_to_quic_buffer_acquire_alloc_failures\":"
         << metrics.TcpToQuicBufferAcquireAllocFailures;
     out << ",\"linux_relay_quic_send_failures\":" << metrics.QuicSendFailures;
@@ -357,8 +345,6 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.QuicReceiveTcpBufferAcquireFailures;
     out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures\":"
         << metrics.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
-    out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_slot_limit_failures\":"
-        << metrics.QuicReceiveTcpBufferAcquireSlotLimitFailures;
     out << ",\"linux_relay_quic_receive_tcp_buffer_acquire_alloc_failures\":"
         << metrics.QuicReceiveTcpBufferAcquireAllocFailures;
     out << ",\"linux_relay_tcp_write_hard_errors\":" << metrics.TcpWriteHardErrors;

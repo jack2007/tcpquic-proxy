@@ -94,7 +94,7 @@ struct TqLinuxRelayWorker::StreamRelayBinding {
     std::atomic<bool> Closing{false};
 };
 
-struct TqLinuxRelayWorker::RelayState {
+struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     uint64_t Id{0};
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
@@ -125,7 +125,6 @@ struct TqLinuxRelayWorker::RelayState {
     uint64_t TcpWriteEagainCount{0};
     uint64_t EpollOutEvents{0};
     StreamRelayBinding* StreamBinding{nullptr};
-    TqLinuxRelayBufferPool Pool;
 
     RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
         : TcpFd(registration.TcpFd),
@@ -136,12 +135,8 @@ struct TqLinuxRelayWorker::RelayState {
           CompressAlgo(registration.CompressAlgo),
           EnableQuicSends(registration.EnableQuicSends),
           SinkQuicReceives(registration.SinkQuicReceives),
-          SinkQuicReceiveBytes(registration.SinkQuicReceiveBytes),
-          Pool(
-              config.ReadChunkSize,
-              config.WorkerSlots,
-              config.MaxPendingBytes) {
-        Pool.Reserve(config.WorkerSlots);
+          SinkQuicReceiveBytes(registration.SinkQuicReceiveBytes) {
+        MaxPendingBufferBytes = config.MaxPendingBufferBytes;
     }
 };
 
@@ -280,14 +275,10 @@ void TqLinuxRelayWorker::RecordBufferAcquireFailure(
 
     auto recordByReason = [failure](
         std::atomic<uint64_t>& pendingBudget,
-        std::atomic<uint64_t>& slotLimit,
         std::atomic<uint64_t>& alloc) {
         switch (failure) {
         case TqBufferAcquireFailure::PendingBytesLimit:
             pendingBudget.fetch_add(1);
-            break;
-        case TqBufferAcquireFailure::SlotLimit:
-            slotLimit.fetch_add(1);
             break;
         case TqBufferAcquireFailure::AllocationFailure:
             alloc.fetch_add(1);
@@ -301,19 +292,16 @@ void TqLinuxRelayWorker::RecordBufferAcquireFailure(
     case RelayErrorKind::TcpReadBufferAcquire:
         recordByReason(
             TcpReadBufferAcquirePendingBudgetFailures,
-            TcpReadBufferAcquireSlotLimitFailures,
             TcpReadBufferAcquireAllocFailures);
         break;
     case RelayErrorKind::TcpToQuicBufferAcquire:
         recordByReason(
             TcpToQuicBufferAcquirePendingBudgetFailures,
-            TcpToQuicBufferAcquireSlotLimitFailures,
             TcpToQuicBufferAcquireAllocFailures);
         break;
     case RelayErrorKind::QuicReceiveTcpBufferAcquire:
         recordByReason(
             QuicReceiveTcpBufferAcquirePendingBudgetFailures,
-            QuicReceiveTcpBufferAcquireSlotLimitFailures,
             QuicReceiveTcpBufferAcquireAllocFailures);
         break;
     default:
@@ -646,11 +634,6 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     uint64_t readBytes = 0;
     const uint64_t tickBudget = std::min<uint64_t>(Config.ReadBatchBytes, Config.ByteBudgetPerTick);
     while (readBytes < tickBudget) {
-        if (relay->Pool.PendingBytes() + Config.ReadChunkSize > relay->Pool.MaxPendingBytes()) {
-            ArmTcpReadable(relay, false);
-            break;
-        }
-
         std::vector<TqBufferRef> refs;
         std::vector<iovec> iov;
         const size_t maxIov = std::min<size_t>(Config.MaxIov, 1024);
@@ -659,10 +642,9 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
 
         for (size_t i = 0; i < maxIov && readBytes + Config.ReadChunkSize <= tickBudget; ++i) {
             TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
-            auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
+            auto buffer = TqAllocateRelayBuffer(relay, Config.ReadChunkSize, &acquireFailure);
             if (!buffer) {
-                if (acquireFailure == TqBufferAcquireFailure::PendingBytesLimit ||
-                    acquireFailure == TqBufferAcquireFailure::SlotLimit) {
+                if (acquireFailure == TqBufferAcquireFailure::PendingBytesLimit) {
                     ArmTcpReadable(relay, false);
                 } else {
                     RecordBufferAcquireFailure(RelayErrorKind::TcpReadBufferAcquire, acquireFailure);
@@ -769,7 +751,7 @@ bool TqLinuxRelayWorker::BuildTcpToQuicViews(
     size_t offset = 0;
     while (offset < relay->CompressionOutput.size()) {
         TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
-        auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
+        auto buffer = TqAllocateRelayBuffer(relay, Config.ReadChunkSize, &acquireFailure);
         if (!buffer) {
             RecordBufferAcquireFailure(
                 RelayErrorKind::TcpToQuicBufferAcquire, acquireFailure);
@@ -804,7 +786,7 @@ bool TqLinuxRelayWorker::FinishTcpToQuic(RelayState* relay) {
         size_t offset = 0;
         while (offset < relay->CompressionOutput.size()) {
             TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
-            auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
+            auto buffer = TqAllocateRelayBuffer(relay, Config.ReadChunkSize, &acquireFailure);
             if (!buffer) {
                 RecordBufferAcquireFailure(
                     RelayErrorKind::TcpToQuicBufferAcquire, acquireFailure);
@@ -1139,7 +1121,7 @@ uint64_t TqLinuxRelayWorker::MaxPendingQuicReceiveBytesPerRelay() const {
     if (Config.MaxPendingQuicReceiveBytesPerRelay != 0) {
         return Config.MaxPendingQuicReceiveBytesPerRelay;
     }
-    return Config.MaxPendingBytes;
+    return Config.MaxPendingBufferBytes;
 }
 
 uint64_t TqLinuxRelayWorker::LowPendingQuicReceiveBytesPerRelay() const {
@@ -1415,7 +1397,7 @@ bool TqLinuxRelayWorker::DrainCompressedQuicReceiveView(
         }
 
         TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
-        auto output = relay->Pool.AcquireWorker(&acquireFailure);
+        auto output = TqAllocateRelayBuffer(relay, Config.ReadChunkSize, &acquireFailure);
         if (!output) {
             RecordBufferAcquireFailure(RelayErrorKind::QuicReceiveTcpBufferAcquire, acquireFailure);
             ArmTcpWritable(relay, true);
@@ -1565,7 +1547,7 @@ bool TqLinuxRelayWorker::EnqueueQuicReceive(
     size_t offset = 0;
     while (offset < writeLength) {
         TqBufferAcquireFailure acquireFailure = TqBufferAcquireFailure::None;
-        auto buffer = relay->Pool.AcquireWorker(&acquireFailure);
+        auto buffer = TqAllocateRelayBuffer(relay, Config.ReadChunkSize, &acquireFailure);
         if (!buffer) {
             RecordBufferAcquireFailure(
                 RelayErrorKind::QuicReceiveTcpBufferAcquire, acquireFailure);
@@ -1862,8 +1844,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpReadBufferAcquireFailures = TcpReadBufferAcquireFailures.load();
     snapshot.TcpReadBufferAcquirePendingBudgetFailures =
         TcpReadBufferAcquirePendingBudgetFailures.load();
-    snapshot.TcpReadBufferAcquireSlotLimitFailures =
-        TcpReadBufferAcquireSlotLimitFailures.load();
     snapshot.TcpReadBufferAcquireAllocFailures = TcpReadBufferAcquireAllocFailures.load();
     snapshot.TcpToQuicCompressFailures = TcpToQuicCompressFailures.load();
     snapshot.TcpToQuicCompressUpdateFailures = TcpToQuicCompressUpdateFailures.load();
@@ -1871,8 +1851,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.TcpToQuicBufferAcquireFailures = TcpToQuicBufferAcquireFailures.load();
     snapshot.TcpToQuicBufferAcquirePendingBudgetFailures =
         TcpToQuicBufferAcquirePendingBudgetFailures.load();
-    snapshot.TcpToQuicBufferAcquireSlotLimitFailures =
-        TcpToQuicBufferAcquireSlotLimitFailures.load();
     snapshot.TcpToQuicBufferAcquireAllocFailures =
         TcpToQuicBufferAcquireAllocFailures.load();
     snapshot.QuicSendFailures = QuicSendFailures.load();
@@ -1888,8 +1866,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.QuicReceiveTcpBufferAcquireFailures = QuicReceiveTcpBufferAcquireFailures.load();
     snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures =
         QuicReceiveTcpBufferAcquirePendingBudgetFailures.load();
-    snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures =
-        QuicReceiveTcpBufferAcquireSlotLimitFailures.load();
     snapshot.QuicReceiveTcpBufferAcquireAllocFailures =
         QuicReceiveTcpBufferAcquireAllocFailures.load();
     snapshot.TcpWriteHardErrors = TcpWriteHardErrors.load();
@@ -1905,10 +1881,11 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
         snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
         bool hasHotRelay = false;
         for (const auto& relay : Relays) {
-            uint64_t relayPendingBytes = 0;
-            snapshot.BufferAcquireCount += relay->Pool.AcquireCount();
-            snapshot.WorkerSlotsAllocated += relay->Pool.AllocatedCount();
-            snapshot.WorkerSlotsFree += relay->Pool.FreeCount();
+            uint64_t relayPendingBytes =
+                relay->PendingBufferBytes.load(std::memory_order_relaxed);
+            snapshot.BufferAcquireCount +=
+                relay->AllocateCount.load(std::memory_order_relaxed);
+            snapshot.RelayBufferBytesInUse += relayPendingBytes;
             if (relay->TcpFd >= 0) {
                 ++snapshot.ActiveTcpRelays;
             }
@@ -1937,7 +1914,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
             }
             snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
-            relayPendingBytes += relay->Pool.PendingBytes();
             for (const auto& view : relay->PendingTcpWrites) {
                 relayPendingBytes += view.Len;
                 snapshot.PendingTcpWriteBytes += view.Len;
@@ -2118,10 +2094,9 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
         config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
         config.MaxIov = tuning.LinuxRelayMaxIov;
-        config.WorkerSlots = tuning.LinuxRelayWorkerSlots;
         config.TcpWriteMaxBytes = tuning.LinuxRelayTcpWriteMaxBytes;
         config.TcpWriteBurstBytes = tuning.LinuxRelayTcpWriteBurstBytes;
-        config.MaxPendingBytes = tuning.LinuxRelayPerWorkerPendingBytes;
+        config.MaxPendingBufferBytes = tuning.MaxPendingBufferBytesPerRelay;
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
         auto worker = std::make_unique<TqLinuxRelayWorker>(config);
@@ -2165,8 +2140,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.ActiveQuicSendRelays += snapshot.ActiveQuicSendRelays;
         total.CurrentPendingQuicReceiveBytes += snapshot.CurrentPendingQuicReceiveBytes;
         total.CurrentPendingQuicReceiveQueue += snapshot.CurrentPendingQuicReceiveQueue;
-        total.WorkerSlotsAllocated += snapshot.WorkerSlotsAllocated;
-        total.WorkerSlotsFree += snapshot.WorkerSlotsFree;
+        total.RelayBufferBytesInUse += snapshot.RelayBufferBytesInUse;
         total.TcpReadArmedRelays += snapshot.TcpReadArmedRelays;
         total.TcpReadDisabledRelays += snapshot.TcpReadDisabledRelays;
         total.TcpWriteArmedRelays += snapshot.TcpWriteArmedRelays;
@@ -2257,8 +2231,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpReadBufferAcquireFailures += snapshot.TcpReadBufferAcquireFailures;
         total.TcpReadBufferAcquirePendingBudgetFailures +=
             snapshot.TcpReadBufferAcquirePendingBudgetFailures;
-        total.TcpReadBufferAcquireSlotLimitFailures +=
-            snapshot.TcpReadBufferAcquireSlotLimitFailures;
         total.TcpReadBufferAcquireAllocFailures += snapshot.TcpReadBufferAcquireAllocFailures;
         total.TcpToQuicCompressFailures += snapshot.TcpToQuicCompressFailures;
         total.TcpToQuicCompressUpdateFailures += snapshot.TcpToQuicCompressUpdateFailures;
@@ -2266,8 +2238,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpToQuicBufferAcquireFailures += snapshot.TcpToQuicBufferAcquireFailures;
         total.TcpToQuicBufferAcquirePendingBudgetFailures +=
             snapshot.TcpToQuicBufferAcquirePendingBudgetFailures;
-        total.TcpToQuicBufferAcquireSlotLimitFailures +=
-            snapshot.TcpToQuicBufferAcquireSlotLimitFailures;
         total.TcpToQuicBufferAcquireAllocFailures +=
             snapshot.TcpToQuicBufferAcquireAllocFailures;
         total.QuicSendFailures += snapshot.QuicSendFailures;
@@ -2283,8 +2253,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.QuicReceiveTcpBufferAcquireFailures += snapshot.QuicReceiveTcpBufferAcquireFailures;
         total.QuicReceiveTcpBufferAcquirePendingBudgetFailures +=
             snapshot.QuicReceiveTcpBufferAcquirePendingBudgetFailures;
-        total.QuicReceiveTcpBufferAcquireSlotLimitFailures +=
-            snapshot.QuicReceiveTcpBufferAcquireSlotLimitFailures;
         total.QuicReceiveTcpBufferAcquireAllocFailures +=
             snapshot.QuicReceiveTcpBufferAcquireAllocFailures;
         total.TcpWriteHardErrors += snapshot.TcpWriteHardErrors;

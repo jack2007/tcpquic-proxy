@@ -49,7 +49,7 @@
 
 | 工具 | 说明 |
 |------|------|
-| CMake ≥ 3.16 | 构建系统 |
+| CMake ≥ 3.20 | 构建系统（msquic 静态库集成要求） |
 | C/C++ 编译器 | GCC 10+ 或 clang（需要完整 C++17 `<filesystem>` 支持） |
 | `perl`、`make` | msquic 编译 quictls 时使用（OpenSSL `Configure` + `make install_dev`） |
 | Git | 初始化子模块 |
@@ -65,7 +65,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 ### 运行时
 
-`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread 等），**不依赖** 系统安装的 libzstd / libssl。构建产物与 vendored 静态库、`libmsquic.so` 同目录部署即可（CMake 已设置 `$ORIGIN` RPATH）。
+`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread、libnuma 等），**不依赖** 系统安装的 libzstd / libssl / libmsquic。默认将 msquic（含 quictls）、zstd、spdlog **静态链入** 主程序，部署时只需拷贝单个 `tcpquic-proxy` 可执行文件。
 
 ### 测试与脚本（不链接进二进制）
 
@@ -81,6 +81,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 | 开关 | 默认 | 说明 |
 |------|------|------|
+| `TCPQUIC_MSQUIC_SHARED` | `OFF` | 设为 `ON` 时构建 `libmsquic.so` 动态库（旧行为） |
 | `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF` | 设为 `ON` 时 msquic 使用系统 `libcrypto`，而非 vendored quictls |
 
 本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。
@@ -139,7 +140,7 @@ cmake --build build --target \
   tcpquic_config_router_test \
   tcpquic_control_test \
   tcpquic_http_connect_test \
-  tcpquic_linux_relay_buffer_pool_test \
+  tcpquic_relay_buffer_test \
   tcpquic_linux_relay_worker_io_test \
   tcpquic_linux_relay_worker_queue_test \
   tcpquic_relay_backend_selection_test \

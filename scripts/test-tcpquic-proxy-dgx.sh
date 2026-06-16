@@ -42,9 +42,7 @@ ensure_remote_bin() {
     fi
     log "deploying binary to ${PEER}:${REMOTE_DIR}"
     remote "mkdir -p ${REMOTE_DIR}"
-    rsync -az "$BIN" "${ROOT}/build/bin/Release/libmsquic.so.2" \
-        "${ROOT}/build/bin/Release/libmsquic.so.2.6.0" \
-        "${PEER}:${REMOTE_DIR}/"
+    rsync -az "$BIN" "${PEER}:${REMOTE_DIR}/"
     remote "chmod +x ${REMOTE_BIN}"
 }
 

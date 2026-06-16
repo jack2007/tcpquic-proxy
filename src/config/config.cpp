@@ -3,6 +3,8 @@
 #include "acl.h"
 #include "tuning.h"
 
+#include <spdlog/spdlog.h>
+
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -349,7 +351,9 @@ private:
             if (key == "read_chunk_size") {
                 if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayReadChunkSize, "relay.linux.read_chunk_size")) return false;
             } else if (key == "worker_slots") {
-                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayWorkerSlots, "relay.linux.worker_slots")) return false;
+                uint32_t ignored = 0;
+                if (!ParseNonZeroUint32(ignored, "relay.linux.worker_slots")) return false;
+                spdlog::warn("relay.linux.worker_slots is deprecated and ignored");
             } else if (key == "tcp_write_max_bytes") {
                 if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes, "relay.linux.tcp_write_max_bytes")) return false;
             } else if (key == "tcp_write_burst_bytes") {
@@ -850,49 +854,62 @@ void TqPrintUsage(FILE* out) {
     std::fprintf(out,
         "Usage: tcpquic-proxy client|server [options]\n"
         "\n"
-        "Options:\n"
-        "  --config <path>            Runtime config JSON; command line overrides file values\n"
-        "  --socks-listen <addr>      SOCKS5 listen address (default 127.0.0.1:1080)\n"
-        "  --http-listen <addr>       HTTP CONNECT listen address (default 127.0.0.1:8080)\n"
-        "  --client-config <path>     Router client config JSON (client)\n"
-        "  --admin-listen <addr>      Router admin listen address\n"
-        "  --quic-peer <addr>         QUIC peer address (client, required)\n"
-        "  --quic-listen <addr>       QUIC listen address (server, required)\n"
-        "  --quic-cert <path>         TLS certificate PEM (required)\n"
-        "  --quic-key <path>          TLS private key PEM (required)\n"
-        "  --quic-ca <path>           CA certificate PEM (required)\n"
-        "  --quic-connections <n>     QUIC connection count (default 1)\n"
-        "  --quic-reconnect-interval-ms <n> Client reconnect interval in ms (1000..60000, default 3000)\n"
-        "  --warmup-mb <n>            Client startup download warmup per QUIC conn (default 0)\n"
-        "  --warmup-target <host:port> Warmup HTTP target (required when --warmup-mb > 0)\n"
-        "  --warmup-path <path>       Warmup HTTP GET path (default /)\n"
-        "  --download-test <sec>       Client: built-in end-to-end download speed test\n"
-        "  --download-sink-test <sec>  Client: built-in download test that discards QUIC receive data before local TCP write\n"
-        "  --upload-test <sec>         Client: built-in end-to-end upload speed test\n"
+        "Client and Server:\n"
+        "  --config <path>              Runtime JSON config file\n"
+        "                              (preferred; see docs/config_guide.md)\n"
+        "  --quic-cert <path>           TLS certificate PEM path\n"
+        "  --quic-key <path>            TLS private key PEM path\n"
+        "  --quic-ca <path>             CA certificate PEM path\n"
+        "  --admin-listen <addr>        Admin HTTP listen address for /health and /metrics\n"
+        "  --compress <mode>            auto|zstd|off (default auto)\n"
+        "  --compress-level <n>         Compression level (default 1)\n"
+        "\n"
+        "Client specific:\n"
+        "  --socks-listen <addr>        SOCKS5 listen address (default 127.0.0.1:1080)\n"
+        "  --http-listen <addr>         HTTP CONNECT listen address (default 127.0.0.1:8080)\n"
+        "  --client-config <path>       Legacy router client config JSON\n"
+        "  --quic-peer <addr>           Legacy single-peer QUIC address\n"
+        "  --quic-connections <n>       QUIC connection count (default 1)\n"
+        "  --quic-reconnect-interval-ms <n>\n"
+        "                              Client reconnect interval in ms (1000..60000)\n"
+        "  --handshake-threads <n>      SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
+        "  --warmup-mb <n>              Startup download warmup per QUIC conn (default 0)\n"
+        "  --warmup-target <host:port>  Warmup HTTP target (required when --warmup-mb > 0)\n"
+        "  --warmup-path <path>         Warmup HTTP GET path (default /)\n"
+        "  --download-test <sec>        Built-in end-to-end download speed test\n"
+        "  --download-sink-test <sec>   Built-in download test without local TCP write\n"
+        "  --upload-test <sec>          Built-in end-to-end upload speed test\n"
+        "\n"
+        "Server specific:\n"
+        "  --quic-listen <addr>         QUIC listen address\n"
+        "  --allow-targets <list>       Allowed CIDR list, comma-separated\n"
+        "  --deny-targets <list>        Denied CIDR list, comma-separated\n"
+        "\n"
+        "Protocol and relay tuning:\n"
         "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
-        "  --quic-disable-1rtt-encryption Disable QUIC 1-RTT packet encryption (insecure lab use only)\n"
-        "  --handshake-threads <n>    SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
-        "  --compress <mode>          auto|zstd|off (default auto)\n"
-        "  --compress-level <n>       Compression level (default 1)\n"
-        "  --tuning <mode>            auto|lan|wan|custom (default wan)\n"
-        "  --target-bandwidth-mbps <n> Target bandwidth for auto/custom BDP\n"
-        "  --target-rtt-ms <n>        Target RTT for auto/custom BDP\n"
-        "  --max-memory-mb <n>        Cap relay pool memory across tunnels\n"
-        "  --relay-io-size <bytes>    Override relay IO size (custom)\n"
-        "  --relay-inflight-bytes <n> Override relay ideal in-flight bytes\n"
-        "  --linux-relay-read-chunk-size <bytes> Override Linux relay TCP read chunk size\n"
-        "  --linux-relay-worker-slots <n> Override Linux relay worker buffer slots per tunnel\n"
-        "  --linux-relay-tcp-write-max-bytes <bytes> Cap each Linux relay TCP sendmsg\n"
-        "  --linux-relay-tcp-write-burst-bytes <bytes> Cap bytes per Linux relay TCP write flush\n"
-        "  --quic-fcw <bytes>         Override QUIC connection flow window\n"
-        "  --quic-srw <bytes>         Override QUIC stream recv window\n"
-        "  --quic-iw <packets>        Override QUIC initial window packets\n"
-        "  --quic-initrtt-ms <n>      Override QUIC initial RTT\n"
-        "  --allow-targets <list>     Allowed CIDR list, comma-separated (server, required)\n"
-        "  --deny-targets <list>      Denied CIDR list, comma-separated\n"
-        "  --trace                     Event + periodic debug trace (spdlog file log)\n"
-        "  --trace-interval <sec>      Periodic stats interval when --trace (default 10)\n"
-        "  --trace-connect-on-start    Client: connect QUIC at startup (debug)\n");
+        "  --quic-disable-1rtt-encryption\n"
+        "                              Disable QUIC 1-RTT packet encryption (insecure lab use)\n"
+        "  --quic-fcw <bytes>           Override QUIC connection flow window\n"
+        "  --quic-srw <bytes>           Override QUIC stream recv window\n"
+        "  --quic-iw <packets>          Override QUIC initial window packets\n"
+        "  --quic-initrtt-ms <n>        Override QUIC initial RTT\n"
+        "  --tuning <mode>              auto|lan|wan|custom (default wan)\n"
+        "  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP\n"
+        "  --target-rtt-ms <n>          Target RTT for auto/custom BDP\n"
+        "  --max-memory-mb <n>          Cap relay pool memory across tunnels\n"
+        "  --relay-io-size <bytes>      Override relay IO size (custom)\n"
+        "  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes\n"
+        "  --linux-relay-read-chunk-size <bytes>\n"
+        "                              Override Linux relay TCP read chunk size\n"
+        "  --linux-relay-tcp-write-max-bytes <bytes>\n"
+        "                              Cap each Linux relay TCP sendmsg\n"
+        "  --linux-relay-tcp-write-burst-bytes <bytes>\n"
+        "                              Cap bytes per Linux relay TCP write flush\n"
+        "\n"
+        "Diagnostics:\n"
+        "  --trace                      Event + periodic debug trace (spdlog file log)\n"
+        "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
+        "  --trace-connect-on-start     Client: connect QUIC at startup (debug)\n");
 }
 
 void TqFinalizeConfig(TqConfig& cfg) {
@@ -1288,18 +1305,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayReadChunkSize) ||
                 cfg.TuningOverrideLinuxRelayReadChunkSize == 0) {
                 err = "invalid value for --linux-relay-read-chunk-size";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--linux-relay-worker-slots", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--linux-relay-worker-slots", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayWorkerSlots) ||
-                cfg.TuningOverrideLinuxRelayWorkerSlots == 0) {
-                err = "invalid value for --linux-relay-worker-slots";
                 return false;
             }
         } else if (GetOptionValue(arg, "--linux-relay-tcp-write-max-bytes", value)) {

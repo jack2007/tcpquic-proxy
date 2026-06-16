@@ -284,9 +284,7 @@ ensure_remote_bin() {
     fi
     log "deploying ${BIN} -> ${PEER}:${REMOTE_DIR}"
     ssh "$PEER" "mkdir -p ${REMOTE_DIR}"
-    rsync -az "$BIN" "${ROOT}/build/bin/Release/libmsquic.so.2" \
-        "${ROOT}/build/bin/Release/libmsquic.so.2.6.0" \
-        "${PEER}:${REMOTE_DIR}/"
+    rsync -az "$BIN" "${PEER}:${REMOTE_DIR}/"
     ssh "$PEER" "chmod +x ${REMOTE_BIN}"
 }
 

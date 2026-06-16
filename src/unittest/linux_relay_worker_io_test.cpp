@@ -63,7 +63,7 @@ int main() {
     config.ReadChunkSize = 4096;
     config.ReadBatchBytes = 16 * 1024;
     config.MaxIov = 4;
-    config.MaxPendingBytes = 64 * 1024;
+    config.MaxPendingBufferBytes = 64 * 1024;
 
     TqLinuxRelayWorker worker(config);
     assert(worker.Start());
@@ -95,7 +95,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 64 * 1024;
+        config.MaxPendingBufferBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.StartForTest()) {
@@ -138,8 +138,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 3;
-        config.WorkerSlots = 2;
-        config.MaxPendingBytes = 64 * 1024;
+        config.MaxPendingBufferBytes = 2048;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -191,10 +190,8 @@ int main() {
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        if (snapshot.TcpReadBufferAcquireSlotLimitFailures != 0 ||
-            snapshot.ReadDisabledCount == 0) {
-            std::fprintf(stderr, "slot exhausted should pause TCP read without error, failures=%llu disabled=%llu read=%llu iov=%llu pending=%llu sends=%llu\n",
-                static_cast<unsigned long long>(snapshot.TcpReadBufferAcquireSlotLimitFailures),
+        if (snapshot.ReadDisabledCount == 0) {
+            std::fprintf(stderr, "pending budget exhausted should pause TCP read, disabled=%llu read=%llu iov=%llu pending=%llu sends=%llu\n",
                 static_cast<unsigned long long>(snapshot.ReadDisabledCount),
                 static_cast<unsigned long long>(snapshot.TcpReadBytes),
                 static_cast<unsigned long long>(snapshot.MaxTcpReadIovUsed),
@@ -227,7 +224,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
         config.MaxPendingQuicReceiveBytesPerRelay = 32 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -344,7 +341,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -444,7 +441,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.StartForTest()) {
@@ -525,7 +522,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 16;
-        config.MaxPendingBytes = 64ull * 1024 * 1024;
+        config.MaxPendingBufferBytes = 64ull * 1024 * 1024;
         config.TcpWriteMaxBytes = 4ull * 1024 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -647,7 +644,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.StartForTest()) {
@@ -735,7 +732,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
         config.TcpWriteMaxBytes = 4096;
         config.TcpWriteBurstBytes = 8192;
 
@@ -833,8 +830,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.WorkerSlots = 32;
-        config.MaxPendingBytes = 512 * 1024;
+        config.MaxPendingBufferBytes = 512 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -955,7 +951,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1023,7 +1019,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1100,7 +1096,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1184,7 +1180,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
         config.EventQueueCapacity = 2;
 
         TqLinuxRelayWorker worker(config);
@@ -1257,7 +1253,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
         config.TcpWriteMaxBytes = 4096;
 
         TqLinuxRelayWorker worker(config);
@@ -1354,7 +1350,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 64 * 1024;
+        config.MaxPendingBufferBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1419,7 +1415,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 2048;
+        config.MaxPendingBufferBytes = 2048;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
@@ -1452,7 +1448,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 64 * 1024;
+        config.MaxPendingBufferBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
@@ -1495,7 +1491,7 @@ int main() {
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 64 * 1024;
+        config.MaxPendingBufferBytes = 64 * 1024;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
@@ -1557,7 +1553,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1668,7 +1664,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1763,7 +1759,7 @@ int main() {
         config.ReadChunkSize = 512;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 128 * 1024;
+        config.MaxPendingBufferBytes = 128 * 1024;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
@@ -1809,7 +1805,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 128 * 1024;
+        config.MaxPendingBufferBytes = 128 * 1024;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
@@ -1855,7 +1851,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -1944,7 +1940,7 @@ int main() {
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
         config.DeferredReceiveCompleteBatchBytes = 16 * 1024;
 
         TqLinuxRelayWorker worker(config);
@@ -2018,7 +2014,7 @@ int main() {
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
         config.MaxIov = 4;
-        config.MaxPendingBytes = 256 * 1024;
+        config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());

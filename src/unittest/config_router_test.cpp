@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -32,7 +33,35 @@ static bool Load(const std::string& body, TqRouterConfig& router, std::string& e
     return TqLoadClientConfig(file, router, err);
 }
 
+static std::string CaptureUsage() {
+    FILE* file = std::tmpfile();
+    if (file == nullptr) abort();
+    TqPrintUsage(file);
+    if (std::fflush(file) != 0) abort();
+    if (std::fseek(file, 0, SEEK_END) != 0) abort();
+    const long size = std::ftell(file);
+    if (size < 0) abort();
+    if (std::fseek(file, 0, SEEK_SET) != 0) abort();
+    std::string text(static_cast<size_t>(size), '\0');
+    if (size > 0 && std::fread(&text[0], 1, static_cast<size_t>(size), file) != static_cast<size_t>(size)) {
+        abort();
+    }
+    std::fclose(file);
+    return text;
+}
+
 int main() {
+    {
+        const std::string usage = CaptureUsage();
+        if (usage.find("Client and Server:") == std::string::npos) return 110;
+        if (usage.find("Client specific:") == std::string::npos) return 111;
+        if (usage.find("Server specific:") == std::string::npos) return 112;
+        if (usage.find("Protocol and relay tuning:") == std::string::npos) return 113;
+        if (usage.find("Diagnostics:") == std::string::npos) return 114;
+        if (usage.find("--config <path>") == std::string::npos) return 115;
+        if (usage.find("--allow-targets <list>") == std::string::npos) return 116;
+        if (usage.find("--download-test <sec>") == std::string::npos) return 117;
+    }
     {
         std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","http_listen":"127.0.0.1:18001","quic_connections":4,"compress":"auto","enabled":true}]})json");
         const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--admin-listen", "127.0.0.1:19091", "--quic-cert", "a.crt", "--quic-key", "a.key", "--quic-ca", "ca.crt"};
@@ -297,7 +326,6 @@ int main() {
         if (cfg.Compress != "off") return 86;
         if (!cfg.QuicDisable1RttEncryption) return 87;
         if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 88;
-        if (cfg.Tuning.LinuxRelayWorkerSlots != 1024) return 89;
         if (cfg.Tuning.InitialRttMs != 1) return 90;
     }
     {

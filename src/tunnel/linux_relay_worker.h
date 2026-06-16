@@ -1,7 +1,7 @@
 #pragma once
 
 #include "compress.h"
-#include "linux_relay_buffer_pool.h"
+#include "relay_buffer.h"
 #include "linux_relay_event_queue.h"
 #include "relay.h"
 #include "tuning.h"
@@ -27,10 +27,9 @@ struct TqLinuxRelayWorkerConfig {
     size_t ReadChunkSize{128 * 1024};
     size_t ReadBatchBytes{1024 * 1024};
     uint32_t MaxIov{16};
-    uint32_t WorkerSlots{128};
     uint64_t TcpWriteMaxBytes{0};
     uint64_t TcpWriteBurstBytes{0};
-    uint64_t MaxPendingBytes{256ull * 1024 * 1024};
+    uint64_t MaxPendingBufferBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     uint64_t DeferredReceiveCompleteBatchBytes{0};
     size_t EventQueueCapacity{4096};
@@ -69,14 +68,13 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
     uint64_t PendingBytes{0};
+    uint64_t RelayBufferBytesInUse{0};
     uint64_t ActiveRelays{0};
     uint64_t ActiveTcpRelays{0};
     uint64_t ActiveSinkRelays{0};
     uint64_t ActiveQuicSendRelays{0};
     uint64_t CurrentPendingQuicReceiveBytes{0};
     uint64_t CurrentPendingQuicReceiveQueue{0};
-    uint64_t WorkerSlotsAllocated{0};
-    uint64_t WorkerSlotsFree{0};
     uint64_t TcpReadArmedRelays{0};
     uint64_t TcpReadDisabledRelays{0};
     uint64_t TcpWriteArmedRelays{0};
@@ -162,14 +160,12 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t EventQueueFullErrors{0};
     uint64_t TcpReadBufferAcquireFailures{0};
     uint64_t TcpReadBufferAcquirePendingBudgetFailures{0};
-    uint64_t TcpReadBufferAcquireSlotLimitFailures{0};
     uint64_t TcpReadBufferAcquireAllocFailures{0};
     uint64_t TcpToQuicCompressFailures{0};
     uint64_t TcpToQuicCompressUpdateFailures{0};
     uint64_t TcpToQuicCompressFlushFailures{0};
     uint64_t TcpToQuicBufferAcquireFailures{0};
     uint64_t TcpToQuicBufferAcquirePendingBudgetFailures{0};
-    uint64_t TcpToQuicBufferAcquireSlotLimitFailures{0};
     uint64_t TcpToQuicBufferAcquireAllocFailures{0};
     uint64_t QuicSendFailures{0};
     uint64_t QuicSendBufferTooLargeFailures{0};
@@ -183,7 +179,6 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceiveDecompressFailures{0};
     uint64_t QuicReceiveTcpBufferAcquireFailures{0};
     uint64_t QuicReceiveTcpBufferAcquirePendingBudgetFailures{0};
-    uint64_t QuicReceiveTcpBufferAcquireSlotLimitFailures{0};
     uint64_t QuicReceiveTcpBufferAcquireAllocFailures{0};
     uint64_t TcpWriteHardErrors{0};
     uint64_t LastTcpWriteErrno{0};
@@ -372,14 +367,12 @@ private:
     std::atomic<uint64_t> EventQueueFullErrors{0};
     std::atomic<uint64_t> TcpReadBufferAcquireFailures{0};
     std::atomic<uint64_t> TcpReadBufferAcquirePendingBudgetFailures{0};
-    std::atomic<uint64_t> TcpReadBufferAcquireSlotLimitFailures{0};
     std::atomic<uint64_t> TcpReadBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> TcpToQuicCompressFailures{0};
     std::atomic<uint64_t> TcpToQuicCompressUpdateFailures{0};
     std::atomic<uint64_t> TcpToQuicCompressFlushFailures{0};
     std::atomic<uint64_t> TcpToQuicBufferAcquireFailures{0};
     std::atomic<uint64_t> TcpToQuicBufferAcquirePendingBudgetFailures{0};
-    std::atomic<uint64_t> TcpToQuicBufferAcquireSlotLimitFailures{0};
     std::atomic<uint64_t> TcpToQuicBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> QuicSendFailures{0};
     std::atomic<uint64_t> QuicSendBufferTooLargeFailures{0};
@@ -393,7 +386,6 @@ private:
     std::atomic<uint64_t> QuicReceiveDecompressFailures{0};
     std::atomic<uint64_t> QuicReceiveTcpBufferAcquireFailures{0};
     std::atomic<uint64_t> QuicReceiveTcpBufferAcquirePendingBudgetFailures{0};
-    std::atomic<uint64_t> QuicReceiveTcpBufferAcquireSlotLimitFailures{0};
     std::atomic<uint64_t> QuicReceiveTcpBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> TcpWriteHardErrors{0};
     std::atomic<uint64_t> LastTcpWriteErrno{0};

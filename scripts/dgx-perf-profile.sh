@@ -74,8 +74,15 @@ remote_kill_all() {
 
 deploy_binaries() {
     ssh -o BatchMode=yes "$PEER" "mkdir -p ${REMOTE_DIR}"
-    rsync -az "${BIN}" "${MSQUIC_LIB_DIR}/libmsquic.so"* "${PEER}:${REMOTE_DIR}/"
-    ssh -o BatchMode=yes "$PEER" "cd ${REMOTE_DIR} && ln -sf \$(ls libmsquic.so.2.* 2>/dev/null | head -1) libmsquic.so.2 2>/dev/null || true"
+    shopt -s nullglob
+    local msquic_sos=("${MSQUIC_LIB_DIR}"/libmsquic.so*)
+    shopt -u nullglob
+    if ((${#msquic_sos[@]})); then
+        rsync -az "${BIN}" "${msquic_sos[@]}" "${PEER}:${REMOTE_DIR}/"
+        ssh -o BatchMode=yes "$PEER" "cd ${REMOTE_DIR} && ln -sf \$(ls libmsquic.so.2.* 2>/dev/null | head -1) libmsquic.so.2 2>/dev/null || true"
+    else
+        rsync -az "${BIN}" "${PEER}:${REMOTE_DIR}/"
+    fi
     rsync -az "${SECNETPERF}" "${PEER}:${REMOTE_DIR}/" 2>/dev/null || true
 }
 
@@ -116,7 +123,7 @@ start_proxy_stack() {
     remote_kill_all
     local args
     args=$(proxy_args "${QUIC_CONNS}")
-    ssh -o BatchMode=yes "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
+    ssh -o BatchMode=yes "$PEER" "nohup ${REMOTE_BIN} server \
         --quic-listen ${TARGET}:${QUIC_PORT} \
         --allow-targets ${TARGET}/32,127.0.0.0/8 \
         --quic-cert ~/tcpquic-dgx-certs/server.crt \
@@ -146,8 +153,12 @@ start_proxy_stack() {
 
 start_secnetperf_server() {
     remote_kill_all
+    local remote_ld=""
+    if ssh -o BatchMode=yes "$PEER" "test -e ${REMOTE_DIR}/libmsquic.so.2 || test -e ${REMOTE_DIR}/libmsquic.so"; then
+        remote_ld="LD_LIBRARY_PATH=${REMOTE_DIR} "
+    fi
     ssh -o BatchMode=yes "$PEER" \
-        "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_DIR}/secnetperf \
+        "${remote_ld}nohup ${REMOTE_DIR}/secnetperf \
         -exec:maxtput -bind:${TARGET}:${PERF_PORT} \
         </dev/null >/tmp/dgx-secnetperf-server.log 2>&1 &"
     sleep 2
@@ -244,7 +255,11 @@ run_proxy_perf() {
 run_secnetperf_perf() {
     [[ -x "$SECNETPERF" ]] || { log "missing $SECNETPERF"; exit 1; }
     start_secnetperf_server
-    LD_LIBRARY_PATH="${MSQUIC_LIB_DIR}" "${SECNETPERF}" \
+    local -a secnetperf_env=()
+    if compgen -G "${MSQUIC_LIB_DIR}/libmsquic.so"* >/dev/null; then
+        secnetperf_env=(env "LD_LIBRARY_PATH=${MSQUIC_LIB_DIR}")
+    fi
+    "${secnetperf_env[@]}" "${SECNETPERF}" \
         -target:"${TARGET}" -bind:"${BIND}" -port:"${PERF_PORT}" \
         -exec:maxtput -conns:1 -down:"${DURATION_SEC}s" -ptput:1 \
         >"${OUT_DIR}/secnetperf.log" 2>&1 &

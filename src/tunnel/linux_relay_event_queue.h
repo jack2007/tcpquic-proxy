@@ -1,6 +1,6 @@
 #pragma once
 
-#include "linux_relay_buffer_pool.h"
+#include "relay_buffer.h"
 
 #include <atomic>
 #include <cstddef>

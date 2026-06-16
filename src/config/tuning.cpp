@@ -113,7 +113,7 @@ void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
     const uint64_t pendingBytes =
         std::min<uint64_t>(out.RelayDefaultIdealSend, 512ull * 1024 * 1024);
     out.LinuxRelayPerTunnelPendingBytes = pendingBytes;
-    out.LinuxRelayPerWorkerPendingBytes = std::max<uint64_t>(
+    out.MaxPendingBufferBytesPerRelay = std::max<uint64_t>(
         pendingBytes,
         out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1u));
     out.LinuxRelayWorkerByteBudgetPerTick =
@@ -146,9 +146,6 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     }
     if (cfg.TuningOverrideLinuxRelayReadChunkSize > 0) {
         out.LinuxRelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
-    }
-    if (cfg.TuningOverrideLinuxRelayWorkerSlots > 0) {
-        out.LinuxRelayWorkerSlots = cfg.TuningOverrideLinuxRelayWorkerSlots;
     }
     if (cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes > 0) {
         out.LinuxRelayTcpWriteMaxBytes = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
@@ -184,7 +181,6 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
     if (mode == TqTuningMode::Lan) {
         out.LinuxRelayMaxIov = 8;
         out.LinuxRelayReadChunkSize = 128 * 1024;
-        out.LinuxRelayWorkerSlots = 128;
         out.LinuxRelayReadBatchBytes = 256 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
         out.LinuxRelayWorkerEventBudget = 1024;
@@ -192,7 +188,6 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
     } else {
         out.LinuxRelayMaxIov = 16;
         out.LinuxRelayReadChunkSize = 128 * 1024;
-        out.LinuxRelayWorkerSlots = 128;
         out.LinuxRelayReadBatchBytes = 1024 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 1024 * 1024;
         out.LinuxRelayWorkerEventBudget = 4096;
@@ -207,7 +202,7 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
     out.LinuxRelayPerTunnelPendingBytes = std::min<uint64_t>(
         16ull * 1024 * 1024,
         std::max<uint64_t>(4ull * 1024 * 1024, out.LinuxRelayReadBatchBytes * 4));
-    out.LinuxRelayPerWorkerPendingBytes = std::max<uint64_t>(
+    out.MaxPendingBufferBytesPerRelay = std::max<uint64_t>(
         out.LinuxRelayPerTunnelPendingBytes,
         out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1));
 }
@@ -573,7 +568,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "tcpquic-proxy tuning: srw=%u fcw=%u iw=%u initrtt=%ums "
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
-        "read_chunk=%zu worker_slots=%u "
+        "read_chunk=%zu max_pending_buffer=%llu "
         "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
@@ -587,7 +582,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayWorkerByteBudgetPerTick),
         static_cast<unsigned long long>(tuning.LinuxRelayReadBatchBytes),
         tuning.LinuxRelayReadChunkSize,
-        tuning.LinuxRelayWorkerSlots,
+        static_cast<unsigned long long>(tuning.MaxPendingBufferBytesPerRelay),
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteMaxBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteBurstBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes));
