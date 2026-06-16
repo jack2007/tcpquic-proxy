@@ -273,5 +273,104 @@ int main() {
         if (Load(R"json({"version":1,"peers":[{"peer_id":"bad","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","quic_reconnect_interval_ms":0}]})json", router, err)) return 71;
         if (err.find("quic_reconnect_interval_ms") == std::string::npos) return 72;
     }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},
+            "server":{
+                "proto_listen":"0.0.0.0:4433",
+                "allow_targets":["127.0.0.1/32","10.0.0.0/8"],
+                "deny_targets":"192.168.0.0/16"
+            },
+            "compression":{"mode":"off"},
+            "proto":{"disable_1rtt_encryption":true,"initrtt_ms":1},
+            "tuning":{"mode":"custom"},
+            "relay":{"linux":{"read_chunk_size":262144,"worker_slots":1024}}
+        })json");
+        const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 81;
+        if (cfg.QuicListen != "0.0.0.0:4433") return 82;
+        if (cfg.QuicCert != "server.crt") return 83;
+        if (cfg.AllowTargets.size() != 2) return 84;
+        if (cfg.DenyTargets.size() != 1) return 85;
+        if (cfg.Compress != "off") return 86;
+        if (!cfg.QuicDisable1RttEncryption) return 87;
+        if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 88;
+        if (cfg.Tuning.LinuxRelayWorkerSlots != 1024) return 89;
+        if (cfg.Tuning.InitialRttMs != 1) return 90;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "proto":{"profile":"low-latency","connections":8,"reconnect_interval_ms":5000},
+            "client":{"download_test":30,"handshake_threads":4},
+            "trace":{"enabled":true,"interval_sec":2,"connect_on_start":true},
+            "peers":[{
+                "id":"primary",
+                "proto_peer":"127.0.0.1:4433",
+                "socks_listen":"127.0.0.1:11080",
+                "http_listen":"127.0.0.1:18080",
+                "proto_connections":8,
+                "enabled":true
+            }]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 91;
+        if (cfg.Router.Peers.size() != 1) return 92;
+        if (cfg.Router.Peers[0].SocksListen != "127.0.0.1:11080") return 93;
+        if (cfg.Router.Peers[0].QuicPeer != "127.0.0.1:4433") return 94;
+        if (cfg.Router.Peers[0].QuicConnections != 8) return 95;
+        if (cfg.QuicReconnectIntervalMs != 5000) return 96;
+        if (cfg.SpeedTestMode != TqSpeedTestMode::Download) return 97;
+        if (cfg.SpeedTestDurationSec != 30) return 98;
+        if (cfg.QuicProfile != TqQuicProfile::LowLatency) return 99;
+        if (cfg.HandshakeThreads != 4) return 100;
+        if (!cfg.Trace || cfg.TraceIntervalSec != 2 || !cfg.TraceConnectOnStart) return 101;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "peers":[
+                {"id":"a","proto_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"},
+                {"id":"b","proto_peer":"127.0.0.1:14445","socks_listen":"127.0.0.1:11002","proto_reconnect_interval_ms":5000}
+            ],
+            "proto":{"reconnect_interval_ms":4000}
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 102;
+        if (cfg.Router.Peers.size() != 2) return 103;
+        if (cfg.Router.Peers[0].QuicReconnectIntervalMs != 4000) return 106;
+        if (cfg.Router.Peers[1].QuicReconnectIntervalMs != 5000) return 107;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "client":{"download_test":30,"upload_test":30},
+            "peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 104;
+        if (err.find("speed-test options are mutually exclusive") == std::string::npos) return 105;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "quic_peer":"127.0.0.1:4433",
+            "quic_cert":"client.crt",
+            "quic_key":"client.key",
+            "quic_ca":"ca.crt"
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 108;
+        if (err.find("unknown config key") == std::string::npos) return 109;
+    }
     return 0;
 }

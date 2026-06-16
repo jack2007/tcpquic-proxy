@@ -39,6 +39,7 @@ struct TqConfig {
     std::string SocksListen = "127.0.0.1:1080";
     std::string HttpListen = "127.0.0.1:8080";
     std::string QuicPeer;
+    std::string ConfigPath;
     std::string ClientConfigPath;
     std::string AdminListen;
     TqRouterConfig Router{};

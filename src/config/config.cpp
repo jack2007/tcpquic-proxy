@@ -179,6 +179,30 @@ public:
         return Finish(router);
     }
 
+    bool ParseRuntimeConfig(TqConfig& cfg) {
+        if (!Consume('{')) {
+            return Error("config must be a JSON object");
+        }
+        if (Consume('}')) {
+            return FinishRuntimeConfig();
+        }
+        bool speedTestSpecified = cfg.SpeedTestMode != TqSpeedTestMode::None;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) {
+                return Error("malformed config object");
+            }
+            if (!ParseRuntimeConfigField(key, cfg, speedTestSpecified)) {
+                return false;
+            }
+        } while (Consume(','));
+
+        if (!Consume('}')) {
+            return Error("malformed config object");
+        }
+        return FinishRuntimeConfig();
+    }
+
 private:
     bool Finish(TqRouterConfig& router) {
         SkipWs();
@@ -186,6 +210,332 @@ private:
             return Error("unexpected trailing content in client config");
         }
         return TqValidateRouterConfig(router, Err);
+    }
+
+    bool FinishRuntimeConfig() {
+        SkipWs();
+        if (Pos != Text.size()) {
+            return Error("unexpected trailing content in config");
+        }
+        return true;
+    }
+
+    bool ParseRuntimeConfigField(const std::string& key, TqConfig& cfg, bool& speedTestSpecified) {
+        if (key == "tls") return ParseTlsConfig(cfg);
+        if (key == "admin") return ParseAdminConfig(cfg);
+        if (key == "proto") return ParseProtoConfig(cfg);
+        if (key == "server") return ParseServerConfig(cfg);
+        if (key == "relay") return ParseRelayConfig(cfg);
+        if (key == "tuning") return ParseTuningConfig(cfg);
+        if (key == "compression") return ParseCompressionConfig(cfg);
+        if (key == "trace") return ParseTraceConfig(cfg);
+        if (key == "client") return ParseClientConfig(cfg, speedTestSpecified);
+        if (key == "peers") return ParseRuntimePeers(cfg.Router.Peers);
+        return Error(("unknown config key: " + key).c_str());
+    }
+
+    bool ParseTlsConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("tls must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed tls object");
+            if (key == "cert") {
+                if (!ParseString(cfg.QuicCert)) return Error("invalid tls.cert");
+            } else if (key == "key") {
+                if (!ParseString(cfg.QuicKey)) return Error("invalid tls.key");
+            } else if (key == "ca") {
+                if (!ParseString(cfg.QuicCa)) return Error("invalid tls.ca");
+            } else {
+                return Error(("unknown tls key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed tls object");
+    }
+
+    bool ParseAdminConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("admin must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed admin object");
+            if (key == "listen") {
+                if (!ParseString(cfg.AdminListen)) return Error("invalid admin.listen");
+            } else {
+                return Error(("unknown admin key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed admin object");
+    }
+
+    bool ParseProtoConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("proto must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed proto object");
+            if (key == "profile") {
+                std::string value;
+                if (!ParseString(value)) return Error("invalid proto.profile");
+                if (value == "max-throughput") cfg.QuicProfile = TqQuicProfile::MaxThroughput;
+                else if (value == "low-latency") cfg.QuicProfile = TqQuicProfile::LowLatency;
+                else return Error("invalid proto.profile");
+            } else if (key == "disable_1rtt_encryption") {
+                if (!ParseBool(cfg.QuicDisable1RttEncryption)) return Error("invalid proto.disable_1rtt_encryption");
+            } else if (key == "connections") {
+                if (!ParseUint32(cfg.QuicConnections) || cfg.QuicConnections > 128) return Error("invalid proto.connections");
+                if (cfg.QuicConnections == 0) cfg.QuicConnections = 1;
+            } else if (key == "reconnect_interval_ms") {
+                if (!ParseReconnectInterval(cfg.QuicReconnectIntervalMs)) return Error("invalid proto.reconnect_interval_ms");
+            } else if (key == "fcw") {
+                if (!ParseUint32(cfg.TuningOverrideQuicFcw)) return Error("invalid proto.fcw");
+            } else if (key == "srw") {
+                if (!ParseUint32(cfg.TuningOverrideQuicSrw)) return Error("invalid proto.srw");
+            } else if (key == "iw") {
+                if (!ParseUint32(cfg.TuningOverrideQuicIw)) return Error("invalid proto.iw");
+            } else if (key == "initrtt_ms") {
+                if (!ParseUint32(cfg.TuningOverrideQuicInitRttMs)) return Error("invalid proto.initrtt_ms");
+            } else {
+                return Error(("unknown proto key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed proto object");
+    }
+
+    bool ParseServerConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("server must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed server object");
+            if (key == "proto_listen") {
+                if (!ParseString(cfg.QuicListen)) return Error("invalid server.proto_listen");
+            } else if (key == "allow_targets") {
+                if (!ParseStringList(cfg.AllowTargets)) return Error("invalid server.allow_targets");
+            } else if (key == "deny_targets") {
+                if (!ParseStringList(cfg.DenyTargets)) return Error("invalid server.deny_targets");
+            } else {
+                return Error(("unknown server key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed server object");
+    }
+
+    bool ParseRelayConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("relay must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
+            if (key == "io_size") {
+                if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
+            } else if (key == "inflight_bytes") {
+                if (!ParseUint32(cfg.TuningOverrideRelayInflightBytes)) return Error("invalid relay.inflight_bytes");
+            } else if (key == "linux") {
+                if (!ParseLinuxRelayConfig(cfg)) return false;
+            } else {
+                return Error(("unknown relay key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed relay object");
+    }
+
+    bool ParseLinuxRelayConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("relay.linux must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed relay.linux object");
+            if (key == "read_chunk_size") {
+                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayReadChunkSize, "relay.linux.read_chunk_size")) return false;
+            } else if (key == "worker_slots") {
+                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayWorkerSlots, "relay.linux.worker_slots")) return false;
+            } else if (key == "tcp_write_max_bytes") {
+                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes, "relay.linux.tcp_write_max_bytes")) return false;
+            } else if (key == "tcp_write_burst_bytes") {
+                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes, "relay.linux.tcp_write_burst_bytes")) return false;
+            } else {
+                return Error(("unknown relay.linux key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed relay.linux object");
+    }
+
+    bool ParseTuningConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("tuning must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed tuning object");
+            if (key == "mode") {
+                std::string value;
+                if (!ParseString(value)) return Error("invalid tuning.mode");
+                cfg.TuningMode = TqParseTuningMode(value.c_str());
+                if (value != "auto" && value != "lan" && value != "wan" && value != "custom") return Error("invalid tuning.mode");
+            } else if (key == "target_bandwidth_mbps") {
+                if (!ParseUint32(cfg.TargetBandwidthMbps)) return Error("invalid tuning.target_bandwidth_mbps");
+            } else if (key == "target_rtt_ms") {
+                if (!ParseUint32(cfg.TargetRttMs)) return Error("invalid tuning.target_rtt_ms");
+            } else if (key == "max_memory_mb") {
+                if (!ParseUint32(cfg.MaxMemoryMb)) return Error("invalid tuning.max_memory_mb");
+            } else {
+                return Error(("unknown tuning key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed tuning object");
+    }
+
+    bool ParseCompressionConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("compression must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed compression object");
+            if (key == "mode") {
+                if (!ParseString(cfg.Compress)) return Error("invalid compression.mode");
+                if (!IsValidCompress(cfg.Compress)) return Error("invalid compression.mode");
+            } else if (key == "level") {
+                if (!ParseInt(cfg.CompressLevel)) return Error("invalid compression.level");
+            } else {
+                return Error(("unknown compression key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed compression object");
+    }
+
+    bool ParseTraceConfig(TqConfig& cfg) {
+        if (!Consume('{')) return Error("trace must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed trace object");
+            if (key == "enabled") {
+                if (!ParseBool(cfg.Trace)) return Error("invalid trace.enabled");
+            } else if (key == "interval_sec") {
+                if (!ParseUint32(cfg.TraceIntervalSec)) return Error("invalid trace.interval_sec");
+                cfg.Trace = true;
+            } else if (key == "connect_on_start") {
+                if (!ParseBool(cfg.TraceConnectOnStart)) return Error("invalid trace.connect_on_start");
+                if (cfg.TraceConnectOnStart) cfg.Trace = true;
+            } else {
+                return Error(("unknown trace key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed trace object");
+    }
+
+    bool ParseClientConfig(TqConfig& cfg, bool& speedTestSpecified) {
+        if (!Consume('{')) return Error("client must be an object");
+        if (Consume('}')) return true;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed client object");
+            if (key == "warmup_mb") {
+                if (!ParseUint32(cfg.WarmupMb)) return Error("invalid client.warmup_mb");
+            } else if (key == "warmup_target") {
+                if (!ParseString(cfg.WarmupTarget)) return Error("invalid client.warmup_target");
+            } else if (key == "warmup_path") {
+                if (!ParseString(cfg.WarmupPath)) return Error("invalid client.warmup_path");
+            } else if (key == "download_test") {
+                if (!ParseSpeedTest(TqSpeedTestMode::Download, cfg, speedTestSpecified, "client.download_test")) return false;
+            } else if (key == "download_sink_test") {
+                if (!ParseSpeedTest(TqSpeedTestMode::DownloadSink, cfg, speedTestSpecified, "client.download_sink_test")) return false;
+            } else if (key == "upload_test") {
+                if (!ParseSpeedTest(TqSpeedTestMode::Upload, cfg, speedTestSpecified, "client.upload_test")) return false;
+            } else if (key == "handshake_threads") {
+                if (!ParseUint32(cfg.HandshakeThreads)) return Error("invalid client.handshake_threads");
+            } else {
+                return Error(("unknown client key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed client object");
+    }
+
+    bool ParseSpeedTest(TqSpeedTestMode mode, TqConfig& cfg, bool& speedTestSpecified, const char* key) {
+        if (speedTestSpecified) {
+            return Error("speed-test options are mutually exclusive");
+        }
+        if (!ParseUint32InRange(1, 86400, cfg.SpeedTestDurationSec)) {
+            return Error((std::string("invalid ") + key).c_str());
+        }
+        cfg.SpeedTestMode = mode;
+        speedTestSpecified = true;
+        return true;
+    }
+
+    bool ParseNonZeroUint32(uint32_t& out, const char* key) {
+        if (!ParseUint32(out) || out == 0) {
+            return Error((std::string("invalid ") + key).c_str());
+        }
+        return true;
+    }
+
+    bool ParseReconnectInterval(uint32_t& out) {
+        return ParseUint32(out) && out >= 1000 && out <= 60000;
+    }
+
+    bool ParseRuntimePeers(std::vector<TqPeerConfig>& peers) {
+        peers.clear();
+        if (!Consume('[')) {
+            return Error("peers must be an array");
+        }
+        if (Consume(']')) {
+            return true;
+        }
+        do {
+            TqPeerConfig peer;
+            if (!ParseRuntimePeer(peer)) {
+                return false;
+            }
+            peers.push_back(peer);
+        } while (Consume(','));
+        return Consume(']') || Error("malformed peers array");
+    }
+
+    bool ParseRuntimePeer(TqPeerConfig& peer) {
+        if (!Consume('{')) {
+            return Error("peer must be an object");
+        }
+        if (Consume('}')) {
+            return true;
+        }
+        bool protoConnectionsSpecified = false;
+        bool protoReconnectIntervalSpecified = false;
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) {
+                return Error("malformed peer object");
+            }
+            if (key == "id") {
+                if (!ParseString(peer.PeerId)) return Error("invalid peer.id");
+            } else if (key == "proto_peer") {
+                if (!ParseString(peer.QuicPeer)) return Error("invalid peer.proto_peer");
+            } else if (key == "socks_listen") {
+                if (!ParseString(peer.SocksListen)) return Error("invalid peer.socks_listen");
+            } else if (key == "http_listen") {
+                if (!ParseString(peer.HttpListen)) return Error("invalid peer.http_listen");
+            } else if (key == "proto_connections") {
+                protoConnectionsSpecified = true;
+                if (!ParseUint32(peer.QuicConnections)) return Error("invalid peer.proto_connections");
+            } else if (key == "proto_reconnect_interval_ms") {
+                protoReconnectIntervalSpecified = true;
+                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid peer.proto_reconnect_interval_ms");
+            } else if (key == "compress") {
+                if (!ParseString(peer.Compress)) return Error("invalid peer.compress");
+            } else if (key == "enabled") {
+                if (!ParseBool(peer.Enabled)) return Error("invalid peer.enabled");
+            } else {
+                return Error(("unknown peer key: " + key).c_str());
+            }
+        } while (Consume(','));
+        if (protoConnectionsSpecified && peer.QuicConnections == 0) {
+            return Error("peer.proto_connections out of range");
+        }
+        if (protoReconnectIntervalSpecified &&
+            (peer.QuicReconnectIntervalMs < 1000 || peer.QuicReconnectIntervalMs > 60000)) {
+            return Error("peer.proto_reconnect_interval_ms out of range");
+        }
+        return Consume('}') || Error("malformed peer object");
     }
 
     bool ParsePeers(std::vector<TqPeerConfig>& peers) {
@@ -337,6 +687,48 @@ private:
         return true;
     }
 
+    bool ParseUint32InRange(uint32_t minValue, uint32_t maxValue, uint32_t& out) {
+        if (!ParseUint32(out)) {
+            return false;
+        }
+        return out >= minValue && out <= maxValue;
+    }
+
+    bool ParseInt(int& out) {
+        SkipWs();
+        if (Pos >= Text.size()) {
+            return false;
+        }
+        bool negative = false;
+        if (Text[Pos] == '-') {
+            negative = true;
+            ++Pos;
+        }
+        if (Pos >= Text.size() || !std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
+            return false;
+        }
+        if (Text[Pos] == '0' && Pos + 1 < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos + 1]))) {
+            return false;
+        }
+        uint64_t value = 0;
+        while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
+            value = value * 10 + static_cast<uint32_t>(Text[Pos] - '0');
+            const uint64_t limit = negative
+                ? static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ull
+                : static_cast<uint64_t>(std::numeric_limits<int>::max());
+            if (value > limit) {
+                return false;
+            }
+            ++Pos;
+        }
+        if (negative && value == static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ull) {
+            out = std::numeric_limits<int>::min();
+        } else {
+            out = negative ? -static_cast<int>(value) : static_cast<int>(value);
+        }
+        return true;
+    }
+
     bool ParseBool(bool& out) {
         SkipWs();
         if (Text.compare(Pos, 4, "true") == 0) {
@@ -350,6 +742,33 @@ private:
             return true;
         }
         return false;
+    }
+
+    bool ParseStringList(std::vector<std::string>& out) {
+        SkipWs();
+        if (Pos < Text.size() && Text[Pos] == '"') {
+            std::string value;
+            if (!ParseString(value)) {
+                return false;
+            }
+            SplitCommaList(value, out);
+            return true;
+        }
+        if (!Consume('[')) {
+            return false;
+        }
+        out.clear();
+        if (Consume(']')) {
+            return true;
+        }
+        do {
+            std::string item;
+            if (!ParseString(item)) {
+                return false;
+            }
+            out.push_back(item);
+        } while (Consume(','));
+        return Consume(']');
     }
 
     bool SkipValue() {
@@ -414,6 +833,17 @@ private:
     size_t Pos{0};
 };
 
+bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& err) {
+    std::ifstream file(path);
+    if (!file) {
+        err = "failed to open config: " + path;
+        return false;
+    }
+    std::string body((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    JsonParser parser(body, err);
+    return parser.ParseRuntimeConfig(cfg);
+}
+
 } // namespace
 
 void TqPrintUsage(FILE* out) {
@@ -421,6 +851,7 @@ void TqPrintUsage(FILE* out) {
         "Usage: tcpquic-proxy client|server [options]\n"
         "\n"
         "Options:\n"
+        "  --config <path>            Runtime config JSON; command line overrides file values\n"
         "  --socks-listen <addr>      SOCKS5 listen address (default 127.0.0.1:1080)\n"
         "  --http-listen <addr>       HTTP CONNECT listen address (default 127.0.0.1:8080)\n"
         "  --client-config <path>     Router client config JSON (client)\n"
@@ -488,6 +919,28 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         return false;
     }
 
+    for (int i = 2; i < argc; ++i) {
+        const char* arg = argv[i];
+        const char* value = nullptr;
+        if (!GetOptionValue(arg, "--config", value)) {
+            continue;
+        }
+        if (value == nullptr) {
+            value = NextArg(i, argc, argv, "--config", err);
+            if (value == nullptr) {
+                return false;
+            }
+        }
+        if (!cfg.ConfigPath.empty()) {
+            err = "--config specified more than once";
+            return false;
+        }
+        cfg.ConfigPath = value;
+        if (!LoadRuntimeConfigFile(cfg.ConfigPath, cfg, err)) {
+            return false;
+        }
+    }
+
     bool quicPeerSpecified = false;
     bool speedTestSpecified = false;
     for (int i = 2; i < argc; ++i) {
@@ -500,7 +953,15 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             return false;
         }
 
-        if (GetOptionValue(arg, "--socks-listen", value)) {
+        if (GetOptionValue(arg, "--config", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--config", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            cfg.ConfigPath = value;
+        } else if (GetOptionValue(arg, "--socks-listen", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--socks-listen", err);
                 if (value == nullptr) {
@@ -638,7 +1099,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                     return false;
                 }
             }
-            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+            if (speedTestSpecified) {
                 err = "--download-test and --upload-test are mutually exclusive";
                 return false;
             }
@@ -655,7 +1116,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                     return false;
                 }
             }
-            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+            if (speedTestSpecified) {
                 err = "speed-test options are mutually exclusive";
                 return false;
             }
@@ -672,7 +1133,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                     return false;
                 }
             }
-            if (cfg.SpeedTestMode != TqSpeedTestMode::None || speedTestSpecified) {
+            if (speedTestSpecified) {
                 err = "--download-test and --upload-test are mutually exclusive";
                 return false;
             }
@@ -936,7 +1397,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         err = "--client-config is valid only in client mode";
         return false;
     }
-    if (!cfg.ClientConfigPath.empty() && quicPeerSpecified) {
+    if (!cfg.ClientConfigPath.empty() && (!cfg.QuicPeer.empty() || quicPeerSpecified)) {
         err = "--client-config and --quic-peer are mutually exclusive";
         return false;
     }
@@ -958,15 +1419,20 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {
             return false;
         }
+    }
+    if (!cfg.Router.Peers.empty()) {
         for (auto& peer : cfg.Router.Peers) {
             if (peer.QuicReconnectIntervalMs == 0) {
                 peer.QuicReconnectIntervalMs = cfg.QuicReconnectIntervalMs;
             }
         }
+        if (!TqValidateRouterConfig(cfg.Router, err)) {
+            return false;
+        }
     }
 
     if (cfg.Mode == TqMode::Client) {
-        if (cfg.ClientConfigPath.empty() && !RequireNonEmpty(cfg.QuicPeer, "--quic-peer", err)) {
+        if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--quic-peer", err)) {
             return false;
         }
         if (!RequireNonEmpty(cfg.QuicCert, "--quic-cert", err)) {
@@ -980,6 +1446,18 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         }
         if (cfg.WarmupMb > 0 && !RequireNonEmpty(cfg.WarmupTarget, "--warmup-target", err)) {
             return false;
+        }
+        if (cfg.SpeedTestMode != TqSpeedTestMode::None && !cfg.Router.Peers.empty()) {
+            size_t enabledPeers = 0;
+            for (const auto& peer : cfg.Router.Peers) {
+                if (peer.Enabled) {
+                    ++enabledPeers;
+                }
+            }
+            if (enabledPeers != 1) {
+                err = "speed-test options require exactly one enabled peer";
+                return false;
+            }
         }
     } else {
         if (!RequireNonEmpty(cfg.QuicListen, "--quic-listen", err)) {

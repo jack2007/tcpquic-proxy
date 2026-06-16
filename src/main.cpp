@@ -526,9 +526,50 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     return 0;
 }
 
+bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::string& err) {
+    const TqPeerConfig* selected = nullptr;
+    for (const auto& peer : cfg.Router.Peers) {
+        if (!peer.Enabled) {
+            continue;
+        }
+        if (selected != nullptr) {
+            err = "single-peer operation requires exactly one enabled peer";
+            return false;
+        }
+        selected = &peer;
+    }
+    if (selected == nullptr) {
+        err = "single-peer operation requires one enabled peer";
+        return false;
+    }
+
+    out = cfg;
+    out.Router = TqRouterConfig{};
+    out.ClientConfigPath.clear();
+    out.QuicPeer = selected->QuicPeer;
+    out.SocksListen = selected->SocksListen.empty() ? cfg.SocksListen : selected->SocksListen;
+    out.HttpListen = selected->HttpListen.empty() ? cfg.HttpListen : selected->HttpListen;
+    out.QuicConnections = selected->QuicConnections == 0 ? cfg.QuicConnections : selected->QuicConnections;
+    out.QuicReconnectIntervalMs = selected->QuicReconnectIntervalMs == 0
+        ? cfg.QuicReconnectIntervalMs
+        : selected->QuicReconnectIntervalMs;
+    out.Compress = selected->Compress.empty() ? cfg.Compress : selected->Compress;
+    return true;
+}
+
 int RunClient(const TqConfig& cfg) {
-    if (cfg.ClientConfigPath.empty()) {
+    if (cfg.Router.Peers.empty()) {
         return RunSinglePeerClient(cfg);
+    }
+
+    if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        TqConfig singlePeerCfg;
+        std::string err;
+        if (!TqMakeSinglePeerConfigFromRouter(cfg, singlePeerCfg, err)) {
+            std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
+            return 1;
+        }
+        return RunSinglePeerClient(singlePeerCfg);
     }
 
     TqMultiPeerRuntimeAdapter adapter(cfg);
