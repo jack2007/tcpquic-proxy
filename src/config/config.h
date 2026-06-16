@@ -29,8 +29,14 @@ struct TqPeerConfig {
     bool Enabled{true};
 };
 
+struct TqProxyAuthUser {
+    std::string Username;
+    std::string Password;
+};
+
 struct TqRouterConfig {
     uint32_t Version{1};
+    std::vector<TqProxyAuthUser> ProxyAuth;
     std::vector<TqPeerConfig> Peers;
 };
 

@@ -87,6 +87,7 @@ set(TCPQUIC_PROXY_SOURCES
     tunnel/tcp_tunnel.cpp
     tunnel/tunnel_registry.cpp
     ingress/http_connect_server.cpp
+    ingress/proxy_auth.cpp
     ingress/socks5_server.cpp
     tunnel/relay.cpp
     runtime/thread_pool.cpp
@@ -326,6 +327,7 @@ add_executable(tcpquic_config_router_test
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_config_router_test)
@@ -443,10 +445,19 @@ if(NOT WIN32)
     list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_tcp_sink_bench_test)
 endif()
 
+add_executable(tcpquic_proxy_auth_test
+    unittest/proxy_auth_test.cpp
+    ingress/proxy_auth.cpp
+)
+tcpquic_target_include_dirs(tcpquic_proxy_auth_test)
+set_property(TARGET tcpquic_proxy_auth_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_proxy_auth_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_http_connect_test
     unittest/http_connect_server_test.cpp
     unittest/trace_proxy_stub.cpp
     ingress/http_connect_server.cpp
+    ingress/proxy_auth.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
@@ -459,6 +470,7 @@ add_executable(tcpquic_socks5_test
     unittest/socks5_server_test.cpp
     unittest/trace_proxy_stub.cpp
     ingress/socks5_server.cpp
+    ingress/proxy_auth.cpp
     protocol/control_protocol.cpp
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
@@ -567,6 +579,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_speed_test_test
     tcpquic_acl_test
     tcpquic_config_router_test
+    tcpquic_proxy_auth_test
     tcpquic_compress_test
     tcpquic_tunnel_test
     tcpquic_http_connect_test

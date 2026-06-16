@@ -1,4 +1,5 @@
 #include "http_connect_server.h"
+#include "proxy_auth.h"
 #include "trace.h"
 
 #include "platform_socket.h"
@@ -129,6 +130,9 @@ bool TqSendHttpStatus(TqSocketHandle fd, int status) {
     case 403:
         reason = "Forbidden";
         break;
+    case 407:
+        reason = "Proxy Authentication Required";
+        break;
     case 502:
         reason = "Bad Gateway";
         break;
@@ -141,20 +145,33 @@ bool TqSendHttpStatus(TqSocketHandle fd, int status) {
         break;
     }
 
-    char response[128];
-    const int len = std::snprintf(
-        response,
-        sizeof(response),
-        "HTTP/1.1 %d %s\r\n\r\n",
-        status,
-        reason);
+    char response[256];
+    int len = 0;
+    if (status == 407) {
+        len = std::snprintf(
+            response,
+            sizeof(response),
+            "HTTP/1.1 %d %s\r\nProxy-Authenticate: Basic realm=\"tcpquic-proxy\"\r\n\r\n",
+            status,
+            reason);
+    } else {
+        len = std::snprintf(
+            response,
+            sizeof(response),
+            "HTTP/1.1 %d %s\r\n\r\n",
+            status,
+            reason);
+    }
     if (len <= 0 || static_cast<size_t>(len) >= sizeof(response)) {
         return false;
     }
     return TqSendAll(fd, response, static_cast<size_t>(len));
 }
 
-void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onTunnel) {
+void TqHandleHttpConnectClient(
+    TqSocketHandle clientFd,
+    const TunnelStartFn& onTunnel,
+    const TqProxyAuthTable& auth) {
     TqTraceProxyAccepted(TqTraceProxyProto::Http, clientFd);
 
     std::string request;
@@ -191,6 +208,13 @@ void TqHandleHttpConnectClient(TqSocketHandle clientFd, const TunnelStartFn& onT
     tunnel.IngressTraceProto = 2;
     if (!TqParseHttpConnectRequest(request, tunnel)) {
         TqSendHttpStatus(clientFd, 400);
+        TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
+        TqCloseSocket(clientFd);
+        return;
+    }
+
+    if (!TqHttpConnectRequestAuthorized(request, auth)) {
+        TqSendHttpStatus(clientFd, 407);
         TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -330,10 +354,19 @@ bool TqParseHttpConnectRequest(const std::string& request, TunnelRequest& out) {
     return true;
 }
 
-TqHttpConnectServer::TqHttpConnectServer(std::string listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool) :
+TqHttpConnectServer::TqHttpConnectServer(
+    std::string listenHostPort,
+    TunnelStartFn onTunnel,
+    TqThreadPool* pool,
+    std::shared_ptr<const TqProxyAuthTable> auth) :
     ListenHostPort(std::move(listenHostPort)),
     OnTunnel(std::move(onTunnel)),
-    Pool(pool) {}
+    Pool(pool),
+    Auth(std::move(auth)) {
+    if (!Auth) {
+        Auth = std::make_shared<TqProxyAuthTable>();
+    }
+}
 
 TqHttpConnectServer::~TqHttpConnectServer() {
     Stop();
@@ -386,15 +419,21 @@ void TqHttpConnectServer::Run() {
             continue;
         }
 
-        if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel]() { TqHandleHttpConnectClient(clientFd, onTunnel); })) {
+        if (Pool == nullptr || !Pool->Submit([clientFd, onTunnel = OnTunnel, auth = Auth]() {
+                TqHandleHttpConnectClient(clientFd, onTunnel, *auth);
+            })) {
             TqCloseSocket(clientFd);
         }
     }
 }
 
-void RunHttpConnectServer(const std::string& listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool) {
+void RunHttpConnectServer(
+    const std::string& listenHostPort,
+    TunnelStartFn onTunnel,
+    TqThreadPool* pool,
+    std::shared_ptr<const TqProxyAuthTable> auth) {
     std::string err;
-    TqHttpConnectServer server(listenHostPort, std::move(onTunnel), pool);
+    TqHttpConnectServer server(listenHostPort, std::move(onTunnel), pool, std::move(auth));
     if (!server.Start(err)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
         return;

@@ -2,10 +2,12 @@
 
 #include "control_protocol.h"
 #include "platform_socket.h"
+#include "proxy_auth.h"
 #include "tcp_tunnel.h"
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,7 +29,11 @@ bool TqParseSocks5ConnectRequest(const std::vector<uint8_t>& request, TunnelRequ
 
 class TqSocks5Server {
 public:
-    TqSocks5Server(std::string listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool);
+    TqSocks5Server(
+        std::string listenHostPort,
+        TunnelStartFn onTunnel,
+        TqThreadPool* pool,
+        std::shared_ptr<const TqProxyAuthTable> auth = std::make_shared<TqProxyAuthTable>());
     ~TqSocks5Server();
 
     bool Start(std::string& err);
@@ -39,9 +45,14 @@ private:
     std::string ListenHostPort;
     TunnelStartFn OnTunnel;
     TqThreadPool* Pool{nullptr};
+    std::shared_ptr<const TqProxyAuthTable> Auth;
     std::atomic<bool> Stopping{false};
     std::atomic<TqSocketHandle> ListenFd{TqInvalidSocket};
     std::thread Worker;
 };
 
-void RunSocks5Server(const std::string& listenHostPort, TunnelStartFn onTunnel, TqThreadPool* pool);
+void RunSocks5Server(
+    const std::string& listenHostPort,
+    TunnelStartFn onTunnel,
+    TqThreadPool* pool,
+    std::shared_ptr<const TqProxyAuthTable> auth = std::make_shared<TqProxyAuthTable>());

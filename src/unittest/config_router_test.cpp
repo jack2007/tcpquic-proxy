@@ -79,6 +79,33 @@ int main() {
         if (!cfg.Router.Peers[0].Enabled) return 10;
     }
     {
+        TqRouterConfig router;
+        std::string err;
+        if (!Load(
+                R"json({"version":1,"proxy_auth":[{"username":"alice","password":"secret-a"},{"username":"bob","password":"secret-b"}],"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","http_listen":"127.0.0.1:18001"}]})json",
+                router,
+                err)) return 120;
+        if (router.ProxyAuth.size() != 2) return 121;
+        if (router.ProxyAuth[0].Username != "alice") return 122;
+        if (router.ProxyAuth[0].Password != "secret-a") return 123;
+        if (router.ProxyAuth[1].Username != "bob") return 124;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"proxy_auth":[{"username":"alice","password":""}],"peers":[]})json", router, err)) return 125;
+        if (err.find("non-empty") == std::string::npos) return 126;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(
+                R"json({"version":1,"proxy_auth":[{"username":"alice","password":"a"},{"username":"alice","password":"b"}],"peers":[]})json",
+                router,
+                err)) return 127;
+        if (err.find("duplicate proxy_auth username") == std::string::npos) return 128;
+    }
+    {
         std::string file = WriteTempConfig(R"json({"version":1,"peers":[]})json");
         const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--quic-peer", "127.0.0.1:14444"};
         TqConfig cfg;

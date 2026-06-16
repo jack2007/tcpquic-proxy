@@ -127,6 +127,38 @@ export ALL_PROXY=socks5://127.0.0.1:1080
 export HTTPS_PROXY=http://127.0.0.1:8080
 ```
 
+**带本地代理鉴权（仅 `--client-config` JSON）：**
+
+在 client 配置文件顶层增加 `proxy_auth` 数组；配置后，该 client 上所有 peer 的 SOCKS5 / HTTP CONNECT 均要求鉴权，任意一组用户名/密码匹配即可。
+
+```json
+{
+  "version": 1,
+  "proxy_auth": [
+    { "username": "alice", "password": "secret-a" },
+    { "username": "bob", "password": "secret-b" }
+  ],
+  "peers": [
+    {
+      "peer_id": "local",
+      "quic_peer": "127.0.0.1:14444",
+      "socks_listen": "127.0.0.1:1080",
+      "http_listen": "127.0.0.1:8080"
+    }
+  ]
+}
+```
+
+```bash
+# HTTP CONNECT（Proxy-Authorization: Basic）
+curl -x http://127.0.0.1:8080 -U alice:secret-a --proxytunnel http://目标主机:端口/
+
+# SOCKS5 username/password（RFC 1929）
+curl --socks5 127.0.0.1:1080 --proxy-user alice:secret-a http://目标主机:端口/
+```
+
+纯 CLI 单 client（`--quic-peer` + `--socks-listen`，无 `--client-config`）不支持代理鉴权。
+
 ## CLI 参数
 
 ```
@@ -206,13 +238,12 @@ src/
 **已实现：**
 
 - 单 QUIC 长连接或连接池（`--quic-connections`）、1 TCP = 1 Stream
-- SOCKS5 CONNECT（NO AUTH）、HTTP CONNECT 隧道
+- SOCKS5 CONNECT、HTTP CONNECT 隧道；可选多用户代理鉴权（`--client-config` 内 `proxy_auth`）
 - 动态目标（B 侧 DNS + TCP 拨号）
 - mTLS、CIDR ACL、zstd 流式压缩
 
 **未实现（规格预留）：**
 
-- SOCKS / HTTP 用户凭证认证
 - QUIC 断连后在途隧道透明迁移（断连会关闭在途流，QUIC 自动重连）
 - UDP 代理、普通 HTTP 代理（非 CONNECT）
 
