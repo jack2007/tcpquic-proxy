@@ -17,7 +17,8 @@ int main() {
     if (productionBlock.find("relay_blocking_demo.cpp") != std::string::npos) return 3;
     if (productionBlock.find("tcp_write_queue.cpp") != std::string::npos) return 4;
     if (productionBlock.find("linux_relay_worker.cpp") == std::string::npos) return 5;
-    if (productionBlock.find("linux_relay_buffer_pool.cpp") == std::string::npos) return 6;
+    if (productionBlock.find("relay_buffer.cpp") == std::string::npos) return 6;
+    if (productionBlock.find("relay_alloc.cpp") == std::string::npos) return 7;
 
     return 0;
 }

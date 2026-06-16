@@ -807,7 +807,7 @@ int main() {
             return 87;
         }
         TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (snapshot.TcpRecvBufferPoolPendingBytes == 0) {
+        if (snapshot.RelayBufferBytesInUse == 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -832,7 +832,7 @@ int main() {
 
         snapshot = receiveWorker.Snapshot();
         if (snapshot.TcpRecvOperationsCreated != 1 || snapshot.TcpRecvOperationsReused < 1 ||
-            snapshot.TcpRecvBufferPoolAcquireCount < 2) {
+            snapshot.RelayBufferAllocateCount < 2) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -843,7 +843,7 @@ int main() {
         pair[1] = TqInvalidSocket;
         receiveWorker.Stop();
         snapshot = receiveWorker.Snapshot();
-        if (snapshot.TcpRecvBufferPoolPendingBytes != 0) {
+        if (snapshot.RelayBufferBytesInUse != 0) {
             MsQuic = nullptr;
             return 93;
         }
@@ -915,7 +915,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.TcpRecvBufferPoolPendingBytes != 0) {
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.RelayBufferBytesInUse != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -977,7 +977,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.TcpRecvBufferPoolPendingBytes != 0) {
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.RelayBufferBytesInUse != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;

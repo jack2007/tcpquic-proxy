@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <limits>
 #include <memory>
 #include <new>
@@ -352,11 +353,24 @@ static void TqUnregisterClientTraceConnection(MsQuicConnection* connection) {
     g_clientTraceConnIds.erase(connection->Handle);
 }
 
+static bool TqEnvFlagEnabled(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    size_t len = 0;
+    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+        return false;
+    }
+    const bool enabled = len > 1 && std::strcmp(value, "0") != 0;
+    std::free(value);
+    return enabled;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+#endif
+}
+
 static bool TqClientDebugEnabled() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("TQ_QUIC_CLIENT_DEBUG");
-        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
-    }();
+    static const bool enabled = TqEnvFlagEnabled("TQ_QUIC_CLIENT_DEBUG");
     return enabled;
 }
 

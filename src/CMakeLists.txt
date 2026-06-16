@@ -5,6 +5,15 @@ function(tcpquic_copy_msquic_runtime target)
     if(NOT WIN32)
         return()
     endif()
+    if(NOT TARGET msquic)
+        return()
+    endif()
+    get_target_property(TCPQUIC_MSQUIC_TARGET_TYPE msquic TYPE)
+    if(NOT TCPQUIC_MSQUIC_TARGET_TYPE STREQUAL "EXECUTABLE" AND
+       NOT TCPQUIC_MSQUIC_TARGET_TYPE STREQUAL "SHARED_LIBRARY" AND
+       NOT TCPQUIC_MSQUIC_TARGET_TYPE STREQUAL "MODULE_LIBRARY")
+        return()
+    endif()
     add_custom_command(TARGET ${target} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:msquic>"
@@ -103,7 +112,8 @@ endif()
 
 if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
-        tunnel/relay_buffer_pool.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
         platform/quic_credentials_win.cpp
     )
@@ -150,9 +160,9 @@ add_executable(tcpquic_quic_settings_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_quic_settings_test)
-target_link_libraries(tcpquic_quic_settings_test Threads::Threads inc warnings msquic logging base_link)
+target_link_libraries(tcpquic_quic_settings_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
-    target_link_libraries(tcpquic_quic_settings_test msquic_platform)
+        target_link_libraries(tcpquic_quic_settings_test PRIVATE msquic_platform)
 endif()
 set_property(TARGET tcpquic_quic_settings_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_quic_settings_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -164,17 +174,9 @@ add_executable(tcpquic_tcp_write_queue_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_tcp_write_queue_test)
-target_link_libraries(tcpquic_tcp_write_queue_test Threads::Threads)
+target_link_libraries(tcpquic_tcp_write_queue_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_tcp_write_queue_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tcp_write_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-
-add_executable(tcpquic_relay_buffer_pool_test
-    unittest/relay_buffer_pool_test.cpp
-    tunnel/relay_buffer_pool.cpp
-)
-tcpquic_target_include_dirs(tcpquic_relay_buffer_pool_test)
-set_property(TARGET tcpquic_relay_buffer_pool_test PROPERTY FOLDER "tools")
-set_property(TARGET tcpquic_relay_buffer_pool_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_relay_buffer_test
     unittest/relay_buffer_test.cpp
@@ -244,7 +246,7 @@ add_executable(tcpquic_thread_pool_test
     runtime/thread_pool.cpp
 )
 tcpquic_target_include_dirs(tcpquic_thread_pool_test)
-target_link_libraries(tcpquic_thread_pool_test Threads::Threads)
+target_link_libraries(tcpquic_thread_pool_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_thread_pool_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_thread_pool_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -253,7 +255,7 @@ add_executable(tcpquic_tunnel_reaper_test
     tunnel/tunnel_reaper.cpp
 )
 tcpquic_target_include_dirs(tcpquic_tunnel_reaper_test)
-target_link_libraries(tcpquic_tunnel_reaper_test Threads::Threads)
+target_link_libraries(tcpquic_tunnel_reaper_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_tunnel_reaper_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_reaper_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -289,14 +291,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     target_sources(tcpquic_speed_test_test PRIVATE
-        tunnel/relay_buffer_pool.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
     )
 endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
 target_link_libraries(tcpquic_speed_test_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
-    target_link_libraries(tcpquic_speed_test_test msquic_platform)
+    target_link_libraries(tcpquic_speed_test_test PRIVATE msquic_platform)
 endif()
 target_compile_definitions(tcpquic_speed_test_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_speed_test_test PROPERTY FOLDER "tools")
@@ -305,7 +308,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     tcpquic_link_mimalloc(tcpquic_speed_test_test)
 endif()
 if(WIN32)
-    target_link_libraries(tcpquic_speed_test_test ws2_32)
+    tcpquic_link_mimalloc(tcpquic_speed_test_test)
+    target_link_libraries(tcpquic_speed_test_test PRIVATE ws2_32)
 endif()
 
 add_executable(tcpquic_acl_test
@@ -337,7 +341,7 @@ tcpquic_target_include_dirs(tcpquic_compress_test)
 if(TCPQUIC_TEST_INCLUDES)
     target_include_directories(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
 endif()
-target_link_libraries(tcpquic_compress_test ${TCPQUIC_TEST_LIBS})
+target_link_libraries(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_LIBS})
 target_compile_definitions(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_compress_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_compress_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -366,7 +370,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     list(APPEND TCPQUIC_TUNNEL_TEST_SOURCES
-        tunnel/relay_buffer_pool.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
     )
 endif()
@@ -377,7 +382,7 @@ if(TCPQUIC_TEST_INCLUDES)
 endif()
 target_link_libraries(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
-    target_link_libraries(tcpquic_tunnel_test msquic_platform)
+    target_link_libraries(tcpquic_tunnel_test PRIVATE msquic_platform)
 endif()
 target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
@@ -386,6 +391,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     tcpquic_link_mimalloc(tcpquic_tunnel_test)
 endif()
 if(WIN32)
+    tcpquic_link_mimalloc(tcpquic_tunnel_test)
     add_custom_target(tcpquic_tcp_tunnel_test ALL
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             $<TARGET_FILE:tcpquic_tunnel_test>
@@ -411,7 +417,7 @@ if(NOT WIN32)
         ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
-    target_link_libraries(tcpquic_blocking_relay_demo_test Threads::Threads inc warnings msquic logging base_link)
+    target_link_libraries(tcpquic_blocking_relay_demo_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
     set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
     list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_blocking_relay_demo_test)
@@ -421,7 +427,7 @@ if(NOT WIN32)
         runtime/tcp_sink_bench.cpp
     )
     tcpquic_target_include_dirs(tcpquic_tcp_sink_bench_test)
-    target_link_libraries(tcpquic_tcp_sink_bench_test Threads::Threads)
+    target_link_libraries(tcpquic_tcp_sink_bench_test PRIVATE Threads::Threads)
     set_property(TARGET tcpquic_tcp_sink_bench_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_tcp_sink_bench_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -430,7 +436,7 @@ if(NOT WIN32)
         runtime/tcp_sink_bench.cpp
     )
     tcpquic_target_include_dirs(tcpquic_tcp_sink_bench)
-    target_link_libraries(tcpquic_tcp_sink_bench Threads::Threads)
+    target_link_libraries(tcpquic_tcp_sink_bench PRIVATE Threads::Threads)
     set_property(TARGET tcpquic_tcp_sink_bench PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_tcp_sink_bench APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -445,7 +451,7 @@ add_executable(tcpquic_http_connect_test
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_http_connect_test)
-target_link_libraries(tcpquic_http_connect_test Threads::Threads)
+target_link_libraries(tcpquic_http_connect_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_http_connect_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_http_connect_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -457,7 +463,7 @@ add_executable(tcpquic_socks5_test
     ${TCPQUIC_SERVER_TEST_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_socks5_test)
-target_link_libraries(tcpquic_socks5_test Threads::Threads)
+target_link_libraries(tcpquic_socks5_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_socks5_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_socks5_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -467,10 +473,10 @@ add_executable(tcpquic_admin_http_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_admin_http_test)
-target_link_libraries(tcpquic_admin_http_test Threads::Threads)
+target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads)
 if(WIN32)
     target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(tcpquic_admin_http_test ws2_32)
+    target_link_libraries(tcpquic_admin_http_test PRIVATE ws2_32)
 endif()
 set_property(TARGET tcpquic_admin_http_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -495,7 +501,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     list(APPEND TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
-        tunnel/relay_buffer_pool.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
     )
 endif()
@@ -503,11 +510,14 @@ add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
 tcpquic_target_include_dirs(tcpquic_router_runtime_test)
 target_link_libraries(tcpquic_router_runtime_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
 if(BUILD_SHARED_LIBS)
-    target_link_libraries(tcpquic_router_runtime_test msquic_platform)
+    target_link_libraries(tcpquic_router_runtime_test PRIVATE msquic_platform)
 endif()
 set_property(TARGET tcpquic_router_runtime_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_router_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    tcpquic_link_mimalloc(tcpquic_router_runtime_test)
+endif()
+if(WIN32)
     tcpquic_link_mimalloc(tcpquic_router_runtime_test)
 endif()
 
@@ -526,7 +536,7 @@ set_property(TARGET tcpquic_platform_socket_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_platform_socket_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(WIN32)
     target_compile_definitions(tcpquic_platform_socket_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(tcpquic_platform_socket_test ws2_32)
+    target_link_libraries(tcpquic_platform_socket_test PRIVATE ws2_32)
 endif()
 
 set(TCPQUIC_WINDOWS_TEST_TARGETS)
@@ -534,18 +544,19 @@ if(WIN32)
     add_executable(tcpquic_windows_relay_worker_test
         unittest/windows_relay_worker_test.cpp
         tunnel/windows_relay_worker.cpp
-        tunnel/relay_buffer_pool.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
         protocol/compress.cpp
         platform/platform_socket_win.cpp
     )
     tcpquic_target_include_dirs(tcpquic_windows_relay_worker_test)
-    target_link_libraries(tcpquic_windows_relay_worker_test ws2_32 inc warnings msquic logging base_link ${TCPQUIC_TEST_LIBS})
+    target_link_libraries(tcpquic_windows_relay_worker_test PRIVATE ws2_32 inc warnings msquic logging base_link ${TCPQUIC_TEST_LIBS})
     target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING ${TCPQUIC_TEST_DEFS})
+    tcpquic_link_mimalloc(tcpquic_windows_relay_worker_test)
     list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
 endif()
 
 set(TCPQUIC_TEST_TARGETS
-    tcpquic_relay_buffer_pool_test
     tcpquic_relay_buffer_test
     tcpquic_tuning_test
     tcpquic_quic_settings_test
@@ -576,7 +587,7 @@ endforeach()
 if(WIN32)
     foreach(target IN LISTS TCPQUIC_TEST_TARGETS)
         target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
-        target_link_libraries(${target} ws2_32)
+        target_link_libraries(${target} PRIVATE ws2_32)
     endforeach()
 
     set(TCPQUIC_MSQUIC_RUNTIME_TARGETS

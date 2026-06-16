@@ -3,7 +3,7 @@
 #if defined(_WIN32)
 
 #include "msquic.hpp"
-#include "relay_buffer_pool.h"
+#include "relay_buffer.h"
 
 #include <algorithm>
 
@@ -80,21 +80,11 @@ struct TqWindowsRelayWorker::IoOperation {
     uint64_t PostedLength{0};
 };
 
-struct TqWindowsRelayWorker::RelayContext {
-    explicit RelayContext(const TqTuningConfig& tuning)
-        : Tuning(tuning),
-          TcpRecvBuffers(
-              tuning.RelayIoSize,
-              2,
-              std::max<uint64_t>(static_cast<uint64_t>(tuning.RelayIoSize) * 2, tuning.RelayIoSize)),
-          TcpSendBuffers(
-              tuning.RelayIoSize,
-              std::max<uint32_t>(2, tuning.RelayMaxInFlightSends),
-              std::max<uint64_t>(
-                  tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay,
-                  static_cast<uint64_t>(tuning.RelayIoSize) * std::max<uint32_t>(2, tuning.RelayMaxInFlightSends))) {
-        TcpRecvBuffers.Reserve(2);
-        TcpSendBuffers.Reserve(std::max<uint32_t>(2, tuning.RelayMaxInFlightSends));
+struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
+    explicit RelayContext(const TqTuningConfig& tuning) : Tuning(tuning) {
+        MaxPendingBufferBytes = std::max<uint64_t>(
+            tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay,
+            static_cast<uint64_t>(tuning.RelayIoSize) * std::max<uint32_t>(2, tuning.RelayMaxInFlightSends));
     }
 
     uint64_t Id{0};
@@ -104,8 +94,6 @@ struct TqWindowsRelayWorker::RelayContext {
     ITqDecompressor* Decompressor{nullptr};
     TqRelayHandle* PublicHandle{nullptr};
     TqTuningConfig Tuning;
-    TqRelayBufferPool TcpRecvBuffers;
-    TqRelayBufferPool TcpSendBuffers;
     std::mutex TcpRecvOpsLock;
     std::vector<std::unique_ptr<IoOperation>> TcpRecvOpsFree;
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
@@ -198,10 +186,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
                     entry.second->PendingQuicReceiveBytes.load(std::memory_order_relaxed);
                 snapshot.PendingQuicReceiveQueueDepth +=
                     entry.second->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed);
-                snapshot.TcpRecvBufferPoolPendingBytes += entry.second->TcpRecvBuffers.PendingBytes();
-                snapshot.TcpRecvBufferPoolAcquireCount += entry.second->TcpRecvBuffers.AcquireCount();
-                snapshot.TcpSendBufferPoolPendingBytes += entry.second->TcpSendBuffers.PendingBytes();
-                snapshot.TcpSendBufferPoolAcquireCount += entry.second->TcpSendBuffers.AcquireCount();
+                const uint64_t pendingBufferBytes =
+                    entry.second->PendingBufferBytes.load(std::memory_order_relaxed);
+                const uint64_t allocateCount =
+                    entry.second->AllocateCount.load(std::memory_order_relaxed);
+                snapshot.RelayBufferBytesInUse += pendingBufferBytes;
+                snapshot.RelayBufferAllocateCount += allocateCount;
             }
         }
     }
@@ -504,7 +494,7 @@ bool TqWindowsRelayWorker::PostTcpRecv(const std::shared_ptr<RelayContext>& rela
     op->PostedLength = 0;
 
     TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;
-    op->BufferOwner = relay->TcpRecvBuffers.Acquire(TqBufferDomain::Worker, &failure);
+    op->BufferOwner = TqAllocateRelayBuffer(relay.get(), relay->Tuning.RelayIoSize, &failure);
     if (!op->BufferOwner) {
         Errors_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -882,7 +872,7 @@ bool TqWindowsRelayWorker::PostTcpSendFromCompressedReceiveView(
         }
 
         TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;
-        auto output = relay->TcpSendBuffers.AcquireWorker(&failure);
+        auto output = TqAllocateRelayBuffer(relay.get(), relay->Tuning.RelayIoSize, &failure);
         if (!output) {
             return true;
         }
@@ -1446,10 +1436,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.TcpSendWouldBlockOrPendingCount += snapshot.TcpSendWouldBlockOrPendingCount;
         total.TcpRecvOperationsCreated += snapshot.TcpRecvOperationsCreated;
         total.TcpRecvOperationsReused += snapshot.TcpRecvOperationsReused;
-        total.TcpRecvBufferPoolPendingBytes += snapshot.TcpRecvBufferPoolPendingBytes;
-        total.TcpRecvBufferPoolAcquireCount += snapshot.TcpRecvBufferPoolAcquireCount;
-        total.TcpSendBufferPoolPendingBytes += snapshot.TcpSendBufferPoolPendingBytes;
-        total.TcpSendBufferPoolAcquireCount += snapshot.TcpSendBufferPoolAcquireCount;
+        total.RelayBufferBytesInUse += snapshot.RelayBufferBytesInUse;
+        total.RelayBufferAllocateCount += snapshot.RelayBufferAllocateCount;
         total.ZstdDecompressInputBytes += snapshot.ZstdDecompressInputBytes;
         total.ZstdDecompressOutputBytes += snapshot.ZstdDecompressOutputBytes;
         total.ZstdDecompressCalls += snapshot.ZstdDecompressCalls;

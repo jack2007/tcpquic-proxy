@@ -47,10 +47,8 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t TcpSendWouldBlockOrPendingCount{0};
     uint64_t TcpRecvOperationsCreated{0};
     uint64_t TcpRecvOperationsReused{0};
-    uint64_t TcpRecvBufferPoolPendingBytes{0};
-    uint64_t TcpRecvBufferPoolAcquireCount{0};
-    uint64_t TcpSendBufferPoolPendingBytes{0};
-    uint64_t TcpSendBufferPoolAcquireCount{0};
+    uint64_t RelayBufferBytesInUse{0};
+    uint64_t RelayBufferAllocateCount{0};
     uint64_t ZstdDecompressInputBytes{0};
     uint64_t ZstdDecompressOutputBytes{0};
     uint64_t ZstdDecompressCalls{0};

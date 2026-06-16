@@ -507,9 +507,9 @@ thread apply all bt
 | `src/tunnel/tunnel_reaper.cpp` | 全局 tunnel context reaper |
 | `src/tunnel/relay.cpp` | 平台 relay runtime 选择和 active relay 计数 |
 | `src/tunnel/linux_relay_worker.cpp` | Linux 生产 relay：epoll/readv/writev、pending receive、zstd worker 解压 |
-| `src/tunnel/linux_relay_buffer_pool.cpp` | Linux worker buffer pool |
+| `src/tunnel/relay_buffer.cpp` | OS 无关 relay 按需 buffer：mimalloc/std malloc 分配、pending bytes 预算 |
+| `src/tunnel/relay_alloc.cpp` | relay buffer allocator 封装 |
 | `src/tunnel/windows_relay_worker.cpp` | Windows 生产 relay：IOCP/WSARecv/WSASend、pending receive、zstd worker 解压 |
-| `src/tunnel/relay_buffer_pool.cpp` | Windows/shared relay buffer pool |
 | `src/tunnel/tcp_dialer.cpp` | server 非阻塞 TCP connect 和 socket buffer tuning |
 | `src/config/tuning.cpp` | tuning、relay memory budget、runtime samples |
 | `src/protocol/compress.cpp` | zstd streaming compress/decompress |
