@@ -16,9 +16,14 @@ int main() {
     const std::string productionBlock = text.substr(proxySources, proxyTarget - proxySources);
     if (productionBlock.find("relay_blocking_demo.cpp") != std::string::npos) return 3;
     if (productionBlock.find("tcp_write_queue.cpp") != std::string::npos) return 4;
-    if (productionBlock.find("linux_relay_worker.cpp") == std::string::npos) return 5;
-    if (productionBlock.find("relay_buffer.cpp") == std::string::npos) return 6;
-    if (productionBlock.find("relay_alloc.cpp") == std::string::npos) return 7;
+    if (productionBlock.find("relay_buffer.cpp") == std::string::npos) return 5;
+    if (productionBlock.find("relay_alloc.cpp") == std::string::npos) return 6;
+    if (productionBlock.find("relay_buffer_pool.cpp") != std::string::npos) return 7;
+#if defined(__linux__)
+    if (productionBlock.find("linux_relay_worker.cpp") == std::string::npos) return 8;
+#elif defined(_WIN32)
+    if (productionBlock.find("windows_relay_worker.cpp") == std::string::npos) return 8;
+#endif
 
     return 0;
 }

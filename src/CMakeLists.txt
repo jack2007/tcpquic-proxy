@@ -146,6 +146,7 @@ add_executable(tcpquic_tuning_test
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_tuning_test)
@@ -502,6 +503,7 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

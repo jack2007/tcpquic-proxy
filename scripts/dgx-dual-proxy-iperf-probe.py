@@ -353,8 +353,7 @@ def state_row(case, phase, lane, side, data):
         f"{data.get('linux_relay_current_pending_quic_receive_bytes', 0)/1024**2:.1f} | "
         f"{data.get('linux_relay_current_pending_quic_receive_queue', 0)} | "
         f"{data.get('linux_relay_pending_bytes', 0)/1024**2:.1f} | "
-        f"{data.get('linux_relay_worker_slots_allocated', 0)} | "
-        f"{data.get('linux_relay_worker_slots_free', 0)} | "
+        f"{data.get('linux_relay_buffer_bytes_in_use', 0)/1024**2:.1f} | "
         f"{data.get('linux_relay_tcp_read_armed_relays', 0)} | "
         f"{data.get('linux_relay_tcp_read_disabled_relays', 0)} | "
         f"{data.get('linux_relay_tcp_write_armed_relays', 0)} | "
@@ -406,8 +405,8 @@ def summarize(rows):
         "",
         "## State Snapshots",
         "",
-        "| Case | Phase | Lane | Side | active_streams | conn/accepted | relays | tcp_relays | sink_relays | quic_send_relays | pending_quic MiB | pending_quic_q | pending MiB | slots_alloc | slots_free | read_armed | read_disabled | write_armed | closing | read_closed | write_shutdown_q | out_quic_sends | pending_tcp_q | pending_tcp MiB |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Case | Phase | Lane | Side | active_streams | conn/accepted | relays | tcp_relays | sink_relays | quic_send_relays | pending_quic MiB | pending_quic_q | pending MiB | buffer_in_use MiB | read_armed | read_disabled | write_armed | closing | read_closed | write_shutdown_q | out_quic_sends | pending_tcp_q | pending_tcp MiB |",
+        "|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         for lane in row["lanes"]:

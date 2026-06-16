@@ -124,6 +124,8 @@ int main() {
         assert(snapshot.QuicSendOperations == 0);
         assert(snapshot.MaxTcpReadIovUsed >= 2);
         assert(snapshot.PendingBytes == 0);
+        assert(snapshot.BufferAcquireCount >= 1);
+        assert(snapshot.RelayBufferBytesInUse == 0);
 
         worker.Stop();
         ::close(fds[1]);

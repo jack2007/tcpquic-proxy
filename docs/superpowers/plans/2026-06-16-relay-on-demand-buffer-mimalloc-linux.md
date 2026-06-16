@@ -674,3 +674,34 @@ Plan complete and saved to `docs/superpowers/plans/2026-06-16-relay-on-demand-bu
 **2. Inline Execution** — 本会话按 Task 1→7 顺序实现，每 Task 后跑测试；Task 8 另起 Windows 独立计划/PR。
 
 请告知选择哪种执行方式；若选 Inline，从 Task 1 开始。
+
+---
+
+## Code Review Findings (2026-06-16)
+
+### 1. Important: `tcpquic_production_linkage_guard_test` still asserts the old Linux pool is part of production sources
+
+- Evidence:
+  - [src/unittest/production_linkage_guard_test.cpp](/home/jack/src/tcpquic-proxy/src/unittest/production_linkage_guard_test.cpp:20) still requires `linux_relay_buffer_pool.cpp` to appear in the production source block.
+  - [src/CMakeLists.txt](/home/jack/src/tcpquic-proxy/src/CMakeLists.txt:96) now switches Linux production sources to `relay_alloc.cpp` + `relay_buffer.cpp` + `linux_relay_worker.cpp`, with no `linux_relay_buffer_pool.cpp`.
+- Impact:
+  - The guard test is now inconsistent with the intended Phase 1 architecture and fails immediately after build.
+  - Local verification confirmed `./build/bin/Release/tcpquic_production_linkage_guard_test` exits with code `6`.
+- Why this matters:
+  - This is a real regression in the verification suite. Anyone running the full target set will see a failing test even if the Linux implementation itself is correct.
+
+### 2. Medium: DGX probe/report script still reads removed `worker_slots` metrics, so post-change reports become misleading
+
+- Evidence:
+  - [scripts/dgx-dual-proxy-iperf-probe.py](/home/jack/src/tcpquic-proxy/scripts/dgx-dual-proxy-iperf-probe.py:356) and the next line still render `linux_relay_worker_slots_allocated` / `linux_relay_worker_slots_free`.
+  - The Linux metrics JSON emitted by [src/runtime/relay_metrics.cpp](/home/jack/src/tcpquic-proxy/src/runtime/relay_metrics.cpp:202) now exposes `linux_relay_buffer_bytes_in_use` instead, and the old slot metrics were removed in this change set.
+- Impact:
+  - New probe runs silently print `0` for slot columns via `data.get(..., 0)` instead of surfacing the new on-demand buffer signal.
+  - This makes the DGX benchmark/reporting path stale exactly where this migration is supposed to be evaluated.
+- Why this matters:
+  - The Phase 1 goal explicitly includes validating the no-reserve memory behavior. Keeping the reporting script on removed fields hides whether `buffer_bytes_in_use` tracks the expected improvement.
+
+### Test gap
+
+- [src/unittest/router_runtime_test.cpp](/home/jack/src/tcpquic-proxy/src/unittest/router_runtime_test.cpp:395) only checks that `linux_relay_buffer_bytes_in_use` exists in the JSON; it does not assert any value relationship.
+- Because of that, metric wiring mistakes around this new field can slip through while the runtime test still passes.

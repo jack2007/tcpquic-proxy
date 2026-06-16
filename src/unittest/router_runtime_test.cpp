@@ -392,7 +392,9 @@ int main() {
         if (body.find("\"linux_relay_events_processed\"") == std::string::npos) return 96;
         if (body.find("\"linux_relay_pending_events\"") == std::string::npos) return 97;
         if (body.find("\"linux_relay_pending_bytes\"") == std::string::npos) return 98;
-        if (body.find("\"linux_relay_buffer_bytes_in_use\":") == std::string::npos) return 171;
+        if (body.find("\"linux_relay_buffer_bytes_in_use\":0") == std::string::npos) return 171;
+        if (body.find("linux_relay_worker_slots_allocated") != std::string::npos) return 172;
+        if (body.find("linux_relay_worker_slots_free") != std::string::npos) return 173;
         if (body.find("\"linux_relay_tcp_read_bytes\"") == std::string::npos) return 99;
         if (body.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (body.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
