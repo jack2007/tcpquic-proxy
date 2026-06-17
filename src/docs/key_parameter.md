@@ -42,10 +42,8 @@ BBR + 500MB 连接流控 + 512MiB Stream 接收窗口 + iw=2000 + initrtt=100ms
 --tuning auto|lan|wan|custom
 --target-bandwidth-mbps <n>
 --target-rtt-ms <n>
---max-memory-mb <n>
---relay-io-size <bytes>
---relay-inflight-bytes <bytes>
---linux-relay-read-chunk-size <bytes>
+--relay-io-size <bytes>                  # Windows relay IO buffer size
+--linux-relay-read-chunk-size <bytes>    # Linux relay TCP read chunk size
 --linux-relay-worker-slots <n>
 --quic-fcw <bytes>
 --quic-srw <bytes>
@@ -284,8 +282,6 @@ EXTRA_PROXY_ARGS="--tuning auto --target-bandwidth-mbps 10000 --target-rtt-ms 10
 --quic-iw 4000
 --quic-initrtt-ms 200
 --relay-io-size 1048576
---relay-inflight-bytes 1073741824
---max-memory-mb 4096
 ```
 
 该档位用于极限实验，不作为普通 WAN 默认推荐。

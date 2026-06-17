@@ -21,6 +21,23 @@ namespace {
 
 constexpr size_t TqMaxHttpHeaderBytes = 16 * 1024;
 
+const char* TqAuthResultReason(TqHttpConnectAuthResult result) {
+    switch (result) {
+    case TqHttpConnectAuthResult::Authorized:
+        return "authorized";
+    case TqHttpConnectAuthResult::Disabled:
+        return "auth_disabled";
+    case TqHttpConnectAuthResult::MissingHeader:
+        return "auth_missing_header";
+    case TqHttpConnectAuthResult::InvalidHeader:
+        return "auth_invalid_header";
+    case TqHttpConnectAuthResult::InvalidCredentials:
+        return "auth_invalid_credentials";
+    default:
+        return "auth_unknown";
+    }
+}
+
 struct TqHostPort {
     std::string Host;
     uint16_t Port{};
@@ -181,6 +198,7 @@ void TqHandleHttpConnectClient(
     while (request.find("\r\n\r\n") == std::string::npos) {
         if (request.size() >= TqMaxHttpHeaderBytes) {
             TqSendHttpStatus(clientFd, 400);
+            TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 400, "header_too_large");
             TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
@@ -191,11 +209,13 @@ void TqHandleHttpConnectClient(
             if (TqSocketInterrupted(TqLastSocketError())) {
                 continue;
             }
+            TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 0, "recv_error");
             TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
         }
         if (received == 0) {
+            TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 0, "client_closed_before_headers");
             TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
             TqCloseSocket(clientFd);
             return;
@@ -208,13 +228,17 @@ void TqHandleHttpConnectClient(
     tunnel.IngressTraceProto = 2;
     if (!TqParseHttpConnectRequest(request, tunnel)) {
         TqSendHttpStatus(clientFd, 400);
+        TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 400, "parse_failed");
         TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
     }
 
-    if (!TqHttpConnectRequestAuthorized(request, auth)) {
+    const TqHttpConnectAuthResult authResult = TqHttpConnectRequestAuthResult(request, auth);
+    if (authResult != TqHttpConnectAuthResult::Authorized &&
+        authResult != TqHttpConnectAuthResult::Disabled) {
         TqSendHttpStatus(clientFd, 407);
+        TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 407, TqAuthResultReason(authResult));
         TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -222,6 +246,7 @@ void TqHandleHttpConnectClient(
 
     if (!onTunnel) {
         TqSendHttpStatus(clientFd, 500);
+        TqTraceProxyRejected(TqTraceProxyProto::Http, clientFd, 500, "missing_tunnel_handler");
         TqTraceProxyClosed(TqTraceProxyProto::Http, clientFd);
         TqCloseSocket(clientFd);
         return;

@@ -54,6 +54,7 @@ struct TqConfig {
     std::string QuicKey;
     std::string QuicCa;
     uint32_t QuicConnections = 1;
+    uint32_t QuicConnectionStreamCount = 1024;
     uint32_t QuicReconnectIntervalMs{3000};
     uint32_t WarmupMb{0};
     std::string WarmupTarget;
@@ -61,9 +62,9 @@ struct TqConfig {
     TqSpeedTestMode SpeedTestMode{TqSpeedTestMode::None};
     uint32_t SpeedTestDurationSec{0};
     TqQuicProfile QuicProfile{TqQuicProfile::MaxThroughput};
-    bool QuicDisable1RttEncryption{false};
+    bool QuicDisable1RttEncryption{true};
     uint32_t HandshakeThreads = 8;
-    std::string Compress = "auto";
+    std::string Compress = "off";
     int CompressLevel = 1;
     std::vector<std::string> AllowTargets;
     std::vector<std::string> DenyTargets;
@@ -71,9 +72,7 @@ struct TqConfig {
     TqTuningMode TuningMode{TqTuningMode::Wan};
     uint32_t TargetBandwidthMbps{0};
     uint32_t TargetRttMs{0};
-    uint32_t MaxMemoryMb{0};
     uint32_t TuningOverrideRelayIoSize{0};
-    uint32_t TuningOverrideRelayInflightBytes{0};
     uint32_t TuningOverrideLinuxRelayReadChunkSize{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteMaxBytes{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteBurstBytes{0};

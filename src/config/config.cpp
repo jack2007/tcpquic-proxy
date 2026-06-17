@@ -15,6 +15,8 @@
 
 namespace {
 
+constexpr uint32_t TqMaxQuicConnectionStreamCount = 65535;
+
 const char* NextArg(int& i, int argc, char** argv, const char* flag, std::string& err) {
     if (i + 1 >= argc) {
         err = std::string("missing value for ") + flag;
@@ -55,6 +57,10 @@ bool ParseUint32InRange(const char* s, uint32_t minValue, uint32_t maxValue, uin
         return false;
     }
     return out >= minValue && out <= maxValue;
+}
+
+bool ParseQuicConnectionStreamCountValue(const char* s, uint32_t& out) {
+    return ParseUint32InRange(s, 1, TqMaxQuicConnectionStreamCount, out);
 }
 
 bool ParseInt(const char* s, int& out) {
@@ -292,6 +298,12 @@ private:
             } else if (key == "connections") {
                 if (!ParseUint32(cfg.QuicConnections) || cfg.QuicConnections > 128) return Error("invalid proto.connections");
                 if (cfg.QuicConnections == 0) cfg.QuicConnections = 1;
+            } else if (key == "connection_stream_count") {
+                if (!ParseUint32(cfg.QuicConnectionStreamCount) ||
+                    cfg.QuicConnectionStreamCount == 0 ||
+                    cfg.QuicConnectionStreamCount > TqMaxQuicConnectionStreamCount) {
+                    return Error("invalid proto.connection_stream_count");
+                }
             } else if (key == "reconnect_interval_ms") {
                 if (!ParseReconnectInterval(cfg.QuicReconnectIntervalMs)) return Error("invalid proto.reconnect_interval_ms");
             } else if (key == "fcw") {
@@ -336,8 +348,6 @@ private:
             if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
             if (key == "io_size") {
                 if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
-            } else if (key == "inflight_bytes") {
-                if (!ParseUint32(cfg.TuningOverrideRelayInflightBytes)) return Error("invalid relay.inflight_bytes");
             } else if (key == "linux") {
                 if (!ParseLinuxRelayConfig(cfg)) return false;
             } else {
@@ -385,8 +395,6 @@ private:
                 if (!ParseUint32(cfg.TargetBandwidthMbps)) return Error("invalid tuning.target_bandwidth_mbps");
             } else if (key == "target_rtt_ms") {
                 if (!ParseUint32(cfg.TargetRttMs)) return Error("invalid tuning.target_rtt_ms");
-            } else if (key == "max_memory_mb") {
-                if (!ParseUint32(cfg.MaxMemoryMb)) return Error("invalid tuning.max_memory_mb");
             } else {
                 return Error(("unknown tuning key: " + key).c_str());
             }
@@ -903,50 +911,45 @@ void TqPrintUsage(FILE* out) {
         "Client and Server:\n"
         "  --config <path>              Runtime JSON config file\n"
         "                              (preferred; see docs/config_guide.md)\n"
-        "  --quic-cert <path>           TLS certificate PEM path\n"
-        "  --quic-key <path>            TLS private key PEM path\n"
-        "  --quic-ca <path>             CA certificate PEM path\n"
+        "  --cert <path>                TLS certificate PEM path\n"
+        "  --key <path>                 TLS private key PEM path\n"
+        "  --ca <path>                  CA certificate PEM path\n"
         "  --admin-listen <addr>        Admin HTTP listen address for /health and /metrics\n"
-        "  --compress <mode>            auto|zstd|off (default auto)\n"
+        "  --compress <mode>            auto|zstd|off (default off)\n"
         "  --compress-level <n>         Compression level (default 1)\n"
         "\n"
         "Client specific:\n"
         "  --socks-listen <addr>        SOCKS5 listen address (default 127.0.0.1:1080)\n"
         "  --http-listen <addr>         HTTP CONNECT listen address (default 127.0.0.1:8080)\n"
         "  --client-config <path>       Legacy router client config JSON\n"
-        "  --quic-peer <addr>           Legacy single-peer QUIC address\n"
-        "  --quic-connections <n>       QUIC connection count (default 1)\n"
-        "  --quic-reconnect-interval-ms <n>\n"
-        "                              Client reconnect interval in ms (1000..60000)\n"
+        "  --peer <addr>                Legacy single-peer address\n"
+        "  --connections <n>            Connection count (default 1)\n"
+        "  --connection-stream-count <n>\n"
+        "                              Max bidirectional streams per connection (default 1024)\n"
+        "  --reconnect-interval-ms <n>\n"
+        "                              Client reconnect interval in ms (default 3000, 1000..60000)\n"
         "  --handshake-threads <n>      SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
-        "  --warmup-mb <n>              Startup download warmup per QUIC conn (default 0)\n"
-        "  --warmup-target <host:port>  Warmup HTTP target (required when --warmup-mb > 0)\n"
-        "  --warmup-path <path>         Warmup HTTP GET path (default /)\n"
         "  --download-test <sec>        Built-in end-to-end download speed test\n"
-        "  --download-sink-test <sec>   Built-in download test without local TCP write\n"
         "  --upload-test <sec>          Built-in end-to-end upload speed test\n"
         "\n"
         "Server specific:\n"
-        "  --quic-listen <addr>         QUIC listen address\n"
+        "  --listen <addr>              Listen address\n"
         "  --allow-targets <list>       Allowed CIDR list, comma-separated\n"
         "  --deny-targets <list>        Denied CIDR list, comma-separated\n"
         "\n"
         "Protocol and relay tuning:\n"
-        "  --quic-profile <mode>        max-throughput|low-latency (default max-throughput)\n"
-        "  --quic-disable-1rtt-encryption\n"
-        "                              Disable QUIC 1-RTT packet encryption (insecure lab use)\n"
-        "  --quic-fcw <bytes>           Override QUIC connection flow window\n"
-        "  --quic-srw <bytes>           Override QUIC stream recv window\n"
-        "  --quic-iw <packets>          Override QUIC initial window packets\n"
-        "  --quic-initrtt-ms <n>        Override QUIC initial RTT\n"
+        "  --profile <mode>             max-throughput|low-latency (default max-throughput)\n"
+        "  --enable-encrypt            Enable packet encryption\n"
+        "  --fcw <bytes>                Override connection flow window\n"
+        "  --srw <bytes>                Override stream recv window\n"
+        "  --iw <packets>               Override initial window packets\n"
+        "  --initrtt-ms <n>             Override initial RTT\n"
         "  --tuning <mode>              auto|lan|wan|custom (default wan)\n"
         "  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP\n"
         "  --target-rtt-ms <n>          Target RTT for auto/custom BDP\n"
-        "  --max-memory-mb <n>          Cap relay pool memory across tunnels\n"
-        "  --relay-io-size <bytes>      Override relay IO size (custom)\n"
-        "  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes\n"
+        "  --relay-io-size <bytes>      Windows relay IO buffer size\n"
         "  --linux-relay-read-chunk-size <bytes>\n"
-        "                              Override Linux relay TCP read chunk size\n"
+        "                              Linux relay TCP read chunk size\n"
         "  --linux-relay-tcp-write-max-bytes <bytes>\n"
         "                              Cap each Linux relay TCP sendmsg\n"
         "  --linux-relay-tcp-write-burst-bytes <bytes>\n"
@@ -955,7 +958,7 @@ void TqPrintUsage(FILE* out) {
         "Diagnostics:\n"
         "  --trace                      Event + periodic debug trace (spdlog file log)\n"
         "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
-        "  --trace-connect-on-start     Client: connect QUIC at startup (debug)\n");
+        "  --trace-connect-on-start     Client: connect at startup (debug)\n");
 }
 
 void TqFinalizeConfig(TqConfig& cfg) {
@@ -1040,10 +1043,10 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.HttpListen = value;
-        } else if (GetOptionValue(arg, "--quic-peer", value)) {
+        } else if (GetOptionValue(arg, "--peer", value)) {
             quicPeerSpecified = true;
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-peer", err);
+                value = NextArg(i, argc, argv, "--peer", err);
                 if (value == nullptr) {
                     return false;
                 }
@@ -1065,59 +1068,70 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.AdminListen = value;
-        } else if (GetOptionValue(arg, "--quic-listen", value)) {
+        } else if (GetOptionValue(arg, "--listen", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-listen", err);
+                value = NextArg(i, argc, argv, "--listen", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             cfg.QuicListen = value;
-        } else if (GetOptionValue(arg, "--quic-cert", value)) {
+        } else if (GetOptionValue(arg, "--cert", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-cert", err);
+                value = NextArg(i, argc, argv, "--cert", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             cfg.QuicCert = value;
-        } else if (GetOptionValue(arg, "--quic-key", value)) {
+        } else if (GetOptionValue(arg, "--key", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-key", err);
+                value = NextArg(i, argc, argv, "--key", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             cfg.QuicKey = value;
-        } else if (GetOptionValue(arg, "--quic-ca", value)) {
+        } else if (GetOptionValue(arg, "--ca", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-ca", err);
+                value = NextArg(i, argc, argv, "--ca", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             cfg.QuicCa = value;
-        } else if (GetOptionValue(arg, "--quic-connections", value)) {
+        } else if (GetOptionValue(arg, "--connections", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-connections", err);
+                value = NextArg(i, argc, argv, "--connections", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             if (!ParseUint32(value, cfg.QuicConnections)) {
-                err = "invalid value for --quic-connections";
+                err = "invalid value for --connections";
                 return false;
             }
             if (cfg.QuicConnections > 128) {
-                err = "--quic-connections must be <= 128";
+                err = "--connections must be <= 128";
                 return false;
             }
             if (cfg.QuicConnections == 0) {
                 cfg.QuicConnections = 1;
             }
-        } else if (GetOptionValue(arg, "--quic-reconnect-interval-ms", value)) {
+        } else if (GetOptionValue(arg, "--connection-stream-count", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-reconnect-interval-ms", err);
+                value = NextArg(i, argc, argv, "--connection-stream-count", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseQuicConnectionStreamCountValue(value, cfg.QuicConnectionStreamCount)) {
+                err = "invalid value for --connection-stream-count (must be 1..65535)";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--reconnect-interval-ms", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--reconnect-interval-ms", err);
                 if (value == nullptr) {
                     return false;
                 }
@@ -1125,7 +1139,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             if (!ParseUint32(value, cfg.QuicReconnectIntervalMs) ||
                 cfg.QuicReconnectIntervalMs < 1000 ||
                 cfg.QuicReconnectIntervalMs > 60000) {
-                err = "invalid value for --quic-reconnect-interval-ms (must be 1000..60000)";
+                err = "invalid value for --reconnect-interval-ms (must be 1000..60000)";
                 return false;
             }
         } else if (GetOptionValue(arg, "--warmup-mb", value)) {
@@ -1206,9 +1220,9 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             cfg.SpeedTestMode = TqSpeedTestMode::Upload;
             speedTestSpecified = true;
-        } else if (GetOptionValue(arg, "--quic-profile", value)) {
+        } else if (GetOptionValue(arg, "--profile", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-profile", err);
+                value = NextArg(i, argc, argv, "--profile", err);
                 if (value == nullptr) {
                     return false;
                 }
@@ -1218,11 +1232,11 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             } else if (std::strcmp(value, "low-latency") == 0) {
                 cfg.QuicProfile = TqQuicProfile::LowLatency;
             } else {
-                err = "invalid value for --quic-profile (max-throughput|low-latency)";
+                err = "invalid value for --profile (max-throughput|low-latency)";
                 return false;
             }
-        } else if (std::strcmp(arg, "--quic-disable-1rtt-encryption") == 0) {
-            cfg.QuicDisable1RttEncryption = true;
+        } else if (std::strcmp(arg, "--enable-encrypt") == 0) {
+            cfg.QuicDisable1RttEncryption = false;
         } else if (GetOptionValue(arg, "--handshake-threads", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--handshake-threads", err);
@@ -1308,17 +1322,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --target-rtt-ms";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--max-memory-mb", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--max-memory-mb", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.MaxMemoryMb)) {
-                err = "invalid value for --max-memory-mb";
-                return false;
-            }
         } else if (GetOptionValue(arg, "--relay-io-size", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--relay-io-size", err);
@@ -1328,17 +1331,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayIoSize)) {
                 err = "invalid value for --relay-io-size";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--relay-inflight-bytes", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--relay-inflight-bytes", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideRelayInflightBytes)) {
-                err = "invalid value for --relay-inflight-bytes";
                 return false;
             }
         } else if (GetOptionValue(arg, "--linux-relay-read-chunk-size", value)) {
@@ -1377,48 +1369,48 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --linux-relay-tcp-write-burst-bytes";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--quic-fcw", value)) {
+        } else if (GetOptionValue(arg, "--fcw", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-fcw", err);
+                value = NextArg(i, argc, argv, "--fcw", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             if (!ParseUint32(value, cfg.TuningOverrideQuicFcw)) {
-                err = "invalid value for --quic-fcw";
+                err = "invalid value for --fcw";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--quic-srw", value)) {
+        } else if (GetOptionValue(arg, "--srw", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-srw", err);
+                value = NextArg(i, argc, argv, "--srw", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             if (!ParseUint32(value, cfg.TuningOverrideQuicSrw)) {
-                err = "invalid value for --quic-srw";
+                err = "invalid value for --srw";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--quic-iw", value)) {
+        } else if (GetOptionValue(arg, "--iw", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-iw", err);
+                value = NextArg(i, argc, argv, "--iw", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             if (!ParseUint32(value, cfg.TuningOverrideQuicIw)) {
-                err = "invalid value for --quic-iw";
+                err = "invalid value for --iw";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--quic-initrtt-ms", value)) {
+        } else if (GetOptionValue(arg, "--initrtt-ms", value)) {
             if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--quic-initrtt-ms", err);
+                value = NextArg(i, argc, argv, "--initrtt-ms", err);
                 if (value == nullptr) {
                     return false;
                 }
             }
             if (!ParseUint32(value, cfg.TuningOverrideQuicInitRttMs)) {
-                err = "invalid value for --quic-initrtt-ms";
+                err = "invalid value for --initrtt-ms";
                 return false;
             }
         } else if (std::strcmp(arg, "--trace") == 0) {
@@ -1449,7 +1441,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         return false;
     }
     if (!cfg.ClientConfigPath.empty() && (!cfg.QuicPeer.empty() || quicPeerSpecified)) {
-        err = "--client-config and --quic-peer are mutually exclusive";
+        err = "--client-config and --peer are mutually exclusive";
         return false;
     }
     if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
@@ -1483,16 +1475,16 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     }
 
     if (cfg.Mode == TqMode::Client) {
-        if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--quic-peer", err)) {
+        if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--peer", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicCert, "--quic-cert", err)) {
+        if (!RequireNonEmpty(cfg.QuicCert, "--cert", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicKey, "--quic-key", err)) {
+        if (!RequireNonEmpty(cfg.QuicKey, "--key", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicCa, "--quic-ca", err)) {
+        if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
             return false;
         }
         if (cfg.WarmupMb > 0 && !RequireNonEmpty(cfg.WarmupTarget, "--warmup-target", err)) {
@@ -1511,16 +1503,16 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
         }
     } else {
-        if (!RequireNonEmpty(cfg.QuicListen, "--quic-listen", err)) {
+        if (!RequireNonEmpty(cfg.QuicListen, "--listen", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicCert, "--quic-cert", err)) {
+        if (!RequireNonEmpty(cfg.QuicCert, "--cert", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicKey, "--quic-key", err)) {
+        if (!RequireNonEmpty(cfg.QuicKey, "--key", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicCa, "--quic-ca", err)) {
+        if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
             return false;
         }
         if (cfg.AllowTargets.empty()) {

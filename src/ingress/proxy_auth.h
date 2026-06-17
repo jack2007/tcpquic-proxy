@@ -27,6 +27,16 @@ bool TqConstantTimeEquals(std::string_view left, std::string_view right);
 bool TqBase64Decode(std::string_view input, std::string& out);
 bool TqFindHttpHeaderValue(const std::string& request, std::string_view headerName, std::string_view& valueOut);
 bool TqParseHttpProxyAuthorization(std::string_view headerValue, std::string& user, std::string& pass);
+
+enum class TqHttpConnectAuthResult {
+    Authorized,
+    Disabled,
+    MissingHeader,
+    InvalidHeader,
+    InvalidCredentials,
+};
+
+TqHttpConnectAuthResult TqHttpConnectRequestAuthResult(const std::string& request, const TqProxyAuthTable& auth);
 bool TqHttpConnectRequestAuthorized(const std::string& request, const TqProxyAuthTable& auth);
 
 bool TqValidateProxyAuthUsers(const std::vector<TqProxyAuthUser>& users, std::string& err);

@@ -761,6 +761,26 @@ void TqTraceProxyAccepted(TqTraceProxyProto proto, TqSocketHandle fd) {
         TqTraceGlobalSnapshot().c_str());
 }
 
+void TqTraceProxyRejected(TqTraceProxyProto proto, TqSocketHandle fd, int status, const char* reason) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+
+    std::string peer;
+    if (!TqFormatSocketPeerAddr(fd, peer)) {
+        peer = "?";
+    }
+
+    LogInfo(
+        "event=proxy_rejected proto=%s fd=%d peer=%s status=%d reason=%s %s",
+        ProxyProtoName(proto),
+        static_cast<int>(fd),
+        peer.c_str(),
+        status,
+        reason != nullptr ? reason : "?",
+        TqTraceGlobalSnapshot().c_str());
+}
+
 void TqTraceProxyTunnelOk(TqTraceProxyProto proto, const char* target, uint64_t tunnelId) {
     if (!TqTraceEnabled()) {
         return;

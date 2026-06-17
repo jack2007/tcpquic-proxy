@@ -28,7 +28,6 @@ recommended window = 2 * BDP = 1000MB ~= 1GiB
 --quic-iw 4000 \
 --quic-initrtt-ms 200 \
 --relay-io-size 1048576 \
---relay-inflight-bytes 1073741824 \
 --quic-connections 1
 ```
 
@@ -45,8 +44,7 @@ recommended window = 2 * BDP = 1000MB ~= 1GiB
 | `--quic-initrtt-ms` | `200` | 让连接初期 RTT 估计贴近真实路径，避免拥塞控制启动阶段使用过低 RTT。 |
 | Pacing | enabled | 当前代码已开启。5% loss 场景应保持 pacing，避免 burst 进一步放大丢包。 |
 | SendBuffering | disabled | 当前代码关闭 MsQuic send buffering，由 relay 层管理发送流水线。 |
-| `--relay-io-size` | `1048576` | 1MiB relay IO block，降低高吞吐场景的 syscall、buffer 和分片开销。 |
-| `--relay-inflight-bytes` | `1073741824` | 应用层发送流水线目标。QUIC 窗口足够大时，还需要 relay 持续投递数据才能填满连接。 |
+| `--relay-io-size` | `1048576` | Windows relay IO buffer size。Linux 平台请使用 `--linux-relay-read-chunk-size` 控制 TCP read chunk。 |
 | `--quic-connections` | `1` | 单连接单流验证场景固定为 1。生产侧应按总吞吐目标增加连接数。 |
 
 ## 当前默认值的限制

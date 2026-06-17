@@ -56,6 +56,7 @@ int main() {
             "Proxy-Authorization: Basic YWxpY2U6c2VjcmV0LWE=\r\n"
             "\r\n";
         TqProxyAuthTable auth(std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+        assert(TqHttpConnectRequestAuthResult(request, auth) == TqHttpConnectAuthResult::Authorized);
         assert(TqHttpConnectRequestAuthorized(request, auth));
 
         std::string_view value;
@@ -69,6 +70,29 @@ int main() {
             "Host: example.test:443\r\n"
             "\r\n";
         TqProxyAuthTable auth(std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+        assert(TqHttpConnectRequestAuthResult(request, auth) == TqHttpConnectAuthResult::MissingHeader);
+        assert(!TqHttpConnectRequestAuthorized(request, auth));
+    }
+
+    {
+        const std::string request =
+            "CONNECT example.test:443 HTTP/1.1\r\n"
+            "Host: example.test:443\r\n"
+            "Proxy-Authorization: Digest abcdef\r\n"
+            "\r\n";
+        TqProxyAuthTable auth(std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+        assert(TqHttpConnectRequestAuthResult(request, auth) == TqHttpConnectAuthResult::InvalidHeader);
+        assert(!TqHttpConnectRequestAuthorized(request, auth));
+    }
+
+    {
+        const std::string request =
+            "CONNECT example.test:443 HTTP/1.1\r\n"
+            "Host: example.test:443\r\n"
+            "Proxy-Authorization: Basic YWxpY2U6d3Jvbmc=\r\n"
+            "\r\n";
+        TqProxyAuthTable auth(std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+        assert(TqHttpConnectRequestAuthResult(request, auth) == TqHttpConnectAuthResult::InvalidCredentials);
         assert(!TqHttpConnectRequestAuthorized(request, auth));
     }
 

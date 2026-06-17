@@ -80,13 +80,11 @@ proxy_tuning_args() {
     if [[ "$TUNING_20GBPS" == "1" ]]; then
         args+=(
             --tuning custom
-            --quic-fcw 1073741824
-            --quic-srw 1073741824
-            --quic-iw 4000
-            --quic-initrtt-ms 200
+            --fcw 1073741824
+            --srw 1073741824
+            --iw 4000
+            --initrtt-ms 200
             --relay-io-size 1048576
-            --relay-inflight-bytes 1073741824
-            --max-memory-mb 4096
         )
     fi
     if [[ -n "$EXTRA_PROXY_ARGS" ]]; then
@@ -276,11 +274,11 @@ start_remote_server() {
     local -a tuning_args=()
     mapfile -t tuning_args < <(proxy_tuning_args)
     ssh "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
-        --quic-listen ${TARGET}:${QUIC_PORT} \
+        --listen ${TARGET}:${QUIC_PORT} \
         --allow-targets ${TARGET}/32,127.0.0.0/8 \
-        --quic-cert ~/tcpquic-dgx-certs/server.crt \
-        --quic-key ~/tcpquic-dgx-certs/server.key \
-        --quic-ca ~/tcpquic-dgx-certs/ca.crt \
+        --cert ~/tcpquic-dgx-certs/server.crt \
+        --key ~/tcpquic-dgx-certs/server.key \
+        --ca ~/tcpquic-dgx-certs/ca.crt \
         --compress ${compress} \
         ${tuning_args[*]} \
         </dev/null >/tmp/tcpquic-dgx-server.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-server.pid"
@@ -311,13 +309,13 @@ start_local_client() {
     local -a tuning_args=()
     mapfile -t tuning_args < <(proxy_tuning_args)
     "$BIN" client \
-        --quic-peer "${TARGET}:${QUIC_PORT}" \
+        --peer "${TARGET}:${QUIC_PORT}" \
         --http-listen "127.0.0.1:${PROXY_PORT}" \
         --socks-listen "127.0.0.1:$((PROXY_PORT + 1000))" \
-        --quic-cert "$CERT_DIR/client.crt" \
-        --quic-key "$CERT_DIR/client.key" \
-        --quic-ca "$CERT_DIR/ca.crt" \
-        --quic-connections "$QUIC_CONNECTIONS" \
+        --cert "$CERT_DIR/client.crt" \
+        --key "$CERT_DIR/client.key" \
+        --ca "$CERT_DIR/ca.crt" \
+        --connections "$QUIC_CONNECTIONS" \
         --compress "$compress" \
         "${tuning_args[@]}" \
         "${warmup_args[@]}" \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 多 curl 并发吞吐评估：N 路并行 HTTP CONNECT 下载，对比 QUIC 连接池利用率
 #
-# 背景：单 curl + --quic-connections>1 时 conn=4 仅比 conn=1 高约 11%；
+# 背景：单 curl + --connections>1 时 conn=4 仅比 conn=1 高约 11%；
 # 本脚本用 PARALLEL_CURL 路并行传输压满多 QUIC 连接/多 stream。
 #
 # 用法:
@@ -15,7 +15,7 @@
 #   BIN               tcpquic-proxy 路径（默认 build/bin/Release/tcpquic-proxy）
 #   LOCAL             1 时强制本机 127.0.0.1 冒烟（不 SSH）；未设置且 SSH 失败时自动降级
 #   PARALLEL_CURL     并行 curl 数量（默认 4）
-#   QUIC_CONNECTIONS  client --quic-connections（默认 4）
+#   QUIC_CONNECTIONS  client --connections（默认 4）
 #   COMPRESS          隧道压缩：off|zstd（默认 off）
 #   SIZE_MB           每路 curl 载荷大小 MB（默认 32）
 #   PAYLOAD_KIND      载荷类型：repeat|zeros|text（默认 repeat）
@@ -90,13 +90,11 @@ proxy_tuning_args() {
     if [[ "$TUNING_20GBPS" == "1" ]]; then
         args+=(
             --tuning custom
-            --quic-fcw 1073741824
-            --quic-srw 1073741824
-            --quic-iw 4000
-            --quic-initrtt-ms 200
+            --fcw 1073741824
+            --srw 1073741824
+            --iw 4000
+            --initrtt-ms 200
             --relay-io-size 1048576
-            --relay-inflight-bytes 1073741824
-            --max-memory-mb 4096
         )
     fi
     printf '%s\n' "${args[@]}"
@@ -412,11 +410,11 @@ start_server() {
     mapfile -t tuning_args < <(proxy_tuning_args)
     if [[ "$MODE" == "dual" ]]; then
         ssh "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
-            --quic-listen ${TARGET}:${QUIC_PORT} \
+            --listen ${TARGET}:${QUIC_PORT} \
             --allow-targets ${TARGET}/32,127.0.0.0/8 \
-            --quic-cert ~/tcpquic-dgx-certs/server.crt \
-            --quic-key ~/tcpquic-dgx-certs/server.key \
-            --quic-ca ~/tcpquic-dgx-certs/ca.crt \
+            --cert ~/tcpquic-dgx-certs/server.crt \
+            --key ~/tcpquic-dgx-certs/server.key \
+            --ca ~/tcpquic-dgx-certs/ca.crt \
             --compress ${COMPRESS} \
             ${tuning_args[*]} \
             </dev/null >/tmp/tcpquic-dgx-server.log 2>&1 & echo \$! > /tmp/tcpquic-dgx-server.pid"
@@ -434,11 +432,11 @@ start_server() {
     mkfifo "$TMP_DIR/server.stdin"
     eval "exec {SERVER_STDIN_FD}<>\"$TMP_DIR/server.stdin\""
     "$BIN" server \
-        --quic-listen "127.0.0.1:${QUIC_PORT}" \
+        --listen "127.0.0.1:${QUIC_PORT}" \
         --allow-targets 127.0.0.0/8 \
-        --quic-cert "$CERT_DIR/server.crt" \
-        --quic-key "$CERT_DIR/server.key" \
-        --quic-ca "$CERT_DIR/ca.crt" \
+        --cert "$CERT_DIR/server.crt" \
+        --key "$CERT_DIR/server.key" \
+        --ca "$CERT_DIR/ca.crt" \
         --compress "$COMPRESS" \
         >"$TMP_DIR/server.log" 2>&1 <"$TMP_DIR/server.stdin" &
     SERVER_PID=$!
@@ -470,13 +468,13 @@ start_client() {
     local -a tuning_args=()
     mapfile -t tuning_args < <(proxy_tuning_args)
     "$BIN" client \
-        --quic-peer "$quic_peer" \
+        --peer "$quic_peer" \
         --http-listen "127.0.0.1:${PROXY_PORT}" \
         --socks-listen "127.0.0.1:$((PROXY_PORT + 1000))" \
-        --quic-cert "$CERT_DIR/client.crt" \
-        --quic-key "$CERT_DIR/client.key" \
-        --quic-ca "$CERT_DIR/ca.crt" \
-        --quic-connections "$QUIC_CONNECTIONS" \
+        --cert "$CERT_DIR/client.crt" \
+        --key "$CERT_DIR/client.key" \
+        --ca "$CERT_DIR/ca.crt" \
+        --connections "$QUIC_CONNECTIONS" \
         --compress "$COMPRESS" \
         "${tuning_args[@]}" \
         "${warmup_args[@]}" \

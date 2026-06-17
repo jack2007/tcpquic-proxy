@@ -209,23 +209,23 @@ start_proxy() {
     SERVER_STDIN_FD=$fd
 
     "$BIN" server \
-        --quic-listen "127.0.0.1:${QUIC_PORT}" \
+        --listen "127.0.0.1:${QUIC_PORT}" \
         --allow-targets "127.0.0.0/8" \
-        --quic-cert "$TMP_DIR/server.crt" \
-        --quic-key "$TMP_DIR/server.key" \
-        --quic-ca "$TMP_DIR/ca.crt" \
+        --cert "$TMP_DIR/server.crt" \
+        --key "$TMP_DIR/server.key" \
+        --ca "$TMP_DIR/ca.crt" \
         --compress "$compress_mode" \
         >"$TMP_DIR/server-${compress_mode}.log" 2>&1 <"$stdin_fifo" &
     SERVER_PID=$!
     wait_log "$TMP_DIR/server-${compress_mode}.log" "QUIC server listening" "server"
 
     "$BIN" client \
-        --quic-peer "127.0.0.1:${QUIC_PORT}" \
+        --peer "127.0.0.1:${QUIC_PORT}" \
         --http-listen "127.0.0.1:${HTTP_PROXY_PORT}" \
         --socks-listen "127.0.0.1:${SOCKS_PROXY_PORT}" \
-        --quic-cert "$TMP_DIR/client.crt" \
-        --quic-key "$TMP_DIR/client.key" \
-        --quic-ca "$TMP_DIR/ca.crt" \
+        --cert "$TMP_DIR/client.crt" \
+        --key "$TMP_DIR/client.key" \
+        --ca "$TMP_DIR/ca.crt" \
         --compress "$compress_mode" \
         >"$TMP_DIR/client-${compress_mode}.log" 2>&1 &
     CLIENT_PID=$!

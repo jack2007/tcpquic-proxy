@@ -1,6 +1,6 @@
 # tcpquic-proxy 运行线程模型
 
-本文档根据当前 `src/` 源码描述 `tcpquic-proxy` 的线程来源、回调边界、relay worker 数据路径和资源背压。重点是当前生产实现，不再描述已归档的 blocking relay / ingress-copy 旧路径为主路径。
+本文档根据当前 `src/` 源码描述 `tcpquic-proxy` 的线程来源、回调边界、relay worker 数据路径和资源背压。重点是当前生产实现，不再描述已删除的 blocking relay / ingress-copy 旧路径。
 
 ## 1. 总体结论
 
@@ -18,7 +18,7 @@
 - Linux QUIC->TCP receive callback 统一返回 `QUIC_STATUS_PENDING`。callback 只建立借用 MsQuic receive buffer 的 pending view 并入队；TCP 写出、zstd 解压和 `StreamReceiveComplete` 都在 owner relay worker 上推进。
 - Windows relay 当前走 `TqWindowsRelayWorker` / IOCP：每个 worker 一个 IOCP thread，receive callback 也使用 pending view；zstd 解压在 IOCP worker 路径中处理。Windows 相关计划仍是 active plan，最终验证需要在 Windows 机器上完成。
 - 隧道清理由进程级 `TqTunnelReaper` 单线程统一回收，不再为每条隧道创建 cleanup watcher。
-- 旧 `TqBlockingDemoRelay` 和 `TqTcpWriteQueue` 仅保留在 demo/test target 中，不参与生产 `tcpquic-proxy` 链接。
+- 旧 `TqBlockingDemoRelay` 和 `TqTcpWriteQueue` 已删除，不参与生产或测试链接。
 
 ## 2. 线程来源
 
@@ -486,8 +486,6 @@ thread apply all bt
 | `TqLinuxRelayWorker::FlushDeferredQuicReceives` | Linux QUIC->TCP pending view drain |
 | `TqLinuxRelayWorker::DrainCompressedQuicReceiveView` | Linux zstd receive decompression |
 | `TqWindowsRelayWorker::Run` | Windows IOCP relay worker |
-| `TqBlockingDemoRelay::*` | demo/legacy only，非生产路径 |
-| `TqTcpWriteQueue::WriterLoop` | demo/legacy only，非生产路径 |
 
 ## 12. 关键源文件索引
 

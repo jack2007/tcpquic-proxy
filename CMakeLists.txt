@@ -45,6 +45,16 @@ set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${TCPQUIC_SPDLOG_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/spdlog")
 
 option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers" ON)
+set(TCPQUIC_ADDRESS_SANITIZER_ENABLED OFF)
+set(TCPQUIC_SANITIZER_FLAGS
+    "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}")
+if(TCPQUIC_SANITIZER_FLAGS MATCHES "(^|[ =,])-fsanitize=address([, ]|$)")
+    set(TCPQUIC_ADDRESS_SANITIZER_ENABLED ON)
+endif()
+if(TCPQUIC_ADDRESS_SANITIZER_ENABLED AND TCPQUIC_USE_MIMALLOC)
+    message(STATUS "AddressSanitizer detected; disabling static mimalloc override")
+    set(TCPQUIC_USE_MIMALLOC OFF CACHE BOOL "Statically link vendored mimalloc for relay buffers" FORCE)
+endif()
 
 set(TCPQUIC_MIMALLOC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mimalloc" CACHE PATH "mimalloc source tree")
 if(TCPQUIC_USE_MIMALLOC AND NOT EXISTS "${TCPQUIC_MIMALLOC_SOURCE_DIR}/include/mimalloc.h")

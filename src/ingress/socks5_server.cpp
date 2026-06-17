@@ -29,6 +29,28 @@ constexpr uint8_t TqSocks5AtypIpv4 = 0x01;
 constexpr uint8_t TqSocks5AtypDomain = 0x03;
 constexpr uint8_t TqSocks5AtypIpv6 = 0x04;
 
+enum class TqSocks5AuthResult {
+    Ok,
+    InvalidVersion,
+    InvalidUsernameLength,
+    InvalidPasswordLength,
+    InvalidCredentials,
+    SendFailure,
+    RecvFailure,
+};
+
+enum class TqSocks5GreetingResult {
+    Ok,
+    InvalidHeader,
+    RecvFailure,
+    NoAcceptableMethod,
+    SendFailure,
+    AuthInvalidVersion,
+    AuthInvalidUsernameLength,
+    AuthInvalidPasswordLength,
+    AuthInvalidCredentials,
+};
+
 struct TqHostPort {
     std::string Host;
     uint16_t Port{};
@@ -190,56 +212,107 @@ bool TqCreateListenSocket(const std::string& listenHostPort, TqSocketHandle& lis
     return false;
 }
 
-bool TqReadSocks5UsernamePasswordAuth(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
+const char* TqSocks5GreetingReason(TqSocks5GreetingResult result) {
+    switch (result) {
+    case TqSocks5GreetingResult::Ok:
+        return "greeting_ok";
+    case TqSocks5GreetingResult::InvalidHeader:
+        return "greeting_invalid_header";
+    case TqSocks5GreetingResult::RecvFailure:
+        return "greeting_recv_failure";
+    case TqSocks5GreetingResult::NoAcceptableMethod:
+        return "greeting_no_acceptable_method";
+    case TqSocks5GreetingResult::SendFailure:
+        return "greeting_send_failure";
+    case TqSocks5GreetingResult::AuthInvalidVersion:
+        return "auth_invalid_version";
+    case TqSocks5GreetingResult::AuthInvalidUsernameLength:
+        return "auth_invalid_username_length";
+    case TqSocks5GreetingResult::AuthInvalidPasswordLength:
+        return "auth_invalid_password_length";
+    case TqSocks5GreetingResult::AuthInvalidCredentials:
+        return "auth_invalid_credentials";
+    default:
+        return "greeting_unknown";
+    }
+}
+
+const char* TqSocks5ConnectReason(uint8_t rep) {
+    switch (rep) {
+    case TQ_SOCKS5_REP_SUCCEEDED:
+        return "connect_ok";
+    case TQ_SOCKS5_REP_GENERAL_FAILURE:
+        return "connect_invalid_request";
+    case TQ_SOCKS5_REP_COMMAND_NOT_SUPPORTED:
+        return "connect_command_not_supported";
+    case TQ_SOCKS5_REP_ADDRESS_TYPE_NOT_SUPPORTED:
+        return "connect_address_type_not_supported";
+    default:
+        return "connect_failed";
+    }
+}
+
+TqSocks5AuthResult TqReadSocks5UsernamePasswordAuth(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
     uint8_t header[2]{};
-    if (!TqRecvAll(clientFd, header, sizeof(header)) || header[0] != 0x01) {
-        return false;
+    if (!TqRecvAll(clientFd, header, sizeof(header))) {
+        return TqSocks5AuthResult::RecvFailure;
+    }
+    if (header[0] != 0x01) {
+        return TqSocks5AuthResult::InvalidVersion;
     }
 
     const uint8_t ulen = header[1];
     if (ulen == 0 || ulen > TqProxyAuthTable::kMaxFieldBytes) {
-        return false;
+        return TqSocks5AuthResult::InvalidUsernameLength;
     }
 
     std::string username(static_cast<size_t>(ulen), '\0');
     if (!TqRecvAll(clientFd, reinterpret_cast<uint8_t*>(username.data()), ulen)) {
-        return false;
+        return TqSocks5AuthResult::RecvFailure;
     }
 
     uint8_t plen = 0;
     if (!TqRecvAll(clientFd, &plen, 1) || plen == 0 || plen > TqProxyAuthTable::kMaxFieldBytes) {
-        return false;
+        return TqSocks5AuthResult::InvalidPasswordLength;
     }
 
     std::string password(static_cast<size_t>(plen), '\0');
     if (!TqRecvAll(clientFd, reinterpret_cast<uint8_t*>(password.data()), plen)) {
-        return false;
+        return TqSocks5AuthResult::RecvFailure;
     }
 
     const uint8_t status = auth.Validate(username, password) ? 0x00 : 0x01;
     const uint8_t response[] = {0x01, status};
-    return status == 0x00 && TqSendAll(clientFd, response, sizeof(response));
+    if (!TqSendAll(clientFd, response, sizeof(response))) {
+        return TqSocks5AuthResult::SendFailure;
+    }
+    return status == 0x00 ? TqSocks5AuthResult::Ok : TqSocks5AuthResult::InvalidCredentials;
 }
 
-bool TqReadSocks5Greeting(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
+TqSocks5GreetingResult TqReadSocks5Greeting(TqSocketHandle clientFd, const TqProxyAuthTable& auth) {
     uint8_t header[2]{};
-    if (!TqRecvAll(clientFd, header, sizeof(header)) || header[0] != TqSocks5Version || header[1] == 0) {
-        return false;
+    if (!TqRecvAll(clientFd, header, sizeof(header))) {
+        return TqSocks5GreetingResult::RecvFailure;
+    }
+    if (header[0] != TqSocks5Version || header[1] == 0) {
+        return TqSocks5GreetingResult::InvalidHeader;
     }
 
     uint8_t methods[255]{};
     if (!TqRecvAll(clientFd, methods, header[1])) {
-        return false;
+        return TqSocks5GreetingResult::RecvFailure;
     }
 
     if (!auth.Enabled()) {
         for (uint8_t i = 0; i < header[1]; ++i) {
             if (methods[i] == TqSocks5AuthNone) {
-                return TqSendSocks5Method(clientFd, TqSocks5AuthNone);
+                return TqSendSocks5Method(clientFd, TqSocks5AuthNone)
+                    ? TqSocks5GreetingResult::Ok
+                    : TqSocks5GreetingResult::SendFailure;
             }
         }
         (void)TqSendSocks5Method(clientFd, TqSocks5AuthNoAcceptable);
-        return false;
+        return TqSocks5GreetingResult::NoAcceptableMethod;
     }
 
     bool wantsUserPass = false;
@@ -251,12 +324,28 @@ bool TqReadSocks5Greeting(TqSocketHandle clientFd, const TqProxyAuthTable& auth)
     }
     if (!wantsUserPass) {
         (void)TqSendSocks5Method(clientFd, TqSocks5AuthNoAcceptable);
-        return false;
+        return TqSocks5GreetingResult::NoAcceptableMethod;
     }
     if (!TqSendSocks5Method(clientFd, TqSocks5AuthUserPass)) {
-        return false;
+        return TqSocks5GreetingResult::SendFailure;
     }
-    return TqReadSocks5UsernamePasswordAuth(clientFd, auth);
+    switch (TqReadSocks5UsernamePasswordAuth(clientFd, auth)) {
+    case TqSocks5AuthResult::Ok:
+        return TqSocks5GreetingResult::Ok;
+    case TqSocks5AuthResult::InvalidVersion:
+        return TqSocks5GreetingResult::AuthInvalidVersion;
+    case TqSocks5AuthResult::InvalidUsernameLength:
+        return TqSocks5GreetingResult::AuthInvalidUsernameLength;
+    case TqSocks5AuthResult::InvalidPasswordLength:
+        return TqSocks5GreetingResult::AuthInvalidPasswordLength;
+    case TqSocks5AuthResult::InvalidCredentials:
+        return TqSocks5GreetingResult::AuthInvalidCredentials;
+    case TqSocks5AuthResult::SendFailure:
+        return TqSocks5GreetingResult::SendFailure;
+    case TqSocks5AuthResult::RecvFailure:
+    default:
+        return TqSocks5GreetingResult::RecvFailure;
+    }
 }
 
 bool TqReadSocks5ConnectRequest(TqSocketHandle clientFd, TunnelRequest& out, uint8_t& rep) {
@@ -325,7 +414,9 @@ void TqHandleSocks5Client(
     const TqProxyAuthTable& auth) {
     TqTraceProxyAccepted(TqTraceProxyProto::Socks, clientFd);
 
-    if (!TqReadSocks5Greeting(clientFd, auth)) {
+    const TqSocks5GreetingResult greeting = TqReadSocks5Greeting(clientFd, auth);
+    if (greeting != TqSocks5GreetingResult::Ok) {
+        TqTraceProxyRejected(TqTraceProxyProto::Socks, clientFd, 0, TqSocks5GreetingReason(greeting));
         TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -336,6 +427,7 @@ void TqHandleSocks5Client(
     uint8_t rep = TQ_SOCKS5_REP_GENERAL_FAILURE;
     if (!TqReadSocks5ConnectRequest(clientFd, tunnel, rep)) {
         (void)TqSendSocks5Reply(clientFd, rep);
+        TqTraceProxyRejected(TqTraceProxyProto::Socks, clientFd, rep, TqSocks5ConnectReason(rep));
         TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -343,6 +435,7 @@ void TqHandleSocks5Client(
 
     if (!onTunnel) {
         (void)TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_GENERAL_FAILURE);
+        TqTraceProxyRejected(TqTraceProxyProto::Socks, clientFd, TQ_SOCKS5_REP_GENERAL_FAILURE, "missing_tunnel_handler");
         TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;
@@ -361,6 +454,7 @@ void TqHandleSocks5Client(
     }
 
     if (!TqSendSocks5Reply(clientFd, TQ_SOCKS5_REP_SUCCEEDED)) {
+        TqTraceProxyRejected(TqTraceProxyProto::Socks, clientFd, TQ_SOCKS5_REP_SUCCEEDED, "reply_send_failure");
         TqTraceProxyClosed(TqTraceProxyProto::Socks, clientFd);
         TqCloseSocket(clientFd);
         return;

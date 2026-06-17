@@ -29,7 +29,6 @@ namespace {
 constexpr char TqAlpn[] = "tcpquic-tunnel/1";
 constexpr uint32_t TqKeepAliveMs = 15 * 1000;
 constexpr uint64_t TqIdleTimeoutMs = 60 * 1000;
-constexpr uint16_t TqPeerBidiStreamCount = 1000;
 
 struct TqEndpoint {
     std::string Host;
@@ -113,7 +112,7 @@ MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     settings.SetCongestionControlAlgorithm(QUIC_CONGESTION_CONTROL_ALGORITHM_BBR);
     settings.SetKeepAlive(TqKeepAliveMs);
     settings.SetIdleTimeoutMs(TqIdleTimeoutMs);
-    settings.SetPeerBidiStreamCount(TqPeerBidiStreamCount);
+    settings.SetPeerBidiStreamCount(static_cast<uint16_t>(cfg.QuicConnectionStreamCount));
     settings.SetStreamRecvWindowDefault(cfg.Tuning.StreamRecvWindow);
     settings.SetConnFlowControlWindow(cfg.Tuning.ConnFlowControlWindow);
     settings.InitialWindowPackets = cfg.Tuning.InitialWindowPackets;

@@ -4,6 +4,13 @@
 #include <cassert>
 #include <cstring>
 
+#define TQ_TEST_REQUIRE(expr) \
+    do { \
+        if (!(expr)) { \
+            return __LINE__; \
+        } \
+    } while (false)
+
 int main() {
     {
         TqConfig cfg{};
@@ -74,29 +81,68 @@ int main() {
     {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Custom;
+        cfg.TargetBandwidthMbps = 11000;
+        cfg.TargetRttMs = 200;
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
-        cfg.TuningOverrideRelayInflightBytes = 1073741824;
         cfg.TuningOverrideLinuxRelayReadChunkSize = 131072;
         cfg.TuningOverrideQuicInitRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 131072);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 512ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
         assert(cfg.Tuning.InitialRttMs == 100);
     }
 
     {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Custom;
+        cfg.TargetBandwidthMbps = 11000;
+        cfg.TargetRttMs = 200;
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
-        cfg.TuningOverrideRelayInflightBytes = 1073741824;
         cfg.TuningOverrideQuicInitRttMs = 200;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        assert(cfg.Tuning.RelayMaxInFlightSends == 1024);
-        assert(cfg.Tuning.RelayDefaultIdealSend == 1073741824ull);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 512ull * 1024 * 1024);
+        assert(cfg.Tuning.RelayMaxInFlightSends == 64);
+        assert(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
         assert(cfg.Tuning.TcpSocketBufferBytes >= 16 * 1024 * 1024);
+    }
+
+    {
+        TqSetRelayMemoryBudget(0);
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Auto;
+        cfg.TargetBandwidthMbps = 1000;
+        cfg.TargetRttMs = 50;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        TQ_TEST_REQUIRE(TqGetRelayMemoryBudget() >= 256);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= 16ull * 1024 * 1024);
+    }
+
+    {
+        TqSetRelayMemoryBudget(0);
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Auto;
+        cfg.TargetBandwidthMbps = 20000;
+        cfg.TargetRttMs = 100;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500000000ull);
+        TQ_TEST_REQUIRE(cfg.Tuning.MaxPendingBufferBytesPerRelay >= 500000000ull);
+        TQ_TEST_REQUIRE(TqGetRelayMemoryBudget() >= 512);
+    }
+
+    {
+        TqConfig cfg{};
+        cfg.TuningMode = TqTuningMode::Auto;
+        cfg.TargetBandwidthMbps = 1073741824u;
+        cfg.TargetRttMs = 2147483648u;
+        TqComputeTuning(cfg, cfg.Tuning);
+
+        TQ_TEST_REQUIRE(cfg.Tuning.ConnFlowControlWindow == 500000000u);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
     }
 
     {
@@ -104,33 +150,31 @@ int main() {
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        TqSetRelayMemoryBudget(512);
+        const uint32_t autoBudgetMb = TqGetRelayMemoryBudget();
+        TQ_TEST_REQUIRE(autoBudgetMb >= 256);
         TqApplyRelayPoolBudget(cfg.Tuning, 100);
-        assert(cfg.Tuning.RelayMaxFreeSendContexts == 5);
-        assert(cfg.Tuning.RelayMaxInFlightSends == 5);
-        assert(cfg.Tuning.RelayDefaultIdealSend == 5ull * 1024 * 1024);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayMaxFreeSendContexts >= 1);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayMaxInFlightSends >= 1);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayDefaultIdealSend <=
+                        static_cast<uint64_t>(autoBudgetMb) * 1024 * 1024 / 100);
 
         TqComputeTuning(cfg, cfg.Tuning);
         TqApplyRelayPoolBudget(cfg.Tuning, 1);
-        assert(cfg.Tuning.RelayMaxFreeSendContexts == 64);
-
-        TqSetRelayMemoryBudget(0);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayMaxFreeSendContexts == 64);
     }
 
     {
-        TqSetRelayMemoryBudget(128);
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
 
         const uint32_t first = TqRelayRegisterActive();
-        assert(first == 1);
+        TQ_TEST_REQUIRE(first == 1);
         TqApplyRelayPoolBudget(cfg.Tuning, first);
-        assert(cfg.Tuning.RelayMaxFreeSendContexts >= 1);
+        TQ_TEST_REQUIRE(cfg.Tuning.RelayMaxFreeSendContexts >= 1);
 
         TqRelayUnregisterActive();
-        assert(TqGetActiveRelayCount() == 0);
-        TqSetRelayMemoryBudget(0);
+        TQ_TEST_REQUIRE(TqGetActiveRelayCount() == 0);
     }
 
     {
@@ -183,13 +227,13 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-peer";
+        char arg2[] = "--peer";
         char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--quic-cert";
+        char arg4[] = "--cert";
         char arg5[] = "cert.pem";
-        char arg6[] = "--quic-key";
+        char arg6[] = "--key";
         char arg7[] = "key.pem";
-        char arg8[] = "--quic-ca";
+        char arg8[] = "--ca";
         char arg9[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9};
         assert(TqParseArgs(10, argv, cfg, err));
@@ -201,17 +245,17 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-disable-1rtt-encryption";
-        char arg3[] = "--quic-peer";
+        char arg2[] = "--enable-encrypt";
+        char arg3[] = "--peer";
         char arg4[] = "127.0.0.1:4433";
-        char arg5[] = "--quic-cert";
+        char arg5[] = "--cert";
         char arg6[] = "cert.pem";
-        char arg7[] = "--quic-key";
+        char arg7[] = "--key";
         char arg8[] = "key.pem";
-        char arg9[] = "--quic-ca";
+        char arg9[] = "--ca";
         char arg10[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10};
-        if (!TqParseArgs(11, argv, cfg, err) || !cfg.QuicDisable1RttEncryption) {
+        if (!TqParseArgs(11, argv, cfg, err) || cfg.QuicDisable1RttEncryption) {
             return 2;
         }
     }
@@ -221,15 +265,15 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-profile";
+        char arg2[] = "--profile";
         char arg3[] = "low-latency";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(TqParseArgs(12, argv, cfg, err));
@@ -241,15 +285,15 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-profile";
+        char arg2[] = "--profile";
         char arg3[] = "invalid";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(!TqParseArgs(12, argv, cfg, err));
@@ -260,13 +304,13 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-peer";
+        char arg2[] = "--peer";
         char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--quic-cert";
+        char arg4[] = "--cert";
         char arg5[] = "cert.pem";
-        char arg6[] = "--quic-key";
+        char arg6[] = "--key";
         char arg7[] = "key.pem";
-        char arg8[] = "--quic-ca";
+        char arg8[] = "--ca";
         char arg9[] = "ca.pem";
         char arg10[] = "--linux-relay-read-chunk-size";
         char arg11[] = "262144";
@@ -283,13 +327,13 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-peer";
+        char arg2[] = "--peer";
         char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--quic-cert";
+        char arg4[] = "--cert";
         char arg5[] = "cert.pem";
-        char arg6[] = "--quic-key";
+        char arg6[] = "--key";
         char arg7[] = "key.pem";
-        char arg8[] = "--quic-ca";
+        char arg8[] = "--ca";
         char arg9[] = "ca.pem";
         char arg10[] = "--linux-relay-tcp-write-max-bytes";
         char arg11[] = "4194304";
@@ -309,13 +353,13 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "server";
-        char arg2[] = "--quic-listen";
+        char arg2[] = "--listen";
         char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--quic-cert";
+        char arg4[] = "--cert";
         char arg5[] = "cert.pem";
-        char arg6[] = "--quic-key";
+        char arg6[] = "--key";
         char arg7[] = "key.pem";
-        char arg8[] = "--quic-ca";
+        char arg8[] = "--ca";
         char arg9[] = "ca.pem";
         char arg10[] = "--allow-targets";
         char arg11[] = "127.0.0.0/8";
@@ -334,13 +378,13 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
-        char arg2[] = "--quic-peer";
+        char arg2[] = "--peer";
         char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--quic-cert";
+        char arg4[] = "--cert";
         char arg5[] = "cert.pem";
-        char arg6[] = "--quic-key";
+        char arg6[] = "--key";
         char arg7[] = "key.pem";
-        char arg8[] = "--quic-ca";
+        char arg8[] = "--ca";
         char arg9[] = "ca.pem";
         char arg10[] = "--linux-relay-ingress-slots";
         char arg11[] = "96";
@@ -351,10 +395,11 @@ int main() {
     }
 
     {
-        TqSetRelayMemoryBudget(512);
+        TqSetRelayMemoryBudget(0);
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
+        const uint32_t autoBudgetMb = TqGetRelayMemoryBudget();
 
         assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
         assert(cfg.Tuning.LinuxRelayMaxIov == 16);
@@ -362,14 +407,15 @@ int main() {
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 4096);
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
-        assert(cfg.Tuning.LinuxRelayGlobalPendingBytes == 512ull * 1024 * 1024 / 2);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 4u * 1024 * 1024);
+        TQ_TEST_REQUIRE(autoBudgetMb >= 256);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes ==
+                        static_cast<uint64_t>(autoBudgetMb) * 1024 * 1024 / 2);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 64ull * 1024 * 1024);
         if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0) {
             return 1;
         }
-        assert(cfg.Tuning.MaxPendingBufferBytesPerRelay >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
-
-        TqSetRelayMemoryBudget(0);
+        TQ_TEST_REQUIRE(
+            cfg.Tuning.MaxPendingBufferBytesPerRelay >= cfg.Tuning.LinuxRelayPerTunnelPendingBytes);
     }
 
     {
@@ -391,13 +437,13 @@ int main() {
         char arg1[] = "client";
         char arg2[] = "--download-test";
         char arg3[] = "10";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(TqParseArgs(12, argv, cfg, err));
@@ -412,13 +458,13 @@ int main() {
         char arg1[] = "client";
         char arg2[] = "--upload-test";
         char arg3[] = "5";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(TqParseArgs(12, argv, cfg, err));
@@ -435,13 +481,13 @@ int main() {
         char arg3[] = "10";
         char arg4[] = "--upload-test";
         char arg5[] = "5";
-        char arg6[] = "--quic-peer";
+        char arg6[] = "--peer";
         char arg7[] = "127.0.0.1:4433";
-        char arg8[] = "--quic-cert";
+        char arg8[] = "--cert";
         char arg9[] = "cert.pem";
-        char arg10[] = "--quic-key";
+        char arg10[] = "--key";
         char arg11[] = "key.pem";
-        char arg12[] = "--quic-ca";
+        char arg12[] = "--ca";
         char arg13[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13};
         assert(!TqParseArgs(14, argv, cfg, err));
@@ -454,13 +500,13 @@ int main() {
         char arg1[] = "client";
         char arg2[] = "--download-test";
         char arg3[] = "0";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(!TqParseArgs(12, argv, cfg, err));
@@ -473,13 +519,13 @@ int main() {
         char arg1[] = "client";
         char arg2[] = "--upload-test";
         char arg3[] = "86401";
-        char arg4[] = "--quic-peer";
+        char arg4[] = "--peer";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(!TqParseArgs(12, argv, cfg, err));
@@ -492,13 +538,13 @@ int main() {
         char arg1[] = "server";
         char arg2[] = "--download-test";
         char arg3[] = "10";
-        char arg4[] = "--quic-listen";
+        char arg4[] = "--listen";
         char arg5[] = "127.0.0.1:4433";
-        char arg6[] = "--quic-cert";
+        char arg6[] = "--cert";
         char arg7[] = "cert.pem";
-        char arg8[] = "--quic-key";
+        char arg8[] = "--key";
         char arg9[] = "key.pem";
-        char arg10[] = "--quic-ca";
+        char arg10[] = "--ca";
         char arg11[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(!TqParseArgs(12, argv, cfg, err));
@@ -526,13 +572,13 @@ int main() {
         char arg3[] = "1";
         char arg4[] = "--download-test";
         char arg5[] = "10";
-        char arg6[] = "--quic-peer";
+        char arg6[] = "--peer";
         char arg7[] = "127.0.0.1:4433";
-        char arg8[] = "--quic-cert";
+        char arg8[] = "--cert";
         char arg9[] = "cert.pem";
-        char arg10[] = "--quic-key";
+        char arg10[] = "--key";
         char arg11[] = "key.pem";
-        char arg12[] = "--quic-ca";
+        char arg12[] = "--ca";
         char arg13[] = "ca.pem";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13};
         assert(!TqParseArgs(14, argv, cfg, err));

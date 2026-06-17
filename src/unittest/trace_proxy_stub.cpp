@@ -4,6 +4,9 @@
 void TqTraceProxyAccepted(TqTraceProxyProto, TqSocketHandle) {
 }
 
+void TqTraceProxyRejected(TqTraceProxyProto, TqSocketHandle, int, const char*) {
+}
+
 void TqTraceProxyTunnelOk(TqTraceProxyProto, const char*, uint64_t) {
 }
 

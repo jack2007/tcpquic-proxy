@@ -30,10 +30,12 @@ Client config uses `peers` for all destinations. A single remote server is repre
     "profile": "max-throughput",
 
     // Insecure lab-only switch that disables QUIC 1-RTT packet encryption.
-    "disable_1rtt_encryption": false,
+    // Default is true; set false to enable packet encryption.
+    "disable_1rtt_encryption": true,
 
     // Default connection settings inherited by peers unless overridden.
     "connections": 16,
+    "connection_stream_count": 1024,
     "reconnect_interval_ms": 3000,
 
     // QUIC transport overrides for high-BDP/high-throughput tests.
@@ -65,12 +67,10 @@ Client config uses `peers` for all destinations. A single remote server is repre
     // Use custom when setting explicit override fields.
     "mode": "custom",
     "target_bandwidth_mbps": 100000,
-    "target_rtt_ms": 1,
-    "max_memory_mb": 4096
+    "target_rtt_ms": 1
   },
   "relay": {
     "io_size": 1048576,
-    "inflight_bytes": 1073741824,
     "linux": {
       "read_chunk_size": 1048576,
       "worker_slots": 1024,
@@ -129,7 +129,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
   },
   "proto": {
     "profile": "max-throughput",
-    "disable_1rtt_encryption": false,
+    "disable_1rtt_encryption": true,
     "fcw": 1073741824,
     "srw": 1073741824,
     "iw": 4000,
@@ -142,12 +142,10 @@ Client config uses `peers` for all destinations. A single remote server is repre
   "tuning": {
     "mode": "custom",
     "target_bandwidth_mbps": 100000,
-    "target_rtt_ms": 1,
-    "max_memory_mb": 4096
+    "target_rtt_ms": 1
   },
   "relay": {
     "io_size": 1048576,
-    "inflight_bytes": 1073741824,
     "linux": {
       "read_chunk_size": 1048576,
       "worker_slots": 1024,
@@ -171,8 +169,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `tls.ca` | client/server | CA certificate PEM path. Required. |
 | `admin.listen` | client/server | Admin HTTP listen address. |
 | `proto.profile` | client/server | `max-throughput` or `low-latency`. |
-| `proto.disable_1rtt_encryption` | client/server | Insecure lab-only QUIC 1-RTT encryption disable switch. |
+| `proto.disable_1rtt_encryption` | client/server | Insecure lab-only QUIC 1-RTT encryption disable switch. Defaults to `true`; set `false` to enable packet encryption. |
 | `proto.connections` | client | Default QUIC connection count inherited by peers. |
+| `proto.connection_stream_count` | client/server | Max bidirectional streams allowed per QUIC connection, range 1..65535. |
 | `proto.reconnect_interval_ms` | client | Default reconnect interval inherited by peers, 1000..60000 ms. |
 | `proto.fcw` | client/server | QUIC connection flow-control window override. |
 | `proto.srw` | client/server | QUIC stream receive window override. |
@@ -193,9 +192,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `tuning.mode` | client/server | `auto`, `lan`, `wan`, or `custom`. |
 | `tuning.target_bandwidth_mbps` | client/server | Target bandwidth for BDP-based tuning. |
 | `tuning.target_rtt_ms` | client/server | Target RTT for BDP-based tuning. |
-| `tuning.max_memory_mb` | client/server | Relay memory pool budget. |
 | `relay.io_size` | client/server | Relay IO chunk size override. |
-| `relay.inflight_bytes` | client/server | Target relay in-flight bytes. |
 | `relay.linux.read_chunk_size` | client/server | Linux relay TCP read chunk size. |
 | `relay.linux.worker_slots` | client/server | Linux relay worker buffer slots per tunnel. |
 | `relay.linux.tcp_write_max_bytes` | client/server | Cap bytes per Linux relay TCP `sendmsg`; omit when not overriding. |
@@ -218,4 +215,4 @@ Client config uses `peers` for all destinations. A single remote server is repre
 - Client configs should use `peers` even for a single remote server.
 - Use `tuning.mode: "custom"` when relying on explicit override keys such as `relay.linux.worker_slots`, `proto.fcw`, or `proto.initrtt_ms`.
 - Built-in speed-test options require exactly one enabled peer.
-- `proto.disable_1rtt_encryption` is insecure and should be used only in isolated lab measurements.
+- `proto.disable_1rtt_encryption: true` is insecure and should be used only in isolated lab measurements.

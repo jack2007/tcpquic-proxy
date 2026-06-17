@@ -133,14 +133,12 @@ def bps_from_iperf(text):
 def proxy_args():
     args = [
         "--tuning", "custom",
-        "--quic-fcw", "1073741824",
-        "--quic-srw", "1073741824",
-        "--quic-iw", "4000",
-        "--quic-initrtt-ms", "1",
+        "--fcw", "1073741824",
+        "--srw", "1073741824",
+        "--iw", "4000",
+        "--initrtt-ms", "1",
         "--relay-io-size", "1048576",
-        "--relay-inflight-bytes", "1073741824",
-        "--max-memory-mb", "8192",
-        "--quic-connections", str(Q_PER_LANE),
+        "--connections", str(Q_PER_LANE),
         "--compress", "off",
         "--linux-relay-read-chunk-size", "1048576",
         "--linux-relay-worker-slots", "1024",
@@ -180,12 +178,12 @@ def start_lane(index):
     server_cmd = " ".join([
         REMOTE_BIN,
         "server",
-        "--quic-listen", f"{TARGET}:{ports['quic']}",
+        "--listen", f"{TARGET}:{ports['quic']}",
         "--allow-targets", f"{TARGET}/32,127.0.0.0/8",
         "--admin-listen", f"127.0.0.1:{ports['server_admin']}",
-        "--quic-cert", f"{cert_remote}/server.crt",
-        "--quic-key", f"{cert_remote}/server.key",
-        "--quic-ca", f"{cert_remote}/ca.crt",
+        "--cert", f"{cert_remote}/server.crt",
+        "--key", f"{cert_remote}/server.key",
+        "--ca", f"{cert_remote}/ca.crt",
         *proxy_args(),
     ])
     _, server_log = remote_bg(
@@ -199,13 +197,13 @@ def start_lane(index):
     cmd = [
         str(BIN),
         "client",
-        "--quic-peer", f"{TARGET}:{ports['quic']}",
+        "--peer", f"{TARGET}:{ports['quic']}",
         "--http-listen", f"127.0.0.1:{ports['http']}",
         "--socks-listen", f"127.0.0.1:{ports['socks']}",
         "--admin-listen", f"127.0.0.1:{ports['client_admin']}",
-        "--quic-cert", str(CERT_SRC / "client.crt"),
-        "--quic-key", str(CERT_SRC / "client.key"),
-        "--quic-ca", str(CERT_SRC / "ca.crt"),
+        "--cert", str(CERT_SRC / "client.crt"),
+        "--key", str(CERT_SRC / "client.key"),
+        "--ca", str(CERT_SRC / "ca.crt"),
         *proxy_args(),
     ]
     log("+ " + " ".join(cmd))
@@ -373,7 +371,7 @@ def summarize(rows):
         f"- Date: {datetime.now().isoformat(timespec='seconds')}",
         f"- Duration: {DURATION}s per direction",
         f"- Lanes: {LANES}",
-        f"- Per lane: `--quic-connections {Q_PER_LANE}`, `iperf3 -P {P_PER_LANE}`",
+        f"- Per lane: `--connections {Q_PER_LANE}`, `iperf3 -P {P_PER_LANE}`",
         f"- TCP write max bytes: {TCP_WRITE_MAX_BYTES if TCP_WRITE_MAX_BYTES > 0 else 'uncapped'}",
         f"- TCP write burst bytes: {TCP_WRITE_BURST_BYTES if TCP_WRITE_BURST_BYTES > 0 else 'uncapped'}",
         f"- Output directory: `{OUT}`",

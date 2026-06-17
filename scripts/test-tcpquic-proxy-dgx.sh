@@ -87,11 +87,11 @@ remote "python3 -m http.server ${HTTP_PORT} --bind ${TARGET} --directory . >/tmp
 remote "test -f ~/tcpquic-dgx-index.html"
 
 remote "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
-    --quic-listen ${TARGET}:${QUIC_PORT} \
+    --listen ${TARGET}:${QUIC_PORT} \
     --allow-targets ${TARGET}/32,127.0.0.0/8 \
-    --quic-cert ~/tcpquic-dgx-certs/server.crt \
-    --quic-key ~/tcpquic-dgx-certs/server.key \
-    --quic-ca ~/tcpquic-dgx-certs/ca.crt \
+    --cert ~/tcpquic-dgx-certs/server.crt \
+    --key ~/tcpquic-dgx-certs/server.key \
+    --ca ~/tcpquic-dgx-certs/ca.crt \
     --compress ${COMPRESS} \
     </dev/null >/tmp/tcpquic-dgx-server.log 2>&1 &"
 
@@ -102,13 +102,13 @@ done
 remote "grep -q 'QUIC server listening' /tmp/tcpquic-dgx-server.log"
 
 "$BIN" client \
-    --quic-peer "${TARGET}:${QUIC_PORT}" \
+    --peer "${TARGET}:${QUIC_PORT}" \
     --http-listen "127.0.0.1:${PROXY_PORT}" \
     --socks-listen "127.0.0.1:$((PROXY_PORT + 1000))" \
-    --quic-cert "$TMP/certs/client.crt" \
-    --quic-key "$TMP/certs/client.key" \
-    --quic-ca "$TMP/certs/ca.crt" \
-    --quic-connections "$QUIC_CONNECTIONS" \
+    --cert "$TMP/certs/client.crt" \
+    --key "$TMP/certs/client.key" \
+    --ca "$TMP/certs/ca.crt" \
+    --connections "$QUIC_CONNECTIONS" \
     --compress "$COMPRESS" \
     >/tmp/tcpquic-dgx-smoke-client.log 2>&1 &
 CLIENT_PID=$!

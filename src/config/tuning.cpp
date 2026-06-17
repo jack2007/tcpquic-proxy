@@ -8,13 +8,31 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <thread>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
 constexpr uint64_t KiB = 1024ull;
 constexpr uint64_t MiB = 1024ull * KiB;
+constexpr uint64_t kAutoRelayBudgetFallbackBytes = 512ull * MiB;
+constexpr uint64_t kAutoRelayBudgetMinBytes = 256ull * MiB;
+constexpr uint64_t kAutoRelayBudgetMaxBytes = 8ull * 1024ull * MiB;
+constexpr uint64_t kRelayPerTunnelTargetMinBytes = 16ull * MiB;
+constexpr uint64_t kRelayPerTunnelTargetMaxBytes = 512ull * MiB;
 
 uint64_t ClampU64(uint64_t value, uint64_t minValue, uint64_t maxValue) {
     return std::min(std::max(value, minValue), maxValue);
@@ -36,11 +54,70 @@ uint32_t RoundUpPowerOfTwo(uint32_t value) {
     return result;
 }
 
+bool MulWouldOverflow(uint64_t left, uint64_t right) {
+    return right != 0 && left > std::numeric_limits<uint64_t>::max() / right;
+}
+
 uint64_t ComputeBdpBytes(uint32_t bandwidthMbps, uint32_t rttMs) {
     if (bandwidthMbps == 0 || rttMs == 0) {
         return 0;
     }
-    return static_cast<uint64_t>(bandwidthMbps) * 1'000'000ull / 8ull * rttMs / 1000ull;
+    const uint64_t bytesPerSecond = static_cast<uint64_t>(bandwidthMbps) * 1'000'000ull / 8ull;
+    if (MulWouldOverflow(bytesPerSecond, rttMs)) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return bytesPerSecond * rttMs / 1000ull;
+}
+
+uint64_t DetectSystemMemoryBytes() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (GlobalMemoryStatusEx(&status) == 0) {
+        return 0;
+    }
+    return static_cast<uint64_t>(status.ullTotalPhys);
+#else
+    const long pageCount = sysconf(_SC_PHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageCount <= 0 || pageSize <= 0) {
+        return 0;
+    }
+    const uint64_t pages = static_cast<uint64_t>(pageCount);
+    const uint64_t bytesPerPage = static_cast<uint64_t>(pageSize);
+    if (pages > std::numeric_limits<uint64_t>::max() / bytesPerPage) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return pages * bytesPerPage;
+#endif
+}
+
+uint64_t ComputeSystemSoftLimitBytes() {
+    const uint64_t systemMemoryBytes = DetectSystemMemoryBytes();
+    if (systemMemoryBytes == 0) {
+        return kAutoRelayBudgetFallbackBytes;
+    }
+    return ClampU64(systemMemoryBytes / 8, kAutoRelayBudgetMinBytes, kAutoRelayBudgetMaxBytes);
+}
+
+uint64_t ComputeTargetPendingPerTunnelBytes(const TqTuningConfig& tuning) {
+    return ClampU64(
+        tuning.RelayDefaultIdealSend,
+        kRelayPerTunnelTargetMinBytes,
+        kRelayPerTunnelTargetMaxBytes);
+}
+
+uint32_t BytesToMbRoundUp(uint64_t bytes) {
+    const uint64_t mb = (bytes + MiB - 1) / MiB;
+    return ClampU32(mb, 0, std::numeric_limits<uint32_t>::max());
+}
+
+uint64_t ComputeAutomaticRelayBudgetBytes(const TqTuningConfig& tuning) {
+    const uint64_t targetPendingBytes = ComputeTargetPendingPerTunnelBytes(tuning);
+    const uint64_t budgetBytes = std::max(
+        std::max(ComputeSystemSoftLimitBytes(), targetPendingBytes),
+        kAutoRelayBudgetFallbackBytes);
+    return ClampU64(budgetBytes, kAutoRelayBudgetMinBytes, kAutoRelayBudgetMaxBytes);
 }
 
 size_t ChooseRelayIoSize(uint32_t bandwidthMbps) {
@@ -134,16 +211,6 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
     }
-    if (cfg.TuningOverrideRelayInflightBytes > 0) {
-        out.RelayDefaultIdealSend = cfg.TuningOverrideRelayInflightBytes;
-        if (out.RelayIoSize > 0) {
-            out.RelayMaxInFlightSends = ClampU32(
-                (cfg.TuningOverrideRelayInflightBytes + out.RelayIoSize - 1) / out.RelayIoSize,
-                8,
-                2048);
-            out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
-        }
-    }
     if (cfg.TuningOverrideLinuxRelayReadChunkSize > 0) {
         out.LinuxRelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
     }
@@ -175,7 +242,7 @@ uint32_t TqDetectLinuxRelayWorkers() {
     return std::max(1u, std::min(detected, 8u));
 }
 
-void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
+void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t autoBudgetBytes) {
     out.LinuxRelayWorkerCount = TqDetectLinuxRelayWorkers();
 
     if (mode == TqTuningMode::Lan) {
@@ -194,14 +261,11 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode) {
         out.LinuxRelayWorkerByteBudgetPerTick = 64ull * 1024 * 1024;
     }
 
-    const uint64_t configuredMemoryBytes =
-        static_cast<uint64_t>(TqGetRelayMemoryBudget()) * 1024ull * 1024ull;
     const uint64_t relayMemoryBytes =
-        configuredMemoryBytes == 0 ? 512ull * 1024 * 1024 : configuredMemoryBytes;
+        ClampU64(autoBudgetBytes, kAutoRelayBudgetMinBytes, kAutoRelayBudgetMaxBytes);
+    const uint64_t targetPendingBytes = ComputeTargetPendingPerTunnelBytes(out);
     out.LinuxRelayGlobalPendingBytes = relayMemoryBytes / 2;
-    out.LinuxRelayPerTunnelPendingBytes = std::min<uint64_t>(
-        16ull * 1024 * 1024,
-        std::max<uint64_t>(4ull * 1024 * 1024, out.LinuxRelayReadBatchBytes * 4));
+    out.LinuxRelayPerTunnelPendingBytes = targetPendingBytes;
     out.MaxPendingBufferBytesPerRelay = std::max<uint64_t>(
         out.LinuxRelayPerTunnelPendingBytes,
         out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1));
@@ -328,7 +392,9 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         ApplyCustomOverrides(cfg, out);
         break;
     }
-    TqApplyLinuxRelayDefaults(out, cfg.TuningMode);
+    const uint64_t autoBudgetBytes = ComputeAutomaticRelayBudgetBytes(out);
+    TqSetRelayMemoryBudget(BytesToMbRoundUp(autoBudgetBytes));
+    TqApplyLinuxRelayDefaults(out, cfg.TuningMode, autoBudgetBytes);
     if (cfg.TuningMode == TqTuningMode::Custom) {
         ApplyHighBdpPipelineScaling(out);
         ApplyCustomOverrides(cfg, out);
@@ -362,7 +428,7 @@ uint32_t TqGetActiveRelayCount() {
 }
 
 void TqApplyRelayPoolBudget(TqTuningConfig& tuning, uint32_t activeRelays) {
-    const uint32_t budgetMb = g_TqRelayMemoryBudgetMb.load(std::memory_order_relaxed);
+    const uint32_t budgetMb = TqGetRelayMemoryBudget();
     if (budgetMb == 0 || activeRelays == 0 || tuning.RelayIoSize == 0) {
         return;
     }
@@ -468,8 +534,7 @@ void TqApplyRuntimeObservations(TqConfig& cfg) {
         cfg.Tuning.InitialRttMs = ClampU32(obs.MeasuredRttMs, 1, 60000);
     }
 
-    if (obs.HasIdealSend && cfg.TuningOverrideRelayInflightBytes == 0 &&
-        obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
+    if (obs.HasIdealSend && obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
         cfg.Tuning.RelayDefaultIdealSend = obs.IdealSendBytes;
         if (cfg.Tuning.RelayIoSize > 0) {
             const uint32_t maxContexts = ClampU32(

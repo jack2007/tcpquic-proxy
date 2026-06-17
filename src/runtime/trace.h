@@ -56,6 +56,7 @@ void TqTraceStreamClosed(
 enum class TqTraceProxyProto { Socks, Http };
 
 void TqTraceProxyAccepted(TqTraceProxyProto proto, TqSocketHandle fd);
+void TqTraceProxyRejected(TqTraceProxyProto proto, TqSocketHandle fd, int status, const char* reason);
 void TqTraceProxyTunnelOk(TqTraceProxyProto proto, const char* target, uint64_t tunnelId);
 void TqTraceProxyTunnelFail(TqTraceProxyProto proto, const char* target, TqOpenError error);
 void TqTraceProxyClosed(TqTraceProxyProto proto, TqSocketHandle fd);

@@ -135,7 +135,6 @@ export TCPQUIC_PROXY_BIN=/path/to/build/bin/Release/tcpquic-proxy
 cmake --build build --target \
   tcpquic_acl_test \
   tcpquic_admin_http_test \
-  tcpquic_blocking_relay_demo_test \
   tcpquic_compress_test \
   tcpquic_config_router_test \
   tcpquic_control_test \
@@ -146,7 +145,6 @@ cmake --build build --target \
   tcpquic_relay_backend_selection_test \
   tcpquic_router_runtime_test \
   tcpquic_socks5_test \
-  tcpquic_tcp_write_queue_test \
   tcpquic_thread_pool_test \
   tcpquic_tuning_test \
   tcpquic_tunnel_reaper_test \
@@ -301,6 +299,7 @@ Usage: tcpquic-proxy client|server [options]
 | `--quic-key` | 双方 | （必填） | 本端私钥 PEM |
 | `--quic-ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
 | `--quic-connections` | client | `1` | QUIC 连接池大小（最大 128） |
+| `--quic-connection-stream-count` | client/server | `1024` | 每条 QUIC 连接允许的双向 stream 上限（范围 `1..65535`） |
 | `--quic-reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
 | `--download-test` | client | 空 | 内置端到端 download 吞吐测试秒数 |
 | `--upload-test` | client | 空 | 内置端到端 upload 吞吐测试秒数 |

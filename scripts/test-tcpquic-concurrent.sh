@@ -8,7 +8,6 @@ TMP_DIR="/tmp/tcpquic-concurrent-$$"
 TUNNELS="${TUNNELS:-100}"
 QUIC_CONNECTIONS="${QUIC_CONNECTIONS:-1}"
 COMPRESS="${COMPRESS:-off}"
-MAX_MEMORY_MB="${MAX_MEMORY_MB:-}"
 HANDSHAKE_THREADS="${HANDSHAKE_THREADS:-32}"
 
 SERVER_PID=""
@@ -97,30 +96,25 @@ mkfifo "$TMP_DIR/server.stdin"
 eval "exec {SERVER_STDIN_FD}<>\"$TMP_DIR/server.stdin\""
 SERVER_ARGS=(
     server
-    --quic-listen 127.0.0.1:4733
+    --listen 127.0.0.1:4733
     --allow-targets 127.0.0.0/8
-    --quic-cert "$TMP_DIR/server.crt"
-    --quic-key "$TMP_DIR/server.key"
-    --quic-ca "$TMP_DIR/ca.crt"
+    --cert "$TMP_DIR/server.crt"
+    --key "$TMP_DIR/server.key"
+    --ca "$TMP_DIR/ca.crt"
     --compress "$COMPRESS"
 )
 CLIENT_ARGS=(
     client
-    --quic-peer 127.0.0.1:4733
+    --peer 127.0.0.1:4733
     --http-listen 127.0.0.1:18090
     --socks-listen 127.0.0.1:11090
-    --quic-cert "$TMP_DIR/client.crt"
-    --quic-key "$TMP_DIR/client.key"
-    --quic-ca "$TMP_DIR/ca.crt"
-    --quic-connections "$QUIC_CONNECTIONS"
+    --cert "$TMP_DIR/client.crt"
+    --key "$TMP_DIR/client.key"
+    --ca "$TMP_DIR/ca.crt"
+    --connections "$QUIC_CONNECTIONS"
     --compress "$COMPRESS"
     --handshake-threads "$HANDSHAKE_THREADS"
 )
-if [ -n "$MAX_MEMORY_MB" ]; then
-    SERVER_ARGS+=(--max-memory-mb "$MAX_MEMORY_MB")
-    CLIENT_ARGS+=(--max-memory-mb "$MAX_MEMORY_MB")
-fi
-
 "$BIN" "${SERVER_ARGS[@]}" \
     >"$TMP_DIR/server.log" 2>&1 <"$TMP_DIR/server.stdin" &
 SERVER_PID=$!
@@ -137,7 +131,7 @@ if [ -r "/proc/${CLIENT_PID}/status" ]; then
     log "client pid=${CLIENT_PID} threads=${client_threads}"
 fi
 
-log "opening ${TUNNELS} concurrent HTTP CONNECT tunnels (quic-connections=${QUIC_CONNECTIONS}, compress=${COMPRESS}, handshake-threads=${HANDSHAKE_THREADS}${MAX_MEMORY_MB:+, max-memory-mb=${MAX_MEMORY_MB}})"
+log "opening ${TUNNELS} concurrent HTTP CONNECT tunnels (quic-connections=${QUIC_CONNECTIONS}, compress=${COMPRESS}, handshake-threads=${HANDSHAKE_THREADS})"
 python3 - "$TUNNELS" <<'PY'
 import concurrent.futures
 import socket

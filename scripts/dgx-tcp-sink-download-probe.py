@@ -170,14 +170,12 @@ def sample_hot_relay_socket(client_admin, output_path, stop_event):
 def proxy_args(q):
     args = [
         "--tuning", "custom",
-        "--quic-fcw", "1073741824",
-        "--quic-srw", "1073741824",
-        "--quic-iw", "4000",
-        "--quic-initrtt-ms", "1",
+        "--fcw", "1073741824",
+        "--srw", "1073741824",
+        "--iw", "4000",
+        "--initrtt-ms", "1",
         "--relay-io-size", "1048576",
-        "--relay-inflight-bytes", "1073741824",
-        "--max-memory-mb", "8192",
-        "--quic-connections", str(q),
+        "--connections", str(q),
         "--compress", "off",
         "--linux-relay-read-chunk-size", "1048576",
         "--linux-relay-worker-slots", "1024",
@@ -250,12 +248,12 @@ def start_proxy(quic_port, proxy_port, client_admin, server_admin):
     server_args = " ".join([
         REMOTE_PROXY_BIN,
         "server",
-        "--quic-listen", f"{TARGET}:{quic_port}",
+        "--listen", f"{TARGET}:{quic_port}",
         "--allow-targets", f"{TARGET}/32,127.0.0.0/8",
         "--admin-listen", f"127.0.0.1:{server_admin}",
-        "--quic-cert", f"{cert_remote}/server.crt",
-        "--quic-key", f"{cert_remote}/server.key",
-        "--quic-ca", f"{cert_remote}/ca.crt",
+        "--cert", f"{cert_remote}/server.crt",
+        "--key", f"{cert_remote}/server.key",
+        "--ca", f"{cert_remote}/ca.crt",
         *proxy_args(STREAMS),
     ])
     _, server_log = remote_bg("tcpquic-server-sink", f"LD_LIBRARY_PATH={REMOTE_DIR} {server_args}")
@@ -265,13 +263,13 @@ def start_proxy(quic_port, proxy_port, client_admin, server_admin):
     client_args = [
         str(PROXY_BIN),
         "client",
-        "--quic-peer", f"{TARGET}:{quic_port}",
+        "--peer", f"{TARGET}:{quic_port}",
         "--http-listen", f"127.0.0.1:{proxy_port}",
         "--socks-listen", f"127.0.0.1:{proxy_port + 1000}",
         "--admin-listen", f"127.0.0.1:{client_admin}",
-        "--quic-cert", str(CERT_SRC / "client.crt"),
-        "--quic-key", str(CERT_SRC / "client.key"),
-        "--quic-ca", str(CERT_SRC / "ca.crt"),
+        "--cert", str(CERT_SRC / "client.crt"),
+        "--key", str(CERT_SRC / "client.key"),
+        "--ca", str(CERT_SRC / "ca.crt"),
         *proxy_args(STREAMS),
     ]
     log("+ " + " ".join(client_args))

@@ -248,11 +248,11 @@ start_server() {
     mkfifo "$stdin_fifo"
     eval "exec {fd}<>\"$stdin_fifo\""
     "$BIN" server \
-        --quic-listen "127.0.0.1:${listen_port}" \
+        --listen "127.0.0.1:${listen_port}" \
         --allow-targets "$allow_targets" \
-        --quic-cert "$TMP_DIR/server.crt" \
-        --quic-key "$TMP_DIR/server.key" \
-        --quic-ca "$TMP_DIR/ca.crt" \
+        --cert "$TMP_DIR/server.crt" \
+        --key "$TMP_DIR/server.key" \
+        --ca "$TMP_DIR/ca.crt" \
         --compress "$compress_mode" \
         >"$log_file" 2>&1 <"$stdin_fifo" &
     echo "$! $fd"
@@ -267,13 +267,13 @@ start_client() {
     local quic_connections=${6:-1}
 
     "$BIN" client \
-        --quic-peer "127.0.0.1:${quic_port}" \
+        --peer "127.0.0.1:${quic_port}" \
         --http-listen "127.0.0.1:${http_port}" \
         --socks-listen "127.0.0.1:${socks_port}" \
-        --quic-cert "$TMP_DIR/client.crt" \
-        --quic-key "$TMP_DIR/client.key" \
-        --quic-ca "$TMP_DIR/ca.crt" \
-        --quic-connections "$quic_connections" \
+        --cert "$TMP_DIR/client.crt" \
+        --key "$TMP_DIR/client.key" \
+        --ca "$TMP_DIR/ca.crt" \
+        --connections "$quic_connections" \
         --compress "$compress_mode" \
         >"$log_file" 2>&1 &
     echo "$!"
@@ -285,9 +285,9 @@ start_configured_client() {
 
     "$BIN" client \
         --client-config "$config_file" \
-        --quic-cert "$TMP_DIR/client.crt" \
-        --quic-key "$TMP_DIR/client.key" \
-        --quic-ca "$TMP_DIR/ca.crt" \
+        --cert "$TMP_DIR/client.crt" \
+        --key "$TMP_DIR/client.key" \
+        --ca "$TMP_DIR/ca.crt" \
         --compress off \
         >"$log_file" 2>&1 &
     echo "$!"
@@ -312,11 +312,11 @@ build_if_missing
 
 log "rejecting invalid CIDR at CLI parse time"
 if "$BIN" server \
-    --quic-listen 127.0.0.1:9 \
+    --listen 127.0.0.1:9 \
     --allow-targets "not-a-cidr" \
-    --quic-cert "$TMP_DIR/server.crt" \
-    --quic-key "$TMP_DIR/server.key" \
-    --quic-ca "$TMP_DIR/ca.crt" \
+    --cert "$TMP_DIR/server.crt" \
+    --key "$TMP_DIR/server.key" \
+    --ca "$TMP_DIR/ca.crt" \
     >"$TMP_DIR/cli-bad-cidr.log" 2>&1; then
     fail_with_logs "server accepted invalid --allow-targets"
 fi
@@ -481,7 +481,7 @@ curl -fsS \
 grep -q "compress-me-" "$TMP_DIR/http-connect-zstd.out" ||
     fail_with_logs "zstd compressed tunnel did not return large payload"
 
-log "testing QUIC connection pool (--quic-connections 4)"
+log "testing QUIC connection pool (--connections 4)"
 kill "$CLIENT_PID" "$SERVER_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true
 wait "$SERVER_PID" 2>/dev/null || true

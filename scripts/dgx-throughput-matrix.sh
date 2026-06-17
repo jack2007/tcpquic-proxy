@@ -122,7 +122,7 @@ EOF
 }
 
 proxy_args() {
-    printf '%s' "--tuning custom --quic-fcw 1073741824 --quic-srw 1073741824 --quic-iw 4000 --quic-initrtt-ms 200 --relay-io-size 1048576 --relay-inflight-bytes 1073741824 --max-memory-mb 4096 --quic-connections 1"
+    printf '%s' "--tuning custom --fcw 1073741824 --srw 1073741824 --iw 4000 --initrtt-ms 200 --relay-io-size 1048576 --connections 1"
 }
 
 start_proxy_stack() {
@@ -130,11 +130,11 @@ start_proxy_stack() {
     local args
     args=$(proxy_args)
     ssh -o BatchMode=yes "$PEER" "LD_LIBRARY_PATH=${REMOTE_DIR} nohup ${REMOTE_BIN} server \
-        --quic-listen ${TARGET}:${QUIC_PORT} \
+        --listen ${TARGET}:${QUIC_PORT} \
         --allow-targets ${TARGET}/32,127.0.0.0/8 \
-        --quic-cert ~/tcpquic-dgx-certs/server.crt \
-        --quic-key ~/tcpquic-dgx-certs/server.key \
-        --quic-ca ~/tcpquic-dgx-certs/ca.crt \
+        --cert ~/tcpquic-dgx-certs/server.crt \
+        --key ~/tcpquic-dgx-certs/server.key \
+        --ca ~/tcpquic-dgx-certs/ca.crt \
         --compress off \
         ${args} </dev/null >/tmp/dgx-matrix-server.log 2>&1 &"
     for _ in $(seq 1 30); do
@@ -142,12 +142,12 @@ start_proxy_stack() {
         ssh -o BatchMode=yes "$PEER" "grep -q 'QUIC server listening' /tmp/dgx-matrix-server.log 2>/dev/null" && break
     done
     "$BIN" client \
-        --quic-peer "${TARGET}:${QUIC_PORT}" \
+        --peer "${TARGET}:${QUIC_PORT}" \
         --http-listen "127.0.0.1:${PROXY_PORT}" \
         --socks-listen "127.0.0.1:$((PROXY_PORT + 1000))" \
-        --quic-cert "$CERT_DIR/client.crt" \
-        --quic-key "$CERT_DIR/client.key" \
-        --quic-ca "$CERT_DIR/ca.crt" \
+        --cert "$CERT_DIR/client.crt" \
+        --key "$CERT_DIR/client.key" \
+        --ca "$CERT_DIR/ca.crt" \
         --compress off \
         ${args} \
         >/tmp/dgx-matrix-client.log 2>&1 &

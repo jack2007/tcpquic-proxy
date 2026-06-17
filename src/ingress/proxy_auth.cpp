@@ -212,22 +212,31 @@ bool TqProxyAuthTable::Validate(std::string_view user, std::string_view pass) co
     return matched;
 }
 
-bool TqHttpConnectRequestAuthorized(const std::string& request, const TqProxyAuthTable& auth) {
+TqHttpConnectAuthResult TqHttpConnectRequestAuthResult(const std::string& request, const TqProxyAuthTable& auth) {
     if (!auth.Enabled()) {
-        return true;
+        return TqHttpConnectAuthResult::Disabled;
     }
 
     std::string_view authHeader;
     if (!TqFindHttpHeaderValue(request, "Proxy-Authorization", authHeader)) {
-        return false;
+        return TqHttpConnectAuthResult::MissingHeader;
     }
 
     std::string user;
     std::string pass;
     if (!TqParseHttpProxyAuthorization(authHeader, user, pass)) {
-        return false;
+        return TqHttpConnectAuthResult::InvalidHeader;
     }
-    return auth.Validate(user, pass);
+    if (!auth.Validate(user, pass)) {
+        return TqHttpConnectAuthResult::InvalidCredentials;
+    }
+    return TqHttpConnectAuthResult::Authorized;
+}
+
+bool TqHttpConnectRequestAuthorized(const std::string& request, const TqProxyAuthTable& auth) {
+    const TqHttpConnectAuthResult result = TqHttpConnectRequestAuthResult(request, auth);
+    return result == TqHttpConnectAuthResult::Authorized ||
+           result == TqHttpConnectAuthResult::Disabled;
 }
 
 bool TqValidateProxyAuthUsers(const std::vector<TqProxyAuthUser>& users, std::string& err) {

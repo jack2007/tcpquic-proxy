@@ -170,16 +170,6 @@ set_property(TARGET tcpquic_quic_settings_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_quic_settings_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 
-add_executable(tcpquic_tcp_write_queue_test
-    unittest/tcp_write_queue_test.cpp
-    tunnel/tcp_write_queue.cpp
-    ${TCPQUIC_PLATFORM_SOURCES}
-)
-tcpquic_target_include_dirs(tcpquic_tcp_write_queue_test)
-target_link_libraries(tcpquic_tcp_write_queue_test PRIVATE Threads::Threads)
-set_property(TARGET tcpquic_tcp_write_queue_test PROPERTY FOLDER "tools")
-set_property(TARGET tcpquic_tcp_write_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-
 add_executable(tcpquic_relay_buffer_test
     unittest/relay_buffer_test.cpp
     tunnel/relay_buffer.cpp
@@ -280,7 +270,6 @@ add_executable(tcpquic_speed_test_test
     acl/acl.cpp
     protocol/compress.cpp
     tunnel/relay.cpp
-    tunnel/tcp_write_queue.cpp
     tunnel/tunnel_reaper.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
@@ -360,7 +349,6 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
     acl/acl.cpp
     protocol/compress.cpp
     tunnel/relay.cpp
-    tunnel/tcp_write_queue.cpp
     tunnel/tunnel_reaper.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
@@ -412,19 +400,6 @@ set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
 set(TCPQUIC_POSIX_TEST_TARGETS)
 if(NOT WIN32)
-    add_executable(tcpquic_blocking_relay_demo_test
-        unittest/blocking_relay_demo_test.cpp
-        tunnel/relay_blocking_demo.cpp
-        tunnel/tcp_write_queue.cpp
-        config/tuning.cpp
-        ${TCPQUIC_PLATFORM_SOURCES}
-    )
-    tcpquic_target_include_dirs(tcpquic_blocking_relay_demo_test)
-    target_link_libraries(tcpquic_blocking_relay_demo_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
-    set_property(TARGET tcpquic_blocking_relay_demo_test PROPERTY FOLDER "tools")
-    set_property(TARGET tcpquic_blocking_relay_demo_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-    list(APPEND TCPQUIC_POSIX_TEST_TARGETS tcpquic_blocking_relay_demo_test)
-
     add_executable(tcpquic_tcp_sink_bench_test
         unittest/tcp_sink_bench_test.cpp
         runtime/tcp_sink_bench.cpp
@@ -574,7 +549,6 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_relay_buffer_test
     tcpquic_tuning_test
     tcpquic_quic_settings_test
-    tcpquic_tcp_write_queue_test
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
     tcpquic_control_test

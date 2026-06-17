@@ -700,13 +700,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "tcpquic-proxy QUIC execution profile: %s\n", quicProfileName);
     TqTunnelReaperGuard reaperGuard;
     TqSetActiveTcpSocketBuffer(cfg.Tuning.TcpSocketBufferBytes);
-    TqSetRelayMemoryBudget(cfg.MaxMemoryMb);
     TqPrintTuning(cfg.Tuning, stderr);
-    if (cfg.MaxMemoryMb > 0) {
-        std::fprintf(stderr,
-            "tcpquic-proxy relay memory budget: %u MB (pool scales by active tunnels)\n",
-            cfg.MaxMemoryMb);
-    }
     if (TqRuntimeTuningEnabled(cfg)) {
         std::fprintf(stderr,
             "tcpquic-proxy runtime tuning: enabled (RTT/throughput feed next QUIC connection)\n");

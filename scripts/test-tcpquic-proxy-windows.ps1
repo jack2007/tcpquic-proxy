@@ -174,10 +174,10 @@ try {
 
   $ServerArgs = @(
     "server",
-    "--quic-listen", "127.0.0.1:$QuicPort",
-    "--quic-cert", $ServerCert,
-    "--quic-key", $ServerKey,
-    "--quic-ca", $Ca,
+    "--listen", "127.0.0.1:$QuicPort",
+    "--cert", $ServerCert,
+    "--key", $ServerKey,
+    "--ca", $Ca,
     "--allow-targets", "127.0.0.0/8",
     "--compress", $Compress
   )
@@ -193,10 +193,10 @@ try {
 
   $ClientArgs = @(
     "client",
-    "--quic-peer", "${QuicPeerHost}:$QuicPort",
-    "--quic-cert", $ClientCert,
-    "--quic-key", $ClientKey,
-    "--quic-ca", $Ca,
+    "--peer", "${QuicPeerHost}:$QuicPort",
+    "--cert", $ClientCert,
+    "--key", $ClientKey,
+    "--ca", $Ca,
     "--socks-listen", "127.0.0.1:$SocksPort",
     "--http-listen", "127.0.0.1:$ConnectPort",
     "--compress", $Compress

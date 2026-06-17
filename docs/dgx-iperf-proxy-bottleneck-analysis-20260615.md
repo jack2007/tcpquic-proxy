@@ -20,8 +20,6 @@ connection count improves throughput and where the current bottleneck is.
   - `--quic-iw 4000`
   - `--quic-initrtt-ms 1`
   - `--relay-io-size 1048576`
-  - `--relay-inflight-bytes 1073741824`
-  - `--max-memory-mb 8192`
   - `--compress off`
   - `--linux-relay-read-chunk-size 1048576`
   - `--linux-relay-worker-slots 1024`

@@ -179,7 +179,6 @@ ldd build/bin/Release/tcpquic-proxy
 cmake --build build --target \
   tcpquic_acl_test \
   tcpquic_admin_http_test \
-  tcpquic_blocking_relay_demo_test \
   tcpquic_compress_test \
   tcpquic_config_router_test \
   tcpquic_control_test \
@@ -190,7 +189,6 @@ cmake --build build --target \
   tcpquic_relay_backend_selection_test \
   tcpquic_router_runtime_test \
   tcpquic_socks5_test \
-  tcpquic_tcp_write_queue_test \
   tcpquic_thread_pool_test \
   tcpquic_tuning_test \
   tcpquic_tunnel_reaper_test \
@@ -299,6 +297,8 @@ cmake -S . -B build-asan \
 
 cmake --build build-asan --target tcpquic-proxy tcpquic_tunnel_test -j$(nproc)
 ```
+
+配置检测到 `-fsanitize=address` 时会自动关闭静态 mimalloc override；ASAN 自带 allocator/interceptor 需要在进程启动早期接管 `malloc`。
 
 运行 ASAN 二进制时，静态构建下无需设置 `LD_LIBRARY_PATH` 指向 msquic；若使用 `TCPQUIC_MSQUIC_SHARED=ON` 则需：
 
