@@ -31,6 +31,24 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
     uint64_t pendingTcpWriteQueue,
     uint64_t pendingTcpWriteBytes,
     uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) __attribute__((weak));
+extern "C" void TqTraceLinuxRelayUnregisterEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -137,6 +155,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool QuicSendFinCompleted{false};
     uint64_t OutstandingQuicSends{0};
     uint64_t OutstandingQuicSendBytes{0};
+    uint64_t TcpReadBytes{0};
     std::deque<TqBufferView> PendingTcpWrites;
     std::deque<std::shared_ptr<TqPendingQuicReceive>> PendingQuicReceives;
     uint64_t PendingQuicReceiveBytes{0};
@@ -591,6 +610,26 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
     if (!removed) {
         return;
     }
+#if defined(__GNUC__)
+    if (TqTraceLinuxRelayUnregisterEvent != nullptr) {
+        TqTraceLinuxRelayUnregisterEvent(
+            Config.WorkerIndex,
+            removed->Id,
+            removed->OutstandingQuicSends,
+            removed->OutstandingQuicSendBytes,
+            removed->PendingTcpWrites.size(),
+            PendingTcpWriteBytes(removed->PendingTcpWrites),
+            removed->PendingQuicReceiveBytes,
+            removed->TcpReadBytes,
+            removed->TcpWriteBytes,
+            removed->TcpReadClosed,
+            removed->TcpWriteClosed,
+            removed->QuicSendFinSubmitted,
+            removed->QuicSendFinCompleted,
+            removed->TcpWriteShutdownQueued,
+            removed->Stream == nullptr);
+    }
+#endif
     removed->Closing = true;
     if (EpollFd >= 0 && removed->TcpFd >= 0) {
         ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, removed->TcpFd, nullptr);
@@ -701,6 +740,7 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             }
 
             readBytes += static_cast<uint64_t>(received);
+            relay->TcpReadBytes += static_cast<uint64_t>(received);
             TcpReadBytes.fetch_add(static_cast<uint64_t>(received));
             TcpReadBatches.fetch_add(1);
             uint64_t previous = MaxTcpReadIovUsed.load();
@@ -2131,6 +2171,8 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 relay->PendingTcpWrites.size(),
                 PendingTcpWriteBytes(relay->PendingTcpWrites),
                 relay->PendingQuicReceiveBytes,
+                relay->TcpReadBytes,
+                relay->TcpWriteBytes,
                 relay->TcpReadClosed,
                 relay->TcpWriteClosed,
                 relay->QuicSendFinSubmitted,

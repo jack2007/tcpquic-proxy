@@ -418,6 +418,28 @@ public:
         CloseTcpLocked();
     }
 
+    void TraceRelayStopping(const char* reason) {
+        if (TraceTunnelId == 0) {
+            return;
+        }
+        const char* backend = "none";
+        uint64_t relayId = 0;
+        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
+            backend = "linux";
+            relayId = RelayHandle.LinuxRelayId;
+        } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
+            backend = "windows";
+            relayId = RelayHandle.WindowsRelayId;
+        }
+        TqTraceRelayStopping(
+            TraceTunnelId,
+            Role == TqTunnelRole::ClientOpen ? "client" : "server",
+            TraceTarget.c_str(),
+            backend,
+            relayId,
+            reason);
+    }
+
     void CloseTcpLocked() {
         if (TqSocketValid(TcpFd)) {
             if (Role == TqTunnelRole::ClientOpen && TraceIngressProto != 0) {
@@ -528,6 +550,7 @@ public:
             if (shutdownStream) {
                 (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
             }
+            TraceRelayStopping("connection_shutdown");
             TqRelayStop(&RelayHandle);
             return;
         }
@@ -985,6 +1008,7 @@ void TqReapTunnelContext(TqTunnelContext* ctx) {
     if (ctx == nullptr) {
         return;
     }
+    ctx->TraceRelayStopping("reaper");
     TqRelayStop(&ctx->RelayHandle);
     ctx->CloseTcp();
     delete ctx;

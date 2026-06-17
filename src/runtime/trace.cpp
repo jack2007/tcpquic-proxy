@@ -460,13 +460,15 @@ bool TqTraceEnabled() {
     return g_traceEnabled.load(std::memory_order_relaxed);
 }
 
-std::string TqFormatTraceLinuxRelayStreamShutdownLine(
+std::string FormatTraceLinuxRelayStateLine(
+    const char* eventName,
     const TqTraceLinuxRelayStreamState& state) {
     char buffer[768];
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "event=linux_relay_stream_shutdown worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
+        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
+        eventName != nullptr ? eventName : "linux_relay_state",
         state.WorkerIndex,
         static_cast<unsigned long long>(state.RelayId),
         static_cast<unsigned long long>(state.OutstandingQuicSends),
@@ -474,6 +476,8 @@ std::string TqFormatTraceLinuxRelayStreamShutdownLine(
         static_cast<unsigned long long>(state.PendingTcpWriteQueue),
         static_cast<unsigned long long>(state.PendingTcpWriteBytes),
         static_cast<unsigned long long>(state.PendingQuicReceiveBytes),
+        static_cast<unsigned long long>(state.TcpReadBytes),
+        static_cast<unsigned long long>(state.TcpWriteBytes),
         state.TcpReadClosed ? 1 : 0,
         state.TcpWriteClosed ? 1 : 0,
         state.QuicSendFinSubmitted ? 1 : 0,
@@ -483,11 +487,23 @@ std::string TqFormatTraceLinuxRelayStreamShutdownLine(
     return buffer;
 }
 
+std::string TqFormatTraceLinuxRelayStreamShutdownLine(
+    const TqTraceLinuxRelayStreamState& state) {
+    return FormatTraceLinuxRelayStateLine("linux_relay_stream_shutdown", state);
+}
+
 void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state) {
     if (!TqTraceEnabled()) {
         return;
     }
     LogInfo("%s", TqFormatTraceLinuxRelayStreamShutdownLine(state).c_str());
+}
+
+void TraceLinuxRelayUnregister(const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo("%s", FormatTraceLinuxRelayStateLine("linux_relay_unregister", state).c_str());
 }
 
 extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
@@ -498,6 +514,8 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
     uint64_t pendingTcpWriteQueue,
     uint64_t pendingTcpWriteBytes,
     uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -512,6 +530,42 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
         pendingTcpWriteQueue,
         pendingTcpWriteBytes,
         pendingQuicReceiveBytes,
+        tcpReadBytes,
+        tcpWriteBytes,
+        tcpReadClosed,
+        tcpWriteClosed,
+        quicSendFinSubmitted,
+        quicSendFinCompleted,
+        tcpWriteShutdownQueued,
+        streamDetached});
+}
+
+extern "C" void TqTraceLinuxRelayUnregisterEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) {
+    TraceLinuxRelayUnregister(TqTraceLinuxRelayStreamState{
+        workerIndex,
+        relayId,
+        outstandingQuicSends,
+        outstandingQuicSendBytes,
+        pendingTcpWriteQueue,
+        pendingTcpWriteBytes,
+        pendingQuicReceiveBytes,
+        tcpReadBytes,
+        tcpWriteBytes,
         tcpReadClosed,
         tcpWriteClosed,
         quicSendFinSubmitted,
@@ -813,6 +867,28 @@ void TqTraceRelayStarted(uint64_t tunnelId) {
     LogInfo(
         "event=relay_started tunnel=%llu %s",
         static_cast<unsigned long long>(tunnelId),
+        TqTraceGlobalSnapshot().c_str());
+}
+
+void TqTraceRelayStopping(
+    uint64_t tunnelId,
+    const char* role,
+    const char* target,
+    const char* backend,
+    uint64_t relayId,
+    const char* reason) {
+    if (!TqTraceEnabled() || tunnelId == 0) {
+        return;
+    }
+
+    LogInfo(
+        "event=relay_stopping role=%s tunnel=%llu target=%s backend=%s relay_id=%llu reason=%s %s",
+        role != nullptr ? role : "?",
+        static_cast<unsigned long long>(tunnelId),
+        target != nullptr ? target : "?",
+        backend != nullptr ? backend : "none",
+        static_cast<unsigned long long>(relayId),
+        reason != nullptr ? reason : "?",
         TqTraceGlobalSnapshot().c_str());
 }
 

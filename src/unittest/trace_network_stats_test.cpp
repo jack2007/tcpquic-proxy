@@ -41,6 +41,8 @@ int main() {
             2,
             1048576,
             131072,
+            73400320,
+            59873689,
             true,
             false,
             true,
@@ -57,7 +59,9 @@ int main() {
         relayLine.find("outstanding_quic_send_bytes=65536") == std::string::npos ||
         relayLine.find("pending_tcp_write_queue=2") == std::string::npos ||
         relayLine.find("pending_tcp_write_bytes=1048576") == std::string::npos ||
-        relayLine.find("pending_quic_receive_bytes=131072") == std::string::npos) {
+        relayLine.find("pending_quic_receive_bytes=131072") == std::string::npos ||
+        relayLine.find("tcp_read_bytes=73400320") == std::string::npos ||
+        relayLine.find("tcp_write_bytes=59873689") == std::string::npos) {
         return 6;
     }
     if (relayLine.find("tcp_read_closed=1") == std::string::npos ||

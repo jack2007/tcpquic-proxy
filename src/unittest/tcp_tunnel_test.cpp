@@ -81,6 +81,21 @@ void TqTraceRelayStarted(uint64_t tunnelId) {
     (void)tunnelId;
 }
 
+void TqTraceRelayStopping(
+    uint64_t tunnelId,
+    const char* role,
+    const char* target,
+    const char* backend,
+    uint64_t relayId,
+    const char* reason) {
+    (void)tunnelId;
+    (void)role;
+    (void)target;
+    (void)backend;
+    (void)relayId;
+    (void)reason;
+}
+
 void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField) {
     (void)tunnelId;
     (void)ok;

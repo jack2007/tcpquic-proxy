@@ -26,6 +26,8 @@ struct TqTraceLinuxRelayStreamState {
     uint64_t PendingTcpWriteQueue{0};
     uint64_t PendingTcpWriteBytes{0};
     uint64_t PendingQuicReceiveBytes{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
     bool TcpReadClosed{false};
     bool TcpWriteClosed{false};
     bool QuicSendFinSubmitted{false};
@@ -76,6 +78,13 @@ uint64_t TqTraceStreamStarted(
     uint8_t compressFlags);
 void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField);
 void TqTraceRelayStarted(uint64_t tunnelId);
+void TqTraceRelayStopping(
+    uint64_t tunnelId,
+    const char* role,
+    const char* target,
+    const char* backend,
+    uint64_t relayId,
+    const char* reason);
 void TqTraceStreamClosed(
     uint64_t tunnelId,
     const char* role,

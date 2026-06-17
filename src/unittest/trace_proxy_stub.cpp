@@ -48,6 +48,9 @@ void TqTraceQuicNetworkStats(MsQuicConnection*, const TqTraceNetworkStats&) {
 
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats&) { return {}; }
 
+void TqTraceRelayStopping(uint64_t, const char*, const char*, const char*, uint64_t, const char*) {
+}
+
 const MsQuicApi* MsQuic = nullptr;
 
 uint32_t TqAbortConnectionTunnels(MsQuicConnection*) { return 0; }
