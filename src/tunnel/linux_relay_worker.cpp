@@ -23,6 +23,20 @@
 
 #if defined(__GNUC__)
 __attribute__((weak)) const MsQuicApi* MsQuic = nullptr;
+extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) __attribute__((weak));
 #endif
 
 namespace {
@@ -48,6 +62,14 @@ void UpdateAtomicMax(std::atomic<uint64_t>& target, uint64_t value) {
            !target.compare_exchange_weak(
                previous, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
     }
+}
+
+uint64_t PendingTcpWriteBytes(const std::deque<TqBufferView>& writes) {
+    uint64_t bytes = 0;
+    for (const auto& view : writes) {
+        bytes += view.Len;
+    }
+    return bytes;
 }
 
 std::string SocketAddressToString(const sockaddr_storage& storage, socklen_t length) {
@@ -2099,6 +2121,24 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+#if defined(__GNUC__)
+        if (TqTraceLinuxRelayStreamShutdownEvent != nullptr) {
+            TqTraceLinuxRelayStreamShutdownEvent(
+                Config.WorkerIndex,
+                relay->Id,
+                relay->OutstandingQuicSends,
+                relay->OutstandingQuicSendBytes,
+                relay->PendingTcpWrites.size(),
+                PendingTcpWriteBytes(relay->PendingTcpWrites),
+                relay->PendingQuicReceiveBytes,
+                relay->TcpReadClosed,
+                relay->TcpWriteClosed,
+                relay->QuicSendFinSubmitted,
+                relay->QuicSendFinCompleted,
+                relay->TcpWriteShutdownQueued,
+                false);
+        }
+#endif
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
         if (stream != nullptr && stream->Context == binding) {

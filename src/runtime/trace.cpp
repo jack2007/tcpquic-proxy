@@ -460,6 +460,66 @@ bool TqTraceEnabled() {
     return g_traceEnabled.load(std::memory_order_relaxed);
 }
 
+std::string TqFormatTraceLinuxRelayStreamShutdownLine(
+    const TqTraceLinuxRelayStreamState& state) {
+    char buffer[768];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "event=linux_relay_stream_shutdown worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
+        state.WorkerIndex,
+        static_cast<unsigned long long>(state.RelayId),
+        static_cast<unsigned long long>(state.OutstandingQuicSends),
+        static_cast<unsigned long long>(state.OutstandingQuicSendBytes),
+        static_cast<unsigned long long>(state.PendingTcpWriteQueue),
+        static_cast<unsigned long long>(state.PendingTcpWriteBytes),
+        static_cast<unsigned long long>(state.PendingQuicReceiveBytes),
+        state.TcpReadClosed ? 1 : 0,
+        state.TcpWriteClosed ? 1 : 0,
+        state.QuicSendFinSubmitted ? 1 : 0,
+        state.QuicSendFinCompleted ? 1 : 0,
+        state.TcpWriteShutdownQueued ? 1 : 0,
+        state.StreamDetached ? 1 : 0);
+    return buffer;
+}
+
+void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo("%s", TqFormatTraceLinuxRelayStreamShutdownLine(state).c_str());
+}
+
+extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) {
+    TqTraceLinuxRelayStreamShutdown(TqTraceLinuxRelayStreamState{
+        workerIndex,
+        relayId,
+        outstandingQuicSends,
+        outstandingQuicSendBytes,
+        pendingTcpWriteQueue,
+        pendingTcpWriteBytes,
+        pendingQuicReceiveBytes,
+        tcpReadClosed,
+        tcpWriteClosed,
+        quicSendFinSubmitted,
+        quicSendFinCompleted,
+        tcpWriteShutdownQueued,
+        streamDetached});
+}
+
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
     char buffer[512];
     const double bandwidthMbps =

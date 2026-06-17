@@ -18,6 +18,22 @@ struct TqTraceNetworkStats {
     uint64_t BandwidthBytesPerSecond{0};
 };
 
+struct TqTraceLinuxRelayStreamState {
+    uint32_t WorkerIndex{0};
+    uint64_t RelayId{0};
+    uint64_t OutstandingQuicSends{0};
+    uint64_t OutstandingQuicSendBytes{0};
+    uint64_t PendingTcpWriteQueue{0};
+    uint64_t PendingTcpWriteBytes{0};
+    uint64_t PendingQuicReceiveBytes{0};
+    bool TcpReadClosed{false};
+    bool TcpWriteClosed{false};
+    bool QuicSendFinSubmitted{false};
+    bool QuicSendFinCompleted{false};
+    bool TcpWriteShutdownQueued{false};
+    bool StreamDetached{false};
+};
+
 bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec);
 void TqTraceShutdown();
 bool TqTraceEnabled();
@@ -48,6 +64,9 @@ void TqTraceQuicDisconnected(
     const char* role);
 void TqTraceQuicNetworkStats(MsQuicConnection* connection, const TqTraceNetworkStats& stats);
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats);
+void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state);
+std::string TqFormatTraceLinuxRelayStreamShutdownLine(
+    const TqTraceLinuxRelayStreamState& state);
 
 uint64_t TqTraceStreamStarted(
     MsQuicConnection* connection,

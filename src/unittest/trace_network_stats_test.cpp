@@ -32,5 +32,42 @@ int main() {
         return 4;
     }
 
+    const std::string relayLine = TqFormatTraceLinuxRelayStreamShutdownLine(
+        TqTraceLinuxRelayStreamState{
+            7,
+            42,
+            3,
+            65536,
+            2,
+            1048576,
+            131072,
+            true,
+            false,
+            true,
+            false,
+            true,
+            false});
+
+    if (relayLine.find("event=linux_relay_stream_shutdown") == std::string::npos) {
+        return 5;
+    }
+    if (relayLine.find("worker=7") == std::string::npos ||
+        relayLine.find("relay=42") == std::string::npos ||
+        relayLine.find("outstanding_quic_sends=3") == std::string::npos ||
+        relayLine.find("outstanding_quic_send_bytes=65536") == std::string::npos ||
+        relayLine.find("pending_tcp_write_queue=2") == std::string::npos ||
+        relayLine.find("pending_tcp_write_bytes=1048576") == std::string::npos ||
+        relayLine.find("pending_quic_receive_bytes=131072") == std::string::npos) {
+        return 6;
+    }
+    if (relayLine.find("tcp_read_closed=1") == std::string::npos ||
+        relayLine.find("tcp_write_closed=0") == std::string::npos ||
+        relayLine.find("quic_send_fin_submitted=1") == std::string::npos ||
+        relayLine.find("quic_send_fin_completed=0") == std::string::npos ||
+        relayLine.find("tcp_write_shutdown_queued=1") == std::string::npos ||
+        relayLine.find("stream_detached=0") == std::string::npos) {
+        return 7;
+    }
+
     return 0;
 }
