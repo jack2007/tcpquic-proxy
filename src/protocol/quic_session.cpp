@@ -116,6 +116,7 @@ MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     settings.SetSendBufferingEnabled(false);
     settings.SetPacingEnabled(true);
     settings.SetStreamMultiReceiveEnabled(true);
+    settings.SetNetStatsEventEnabled(true);
     if (server) {
         settings.SetServerResumptionLevel(QUIC_SERVER_RESUME_ONLY);
     }
@@ -921,6 +922,19 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     const size_t slotIndex = slotContext->SlotIndex;
 
     switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
+        if (TqTraceEnabled()) {
+            TqTraceQuicNetworkStats(
+                connection,
+                TqTraceNetworkStats{
+                    event->NETWORK_STATISTICS.BytesInFlight,
+                    event->NETWORK_STATISTICS.PostedBytes,
+                    event->NETWORK_STATISTICS.IdealBytes,
+                    event->NETWORK_STATISTICS.SmoothedRTT,
+                    event->NETWORK_STATISTICS.CongestionWindow,
+                    event->NETWORK_STATISTICS.Bandwidth});
+        }
+        break;
     case QUIC_CONNECTION_EVENT_CONNECTED:
         TqClientDebugLog("event-connected", slotIndex, connection);
         TqSampleConnectionRtt(connection);
@@ -1173,6 +1187,19 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
     }
 
     switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
+        if (TqTraceEnabled()) {
+            TqTraceQuicNetworkStats(
+                connection,
+                TqTraceNetworkStats{
+                    event->NETWORK_STATISTICS.BytesInFlight,
+                    event->NETWORK_STATISTICS.PostedBytes,
+                    event->NETWORK_STATISTICS.IdealBytes,
+                    event->NETWORK_STATISTICS.SmoothedRTT,
+                    event->NETWORK_STATISTICS.CongestionWindow,
+                    event->NETWORK_STATISTICS.Bandwidth});
+        }
+        break;
     case QUIC_CONNECTION_EVENT_CONNECTED:
         TqSampleConnectionRtt(connection);
         connection->SendResumptionTicket(QUIC_SEND_RESUMPTION_FLAG_FINAL);

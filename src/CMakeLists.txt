@@ -190,6 +190,19 @@ endif()
 set_property(TARGET tcpquic_quic_settings_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_quic_settings_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_trace_network_stats_test
+    unittest/trace_network_stats_test.cpp
+    runtime/trace.cpp
+    platform/exe_path.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_trace_network_stats_test)
+target_link_libraries(tcpquic_trace_network_stats_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_trace_network_stats_test PRIVATE msquic_platform)
+endif()
+set_property(TARGET tcpquic_trace_network_stats_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_trace_network_stats_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_relay_buffer_test
     unittest/relay_buffer_test.cpp

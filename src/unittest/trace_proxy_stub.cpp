@@ -43,6 +43,11 @@ void TqTraceQuicShutdownPeer(MsQuicConnection*, uint32_t, const char*, uint64_t)
 void TqTraceQuicDisconnected(MsQuicConnection*, uint32_t, const char*) {
 }
 
+void TqTraceQuicNetworkStats(MsQuicConnection*, const TqTraceNetworkStats&) {
+}
+
+std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats&) { return {}; }
+
 const MsQuicApi* MsQuic = nullptr;
 
 uint32_t TqAbortConnectionTunnels(MsQuicConnection*) { return 0; }

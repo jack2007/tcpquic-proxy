@@ -77,6 +77,8 @@ struct TqQuicConnTraceState {
     std::chrono::steady_clock::time_point connectedAt{};
     TqMsgCounters msgs;
     uint64_t streamsOpened{0};
+    bool hasNetStats{false};
+    TqTraceNetworkStats netStats;
 };
 
 std::mutex g_stateMu;
@@ -218,6 +220,8 @@ struct TqQuicConnTraceSnapshot {
     uint64_t openOkRx{0};
     uint64_t openFailTx{0};
     uint64_t openFailRx{0};
+    bool hasNetStats{false};
+    TqTraceNetworkStats netStats;
 };
 
 void DumpPeriodicStats() {
@@ -247,6 +251,8 @@ void DumpPeriodicStats() {
             snap.openOkRx = conn.msgs.openOkRx.load();
             snap.openFailTx = conn.msgs.openFailTx.load();
             snap.openFailRx = conn.msgs.openFailRx.load();
+            snap.hasNetStats = conn.hasNetStats;
+            snap.netStats = conn.netStats;
             conns.push_back(std::move(snap));
         }
     }
@@ -262,7 +268,10 @@ void DumpPeriodicStats() {
             continue;
         }
 
-        const auto lines = FormatQuicStatsLines(stats);
+        auto lines = FormatQuicStatsLines(stats);
+        if (conn.hasNetStats) {
+            lines.push_back(TqFormatTraceNetworkStatsLine(conn.netStats));
+        }
         LogInfo(
             "event=stats_quic conn=%u role=%s slot=%u peer=%s local=%s streams_opened=%llu app_open_tx=%llu open_rx=%llu open_ok_tx=%llu open_ok_rx=%llu open_fail_tx=%llu open_fail_rx=%llu",
             conn.connId,
@@ -300,6 +309,18 @@ void StatsThreadMain() {
 TqQuicConnTraceState* FindQuicConnLocked(uint32_t connId) {
     auto it = g_quicConnsById.find(connId);
     return it == g_quicConnsById.end() ? nullptr : &it->second;
+}
+
+TqQuicConnTraceState* FindQuicConnLocked(MsQuicConnection* connection) {
+    if (connection == nullptr) {
+        return nullptr;
+    }
+    for (auto& entry : g_quicConnsById) {
+        if (entry.second.connection == connection) {
+            return &entry.second;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -439,6 +460,24 @@ bool TqTraceEnabled() {
     return g_traceEnabled.load(std::memory_order_relaxed);
 }
 
+std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
+    char buffer[512];
+    const double bandwidthMbps =
+        static_cast<double>(stats.BandwidthBytesPerSecond) * 8.0 / 1000000.0;
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u posted=%llu ideal=%llu srtt=%lluus cwnd=%u",
+        static_cast<unsigned long long>(stats.BandwidthBytesPerSecond),
+        bandwidthMbps,
+        stats.BytesInFlight,
+        static_cast<unsigned long long>(stats.PostedBytes),
+        static_cast<unsigned long long>(stats.IdealBytes),
+        static_cast<unsigned long long>(stats.SmoothedRttUs),
+        stats.CongestionWindow);
+    return buffer;
+}
+
 std::string TqTraceGlobalSnapshot() {
     char buffer[512];
     std::snprintf(
@@ -568,6 +607,8 @@ void TqTraceQuicDisconnected(
     std::string peerAddr;
     uint64_t streamsOpened = 0;
     std::chrono::steady_clock::time_point connectedAt{};
+    bool hasNetStats = false;
+    TqTraceNetworkStats netStats;
     bool found = false;
     {
         std::lock_guard<std::mutex> guard(g_stateMu);
@@ -576,6 +617,8 @@ void TqTraceQuicDisconnected(
             peerAddr = entry->peerAddr;
             streamsOpened = entry->streamsOpened;
             connectedAt = entry->connectedAt;
+            hasNetStats = entry->hasNetStats;
+            netStats = entry->netStats;
             found = true;
             g_quicConnsById.erase(connId);
         }
@@ -592,7 +635,10 @@ void TqTraceQuicDisconnected(
 
     QUIC_STATISTICS_V2 stats{};
     const bool haveStats = CollectQuicStats(connection, stats);
-    const auto lines = haveStats ? FormatQuicStatsLines(stats) : std::vector<std::string>{};
+    auto lines = haveStats ? FormatQuicStatsLines(stats) : std::vector<std::string>{};
+    if (hasNetStats) {
+        lines.push_back(TqFormatTraceNetworkStatsLine(netStats));
+    }
 
     LogInfo(
         "event=quic_disconnected role=%s conn=%u slot=%u peer=%s lifetime=%.1fs streams_opened=%llu %s",
@@ -605,6 +651,18 @@ void TqTraceQuicDisconnected(
         TqTraceGlobalSnapshot().c_str());
     if (!lines.empty()) {
         LogInfoMultiline("  quic_final_metrics:", lines);
+    }
+}
+
+void TqTraceQuicNetworkStats(MsQuicConnection* connection, const TqTraceNetworkStats& stats) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> guard(g_stateMu);
+    if (auto* conn = FindQuicConnLocked(connection)) {
+        conn->hasNetStats = true;
+        conn->netStats = stats;
     }
 }
 

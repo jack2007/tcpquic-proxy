@@ -114,6 +114,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool QuicSendFinSubmitted{false};
     bool QuicSendFinCompleted{false};
     uint64_t OutstandingQuicSends{0};
+    uint64_t OutstandingQuicSendBytes{0};
     std::deque<TqBufferView> PendingTcpWrites;
     std::deque<std::shared_ptr<TqPendingQuicReceive>> PendingQuicReceives;
     uint64_t PendingQuicReceiveBytes{0};
@@ -692,6 +693,16 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
                 }
                 break;
             }
+            if (Config.MaxInFlightQuicSends != 0 &&
+                relay->OutstandingQuicSends >= Config.MaxInFlightQuicSends) {
+                ArmTcpReadable(relay, false);
+                break;
+            }
+            if (Config.MaxBufferedQuicSendBytes != 0 &&
+                relay->OutstandingQuicSendBytes >= Config.MaxBufferedQuicSendBytes) {
+                ArmTcpReadable(relay, false);
+                break;
+            }
             continue;
         }
         if (received == 0) {
@@ -885,6 +896,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
 
     std::vector<QUIC_BUFFER> quicBuffers;
     quicBuffers.reserve(views.size());
+    uint64_t totalBytes = 0;
     for (const auto& view : views) {
         if (view.Len > UINT32_MAX) {
             RecordError(RelayErrorKind::QuicSend);
@@ -895,6 +907,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
         buffer.Buffer = view.Data;
         buffer.Length = static_cast<uint32_t>(view.Len);
         quicBuffers.push_back(buffer);
+        totalBytes += view.Len;
     }
 
     auto* operation = new (std::nothrow) TqLinuxRelaySendOperation{};
@@ -904,6 +917,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
         return false;
     }
     operation->RelayId = relay->Id;
+    operation->TotalBytes = totalBytes;
     operation->Fin = (flags == QUIC_SEND_FLAG_FIN);
     if (operation->Fin) {
         relay->QuicSendFinSubmitted = true;
@@ -930,6 +944,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
         return false;
     }
     ++relay->OutstandingQuicSends;
+    relay->OutstandingQuicSendBytes += totalBytes;
     QuicSendOperations.fetch_add(1);
     return true;
 }
@@ -948,6 +963,12 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
     if (relay != nullptr && relay->OutstandingQuicSends > 0) {
         --relay->OutstandingQuicSends;
     }
+    if (relay != nullptr) {
+        relay->OutstandingQuicSendBytes =
+            relay->OutstandingQuicSendBytes >= operation->TotalBytes
+                ? relay->OutstandingQuicSendBytes - operation->TotalBytes
+                : 0;
+    }
     const bool finCompleted = operation->Fin;
     delete operation;
     if (relay != nullptr && !relay->Closing) {
@@ -955,7 +976,13 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
             relay->QuicSendFinCompleted = true;
         }
         FlushDeferredQuicReceives(relay.get());
-        ArmTcpReadable(relay.get(), true);
+        if (!relay->TcpReadClosed &&
+            (Config.MaxInFlightQuicSends == 0 ||
+             relay->OutstandingQuicSends < Config.MaxInFlightQuicSends) &&
+            (Config.MaxBufferedQuicSendBytes == 0 ||
+             relay->OutstandingQuicSendBytes < Config.MaxBufferedQuicSendBytes)) {
+            ArmTcpReadable(relay.get(), true);
+        }
         MaybeStopFullyClosedRelay(relay.get());
     }
 }
@@ -1518,6 +1545,14 @@ bool TqLinuxRelayWorker::FlushTcpWritableForTest(int tcpFd) {
     return true;
 }
 
+bool TqLinuxRelayWorker::DispatchTcpEventsForTest(uint64_t relayId, uint32_t events) {
+    if (FindRelayById(relayId) == nullptr) {
+        return false;
+    }
+    ProcessTcpEvents(relayId, events);
+    return true;
+}
+
 bool TqLinuxRelayWorker::EnqueueQuicReceive(
     RelayState* relay,
     const uint8_t* data,
@@ -1707,6 +1742,22 @@ void TqLinuxRelayWorker::UpdateTcpInterest(RelayState* relay) {
     }
     event.data.u64 = relay->Id;
     (void)::epoll_ctl(EpollFd, EPOLL_CTL_MOD, relay->TcpFd, &event);
+}
+
+void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    if ((events & EPOLLOUT) != 0) {
+        relay->EpollOutEvents += 1;
+        FlushTcpWrites(relay.get());
+        FlushDeferredQuicReceives(relay.get());
+        FlushTcpWrites(relay.get());
+    }
+    if ((events & (EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0) {
+        DrainTcpReadable(relay.get());
+    }
 }
 
 void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
@@ -1913,6 +1964,8 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
                 ++snapshot.TcpWriteShutdownQueuedRelays;
             }
             snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
+            snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
+            snapshot.MaxBufferedQuicSendBytes += Config.MaxBufferedQuicSendBytes;
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
             for (const auto& view : relay->PendingTcpWrites) {
                 relayPendingBytes += view.Len;
@@ -1972,19 +2025,7 @@ void TqLinuxRelayWorker::Run() {
                 }
                 DrainEvents(Config.EventBudget);
             } else {
-                auto relay = FindRelayById(events[i].data.u64);
-                if (relay == nullptr || relay->Closing) {
-                    continue;
-                }
-                if ((events[i].events & EPOLLOUT) != 0) {
-                    relay->EpollOutEvents += 1;
-                    FlushTcpWrites(relay.get());
-                    FlushDeferredQuicReceives(relay.get());
-                    FlushTcpWrites(relay.get());
-                }
-                if ((events[i].events & EPOLLIN) != 0) {
-                    DrainTcpReadable(relay.get());
-                }
+                ProcessTcpEvents(events[i].data.u64, events[i].events);
             }
         }
     }
@@ -2099,6 +2140,11 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.MaxPendingBufferBytes = tuning.MaxPendingBufferBytesPerRelay;
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
+        config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
+        if (tuning.RelayIoSize != 0) {
+            config.MaxBufferedQuicSendBytes =
+                std::min<uint64_t>(tuning.RelayDefaultIdealSend, 4ull * tuning.RelayIoSize);
+        }
         auto worker = std::make_unique<TqLinuxRelayWorker>(config);
         if (!worker->Start()) {
             Workers.clear();

@@ -9,6 +9,15 @@
 
 struct MsQuicConnection;
 
+struct TqTraceNetworkStats {
+    uint32_t BytesInFlight{0};
+    uint64_t PostedBytes{0};
+    uint64_t IdealBytes{0};
+    uint64_t SmoothedRttUs{0};
+    uint32_t CongestionWindow{0};
+    uint64_t BandwidthBytesPerSecond{0};
+};
+
 bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec);
 void TqTraceShutdown();
 bool TqTraceEnabled();
@@ -37,6 +46,8 @@ void TqTraceQuicDisconnected(
     MsQuicConnection* connection,
     uint32_t connId,
     const char* role);
+void TqTraceQuicNetworkStats(MsQuicConnection* connection, const TqTraceNetworkStats& stats);
+std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats);
 
 uint64_t TqTraceStreamStarted(
     MsQuicConnection* connection,

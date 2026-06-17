@@ -132,6 +132,57 @@ int main() {
     }
 
     {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+        config.MaxPendingBufferBytes = 64 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = nullptr;
+        registration.EnableQuicSends = false;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        if (::shutdown(fds[1], SHUT_WR) != 0) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLRDHUP);
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.TcpReadClosedRelays != 1) {
+            std::fprintf(stderr,
+                "expected EPOLLRDHUP-only event to drain TCP EOF, read_closed=%llu\n",
+                static_cast<unsigned long long>(snapshot.TcpReadClosedRelays));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
         QUIC_API_TABLE fakeApi{};
         InstallFakeMsQuicForSend(fakeApi);
 
@@ -208,6 +259,93 @@ int main() {
         CompleteFakeSends(worker, fakeStream);
         if (!worker.WaitForObservedTcpBytesForTest(payload.size(), 2000)) {
             std::fprintf(stderr, "expected TCP read to resume after send complete\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        CompleteFakeSends(worker, fakeStream);
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 2048;
+        config.MaxIov = 2;
+        config.MaxPendingBufferBytes = 64 * 1024;
+        config.MaxBufferedQuicSendBytes = 2048;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = true;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        std::vector<uint8_t> payload(4096, 0x31);
+        if (::write(fds[1], payload.data(), payload.size()) !=
+            static_cast<ssize_t>(payload.size())) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        if (!worker.WaitForObservedTcpBytesForTest(2048, 2000)) {
+            std::fprintf(stderr, "expected first read before in-flight pause\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        TqLinuxRelayWorkerSnapshot paused = worker.Snapshot();
+        if (paused.TcpReadBytes != 2048 ||
+            paused.TcpReadDisabledRelays != 1 ||
+            paused.OutstandingQuicSendBytes != 2048) {
+            std::fprintf(stderr,
+                "expected buffered byte cap to pause TCP read, read=%llu disabled=%llu outstanding_bytes=%llu\n",
+                static_cast<unsigned long long>(paused.TcpReadBytes),
+                static_cast<unsigned long long>(paused.TcpReadDisabledRelays),
+                static_cast<unsigned long long>(paused.OutstandingQuicSendBytes));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        CompleteFakeSends(worker, fakeStream);
+        if (!worker.WaitForObservedTcpBytesForTest(payload.size(), 2000)) {
+            std::fprintf(stderr, "expected TCP read to resume after in-flight send complete\n");
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;

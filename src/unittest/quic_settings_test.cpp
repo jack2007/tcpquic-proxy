@@ -19,6 +19,10 @@ int main() {
         clientSettings.PeerBidiStreamCount != 1024) {
         return 11;
     }
+    if (clientSettings.IsSet.NetStatsEventEnabled != TRUE ||
+        clientSettings.NetStatsEventEnabled != TRUE) {
+        return 14;
+    }
 
     const MsQuicSettings serverSettings = TqMakeMsQuicSettings(cfg, true);
     if (serverSettings.IsSet.StreamMultiReceiveEnabled != TRUE ||
@@ -31,6 +35,10 @@ int main() {
     if (serverSettings.IsSet.PeerBidiStreamCount != TRUE ||
         serverSettings.PeerBidiStreamCount != 1024) {
         return 12;
+    }
+    if (serverSettings.IsSet.NetStatsEventEnabled != TRUE ||
+        serverSettings.NetStatsEventEnabled != TRUE) {
+        return 15;
     }
 
     cfg.QuicConnectionStreamCount = 2048;

@@ -32,6 +32,8 @@ struct TqLinuxRelayWorkerConfig {
     uint64_t MaxPendingBufferBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingQuicReceiveBytesPerRelay{0};
     uint64_t DeferredReceiveCompleteBatchBytes{0};
+    uint32_t MaxInFlightQuicSends{0};
+    uint64_t MaxBufferedQuicSendBytes{0};
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
 };
@@ -58,6 +60,7 @@ struct TqLinuxRelaySendOperation {
 
     uint64_t Magic{MagicValue};
     uint64_t RelayId{0};
+    uint64_t TotalBytes{0};
     bool Fin{false};
     std::vector<TqBufferView> Views;
     std::vector<QUIC_BUFFER> QuicBuffers;
@@ -82,6 +85,8 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpReadClosedRelays{0};
     uint64_t TcpWriteShutdownQueuedRelays{0};
     uint64_t OutstandingQuicSends{0};
+    uint64_t OutstandingQuicSendBytes{0};
+    uint64_t MaxBufferedQuicSendBytes{0};
     uint64_t PendingTcpWriteQueue{0};
     uint64_t PendingTcpWriteBytes{0};
     uint64_t MaxWorkerPendingBytes{0};
@@ -210,6 +215,7 @@ public:
     std::vector<uint8_t> TakeCapturedQuicBytesForTest(int tcpFd);
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
     bool FlushTcpWritableForTest(int tcpFd);
+    bool DispatchTcpEventsForTest(uint64_t relayId, uint32_t events);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
 
     static QUIC_STATUS QUIC_API StreamCallback(
@@ -286,6 +292,7 @@ private:
     void FlushTcpWrites(RelayState* relay);
     void UpdateTcpInterest(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
+    void ProcessTcpEvents(uint64_t relayId, uint32_t events);
     QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
     QUIC_STATUS OnStreamEventWithBinding(
         MsQuicStream* stream,
