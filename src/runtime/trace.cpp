@@ -42,7 +42,6 @@ struct TqMsgCounters {
 };
 
 struct TqGlobalCounters {
-    std::atomic<uint64_t> quicConnsActive{0};
     std::atomic<uint64_t> streamsActive{0};
     std::atomic<uint64_t> relaysActive{0};
     std::atomic<uint64_t> socksActive{0};
@@ -467,7 +466,7 @@ std::string FormatTraceLinuxRelayStateLine(
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
+        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_write_errno=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
         eventName != nullptr ? eventName : "linux_relay_state",
         state.WorkerIndex,
         static_cast<unsigned long long>(state.RelayId),
@@ -478,6 +477,7 @@ std::string FormatTraceLinuxRelayStateLine(
         static_cast<unsigned long long>(state.PendingQuicReceiveBytes),
         static_cast<unsigned long long>(state.TcpReadBytes),
         static_cast<unsigned long long>(state.TcpWriteBytes),
+        static_cast<unsigned long long>(state.TcpWriteErrno),
         state.TcpReadClosed ? 1 : 0,
         state.TcpWriteClosed ? 1 : 0,
         state.QuicSendFinSubmitted ? 1 : 0,
@@ -516,6 +516,7 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -532,6 +533,7 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
         pendingQuicReceiveBytes,
         tcpReadBytes,
         tcpWriteBytes,
+        tcpWriteErrno,
         tcpReadClosed,
         tcpWriteClosed,
         quicSendFinSubmitted,
@@ -550,6 +552,7 @@ extern "C" void TqTraceLinuxRelayUnregisterEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -566,6 +569,7 @@ extern "C" void TqTraceLinuxRelayUnregisterEvent(
         pendingQuicReceiveBytes,
         tcpReadBytes,
         tcpWriteBytes,
+        tcpWriteErrno,
         tcpReadClosed,
         tcpWriteClosed,
         quicSendFinSubmitted,
@@ -585,6 +589,7 @@ extern "C" void TqTraceLinuxRelayStopConditionEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -604,6 +609,7 @@ extern "C" void TqTraceLinuxRelayStopConditionEvent(
         pendingQuicReceiveBytes,
         tcpReadBytes,
         tcpWriteBytes,
+        tcpWriteErrno,
         tcpReadClosed,
         tcpWriteClosed,
         quicSendFinSubmitted,
@@ -634,6 +640,7 @@ extern "C" void TqTraceLinuxRelayStreamEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -653,6 +660,7 @@ extern "C" void TqTraceLinuxRelayStreamEvent(
         pendingQuicReceiveBytes,
         tcpReadBytes,
         tcpWriteBytes,
+        tcpWriteErrno,
         tcpReadClosed,
         tcpWriteClosed,
         quicSendFinSubmitted,
@@ -692,11 +700,16 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
 
 std::string TqTraceGlobalSnapshot() {
     char buffer[512];
+    size_t quicConns = 0;
+    {
+        std::lock_guard<std::mutex> guard(g_stateMu);
+        quicConns = g_quicConnsById.size();
+    }
     std::snprintf(
         buffer,
         sizeof(buffer),
         "global: quic_conns=%llu streams=%llu relays=%llu socks=%llu http=%llu target_tcp=%llu open_ok=%llu open_fail=%llu open_tx=%llu open_rx=%llu open_ok_tx=%llu open_ok_rx=%llu open_fail_tx=%llu open_fail_rx=%llu",
-        static_cast<unsigned long long>(g_global.quicConnsActive.load()),
+        static_cast<unsigned long long>(quicConns),
         static_cast<unsigned long long>(g_global.streamsActive.load()),
         static_cast<unsigned long long>(g_global.relaysActive.load()),
         static_cast<unsigned long long>(g_global.socksActive.load()),
@@ -758,8 +771,6 @@ void TqTraceQuicConnected(
         state.peerAddr = peerAddr;
         state.connectedAt = connectedAt;
     }
-
-    g_global.quicConnsActive.fetch_add(1);
 
     QUIC_STATISTICS_V2 stats{};
     const bool haveStats = CollectQuicStats(connection, stats);
@@ -841,10 +852,6 @@ void TqTraceQuicDisconnected(
             found = true;
             g_quicConnsById.erase(connId);
         }
-    }
-
-    if (g_global.quicConnsActive.load() > 0) {
-        g_global.quicConnsActive.fetch_sub(1);
     }
 
     const auto now = std::chrono::steady_clock::now();

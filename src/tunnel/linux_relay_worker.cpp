@@ -33,6 +33,7 @@ extern "C" void TqTraceLinuxRelayStreamShutdownEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -49,6 +50,7 @@ extern "C" void TqTraceLinuxRelayUnregisterEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -66,6 +68,7 @@ extern "C" void TqTraceLinuxRelayStopConditionEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -90,6 +93,7 @@ extern "C" void TqTraceLinuxRelayStreamEvent(
     uint64_t pendingQuicReceiveBytes,
     uint64_t tcpReadBytes,
     uint64_t tcpWriteBytes,
+    uint64_t tcpWriteErrno,
     bool tcpReadClosed,
     bool tcpWriteClosed,
     bool quicSendFinSubmitted,
@@ -205,6 +209,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool TcpReadArmed{true};
     bool TcpWriteArmed{false};
     uint64_t TcpWriteBytes{0};
+    uint64_t LastTcpWriteErrno{0};
     uint64_t TcpWriteEagainCount{0};
     uint64_t EpollOutEvents{0};
     StreamRelayBinding* StreamBinding{nullptr};
@@ -518,6 +523,7 @@ void TqLinuxRelayWorker::TraceRelayStreamEvent(
         relay->PendingQuicReceiveBytes,
         relay->TcpReadBytes,
         relay->TcpWriteBytes,
+        relay->LastTcpWriteErrno,
         relay->TcpReadClosed,
         relay->TcpWriteClosed,
         relay->QuicSendFinSubmitted,
@@ -554,6 +560,7 @@ void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
             relay->PendingQuicReceiveBytes,
             relay->TcpReadBytes,
             relay->TcpWriteBytes,
+            relay->LastTcpWriteErrno,
             relay->TcpReadClosed,
             relay->TcpWriteClosed,
             relay->QuicSendFinSubmitted,
@@ -744,6 +751,7 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
             removed->PendingQuicReceiveBytes,
             removed->TcpReadBytes,
             removed->TcpWriteBytes,
+            removed->LastTcpWriteErrno,
             removed->TcpReadClosed,
             removed->TcpWriteClosed,
             removed->QuicSendFinSubmitted,
@@ -1552,7 +1560,9 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
             break;
         }
         RecordError(RelayErrorKind::TcpWriteHard);
-        LastTcpWriteErrno.store(static_cast<uint64_t>(errno));
+        const uint64_t savedErrno = static_cast<uint64_t>(errno);
+        relay->LastTcpWriteErrno = savedErrno;
+        LastTcpWriteErrno.store(savedErrno);
         SetRelayStop(relay, "tcp_write_hard_error");
         for (auto& pending : relay->PendingQuicReceives) {
             if (pending) {
@@ -1864,7 +1874,10 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
             break;
         }
         RecordError(RelayErrorKind::TcpWriteHard);
-        LastTcpWriteErrno.store(static_cast<uint64_t>(errno));
+        const uint64_t savedErrno = static_cast<uint64_t>(errno);
+        relay->LastTcpWriteErrno = savedErrno;
+        LastTcpWriteErrno.store(savedErrno);
+        SetRelayStop(relay, "tcp_write_hard_error");
         break;
     }
 
@@ -2309,6 +2322,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 relay->PendingQuicReceiveBytes,
                 relay->TcpReadBytes,
                 relay->TcpWriteBytes,
+                relay->LastTcpWriteErrno,
                 relay->TcpReadClosed,
                 relay->TcpWriteClosed,
                 relay->QuicSendFinSubmitted,

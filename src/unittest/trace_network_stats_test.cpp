@@ -43,6 +43,7 @@ int main() {
             131072,
             73400320,
             59873689,
+            0,
             true,
             false,
             true,
@@ -63,6 +64,9 @@ int main() {
         relayLine.find("tcp_read_bytes=73400320") == std::string::npos ||
         relayLine.find("tcp_write_bytes=59873689") == std::string::npos) {
         return 6;
+    }
+    if (relayLine.find("tcp_write_errno=0") == std::string::npos) {
+        return 8;
     }
     if (relayLine.find("tcp_read_closed=1") == std::string::npos ||
         relayLine.find("tcp_write_closed=0") == std::string::npos ||
