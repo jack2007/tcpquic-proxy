@@ -44,6 +44,7 @@ std::string TqTraceGlobalSnapshot();
 
 void TqTraceQuicConnecting(const char* role, uint32_t slot, const char* peer);
 void TqTraceQuicIncoming();
+void TqTraceLogLine(const char* line);
 void TqTraceQuicConnected(
     MsQuicConnection* connection,
     uint32_t connId,

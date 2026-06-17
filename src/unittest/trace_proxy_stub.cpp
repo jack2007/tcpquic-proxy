@@ -31,6 +31,9 @@ void TqTraceQuicConnecting(const char*, uint32_t, const char*) {
 void TqTraceQuicIncoming() {
 }
 
+void TqTraceLogLine(const char*) {
+}
+
 void TqTraceQuicConnected(MsQuicConnection*, uint32_t, const char*, uint32_t) {
 }
 

@@ -574,6 +574,104 @@ extern "C" void TqTraceLinuxRelayUnregisterEvent(
         streamDetached});
 }
 
+extern "C" void TqTraceLinuxRelayStopConditionEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* trigger,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    const TqTraceLinuxRelayStreamState state{
+        workerIndex,
+        relayId,
+        outstandingQuicSends,
+        outstandingQuicSendBytes,
+        pendingTcpWriteQueue,
+        pendingTcpWriteBytes,
+        pendingQuicReceiveBytes,
+        tcpReadBytes,
+        tcpWriteBytes,
+        tcpReadClosed,
+        tcpWriteClosed,
+        quicSendFinSubmitted,
+        quicSendFinCompleted,
+        tcpWriteShutdownQueued,
+        streamDetached};
+    LogInfo(
+        "%s trigger=%s",
+        FormatTraceLinuxRelayStateLine("linux_relay_stop_condition", state).c_str(),
+        trigger != nullptr ? trigger : "?");
+}
+
+extern "C" void TqTraceLinuxRelayStreamEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* streamEvent,
+    uint64_t errorCode,
+    uint32_t status,
+    uint64_t absoluteOffset,
+    uint64_t totalBufferLength,
+    uint32_t bufferCount,
+    uint32_t receiveFlags,
+    bool fin,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pendingTcpWriteQueue,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t tcpReadBytes,
+    uint64_t tcpWriteBytes,
+    bool tcpReadClosed,
+    bool tcpWriteClosed,
+    bool quicSendFinSubmitted,
+    bool quicSendFinCompleted,
+    bool tcpWriteShutdownQueued,
+    bool streamDetached) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    const TqTraceLinuxRelayStreamState state{
+        workerIndex,
+        relayId,
+        outstandingQuicSends,
+        outstandingQuicSendBytes,
+        pendingTcpWriteQueue,
+        pendingTcpWriteBytes,
+        pendingQuicReceiveBytes,
+        tcpReadBytes,
+        tcpWriteBytes,
+        tcpReadClosed,
+        tcpWriteClosed,
+        quicSendFinSubmitted,
+        quicSendFinCompleted,
+        tcpWriteShutdownQueued,
+        streamDetached};
+    LogInfo(
+        "%s stream_event=%s error_code=%llu status=0x%x absolute_offset=%llu total_buffer_length=%llu buffer_count=%u receive_flags=0x%x fin=%d",
+        FormatTraceLinuxRelayStateLine("linux_relay_stream_event", state).c_str(),
+        streamEvent != nullptr ? streamEvent : "?",
+        static_cast<unsigned long long>(errorCode),
+        status,
+        static_cast<unsigned long long>(absoluteOffset),
+        static_cast<unsigned long long>(totalBufferLength),
+        bufferCount,
+        receiveFlags,
+        fin ? 1 : 0);
+}
+
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
     char buffer[512];
     const double bandwidthMbps =
@@ -627,6 +725,13 @@ void TqTraceQuicIncoming() {
         return;
     }
     LogInfo("event=quic_incoming role=server %s", TqTraceGlobalSnapshot().c_str());
+}
+
+void TqTraceLogLine(const char* line) {
+    if (!TqTraceEnabled() || line == nullptr || line[0] == '\0') {
+        return;
+    }
+    LogInfo("%s", line);
 }
 
 void TqTraceQuicConnected(

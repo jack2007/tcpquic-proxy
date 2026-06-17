@@ -100,6 +100,22 @@ bool ConvertListenAddress(const TqEndpoint& endpoint, QUIC_ADDR& address) {
     return QuicAddrFromString(endpoint.Host.c_str(), endpoint.Port, &address);
 }
 
+std::string TqFormatConnectionAddr(MsQuicConnection* connection, uint32_t param) {
+    if (connection == nullptr || !connection->IsValid()) {
+        return "?";
+    }
+    QUIC_ADDR addr{};
+    uint32_t len = sizeof(addr);
+    if (QUIC_FAILED(connection->GetParam(param, &len, &addr))) {
+        return "?";
+    }
+    QUIC_ADDR_STR addrStr{};
+    if (!QuicAddrToString(&addr, &addrStr)) {
+        return "?";
+    }
+    return addrStr.Address;
+}
+
 }
 
 MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
@@ -938,6 +954,17 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_CONNECTED:
         TqClientDebugLog("event-connected", slotIndex, connection);
         TqSampleConnectionRtt(connection);
+        {
+            char line[256];
+            std::snprintf(
+                line,
+                sizeof(line),
+                "tcpquic-proxy: QUIC client connected peer=%s slot=%zu",
+                TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS).c_str(),
+                slotIndex + 1);
+            std::fprintf(stderr, "%s\n", line);
+            TqTraceLogLine(line);
+        }
         if (state) {
             auto notification = QuicClientSession::OnSlotConnected(state, slotIndex, connection);
             state->StateChanged.notify_all();
@@ -1007,6 +1034,17 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
+        {
+            char line[256];
+            std::snprintf(
+                line,
+                sizeof(line),
+                "tcpquic-proxy: QUIC client disconnected peer=%s slot=%zu",
+                TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS).c_str(),
+                slotIndex + 1);
+            std::fprintf(stderr, "%s\n", line);
+            TqTraceLogLine(line);
+        }
         if (TqTraceEnabled()) {
             TqUnregisterClientTraceConnection(connection);
             TqTraceQuicDisconnected(
@@ -1205,6 +1243,15 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         connection->SendResumptionTicket(QUIC_SEND_RESUMPTION_FLAG_FINAL);
         {
             const uint32_t connId = TqRegisterServerConnection(connection);
+            char line[256];
+            std::snprintf(
+                line,
+                sizeof(line),
+                "tcpquic-proxy: QUIC server connection accepted from=%s conn=%u",
+                TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS).c_str(),
+                connId);
+            std::fprintf(stderr, "%s\n", line);
+            TqTraceLogLine(line);
             TqTraceQuicConnected(connection, connId, "server", 0);
         }
         break;
@@ -1247,6 +1294,18 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         (void)TqAbortConnectionTunnels(connection);
+        {
+            const uint32_t connId = TqLookupServerConnectionId(connection);
+            char line[256];
+            std::snprintf(
+                line,
+                sizeof(line),
+                "tcpquic-proxy: QUIC server connection disconnected from=%s conn=%u",
+                TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS).c_str(),
+                connId);
+            std::fprintf(stderr, "%s\n", line);
+            TqTraceLogLine(line);
+        }
         if (TqTraceEnabled()) {
             const uint32_t connId = TqLookupServerConnectionId(connection);
             TqTraceQuicDisconnected(connection, connId, "server");

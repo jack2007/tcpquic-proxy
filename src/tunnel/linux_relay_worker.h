@@ -246,13 +246,24 @@ private:
     void Wake();
     void RecordEventProducer();
     size_t DrainEvents(size_t budget);
+    void TraceRelayStreamEvent(
+        RelayState* relay,
+        const char* streamEvent,
+        uint64_t errorCode,
+        uint32_t status,
+        uint64_t absoluteOffset,
+        uint64_t totalBufferLength,
+        uint32_t bufferCount,
+        uint32_t receiveFlags,
+        bool fin);
+    void SetRelayStop(RelayState* relay, const char* trigger);
     void DrainTcpReadable(RelayState* relay);
     bool BuildTcpToQuicViews(
         RelayState* relay,
         std::vector<TqBufferView>& input,
         std::vector<TqBufferView>& output);
     bool FinishTcpToQuic(RelayState* relay);
-    void MaybeStopFullyClosedRelay(RelayState* relay);
+    void MaybeStopFullyClosedRelay(RelayState* relay, const char* trigger);
     bool SubmitTcpBatchToQuic(
         RelayState* relay,
         std::vector<TqBufferView>& views,
