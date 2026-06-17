@@ -32,9 +32,18 @@ QUIC_STATUS QUIC_API FakeStreamSend(
     return QUIC_STATUS_SUCCESS;
 }
 
+void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t) {
+}
+
+QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
+    return QUIC_STATUS_SUCCESS;
+}
+
 void InstallFakeMsQuicForSend(QUIC_API_TABLE& table) {
     std::memset(&table, 0, sizeof(table));
     table.StreamSend = FakeStreamSend;
+    table.StreamReceiveComplete = FakeStreamReceiveComplete;
+    table.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
     MsQuic = reinterpret_cast<const MsQuicApi*>(&table);
 }
 
@@ -352,6 +361,156 @@ int main() {
             return 1;
         }
         CompleteFakeSends(worker, fakeStream);
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 1;
+        }
+        int sendBuffer = 4096;
+        (void)::setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &sendBuffer, sizeof(sendBuffer));
+        const int peerFlags = ::fcntl(fds[1], F_GETFL, 0);
+        (void)::fcntl(fds[1], F_SETFL, peerFlags | O_NONBLOCK);
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = true;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        if (::shutdown(fds[1], SHUT_WR) != 0 ||
+            !worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLRDHUP)) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        TqLinuxRelayWorkerSnapshot readClosed = worker.Snapshot();
+        if (readClosed.TcpReadClosedRelays != 1 || readClosed.OutstandingQuicSends != 0) {
+            std::fprintf(stderr,
+                "expected TCP read FIN before stream shutdown, read_closed=%llu sends=%llu\n",
+                static_cast<unsigned long long>(readClosed.TcpReadClosedRelays),
+                static_cast<unsigned long long>(readClosed.OutstandingQuicSends));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        const std::vector<uint8_t> plain(2 * 1024 * 1024, 0x72);
+        QUIC_BUFFER quicBuffer{};
+        quicBuffer.Buffer = const_cast<uint8_t*>(plain.data());
+        quicBuffer.Length = static_cast<uint32_t>(plain.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 1;
+        receiveEvent.RECEIVE.Buffers = &quicBuffer;
+        receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+
+        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING ||
+            worker.DrainForTest(config.EventBudget) != 1) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot beforeShutdown = worker.Snapshot();
+        if (beforeShutdown.PendingBytes == 0 || handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr,
+                "expected pending TCP writes before shutdown, pending=%llu stop=%d\n",
+                static_cast<unsigned long long>(beforeShutdown.PendingBytes),
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0);
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        QUIC_STREAM_EVENT shutdownEvent{};
+        shutdownEvent.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &shutdownEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+
+        std::vector<uint8_t> output;
+        output.reserve(plain.size());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+        uint8_t buffer[8192];
+        while (std::chrono::steady_clock::now() < deadline && output.size() < plain.size()) {
+            const ssize_t received = ::recv(fds[1], buffer, sizeof(buffer), MSG_DONTWAIT);
+            if (received > 0) {
+                output.insert(output.end(), buffer, buffer + received);
+                continue;
+            }
+            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                TqLinuxRelayEvent writable{};
+                writable.Type = TqLinuxRelayEventType::TcpWritable;
+                writable.RelayId = registered.RelayId;
+                (void)worker.EnqueueForTest(std::move(writable));
+                (void)worker.DrainForTest(config.EventBudget);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            break;
+        }
+
+        const TqLinuxRelayWorkerSnapshot completed = worker.Snapshot();
+        if (output != plain ||
+            completed.PendingBytes != 0 ||
+            !handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr,
+                "expected deferred stream shutdown to drain then stop, output=%zu pending=%llu stop=%d active=%llu\n",
+                output.size(),
+                static_cast<unsigned long long>(completed.PendingBytes),
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
+                static_cast<unsigned long long>(completed.ActiveRelays));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
 
         worker.Stop();
         ::close(fds[1]);
@@ -1284,7 +1443,8 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
-        if (worker.Snapshot().PendingBytes == 0) {
+        const TqLinuxRelayWorkerSnapshot beforeShutdown = worker.Snapshot();
+        if (beforeShutdown.PendingBytes == 0 || beforeShutdown.ActiveRelays != 1) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -1297,14 +1457,20 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
-        if (worker.DrainForTest(config.EventBudget) != 1) {
-            worker.Stop();
-            ::close(fds[1]);
-            return 1;
-        }
-        if (worker.Snapshot().PendingBytes != 0) {
-            std::fprintf(stderr, "expected shutdown complete to clear pending receive, got %llu\n",
-                static_cast<unsigned long long>(worker.Snapshot().PendingBytes));
+        (void)worker.DrainForTest(config.EventBudget);
+
+        const TqLinuxRelayWorkerSnapshot afterShutdown = worker.Snapshot();
+        if (afterShutdown.PendingBytes != beforeShutdown.PendingBytes ||
+            afterShutdown.ActiveRelays != 1 ||
+            afterShutdown.ClosingRelays != 0 ||
+            !afterShutdown.HotRelayTcpWriteArmed) {
+            std::fprintf(stderr,
+                "stream shutdown should not discard pending TCP writes, before_pending=%llu after_pending=%llu active=%llu closing=%llu armed=%d\n",
+                static_cast<unsigned long long>(beforeShutdown.PendingBytes),
+                static_cast<unsigned long long>(afterShutdown.PendingBytes),
+                static_cast<unsigned long long>(afterShutdown.ActiveRelays),
+                static_cast<unsigned long long>(afterShutdown.ClosingRelays),
+                afterShutdown.HotRelayTcpWriteArmed ? 1 : 0);
             worker.Stop();
             ::close(fds[1]);
             return 1;

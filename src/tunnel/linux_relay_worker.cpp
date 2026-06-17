@@ -2098,10 +2098,24 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
         return QUIC_STATUS_SUCCESS;
     }
-    if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE ||
-        event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
+    if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
+        if (stream != nullptr && stream->Context == binding) {
+            stream->Callback = MsQuicStream::NoOpCallback;
+            stream->Context = nullptr;
+        }
+        relay->Stream = nullptr;
+        MaybeStopFullyClosedRelay(relay);
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+        if (stream != nullptr && stream->Context == binding) {
+            stream->Callback = MsQuicStream::NoOpCallback;
+            stream->Context = nullptr;
+        }
         relay->Stream = nullptr;
         relay->Closing = true;
         TqLinuxRelayEvent shutdown{};
