@@ -43,3 +43,9 @@ bool TqRelayStartQuicReceiveSink(
 
 void TqRelayStop(TqRelayHandle* handle);
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle);
+void TqRelayUpdateQuicReadAheadFromNetworkStats(
+    uint64_t bandwidthBytesPerSecond,
+    uint64_t smoothedRttUs);
+uint64_t TqRelayCurrentQuicReadAheadBytes();
+void TqRelayResetQuicReadAheadForTest(uint64_t initialBytes);
+uint64_t TqRelayCurrentQuicReadAheadBytesForTest();

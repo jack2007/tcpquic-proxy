@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "relay.h"
 #include "trace.h"
 #include "tunnel_registry.h"
 #include "tuning.h"
@@ -939,6 +940,9 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
+        TqRelayUpdateQuicReadAheadFromNetworkStats(
+            event->NETWORK_STATISTICS.Bandwidth,
+            event->NETWORK_STATISTICS.SmoothedRTT);
         if (TqTraceEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,
@@ -1226,6 +1230,9 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
+        TqRelayUpdateQuicReadAheadFromNetworkStats(
+            event->NETWORK_STATISTICS.Bandwidth,
+            event->NETWORK_STATISTICS.SmoothedRTT);
         if (TqTraceEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,

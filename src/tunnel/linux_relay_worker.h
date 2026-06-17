@@ -34,6 +34,7 @@ struct TqLinuxRelayWorkerConfig {
     uint64_t DeferredReceiveCompleteBatchBytes{0};
     uint32_t MaxInFlightQuicSends{0};
     uint64_t MaxBufferedQuicSendBytes{0};
+    bool UseDynamicQuicReadAhead{false};
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
 };
@@ -257,6 +258,11 @@ private:
         uint32_t receiveFlags,
         bool fin);
     void SetRelayStop(RelayState* relay, const char* trigger);
+    uint64_t CurrentMaxBufferedQuicSendBytes() const;
+    uint64_t CurrentResumeBufferedQuicSendBytes() const;
+    bool ShouldPauseTcpReadForQuicBacklog(const RelayState* relay) const;
+    bool ShouldResumeTcpReadForQuicBacklog(const RelayState* relay) const;
+    void SetTcpReadBackpressure(RelayState* relay, bool paused, const char* reason);
     void DrainTcpReadable(RelayState* relay);
     bool BuildTcpToQuicViews(
         RelayState* relay,

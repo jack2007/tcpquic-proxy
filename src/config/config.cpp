@@ -348,6 +348,10 @@ private:
             if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
             if (key == "io_size") {
                 if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
+            } else if (key == "initial_quic_read_ahead") {
+                if (!ParseNonZeroUint32(
+                        cfg.TuningOverrideInitialQuicReadAheadBytes,
+                        "relay.initial_quic_read_ahead")) return false;
             } else if (key == "linux") {
                 if (!ParseLinuxRelayConfig(cfg)) return false;
             } else {
@@ -948,6 +952,8 @@ void TqPrintUsage(FILE* out) {
         "  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP\n"
         "  --target-rtt-ms <n>          Target RTT for auto/custom BDP\n"
         "  --relay-io-size <bytes>      Windows relay IO buffer size\n"
+        "  --initial-quic-read-ahead <bytes>\n"
+        "                              Initial/minimum read-ahead bytes (default 1048576)\n"
         "  --linux-relay-read-chunk-size <bytes>\n"
         "                              Linux relay TCP read chunk size\n"
         "  --linux-relay-tcp-write-max-bytes <bytes>\n"
@@ -1331,6 +1337,18 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayIoSize)) {
                 err = "invalid value for --relay-io-size";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--initial-quic-read-ahead", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--initial-quic-read-ahead", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideInitialQuicReadAheadBytes) ||
+                cfg.TuningOverrideInitialQuicReadAheadBytes == 0) {
+                err = "invalid value for --initial-quic-read-ahead";
                 return false;
             }
         } else if (GetOptionValue(arg, "--linux-relay-read-chunk-size", value)) {

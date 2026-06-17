@@ -1,5 +1,6 @@
 #include "compress.h"
 #include "linux_relay_worker.h"
+#include "relay.h"
 
 #include <algorithm>
 #include <cassert>
@@ -67,6 +68,24 @@ void CompleteFakeSends(TqLinuxRelayWorker& worker, MsQuicStream* stream) {
 
 int main() {
     (void)::signal(SIGPIPE, SIG_IGN);
+
+    TqRelayResetQuicReadAheadForTest(1024 * 1024);
+    if (TqRelayCurrentQuicReadAheadBytesForTest() != 1024ull * 1024) {
+        return 1;
+    }
+    TqRelayUpdateQuicReadAheadFromNetworkStats(10ull * 1024 * 1024, 200000);
+    if (TqRelayCurrentQuicReadAheadBytesForTest() != 4ull * 1024 * 1024) {
+        std::fprintf(stderr, "expected 2*BDP read-ahead, got %llu\n",
+            static_cast<unsigned long long>(TqRelayCurrentQuicReadAheadBytesForTest()));
+        return 1;
+    }
+    TqRelayUpdateQuicReadAheadFromNetworkStats(1000, 1000);
+    if (TqRelayCurrentQuicReadAheadBytesForTest() != 1024ull * 1024) {
+        std::fprintf(stderr, "expected read-ahead to stay at initial minimum, got %llu\n",
+            static_cast<unsigned long long>(TqRelayCurrentQuicReadAheadBytesForTest()));
+        return 1;
+    }
+
     TqLinuxRelayWorkerConfig config{};
     config.EventBudget = 128;
     config.ReadChunkSize = 4096;

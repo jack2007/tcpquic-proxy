@@ -257,6 +257,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         protocol/compress.cpp
+        config/tuning.cpp
         ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_linux_relay_worker_io_test)

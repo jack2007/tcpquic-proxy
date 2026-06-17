@@ -100,6 +100,15 @@ extern "C" void TqTraceLinuxRelayStreamEvent(
     bool quicSendFinCompleted,
     bool tcpWriteShutdownQueued,
     bool streamDetached) __attribute__((weak));
+extern "C" void TqTraceLinuxRelayBackpressureEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* action,
+    const char* reason,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pauseThreshold,
+    uint64_t resumeThreshold,
+    uint64_t readAheadBytes) __attribute__((weak));
 #endif
 
 namespace {
@@ -208,6 +217,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool TcpWriteShutdownQueued{false};
     bool TcpReadArmed{true};
     bool TcpWriteArmed{false};
+    bool TcpReadPausedByQuicBacklog{false};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
     uint64_t TcpWriteEagainCount{0};
@@ -574,6 +584,63 @@ void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
     relay->Handle->Stop.store(true, std::memory_order_release);
 }
 
+uint64_t TqLinuxRelayWorker::CurrentMaxBufferedQuicSendBytes() const {
+    if (Config.UseDynamicQuicReadAhead) {
+        return TqRelayCurrentQuicReadAheadBytes();
+    }
+    return Config.MaxBufferedQuicSendBytes;
+}
+
+uint64_t TqLinuxRelayWorker::CurrentResumeBufferedQuicSendBytes() const {
+    const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+    return pauseThreshold / 2;
+}
+
+bool TqLinuxRelayWorker::ShouldPauseTcpReadForQuicBacklog(const RelayState* relay) const {
+    if (relay == nullptr) {
+        return false;
+    }
+    const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+    return pauseThreshold != 0 && relay->OutstandingQuicSendBytes >= pauseThreshold;
+}
+
+bool TqLinuxRelayWorker::ShouldResumeTcpReadForQuicBacklog(const RelayState* relay) const {
+    if (relay == nullptr) {
+        return false;
+    }
+    const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+    if (pauseThreshold == 0) {
+        return true;
+    }
+    return relay->OutstandingQuicSendBytes <= CurrentResumeBufferedQuicSendBytes();
+}
+
+void TqLinuxRelayWorker::SetTcpReadBackpressure(
+    RelayState* relay,
+    bool paused,
+    const char* reason) {
+    if (relay == nullptr || relay->TcpReadPausedByQuicBacklog == paused) {
+        return;
+    }
+    relay->TcpReadPausedByQuicBacklog = paused;
+#if defined(__GNUC__)
+    if (TqTraceLinuxRelayBackpressureEvent != nullptr) {
+        const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+        TqTraceLinuxRelayBackpressureEvent(
+            Config.WorkerIndex,
+            relay->Id,
+            paused ? "pause" : "resume",
+            reason,
+            relay->OutstandingQuicSendBytes,
+            pauseThreshold,
+            pauseThreshold / 2,
+            pauseThreshold);
+    }
+#else
+    (void)reason;
+#endif
+}
+
 void TqLinuxRelayWorker::Wake() {
     if (WakeFd < 0) {
         return;
@@ -822,6 +889,11 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     if (relay == nullptr || relay->Closing) {
         return;
     }
+    if (ShouldPauseTcpReadForQuicBacklog(relay)) {
+        SetTcpReadBackpressure(relay, true, "quic_send_backlog");
+        ArmTcpReadable(relay, false);
+        return;
+    }
 
     uint64_t readBytes = 0;
     const uint64_t tickBudget = std::min<uint64_t>(Config.ReadBatchBytes, Config.ByteBudgetPerTick);
@@ -888,8 +960,8 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
                 ArmTcpReadable(relay, false);
                 break;
             }
-            if (Config.MaxBufferedQuicSendBytes != 0 &&
-                relay->OutstandingQuicSendBytes >= Config.MaxBufferedQuicSendBytes) {
+            if (ShouldPauseTcpReadForQuicBacklog(relay)) {
+                SetTcpReadBackpressure(relay, true, "quic_send_backlog");
                 ArmTcpReadable(relay, false);
                 break;
             }
@@ -1167,8 +1239,8 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
         if (!relay->TcpReadClosed &&
             (Config.MaxInFlightQuicSends == 0 ||
              relay->OutstandingQuicSends < Config.MaxInFlightQuicSends) &&
-            (Config.MaxBufferedQuicSendBytes == 0 ||
-             relay->OutstandingQuicSendBytes < Config.MaxBufferedQuicSendBytes)) {
+            ShouldResumeTcpReadForQuicBacklog(relay.get())) {
+            SetTcpReadBackpressure(relay.get(), false, "quic_send_backlog");
             ArmTcpReadable(relay.get(), true);
         }
         MaybeStopFullyClosedRelay(relay.get(), finCompleted ? "quic_send_fin_completed" : "quic_send_completed");
@@ -2144,7 +2216,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
             }
             snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
             snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
-            snapshot.MaxBufferedQuicSendBytes += Config.MaxBufferedQuicSendBytes;
+            snapshot.MaxBufferedQuicSendBytes += CurrentMaxBufferedQuicSendBytes();
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
             for (const auto& view : relay->PendingTcpWrites) {
                 relayPendingBytes += view.Len;
@@ -2382,6 +2454,7 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         return true;
     }
 
+    TqRelayResetQuicReadAhead(tuning.InitialQuicReadAheadBytes);
     const uint32_t workerCount = std::max<uint32_t>(1, tuning.LinuxRelayWorkerCount);
     for (uint32_t i = 0; i < workerCount; ++i) {
         TqLinuxRelayWorkerConfig config{};
@@ -2397,10 +2470,8 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
         config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
         config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
         config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
-        if (tuning.RelayIoSize != 0) {
-            config.MaxBufferedQuicSendBytes =
-                std::min<uint64_t>(tuning.RelayDefaultIdealSend, 4ull * tuning.RelayIoSize);
-        }
+        config.MaxBufferedQuicSendBytes = tuning.InitialQuicReadAheadBytes;
+        config.UseDynamicQuicReadAhead = true;
         auto worker = std::make_unique<TqLinuxRelayWorker>(config);
         if (!worker->Start()) {
             Workers.clear();

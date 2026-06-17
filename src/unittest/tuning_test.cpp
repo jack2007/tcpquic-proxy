@@ -22,6 +22,7 @@ int main() {
         assert(cfg.Tuning.InitialWindowPackets == 2000);
         assert(cfg.Tuning.InitialRttMs == 100);
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
+        assert(cfg.Tuning.InitialQuicReadAheadBytes == 1024ull * 1024);
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
         assert(cfg.Tuning.TcpSocketBufferBytes == 4 * 1024 * 1024);
         assert(cfg.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay == 16ull * 1024 * 1024);
@@ -346,6 +347,29 @@ int main() {
         TqFinalizeConfig(cfg);
         assert(cfg.Tuning.LinuxRelayTcpWriteMaxBytes == 4194304);
         assert(cfg.Tuning.LinuxRelayTcpWriteBurstBytes == 16777216);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--ca";
+        char arg9[] = "ca.pem";
+        char arg10[] = "--initial-quic-read-ahead";
+        char arg11[] = "2097152";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+            arg8, arg9, arg10, arg11};
+        assert(TqParseArgs(12, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        assert(cfg.Tuning.InitialQuicReadAheadBytes == 2097152);
     }
 
     {

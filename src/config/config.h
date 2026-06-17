@@ -76,6 +76,7 @@ struct TqConfig {
     uint32_t TuningOverrideLinuxRelayReadChunkSize{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteMaxBytes{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteBurstBytes{0};
+    uint32_t TuningOverrideInitialQuicReadAheadBytes{0};
     uint32_t TuningOverrideQuicFcw{0};
     uint32_t TuningOverrideQuicSrw{0};
     uint32_t TuningOverrideQuicIw{0};

@@ -680,6 +680,30 @@ extern "C" void TqTraceLinuxRelayStreamEvent(
         fin ? 1 : 0);
 }
 
+extern "C" void TqTraceLinuxRelayBackpressureEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* action,
+    const char* reason,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pauseThreshold,
+    uint64_t resumeThreshold,
+    uint64_t readAheadBytes) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo(
+        "event=relay_backpressure worker=%u relay=%llu action=%s reason=%s outstanding_quic_send_bytes=%llu pause_threshold=%llu resume_threshold=%llu read_ahead=%llu",
+        workerIndex,
+        static_cast<unsigned long long>(relayId),
+        action != nullptr ? action : "?",
+        reason != nullptr ? reason : "?",
+        static_cast<unsigned long long>(outstandingQuicSendBytes),
+        static_cast<unsigned long long>(pauseThreshold),
+        static_cast<unsigned long long>(resumeThreshold),
+        static_cast<unsigned long long>(readAheadBytes));
+}
+
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
     char buffer[512];
     const double bandwidthMbps =

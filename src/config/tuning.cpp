@@ -220,6 +220,9 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes > 0) {
         out.LinuxRelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
     }
+    if (cfg.TuningOverrideInitialQuicReadAheadBytes > 0) {
+        out.InitialQuicReadAheadBytes = cfg.TuningOverrideInitialQuicReadAheadBytes;
+    }
     if (cfg.TuningOverrideQuicFcw > 0) {
         out.ConnFlowControlWindow = cfg.TuningOverrideQuicFcw;
     }
@@ -276,6 +279,8 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t 
 int g_TqActiveTcpSocketBuffer = 4 * 1024 * 1024;
 std::atomic<uint32_t> g_TqRelayMemoryBudgetMb{0};
 std::atomic<uint32_t> g_TqActiveRelays{0};
+std::atomic<uint64_t> g_TqQuicReadAheadInitialBytes{1ull * MiB};
+std::atomic<uint64_t> g_TqQuicReadAheadBytes{1ull * MiB};
 
 struct TqRuntimeState {
     std::mutex Lock;
@@ -579,6 +584,46 @@ void TqResetRuntimeObservations() {
     g_Runtime.LastLogUnixMs = 0;
 }
 
+void TqRelayResetQuicReadAhead(uint64_t initialBytes) {
+    const uint64_t effectiveInitial = std::max<uint64_t>(initialBytes, 1);
+    g_TqQuicReadAheadInitialBytes.store(effectiveInitial, std::memory_order_release);
+    g_TqQuicReadAheadBytes.store(effectiveInitial, std::memory_order_release);
+}
+
+void TqRelayUpdateQuicReadAheadFromNetworkStats(
+    uint64_t bandwidthBytesPerSecond,
+    uint64_t smoothedRttUs) {
+    if (bandwidthBytesPerSecond == 0 || smoothedRttUs == 0) {
+        return;
+    }
+    const long double bdpBytes =
+        (static_cast<long double>(bandwidthBytesPerSecond) *
+         static_cast<long double>(smoothedRttUs)) /
+        1000000.0L;
+    const long double doubledBdp = bdpBytes * 2.0L;
+    const uint64_t targetBytes =
+        doubledBdp > static_cast<long double>(std::numeric_limits<uint64_t>::max())
+        ? std::numeric_limits<uint64_t>::max()
+        : static_cast<uint64_t>(doubledBdp);
+    const uint64_t initialBytes =
+        g_TqQuicReadAheadInitialBytes.load(std::memory_order_acquire);
+    g_TqQuicReadAheadBytes.store(
+        std::max(targetBytes, initialBytes),
+        std::memory_order_release);
+}
+
+uint64_t TqRelayCurrentQuicReadAheadBytes() {
+    return g_TqQuicReadAheadBytes.load(std::memory_order_acquire);
+}
+
+void TqRelayResetQuicReadAheadForTest(uint64_t initialBytes) {
+    TqRelayResetQuicReadAhead(initialBytes);
+}
+
+uint64_t TqRelayCurrentQuicReadAheadBytesForTest() {
+    return TqRelayCurrentQuicReadAheadBytes();
+}
+
 bool TqCompressionAdaptiveEnabled(const TqConfig& cfg) {
     return cfg.Compress == "auto";
 }
@@ -634,7 +679,8 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "relay_io=%zu ideal_send=%llu inflight=%u tcp_buf=%d "
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
         "read_chunk=%zu max_pending_buffer=%llu "
-        "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu\n",
+        "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu "
+        "initial_read_ahead=%llu\n",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -650,7 +696,8 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.MaxPendingBufferBytesPerRelay),
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteMaxBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteBurstBytes),
-        static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes));
+        static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes),
+        static_cast<unsigned long long>(tuning.InitialQuicReadAheadBytes));
 }
 
 void TqSetActiveTcpSocketBuffer(int bytes) {

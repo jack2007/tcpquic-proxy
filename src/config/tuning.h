@@ -29,6 +29,7 @@ struct TqTuningConfig {
     size_t LinuxRelayQuicRecvBatchBytes{1024 * 1024};
     uint64_t LinuxRelayTcpWriteMaxBytes{0};
     uint64_t LinuxRelayTcpWriteBurstBytes{0};
+    uint64_t InitialQuicReadAheadBytes{1024ull * 1024};
     uint64_t LinuxRelayGlobalPendingBytes{256ull * 1024 * 1024};
     uint64_t MaxPendingBufferBytesPerRelay{32ull * 1024 * 1024};
     uint64_t LinuxRelayPerTunnelPendingBytes{4ull * 1024 * 1024};
@@ -79,6 +80,13 @@ void TqRecordIdealSendHint(uint64_t idealSendBytes);
 void TqApplyRuntimeObservations(TqConfig& cfg);
 TqRuntimeObservations TqGetRuntimeObservations();
 void TqResetRuntimeObservations();
+void TqRelayResetQuicReadAhead(uint64_t initialBytes);
+void TqRelayUpdateQuicReadAheadFromNetworkStats(
+    uint64_t bandwidthBytesPerSecond,
+    uint64_t smoothedRttUs);
+uint64_t TqRelayCurrentQuicReadAheadBytes();
+void TqRelayResetQuicReadAheadForTest(uint64_t initialBytes);
+uint64_t TqRelayCurrentQuicReadAheadBytesForTest();
 bool TqCompressionAdaptiveEnabled(const TqConfig& cfg);
 const char* TqResolveAutoCompress(const TqConfig& cfg);
 void TqRecordCompressionSample(uint64_t rawBytes, uint64_t compressedBytes);
