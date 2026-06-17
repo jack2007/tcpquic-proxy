@@ -132,6 +132,27 @@ target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog)
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
 tcpquic_link_mimalloc(tcpquic-proxy)
 
+if(NOT WIN32 AND TARGET OpenSSL_Target AND DEFINED OpenSSLQuic_BINARY_DIR)
+    find_program(TCPQUIC_MAKE_PROGRAM make)
+    if(TCPQUIC_MAKE_PROGRAM)
+        set(TCPQUIC_QUICTLS_BUILD_DIR "${OpenSSLQuic_BINARY_DIR}/submodules/quictls")
+        set(TCPQUIC_OPENSSL_APP "${TCPQUIC_QUICTLS_BUILD_DIR}/apps/openssl")
+        add_custom_target(tcpquic-openssl
+            COMMAND ${CMAKE_COMMAND} -E env
+                "LDCMD=${CMAKE_C_COMPILER} -static"
+                ${TCPQUIC_MAKE_PROGRAM} -C "${TCPQUIC_QUICTLS_BUILD_DIR}" apps/openssl
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:tcpquic-proxy>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${TCPQUIC_OPENSSL_APP}"
+                "$<TARGET_FILE_DIR:tcpquic-proxy>/openssl"
+            DEPENDS OpenSSL_Target
+            COMMENT "Build static OpenSSL CLI next to tcpquic-proxy")
+        add_dependencies(tcpquic-proxy tcpquic-openssl)
+    else()
+        message(WARNING "make not found; tcpquic openssl helper will not be built")
+    endif()
+endif()
+
 set(TCPQUIC_TEST_LIBS libzstd)
 set(TCPQUIC_TEST_INCLUDES)
 set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1)

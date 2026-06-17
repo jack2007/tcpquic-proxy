@@ -60,6 +60,7 @@ int main() {
         if (usage.find("Diagnostics:") == std::string::npos) return 114;
         if (usage.find("--config <path>") == std::string::npos) return 115;
         if (usage.find("--allow-targets <list>") == std::string::npos) return 116;
+        if (usage.find("default 0.0.0.0/0") == std::string::npos) return 150;
         if (usage.find("--download-test <sec>") == std::string::npos) return 117;
         if (usage.find("--connection-stream-count <n>") == std::string::npos) return 118;
         if (usage.find("--peer <addr>") == std::string::npos) return 129;
@@ -400,6 +401,14 @@ int main() {
         std::string err;
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 140;
         if (!cfg.QuicDisable1RttEncryption) return 141;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 151;
+        if (cfg.AllowTargets.size() != 1) return 152;
+        if (cfg.AllowTargets[0] != "0.0.0.0/0") return 153;
     }
     {
         const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--allow-targets", "127.0.0.1/32", "--enable-encrypt", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};

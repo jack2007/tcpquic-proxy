@@ -15,11 +15,6 @@
 #include <memory>
 #include <new>
 #include <thread>
-#if defined(_WIN32)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
 #include <unordered_map>
 
 extern const MsQuicApi* MsQuic;
@@ -1105,19 +1100,9 @@ void QuicServerSession::Stop() {
 }
 
 void QuicServerSession::Run() {
-#if defined(_WIN32)
-    const bool interactive = _isatty(_fileno(stdin)) != 0;
-#else
-    const bool interactive = isatty(STDIN_FILENO) != 0;
-#endif
-    if (interactive) {
-        std::fprintf(stderr, "Press Enter to exit.\n");
-        (void)getchar();
-    } else {
-        std::fprintf(stderr, "Running (non-interactive).\n");
-        std::unique_lock<std::mutex> guard(Lock);
-        StateChanged.wait(guard, [this] { return !Started || Stopping; });
-    }
+    std::unique_lock<std::mutex> guard(Lock);
+    StateChanged.wait(guard, [this] { return !Started || Stopping; });
+    guard.unlock();
     Stop();
 }
 

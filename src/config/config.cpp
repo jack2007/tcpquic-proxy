@@ -934,7 +934,7 @@ void TqPrintUsage(FILE* out) {
         "\n"
         "Server specific:\n"
         "  --listen <addr>              Listen address\n"
-        "  --allow-targets <list>       Allowed CIDR list, comma-separated\n"
+        "  --allow-targets <list>       Allowed CIDR list, comma-separated (default 0.0.0.0/0)\n"
         "  --deny-targets <list>        Denied CIDR list, comma-separated\n"
         "\n"
         "Protocol and relay tuning:\n"
@@ -1516,8 +1516,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             return false;
         }
         if (cfg.AllowTargets.empty()) {
-            err = "missing required option: --allow-targets";
-            return false;
+            cfg.AllowTargets.push_back("0.0.0.0/0");
         }
         if (!TqValidateCidrList(cfg.AllowTargets, err)) {
             return false;
