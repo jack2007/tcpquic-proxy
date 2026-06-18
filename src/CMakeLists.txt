@@ -134,44 +134,64 @@ tcpquic_link_mimalloc(tcpquic-proxy)
 
 option(TCPQUIC_PREFER_STATIC_OPENSSL_HELPER "Prefer a statically linked vendored openssl helper when supported" ON)
 
-if(NOT WIN32 AND TARGET OpenSSL_Target AND DEFINED OpenSSLQuic_BINARY_DIR)
-    find_program(TCPQUIC_MAKE_PROGRAM make)
-    if(TCPQUIC_MAKE_PROGRAM)
-        set(TCPQUIC_QUICTLS_BUILD_DIR "${OpenSSLQuic_BINARY_DIR}/submodules/quictls")
-        set(TCPQUIC_OPENSSL_APP "${TCPQUIC_QUICTLS_BUILD_DIR}/apps/openssl")
-        set(TCPQUIC_OPENSSL_LINK_ENV)
-        set(TCPQUIC_OPENSSL_HELPER_COMMENT "Build OpenSSL CLI next to tcpquic-proxy")
-        if(TCPQUIC_PREFER_STATIC_OPENSSL_HELPER)
-            include(CMakePushCheckState)
-            include(CheckCSourceCompiles)
-            cmake_push_check_state(RESET)
-            set(CMAKE_REQUIRED_LINK_OPTIONS "-static")
-            set(CMAKE_REQUIRED_LIBRARIES dl pthread)
-            set(CMAKE_REQUIRED_QUIET TRUE)
-            check_c_source_compiles("int main(void) { return 0; }" TCPQUIC_CAN_STATIC_LINK_OPENSSL_HELPER)
-            cmake_pop_check_state()
-
-            if(TCPQUIC_CAN_STATIC_LINK_OPENSSL_HELPER)
-                set(TCPQUIC_OPENSSL_LINK_ENV "LDCMD=${CMAKE_C_COMPILER} -static")
-                set(TCPQUIC_OPENSSL_HELPER_COMMENT "Build static OpenSSL CLI next to tcpquic-proxy")
-                message(STATUS "Building vendored openssl helper with static system libraries")
-            else()
-                message(WARNING "Static system libraries are unavailable; building vendored openssl helper dynamically")
-            endif()
+if(TARGET OpenSSL_Target AND DEFINED OpenSSLQuic_BINARY_DIR)
+    if(WIN32)
+        find_program(TCPQUIC_OPENSSL_BUILD_PROGRAM jom)
+        if(NOT TCPQUIC_OPENSSL_BUILD_PROGRAM)
+            set(TCPQUIC_OPENSSL_BUILD_PROGRAM nmake)
         endif()
+        set(TCPQUIC_QUICTLS_BUILD_DIR
+            "${OpenSSLQuic_BINARY_DIR}/submodules/quictls/$<IF:$<CONFIG:Debug>,debug,release>")
+        set(TCPQUIC_OPENSSL_APP "${TCPQUIC_QUICTLS_BUILD_DIR}/apps/openssl.exe")
         add_custom_target(tcpquic-openssl
-            COMMAND ${CMAKE_COMMAND} -E env
-                ${TCPQUIC_OPENSSL_LINK_ENV}
-                ${TCPQUIC_MAKE_PROGRAM} -C "${TCPQUIC_QUICTLS_BUILD_DIR}" apps/openssl
+            COMMAND ${TCPQUIC_OPENSSL_BUILD_PROGRAM} "apps\\openssl.exe"
             COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:tcpquic-proxy>"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${TCPQUIC_OPENSSL_APP}"
-                "$<TARGET_FILE_DIR:tcpquic-proxy>/openssl"
+                "$<TARGET_FILE_DIR:tcpquic-proxy>/openssl.exe"
+            WORKING_DIRECTORY "${TCPQUIC_QUICTLS_BUILD_DIR}"
             DEPENDS OpenSSL_Target
-            COMMENT "${TCPQUIC_OPENSSL_HELPER_COMMENT}")
+            COMMENT "Build OpenSSL CLI next to tcpquic-proxy")
         add_dependencies(tcpquic-proxy tcpquic-openssl)
     else()
-        message(WARNING "make not found; tcpquic openssl helper will not be built")
+        find_program(TCPQUIC_MAKE_PROGRAM make)
+        if(TCPQUIC_MAKE_PROGRAM)
+            set(TCPQUIC_QUICTLS_BUILD_DIR "${OpenSSLQuic_BINARY_DIR}/submodules/quictls")
+            set(TCPQUIC_OPENSSL_APP "${TCPQUIC_QUICTLS_BUILD_DIR}/apps/openssl")
+            set(TCPQUIC_OPENSSL_LINK_ENV)
+            set(TCPQUIC_OPENSSL_HELPER_COMMENT "Build OpenSSL CLI next to tcpquic-proxy")
+            if(TCPQUIC_PREFER_STATIC_OPENSSL_HELPER)
+                include(CMakePushCheckState)
+                include(CheckCSourceCompiles)
+                cmake_push_check_state(RESET)
+                set(CMAKE_REQUIRED_LINK_OPTIONS "-static")
+                set(CMAKE_REQUIRED_LIBRARIES dl pthread)
+                set(CMAKE_REQUIRED_QUIET TRUE)
+                check_c_source_compiles("int main(void) { return 0; }" TCPQUIC_CAN_STATIC_LINK_OPENSSL_HELPER)
+                cmake_pop_check_state()
+
+                if(TCPQUIC_CAN_STATIC_LINK_OPENSSL_HELPER)
+                    set(TCPQUIC_OPENSSL_LINK_ENV "LDCMD=${CMAKE_C_COMPILER} -static")
+                    set(TCPQUIC_OPENSSL_HELPER_COMMENT "Build static OpenSSL CLI next to tcpquic-proxy")
+                    message(STATUS "Building vendored openssl helper with static system libraries")
+                else()
+                    message(WARNING "Static system libraries are unavailable; building vendored openssl helper dynamically")
+                endif()
+            endif()
+            add_custom_target(tcpquic-openssl
+                COMMAND ${CMAKE_COMMAND} -E env
+                    ${TCPQUIC_OPENSSL_LINK_ENV}
+                    ${TCPQUIC_MAKE_PROGRAM} -C "${TCPQUIC_QUICTLS_BUILD_DIR}" apps/openssl
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:tcpquic-proxy>"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${TCPQUIC_OPENSSL_APP}"
+                    "$<TARGET_FILE_DIR:tcpquic-proxy>/openssl"
+                DEPENDS OpenSSL_Target
+                COMMENT "${TCPQUIC_OPENSSL_HELPER_COMMENT}")
+            add_dependencies(tcpquic-proxy tcpquic-openssl)
+        else()
+            message(WARNING "make not found; tcpquic openssl helper will not be built")
+        endif()
     endif()
 endif()
 
