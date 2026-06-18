@@ -100,7 +100,7 @@ stream 收到普通 OPEN 后，会把 DNS 和 TCP connect 流程提交给一个
 - 连接成功后发送 OPEN response 并启动 relay。
 - 失败时映射为既有 OPEN 错误语义，例如 `DnsFailed`、`TcpRefused`、`TcpTimeout`。
 
-c-ares 作为源码依赖 vendored 在 `third_party/c-ares`，不要求系统安装 c-ares dev 包。
+c-ares 作为 Git 子模块 vendored 在 `third_party/c-ares`，不要求系统安装 c-ares dev 包。
 reactor 线程持有并驱动 resolver，不引入 DNS 专用线程池。
 
 server dial reactor 还支持 speed-test 使用的 ephemeral authorizer：正常 ACL 不允许的
