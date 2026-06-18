@@ -6,6 +6,9 @@
 #if defined(_WIN32)
 #include "windows_relay_worker.h"
 #endif
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#endif
 
 #include "msquic.hpp"
 #include "tuning.h"
@@ -66,6 +69,38 @@ bool TqRelayStart(
     handle->Backend = TqRelayBackendType::LinuxWorker;
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
+    return true;
+#elif defined(__APPLE__)
+    if (!TqDarwinRelayRuntime::Instance().Start(tuning)) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    TqDarwinRelayWorker* worker = TqDarwinRelayRuntime::Instance().PickWorker();
+    if (worker == nullptr) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = tcpFd;
+    registration.Stream = stream;
+    registration.Handle = handle;
+    registration.Compressor = compressor;
+    registration.Decompressor = decompressor;
+    registration.CompressAlgo = compressAlgo;
+    registration.EnableQuicSends = true;
+
+    const auto registered = worker->RegisterRelayWithId(registration);
+    if (!registered.Ok) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    handle->Stop.store(false);
+    handle->Backend = TqRelayBackendType::DarwinWorker;
+    handle->DarwinWorker = worker;
+    handle->DarwinRelayId = registered.RelayId;
     return true;
 #else
     (void)tcpFd;
@@ -154,6 +189,22 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->Backend = TqRelayBackendType::None;
         handle->LinuxWorker = nullptr;
         handle->LinuxRelayId = 0;
+        handle->Stop.store(true);
+        if (worker != nullptr && relayId != 0) {
+            worker->UnregisterRelay(relayId);
+        }
+        TqRelayUnregisterActive();
+        return;
+    }
+#endif
+
+#if defined(__APPLE__)
+    if (handle->Backend == TqRelayBackendType::DarwinWorker) {
+        TqDarwinRelayWorker* worker = handle->DarwinWorker;
+        const uint64_t relayId = handle->DarwinRelayId;
+        handle->Backend = TqRelayBackendType::None;
+        handle->DarwinWorker = nullptr;
+        handle->DarwinRelayId = 0;
         handle->Stop.store(true);
         if (worker != nullptr && relayId != 0) {
             worker->UnregisterRelay(relayId);
