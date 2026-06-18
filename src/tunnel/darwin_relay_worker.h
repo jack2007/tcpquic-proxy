@@ -82,12 +82,25 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
     uint64_t Wakeups{0};
     uint64_t PendingEvents{0};
+    uint64_t PendingBytes{0};
     uint64_t ActiveRelays{0};
     uint64_t TcpReadArmedRelays{0};
     uint64_t TcpWriteArmedRelays{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
+    uint64_t CurrentPendingQuicReceiveBytes{0};
+    uint64_t PendingTcpWriteQueue{0};
+    uint64_t PendingTcpWriteBytes{0};
+    uint64_t OutstandingQuicSends{0};
+    uint64_t OutstandingQuicSendBytes{0};
+    uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBatches{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t QuicReceiveViewCount{0};
+    uint64_t QuicReceiveViewBytes{0};
+    uint64_t DeferredReceiveCompletes{0};
+    uint64_t QuicSendBackpressureEvents{0};
     uint64_t Errors{0};
 };
 
@@ -230,7 +243,14 @@ private:
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> Wakeups{0};
+    std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};
+    std::atomic<uint64_t> TcpWriteBatches{0};
+    std::atomic<uint64_t> TcpWriteBytes{0};
+    std::atomic<uint64_t> QuicReceiveViewCount{0};
+    std::atomic<uint64_t> QuicReceiveViewBytes{0};
+    std::atomic<uint64_t> DeferredReceiveCompletes{0};
+    std::atomic<uint64_t> QuicSendBackpressureEvents{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};
@@ -242,13 +262,14 @@ public:
 
     bool Start(const TqTuningConfig& tuning);
     void Stop();
+    TqDarwinRelayWorkerSnapshot Snapshot() const;
     TqDarwinRelayWorker* PickWorker();
     void StopRelay(TqRelayHandle* handle);
 
 private:
     TqDarwinRelayRuntime() = default;
 
-    std::mutex Mutex;
+    mutable std::mutex Mutex;
     bool Started{false};
     uint32_t NextWorker{0};
     std::vector<std::unique_ptr<TqDarwinRelayWorker>> Workers;

@@ -3,6 +3,9 @@
 #if defined(__linux__)
 #include "linux_relay_worker.h"
 #endif
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#endif
 #if defined(_WIN32)
 #include "windows_relay_worker.h"
 #endif
@@ -175,6 +178,29 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LastTcpReadErrno = snapshot.LastTcpReadErrno;
     metrics.FatalRelayResets = snapshot.FatalRelayResets;
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
+#elif defined(__APPLE__)
+    const auto snapshot = TqDarwinRelayRuntime::Instance().Snapshot();
+    metrics.Backend = "worker";
+    metrics.Wakeups = snapshot.Wakeups;
+    metrics.EventsProcessed = snapshot.EventsProcessed;
+    metrics.PendingEvents = snapshot.PendingEvents;
+    metrics.PendingBytes = snapshot.PendingBytes;
+    metrics.ActiveRelays = snapshot.ActiveRelays;
+    metrics.CurrentPendingQuicReceiveBytes = snapshot.CurrentPendingQuicReceiveBytes;
+    metrics.TcpReadArmedRelays = snapshot.TcpReadArmedRelays;
+    metrics.TcpWriteArmedRelays = snapshot.TcpWriteArmedRelays;
+    metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
+    metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
+    metrics.PendingTcpWriteBytes = snapshot.PendingTcpWriteBytes;
+    metrics.TcpReadBytes = snapshot.TcpReadBytes;
+    metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
+    metrics.DeferredReceiveCompletes = snapshot.DeferredReceiveCompletes;
+    metrics.QuicReceiveViewCount = snapshot.QuicReceiveViewCount;
+    metrics.QuicReceiveViewBytes = snapshot.QuicReceiveViewBytes;
+    metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
+    metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
+    metrics.Errors = snapshot.Errors;
+    metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     metrics.Backend = "worker";

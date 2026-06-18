@@ -997,6 +997,7 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
                 std::lock_guard<std::mutex> relayLock(relay->Mutex);
                 relay->TcpReadBytes += static_cast<uint64_t>(received);
             }
+            TcpReadBatches.fetch_add(1, std::memory_order_relaxed);
             TcpReadBytes.fetch_add(static_cast<uint64_t>(received), std::memory_order_relaxed);
 
             std::vector<TqBufferView> sendViews;
@@ -1227,6 +1228,7 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
                 : 0;
         }
         if (status == QUIC_STATUS_OUT_OF_MEMORY || status == QUIC_STATUS_BUFFER_TOO_SMALL) {
+            QuicSendBackpressureEvents.fetch_add(1, std::memory_order_relaxed);
             if (!SetTcpReadBackpressure(relay, true)) {
                 return false;
             }
@@ -1443,6 +1445,8 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         }
         relay->PendingQuicReceiveBytes += receive->TotalLength;
     }
+    QuicReceiveViewCount.fetch_add(1, std::memory_order_relaxed);
+    QuicReceiveViewBytes.fetch_add(receive->TotalLength, std::memory_order_relaxed);
 
     TqDarwinRelayEvent event{};
     event.Type = TqDarwinRelayEventType::QuicReceiveView;
@@ -1455,6 +1459,8 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
             ? relay->PendingQuicReceiveBytes - receive->TotalLength
             : 0;
+        QuicReceiveViewCount.fetch_sub(1, std::memory_order_relaxed);
+        QuicReceiveViewBytes.fetch_sub(receive->TotalLength, std::memory_order_relaxed);
         return false;
     }
     return true;
@@ -1750,6 +1756,8 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
                     return false;
                 }
                 relay->TcpWriteBytes += static_cast<uint64_t>(sent);
+                TcpWriteBatches.fetch_add(1, std::memory_order_relaxed);
+                TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
                 while (remaining > 0 && !relay->PendingTcpWrites.empty()) {
                     auto front = relay->PendingTcpWrites.front();
                     if (front == nullptr) {
@@ -1846,6 +1854,7 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
     }
     const uint64_t bytes = receive->PendingCompleteBytes;
     receive->PendingCompleteBytes = 0;
+    DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
 #if defined(TCPQUIC_TESTING)
     if (g_darwinRelayReceiveCompleteForTest != nullptr) {
         g_darwinRelayReceiveCompleteForTest(receive->Stream, bytes);
@@ -2011,20 +2020,45 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
     snapshot.EventsProcessed = EventsProcessed.load(std::memory_order_relaxed);
     snapshot.Wakeups = Wakeups.load(std::memory_order_relaxed);
     snapshot.PendingEvents = EventQueue.SizeApprox();
+    snapshot.TcpReadBatches = TcpReadBatches.load(std::memory_order_relaxed);
     snapshot.TcpReadBytes = TcpReadBytes.load(std::memory_order_relaxed);
+    snapshot.TcpWriteBatches = TcpWriteBatches.load(std::memory_order_relaxed);
+    snapshot.TcpWriteBytes = TcpWriteBytes.load(std::memory_order_relaxed);
+    snapshot.QuicReceiveViewCount = QuicReceiveViewCount.load(std::memory_order_relaxed);
+    snapshot.QuicReceiveViewBytes = QuicReceiveViewBytes.load(std::memory_order_relaxed);
+    snapshot.DeferredReceiveCompletes = DeferredReceiveCompletes.load(std::memory_order_relaxed);
+    snapshot.QuicSendBackpressureEvents = QuicSendBackpressureEvents.load(std::memory_order_relaxed);
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load(std::memory_order_relaxed);
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(RelayMutex);
         snapshot.ActiveRelays = Relays.size();
         for (const auto& entry : Relays) {
-            std::lock_guard<std::mutex> relayLock(entry.second->Mutex);
-            if (entry.second->TcpReadArmed) {
+            const auto& relay = entry.second;
+            if (relay == nullptr) {
+                continue;
+            }
+            std::lock_guard<std::mutex> relayLock(relay->Mutex);
+            if (relay->TcpReadArmed) {
                 ++snapshot.TcpReadArmedRelays;
             }
-            if (entry.second->TcpWriteArmed) {
+            if (relay->TcpWriteArmed) {
                 ++snapshot.TcpWriteArmedRelays;
             }
+            snapshot.OutstandingQuicSends += relay->InFlightQuicSends;
+            snapshot.OutstandingQuicSendBytes += relay->InFlightQuicSendBytes;
+            snapshot.OutstandingQuicSends += relay->PendingQuicSends.size();
+            uint64_t relayPendingBytes = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
+            for (const auto& pendingSend : relay->PendingQuicSends) {
+                if (pendingSend != nullptr) {
+                    snapshot.OutstandingQuicSendBytes += pendingSend->TotalBytes;
+                    relayPendingBytes += pendingSend->TotalBytes;
+                }
+            }
+            snapshot.CurrentPendingQuicReceiveBytes += relay->PendingQuicReceiveBytes;
+            snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
+            snapshot.PendingTcpWriteBytes += relay->PendingTcpWriteBytes;
+            snapshot.PendingBytes += relayPendingBytes;
         }
     }
     snapshot.Errors = Errors.load(std::memory_order_relaxed);
@@ -2146,6 +2180,41 @@ void TqDarwinRelayRuntime::Stop() {
     Workers.clear();
     Started = false;
     NextWorker = 0;
+}
+
+TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot() const {
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    for (const auto& worker : Workers) {
+        if (worker == nullptr) {
+            continue;
+        }
+        const auto workerSnapshot = worker->Snapshot();
+        snapshot.EventsProcessed += workerSnapshot.EventsProcessed;
+        snapshot.Wakeups += workerSnapshot.Wakeups;
+        snapshot.PendingEvents += workerSnapshot.PendingEvents;
+        snapshot.PendingBytes += workerSnapshot.PendingBytes;
+        snapshot.ActiveRelays += workerSnapshot.ActiveRelays;
+        snapshot.TcpReadArmedRelays += workerSnapshot.TcpReadArmedRelays;
+        snapshot.TcpWriteArmedRelays += workerSnapshot.TcpWriteArmedRelays;
+        snapshot.QuicReceivePausedCount += workerSnapshot.QuicReceivePausedCount;
+        snapshot.QuicReceiveResumedCount += workerSnapshot.QuicReceiveResumedCount;
+        snapshot.CurrentPendingQuicReceiveBytes += workerSnapshot.CurrentPendingQuicReceiveBytes;
+        snapshot.PendingTcpWriteQueue += workerSnapshot.PendingTcpWriteQueue;
+        snapshot.PendingTcpWriteBytes += workerSnapshot.PendingTcpWriteBytes;
+        snapshot.OutstandingQuicSends += workerSnapshot.OutstandingQuicSends;
+        snapshot.OutstandingQuicSendBytes += workerSnapshot.OutstandingQuicSendBytes;
+        snapshot.TcpReadBatches += workerSnapshot.TcpReadBatches;
+        snapshot.TcpReadBytes += workerSnapshot.TcpReadBytes;
+        snapshot.TcpWriteBatches += workerSnapshot.TcpWriteBatches;
+        snapshot.TcpWriteBytes += workerSnapshot.TcpWriteBytes;
+        snapshot.QuicReceiveViewCount += workerSnapshot.QuicReceiveViewCount;
+        snapshot.QuicReceiveViewBytes += workerSnapshot.QuicReceiveViewBytes;
+        snapshot.DeferredReceiveCompletes += workerSnapshot.DeferredReceiveCompletes;
+        snapshot.QuicSendBackpressureEvents += workerSnapshot.QuicSendBackpressureEvents;
+        snapshot.Errors += workerSnapshot.Errors;
+    }
+    return snapshot;
 }
 
 TqDarwinRelayWorker* TqDarwinRelayRuntime::PickWorker() {

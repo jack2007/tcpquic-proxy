@@ -343,6 +343,7 @@ void WorkerRegistersTcpReadinessShell() {
     CHECK(result.Ok);
     CHECK(result.RelayId != 0);
     CHECK(handle.Backend == TqRelayBackendType::DarwinWorker);
+    CHECK(handle.DarwinWorker != nullptr);
     CHECK(handle.DarwinWorker == &worker);
     CHECK(handle.DarwinRelayId == result.RelayId);
 
@@ -351,6 +352,17 @@ void WorkerRegistersTcpReadinessShell() {
     CHECK(snapshot.ActiveRelays == 1);
     CHECK(snapshot.TcpReadArmedRelays == 1);
     CHECK(snapshot.TcpWriteArmedRelays == 0);
+    CHECK(snapshot.PendingBytes == 0);
+    CHECK(snapshot.CurrentPendingQuicReceiveBytes == 0);
+    CHECK(snapshot.PendingTcpWriteQueue == 0);
+    CHECK(snapshot.PendingTcpWriteBytes == 0);
+    CHECK(snapshot.OutstandingQuicSends == 0);
+    CHECK(snapshot.OutstandingQuicSendBytes == 0);
+    CHECK(snapshot.TcpReadBatches == 0);
+    CHECK(snapshot.TcpWriteBatches == 0);
+    CHECK(snapshot.QuicReceiveViewCount == 0);
+    CHECK(snapshot.DeferredReceiveCompletes == 0);
+    CHECK(snapshot.QuicSendBackpressureEvents == 0);
 
     worker.UnregisterRelay(result.RelayId);
     snapshot = worker.Snapshot();
@@ -1830,6 +1842,75 @@ void QuicReceivePauseFailureRollsBackAndCompletesReceive() {
     CHECK(close(fds[1]) == 0);
 }
 
+void QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    ResetFakeReceiveComplete();
+    ResetPartialSendMsg(0);
+    SetSendMsgMode(1);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventBudget = 16;
+    config.EventQueueCapacity = 32;
+    config.MaxPendingQuicReceiveBytesPerRelay = 1024 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    worker.SetSendMsgForTest(PartialSendMsg);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "snapshot-pending-tcp-write";
+    QUIC_BUFFER quicBuffer{};
+    quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
+    quicBuffer.Length = static_cast<uint32_t>(sizeof(payload) - 1);
+    QUIC_STREAM_EVENT receiveEvent{};
+    receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receiveEvent.RECEIVE.BufferCount = 1;
+    receiveEvent.RECEIVE.Buffers = &quicBuffer;
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    do {
+        snapshot = worker.Snapshot();
+        if (snapshot.PendingTcpWriteQueue == 1 && snapshot.PendingTcpWriteBytes == sizeof(payload) - 1) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    CHECK(snapshot.PendingTcpWriteQueue == 1);
+    CHECK(snapshot.PendingTcpWriteBytes == sizeof(payload) - 1);
+    CHECK(snapshot.PendingBytes == 2 * (sizeof(payload) - 1));
+    CHECK(snapshot.CurrentPendingQuicReceiveBytes == sizeof(payload) - 1);
+    CHECK(snapshot.QuicReceiveViewCount == 1);
+    CHECK(snapshot.QuicReceiveViewBytes == sizeof(payload) - 1);
+    CHECK(snapshot.TcpWriteBatches == 0);
+    CHECK(snapshot.TcpWriteBytes == 0);
+    CHECK(snapshot.DeferredReceiveCompletes == 0);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == sizeof(payload) - 1);
+    CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == sizeof(payload) - 1);
+
+    worker.SetSendMsgForTest(nullptr);
+    worker.SetReceiveCompleteForTest(nullptr);
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CHECK(close(fds[0]) == 0);
+    CHECK(close(fds[1]) == 0);
+}
+
 void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -1926,6 +2007,7 @@ int main() {
     QuicReceivePauseFailureRollsBackAndCompletesReceive();
     MissingRelayQuicReceiveCompletesAndReleases();
     CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes();
+    QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics();
     CompressedQuicReceiveFailsClosedWithoutWritingCorruptData();
     return 0;
 }
