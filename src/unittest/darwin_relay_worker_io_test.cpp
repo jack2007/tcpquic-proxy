@@ -1111,6 +1111,64 @@ void UnknownSendCompleteAfterStopIsIgnored() {
     CHECK(close(fds[1]) == 0);
 }
 
+void StopThenLateTcpEventIgnoresRetiredRelay() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "late-tcp-event";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (worker.InFlightQuicSendCountForTest(result.RelayId) == 1) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+    std::shared_ptr<void> callbackOwner = worker.StreamCallbackContextOwnerForTest(result.RelayId);
+    CHECK(callbackOwner != nullptr);
+    worker.UnregisterRelay(result.RelayId);
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(worker.Snapshot().Errors == 0);
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+
+    void* sendContext = g_lastSendContext.load(std::memory_order_acquire);
+    CHECK(sendContext != nullptr);
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    event.SEND_COMPLETE.ClientContext = sendContext;
+    CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackOwner.get(), &event) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
+
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CHECK(close(fds[0]) == 0);
+    CHECK(close(fds[1]) == 0);
+}
+
 void StopAfterCompletionLeavesNoKnownOperations() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -1811,6 +1869,7 @@ int main() {
     SynchronousSendCompleteBeforeSuccessDoesNotLeak();
     MagicMismatchKnownOperationCleansAccounting();
     StopThenLateCompletionDoesNotUseDanglingWorker();
+    StopThenLateTcpEventIgnoresRetiredRelay();
     StopAfterCompletionLeavesNoKnownOperations();
     UnknownSendCompleteContextIsIgnoredWithoutFreeing();
     StopReturnedLateCompletionUsesCurrentStreamCallback();

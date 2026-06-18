@@ -112,6 +112,7 @@ public:
     void SetReceiveSetEnabledForTest(TqDarwinRelayReceiveSetEnabledForTest setEnabledFn);
     void SetSendMsgForTest(TqDarwinRelaySendMsgForTest sendMsgFn);
     bool FlushTcpWritableForTest(uint64_t relayId);
+    bool InvokeTcpEventForTest(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool InvokeQuicReceiveViewForTest(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     void* StreamCallbackContextForTest(uint64_t relayId);
     std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
@@ -154,6 +155,7 @@ private:
     void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
     void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
+    std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
     void ProcessKqueueEvent(const struct kevent& event);
     void ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool DrainTcpReadable(const std::shared_ptr<RelayState>& relay);

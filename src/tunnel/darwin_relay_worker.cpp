@@ -280,6 +280,11 @@ bool TqDarwinRelayWorker::FlushTcpWritableForTest(uint64_t relayId) {
     return FlushTcpWrites(relay);
 }
 
+bool TqDarwinRelayWorker::InvokeTcpEventForTest(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data) {
+    ProcessTcpEvents(relayId, filter, flags, data);
+    return true;
+}
+
 bool TqDarwinRelayWorker::InvokeQuicReceiveViewForTest(
     const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
     if (receive == nullptr) {
@@ -835,6 +840,11 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelay(
     if (it != Relays.end()) {
         return it->second;
     }
+    return nullptr;
+}
+
+std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetiredRelay(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
     for (const auto& relay : RetiredRelays) {
         if (relay->Id == relayId) {
             return relay;
@@ -866,7 +876,6 @@ void TqDarwinRelayWorker::ProcessTcpEvents(uint64_t relayId, int16_t filter, uin
     (void)data;
     std::shared_ptr<RelayState> relay = FindRelay(relayId);
     if (relay == nullptr) {
-        Errors.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -1261,6 +1270,9 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
         Errors.fetch_add(1, std::memory_order_relaxed);
     }
     auto relay = FindRelay(info.RelayId);
+    if (relay == nullptr) {
+        relay = FindRetiredRelay(info.RelayId);
+    }
     delete operation;
     if (relay != nullptr) {
         bool closing = false;
