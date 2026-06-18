@@ -54,6 +54,18 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats&) { return {
 void TqTraceRelayStopping(uint64_t, const char*, const char*, const char*, uint64_t, const char*) {
 }
 
+void TqTraceRelayFatalError(
+    const char*,
+    const char*,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t) {
+}
+
 const MsQuicApi* MsQuic = nullptr;
 
 uint32_t TqAbortConnectionTunnels(MsQuicConnection*) { return 0; }

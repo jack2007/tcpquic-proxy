@@ -48,6 +48,9 @@ bool TqTraceEnabled() {
     return false;
 }
 
+void TqTraceLogLine(const char*) {
+}
+
 uint64_t TqTraceStreamStarted(
     MsQuicConnection* connection,
     uint32_t connId,
@@ -87,6 +90,27 @@ void TqTraceRelayStopping(
     (void)backend;
     (void)relayId;
     (void)reason;
+}
+
+void TqTraceRelayFatalError(
+    const char* backend,
+    const char* reason,
+    uint64_t relayId,
+    uint64_t socketOrFd,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t pendingQuicReceiveQueue,
+    uint64_t pendingQuicSends,
+    uint64_t inflightQuicSends,
+    uint64_t inflightTcpSends) {
+    (void)backend;
+    (void)reason;
+    (void)relayId;
+    (void)socketOrFd;
+    (void)pendingQuicReceiveBytes;
+    (void)pendingQuicReceiveQueue;
+    (void)pendingQuicSends;
+    (void)inflightQuicSends;
+    (void)inflightTcpSends;
 }
 
 void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField) {

@@ -206,6 +206,7 @@ set(TCPQUIC_SERVER_TEST_SOURCES
 )
 add_executable(tcpquic_tuning_test
     unittest/tuning_test.cpp
+    unittest/trace_proxy_stub.cpp
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
@@ -261,6 +262,7 @@ set(TCPQUIC_LINUX_TEST_TARGETS)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_relay_worker_queue_test
         unittest/linux_relay_worker_queue_test.cpp
+        unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
@@ -275,6 +277,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
     add_executable(tcpquic_linux_relay_worker_io_test
         unittest/linux_relay_worker_io_test.cpp
+        unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
@@ -291,6 +294,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
     add_executable(tcpquic_relay_backend_selection_test
         unittest/relay_backend_selection_test.cpp
+        unittest/trace_proxy_stub.cpp
         tunnel/relay.cpp
         config/tuning.cpp
         tunnel/linux_relay_worker.cpp
@@ -393,6 +397,7 @@ set_property(TARGET tcpquic_acl_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_config_router_test
     unittest/config_router_test.cpp
+    unittest/trace_proxy_stub.cpp
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
@@ -550,6 +555,7 @@ set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN
 
 set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     unittest/router_runtime_test.cpp
+    unittest/trace_proxy_stub.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
