@@ -6,12 +6,15 @@
 #include "socks5_server.h"
 
 #include <cerrno>
-#include <fcntl.h>
 #include <future>
 #include <memory>
+#include <vector>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <vector>
+#endif
 
 namespace {
 
@@ -24,6 +27,37 @@ void TqCloseFd(TqSocketHandle& fd) {
         TqCloseSocket(fd);
         fd = TqInvalidSocket;
     }
+}
+
+bool TqIsSocketInterrupted() {
+    return TqSocketInterrupted(TqLastSocketError());
+}
+
+bool TqIsSocketWouldBlock() {
+    return TqSocketWouldBlock(TqLastSocketError());
+}
+
+TqSocketHandle TqAcceptClient(TqSocketHandle listenFd) {
+#if defined(_WIN32)
+    TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+    if (TqSocketValid(clientFd) && !TqSetNonBlocking(clientFd)) {
+        TqCloseFd(clientFd);
+    }
+    return clientFd;
+#else
+    TqSocketHandle clientFd = ::accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (!TqSocketValid(clientFd) && errno == ENOSYS) {
+        clientFd = ::accept(listenFd, nullptr, nullptr);
+        if (TqSocketValid(clientFd)) {
+            const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
+            if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
+                ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
+                TqCloseFd(clientFd);
+            }
+        }
+    }
+    return clientFd;
+#endif
 }
 
 TqClientIngressProto TqToIngressProto(bool socks) {
@@ -90,6 +124,9 @@ bool TqClientIngressReactor::Start() {
         return false;
     }
     if (Worker.joinable()) {
+        return false;
+    }
+    if (!SocketStartup.Ok()) {
         return false;
     }
     if (!Reactor.Start()) {
@@ -178,7 +215,7 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
 
         Listens.emplace(socks->Fd, ListenEntry{peer.PeerId, ListenProto::Socks5});
         if (!Reactor.Add(socks->Fd, TqReactorEvents::Read,
-                [this](int fd, uint32_t events) {
+                [this](TqSocketHandle fd, uint32_t events) {
                     if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
                         AcceptLoop(fd);
                     }
@@ -190,7 +227,7 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
         if (TqSocketValid(http->Fd)) {
             Listens.emplace(http->Fd, ListenEntry{peer.PeerId, ListenProto::HttpConnect});
             if (!Reactor.Add(http->Fd, TqReactorEvents::Read,
-                    [this](int fd, uint32_t events) {
+                    [this](TqSocketHandle fd, uint32_t events) {
                         if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
                             AcceptLoop(fd);
                         }
@@ -308,7 +345,7 @@ void TqClientIngressReactor::ProcessPendingTasks() {
     }
 }
 
-void TqClientIngressReactor::AcceptLoop(int listenFd) {
+void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
     std::string peerId;
     ListenProto proto = ListenProto::Socks5;
     {
@@ -322,20 +359,9 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
     }
 
     for (int accepted = 0; accepted < TqMaxIngressAcceptsPerEvent; ++accepted) {
-        int clientFd = ::accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        if (clientFd < 0 && errno == ENOSYS) {
-            clientFd = ::accept(listenFd, nullptr, nullptr);
-            if (clientFd >= 0) {
-                const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
-                if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
-                    ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
-                    TqCloseFd(clientFd);
-                    continue;
-                }
-            }
-        }
+        TqSocketHandle clientFd = TqAcceptClient(listenFd);
 
-        if (clientFd >= 0) {
+        if (TqSocketValid(clientFd)) {
             std::lock_guard<std::mutex> lock(Mutex);
             const auto peerIt = Peers.find(peerId);
             if (peerIt == Peers.end()) {
@@ -352,7 +378,7 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
             client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
             client.CancelTunnel = peerIt->second.Peer.CancelTunnel;
             if (!Reactor.Add(clientFd, TqReactorEvents::Read,
-                    [this](int fd, uint32_t events) {
+                    [this](TqSocketHandle fd, uint32_t events) {
                         HandleClientEvents(fd, events);
                     })) {
                 TqCloseFd(clientFd);
@@ -362,17 +388,17 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
             continue;
         }
 
-        if (errno == EINTR) {
+        if (TqIsSocketInterrupted()) {
             continue;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (TqIsSocketWouldBlock()) {
             return;
         }
         return;
     }
 }
 
-void TqClientIngressReactor::HandleClientEvents(int clientFd, uint32_t events) {
+void TqClientIngressReactor::HandleClientEvents(TqSocketHandle clientFd, uint32_t events) {
     if ((events & TqReactorEvents::Read) != 0) {
         HandleClientRead(clientFd);
     }
@@ -387,10 +413,10 @@ void TqClientIngressReactor::HandleClientEvents(int clientFd, uint32_t events) {
     }
 }
 
-void TqClientIngressReactor::HandleClientRead(int clientFd) {
+void TqClientIngressReactor::HandleClientRead(TqSocketHandle clientFd) {
     for (;;) {
         uint8_t buffer[TqIngressReadBufferSize]{};
-        const ssize_t received = ::recv(clientFd, buffer, sizeof(buffer), 0);
+        const int received = TqRecv(clientFd, buffer, sizeof(buffer), TqRecvFlags::None);
         if (received > 0) {
             TqClientIngressResult result = TqClientIngressResult::Close;
             {
@@ -414,10 +440,10 @@ void TqClientIngressReactor::HandleClientRead(int clientFd) {
             return;
         }
 
-        if (errno == EINTR) {
+        if (TqIsSocketInterrupted()) {
             continue;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        if (TqIsSocketWouldBlock()) {
             return;
         }
 
@@ -427,7 +453,7 @@ void TqClientIngressReactor::HandleClientRead(int clientFd) {
     }
 }
 
-void TqClientIngressReactor::HandleClientWrite(int clientFd) {
+void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
     for (;;) {
         TqClientIngressTunnelAcceptFn acceptTunnel;
         TqClientIngressTunnelCloseFn rejectTunnel;
@@ -458,7 +484,7 @@ void TqClientIngressReactor::HandleClientWrite(int clientFd) {
                     closeOwnedByReactor = completedHandle == nullptr;
                 }
             } else {
-                const ssize_t sent = ::send(clientFd, pending.data(), pending.size(), MSG_NOSIGNAL);
+                const int sent = TqSend(clientFd, pending.data(), pending.size(), TqSendFlags::NoSignal);
                 if (sent > 0) {
                     if (handshakeWrite) {
                         client.State.MarkWriteComplete(static_cast<size_t>(sent));
@@ -474,9 +500,9 @@ void TqClientIngressReactor::HandleClientWrite(int clientFd) {
                             closeOwnedByReactor = completedHandle == nullptr;
                         }
                     }
-                } else if (sent < 0 && errno == EINTR) {
+                } else if (sent < 0 && TqIsSocketInterrupted()) {
                     continue;
-                } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                } else if (sent < 0 && TqIsSocketWouldBlock()) {
                     return;
                 } else {
                     CloseClientLocked(clientFd, true);
@@ -526,7 +552,7 @@ void TqClientIngressReactor::HandleClientWrite(int clientFd) {
     }
 }
 
-void TqClientIngressReactor::HandleIngressResult(int clientFd, TqClientIngressResult result) {
+void TqClientIngressReactor::HandleIngressResult(TqSocketHandle clientFd, TqClientIngressResult result) {
     if (result == TqClientIngressResult::NeedRead) {
         (void)Reactor.Modify(clientFd, TqReactorEvents::Read);
         return;
@@ -544,7 +570,7 @@ void TqClientIngressReactor::HandleIngressResult(int clientFd, TqClientIngressRe
     CloseClientLocked(clientFd, true);
 }
 
-void TqClientIngressReactor::StartClientOpen(int clientFd) {
+void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
     TunnelRequest request{};
     TqClientIngressTunnelStartFn startTunnel;
     TqClientIngressTunnelCloseFn rejectTunnel;
@@ -595,37 +621,46 @@ void TqClientIngressReactor::StartClientOpen(int clientFd) {
         return;
     }
     it->second.OpenHandle = handle;
-    it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
+    if (it->second.PendingWrite.empty()) {
+        it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
+    }
 }
 
 void TqClientIngressReactor::CompleteClientOpen(
-    int clientFd,
+    TqSocketHandle clientFd,
     TqClientTunnelOpenHandle* handle,
     TqTunnelStartResult result) {
-    std::lock_guard<std::mutex> lock(Mutex);
-    auto it = Clients.find(clientFd);
-    if (it == Clients.end()) {
-        return;
-    }
-    ClientEntry& client = it->second;
-    if (client.Phase != ClientPhase::Opening) {
-        return;
-    }
-    if (client.OpenHandle != nullptr && handle != nullptr && client.OpenHandle != handle) {
-        return;
-    }
-    if (client.OpenHandle == nullptr) {
-        client.OpenHandle = handle;
-    }
+    bool writeNow = false;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = Clients.find(clientFd);
+        if (it == Clients.end()) {
+            return;
+        }
+        ClientEntry& client = it->second;
+        if (client.Phase != ClientPhase::Opening) {
+            return;
+        }
+        if (client.OpenHandle != nullptr && handle != nullptr && client.OpenHandle != handle) {
+            return;
+        }
+        if (client.OpenHandle == nullptr) {
+            client.OpenHandle = handle;
+        }
 
-    const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
-    client.OpenSucceeded = result.Ok;
-    client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
-    client.Phase = ClientPhase::WritingOpenResponse;
-    (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
+        const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
+        client.OpenSucceeded = result.Ok;
+        client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
+        client.Phase = ClientPhase::WritingOpenResponse;
+        (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
+        writeNow = true;
+    }
+    if (writeNow) {
+        HandleClientWrite(clientFd);
+    }
 }
 
-void TqClientIngressReactor::CloseClientLocked(int clientFd, bool closeFd) {
+void TqClientIngressReactor::CloseClientLocked(TqSocketHandle clientFd, bool closeFd) {
     auto it = Clients.find(clientFd);
     if (it == Clients.end()) {
         return;
@@ -645,7 +680,7 @@ void TqClientIngressReactor::CloseClientLocked(int clientFd, bool closeFd) {
     }
 }
 
-void TqClientIngressReactor::CloseClientOwnedByTunnelLocked(int clientFd) {
+void TqClientIngressReactor::CloseClientOwnedByTunnelLocked(TqSocketHandle clientFd) {
     auto it = Clients.find(clientFd);
     if (it == Clients.end()) {
         return;
@@ -671,13 +706,13 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
         TqCloseFd(it->second.HttpFd);
     }
 
-    std::vector<int> clientFds;
+    std::vector<TqSocketHandle> clientFds;
     for (auto clientIt = Clients.begin(); clientIt != Clients.end(); ++clientIt) {
         if (clientIt->second.PeerId == peerId) {
             clientFds.push_back(clientIt->first);
         }
     }
-    for (int fd : clientFds) {
+    for (TqSocketHandle fd : clientFds) {
         CloseClientLocked(fd, true);
     }
 
@@ -696,12 +731,12 @@ void TqClientIngressReactor::CloseAllLocked() {
         }
     }
 
-    std::vector<int> clientFds;
+    std::vector<TqSocketHandle> clientFds;
     clientFds.reserve(Clients.size());
     for (const auto& item : Clients) {
         clientFds.push_back(item.first);
     }
-    for (int fd : clientFds) {
+    for (TqSocketHandle fd : clientFds) {
         CloseClientLocked(fd, true);
     }
 

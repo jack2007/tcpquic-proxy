@@ -2,7 +2,12 @@
 
 #include "client_ingress_state.h"
 #include "config.h"
+#include "socket_reactor.h"
+#if defined(_WIN32)
+#include "windows_reactor.h"
+#else
 #include "linux_reactor.h"
+#endif
 #include "client_tunnel_open.h"
 
 #include <atomic>
@@ -14,6 +19,12 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+
+#if defined(_WIN32)
+using TqClientIngressPlatformReactor = TqWindowsReactor;
+#else
+using TqClientIngressPlatformReactor = TqLinuxReactor;
+#endif
 
 using TqClientIngressTunnelStartFn =
     std::function<TqClientTunnelOpenHandle*(
@@ -67,8 +78,8 @@ private:
 
     struct PeerEntry {
         TqClientIngressPeer Peer;
-        int SocksFd{-1};
-        int HttpFd{-1};
+        TqSocketHandle SocksFd{TqInvalidSocket};
+        TqSocketHandle HttpFd{TqInvalidSocket};
         std::string SocksAddress;
         std::string HttpAddress;
     };
@@ -102,18 +113,18 @@ private:
     bool EnqueueSync(std::function<bool()> task);
     bool EnqueueAsync(std::function<void()> task);
     void ProcessPendingTasks();
-    void AcceptLoop(int listenFd);
-    void HandleClientEvents(int clientFd, uint32_t events);
-    void HandleClientRead(int clientFd);
-    void HandleClientWrite(int clientFd);
-    void HandleIngressResult(int clientFd, TqClientIngressResult result);
-    void StartClientOpen(int clientFd);
+    void AcceptLoop(TqSocketHandle listenFd);
+    void HandleClientEvents(TqSocketHandle clientFd, uint32_t events);
+    void HandleClientRead(TqSocketHandle clientFd);
+    void HandleClientWrite(TqSocketHandle clientFd);
+    void HandleIngressResult(TqSocketHandle clientFd, TqClientIngressResult result);
+    void StartClientOpen(TqSocketHandle clientFd);
     void CompleteClientOpen(
-        int clientFd,
+        TqSocketHandle clientFd,
         TqClientTunnelOpenHandle* handle,
         TqTunnelStartResult result);
-    void CloseClientLocked(int clientFd, bool closeFd);
-    void CloseClientOwnedByTunnelLocked(int clientFd);
+    void CloseClientLocked(TqSocketHandle clientFd, bool closeFd);
+    void CloseClientOwnedByTunnelLocked(TqSocketHandle clientFd);
     void RemovePeerLocked(const std::string& peerId);
     void CloseAllLocked();
 
@@ -122,10 +133,11 @@ private:
     mutable std::mutex Mutex;
     LifecycleState State{LifecycleState::Stopped};
     std::atomic<bool> Running{false};
-    TqLinuxReactor Reactor;
+    TqSocketStartup SocketStartup;
+    TqClientIngressPlatformReactor Reactor;
     std::thread Worker;
     std::deque<std::function<void()>> PendingTasks;
     std::unordered_map<std::string, PeerEntry> Peers;
-    std::unordered_map<int, ListenEntry> Listens;
-    std::unordered_map<int, ClientEntry> Clients;
+    std::unordered_map<TqSocketHandle, ListenEntry> Listens;
+    std::unordered_map<TqSocketHandle, ClientEntry> Clients;
 };

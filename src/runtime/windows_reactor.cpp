@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace {
@@ -178,7 +179,8 @@ bool TqWindowsReactor::RunOnce(int timeoutMs) {
             return 0;
         }
 
-        Handler handler = it->second.Callback;
+        auto entry = std::make_shared<Entry>(it->second);
+        Handler handler = entry->Callback;
         handler(fd, reactorEvents);
         return 1;
     };

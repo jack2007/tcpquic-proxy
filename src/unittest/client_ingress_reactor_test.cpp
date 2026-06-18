@@ -1,25 +1,24 @@
 #include "client_ingress_reactor.h"
 
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
 #include <functional>
-#include <poll.h>
-#include <netdb.h>
 #include <string>
-#include <sys/socket.h>
 #include <thread>
-#include <unistd.h>
 #include <vector>
+
+#if !defined(_WIN32)
+#include <netdb.h>
+#endif
 
 namespace {
 
-void CloseFd(int& fd) {
-    if (fd >= 0) {
-        (void)::close(fd);
-        fd = -1;
+void CloseFd(TqSocketHandle& fd) {
+    if (TqSocketValid(fd)) {
+        TqCloseSocket(fd);
+        fd = TqInvalidSocket;
     }
 }
 
@@ -33,8 +32,8 @@ bool SplitHostPort(const std::string& value, std::string& host, std::string& por
     return true;
 }
 
-bool ConnectTo(const std::string& address, int& connectedFd) {
-    connectedFd = -1;
+bool ConnectTo(const std::string& address, TqSocketHandle& connectedFd) {
+    connectedFd = TqInvalidSocket;
 
     std::string host;
     std::string port;
@@ -52,28 +51,27 @@ bool ConnectTo(const std::string& address, int& connectedFd) {
     }
 
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        const int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) {
+        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!TqSocketValid(fd)) {
             continue;
         }
-        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+        if (::connect(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 && TqSetNonBlocking(fd)) {
             connectedFd = fd;
             ::freeaddrinfo(result);
             return true;
         }
-        int closeFd = fd;
-        CloseFd(closeFd);
+        CloseFd(fd);
     }
 
     ::freeaddrinfo(result);
     return false;
 }
 
-bool SendAll(int fd, const std::vector<uint8_t>& data) {
+bool SendAll(TqSocketHandle fd, const std::vector<uint8_t>& data) {
     size_t sent = 0;
     while (sent < data.size()) {
-        const ssize_t result = ::send(fd, data.data() + sent, data.size() - sent, 0);
-        if (result < 0 && errno == EINTR) {
+        const int result = TqSend(fd, data.data() + sent, data.size() - sent, TqSendFlags::None);
+        if (result < 0 && TqSocketInterrupted(TqLastSocketError())) {
             continue;
         }
         if (result <= 0) {
@@ -84,30 +82,21 @@ bool SendAll(int fd, const std::vector<uint8_t>& data) {
     return true;
 }
 
-bool ReadExactWithTimeout(int fd, size_t size, std::vector<uint8_t>& out) {
+bool ReadExactWithTimeout(TqSocketHandle fd, size_t size, std::vector<uint8_t>& out) {
     out.clear();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (out.size() < size) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
-            return false;
-        }
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
-        pollfd pfd{};
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        const int timeoutMs = remaining.count() > 0 ? static_cast<int>(remaining.count()) : 1;
-        const int pollResult = ::poll(&pfd, 1, timeoutMs);
-        if (pollResult < 0 && errno == EINTR) {
-            continue;
-        }
-        if (pollResult <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+        if (std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
         uint8_t buffer[64]{};
         const size_t want = std::min(sizeof(buffer), size - out.size());
-        const ssize_t received = ::recv(fd, buffer, want, 0);
-        if (received < 0 && errno == EINTR) {
+        const int received = TqRecv(fd, buffer, want, TqRecvFlags::None);
+        if (received < 0 && TqSocketInterrupted(TqLastSocketError())) {
+            continue;
+        }
+        if (received < 0 && TqSocketWouldBlock(TqLastSocketError())) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         if (received <= 0) {
@@ -118,16 +107,16 @@ bool ReadExactWithTimeout(int fd, size_t size, std::vector<uint8_t>& out) {
     return true;
 }
 
-std::vector<uint8_t> ReadAvailable(int fd) {
+std::vector<uint8_t> ReadAvailable(TqSocketHandle fd) {
     std::vector<uint8_t> out;
     uint8_t buffer[128]{};
     for (;;) {
-        const ssize_t received = ::recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+        const int received = TqRecv(fd, buffer, sizeof(buffer), TqRecvFlags::DontWait);
         if (received > 0) {
             out.insert(out.end(), buffer, buffer + received);
             continue;
         }
-        if (received < 0 && errno == EINTR) {
+        if (received < 0 && TqSocketInterrupted(TqLastSocketError())) {
             continue;
         }
         return out;
@@ -181,14 +170,14 @@ int TestStartAddPeerCountRemoveStop() {
         return 14;
     }
 
-    int socksFd = -1;
+    TqSocketHandle socksFd = TqInvalidSocket;
     if (!ConnectTo(socksAddress, socksFd)) {
         reactor.Stop();
         return 15;
     }
     CloseFd(socksFd);
 
-    int httpFd = -1;
+    TqSocketHandle httpFd = TqInvalidSocket;
     if (!ConnectTo(httpAddress, httpFd)) {
         reactor.Stop();
         return 16;
@@ -204,7 +193,7 @@ int TestStartAddPeerCountRemoveStop() {
         return 18;
     }
 
-    int removedFd = -1;
+    TqSocketHandle removedFd = TqInvalidSocket;
     if (ConnectTo(socksAddress, removedFd)) {
         CloseFd(removedFd);
         reactor.Stop();
@@ -268,7 +257,7 @@ int TestRemovePeerClosesListenPort() {
         return 45;
     }
 
-    int removedFd = -1;
+    TqSocketHandle removedFd = TqInvalidSocket;
     if (ConnectTo(socksAddress, removedFd)) {
         CloseFd(removedFd);
         reactor.Stop();
@@ -297,7 +286,7 @@ int TestDestructorCleansUp() {
         }
     }
 
-    int fd = -1;
+    TqSocketHandle fd = TqInvalidSocket;
     if (ConnectTo(socksAddress, fd)) {
         CloseFd(fd);
         return 53;
@@ -316,7 +305,7 @@ int TestSocksHandshakeStartsFakeOpenAndReturnsSuccess() {
 
     TqClientIngressPeer peer = MakePeer("socks-open");
     peer.StartTunnel = [&](const TunnelRequest& req, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
-        if (fd < 0) {
+        if (!TqSocketValid(fd)) {
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
         ++startCalls;
@@ -355,7 +344,7 @@ int TestSocksHandshakeStartsFakeOpenAndReturnsSuccess() {
         return 71;
     }
 
-    int fd = -1;
+    TqSocketHandle fd = TqInvalidSocket;
     if (!ConnectTo(reactor.SocksListenAddressForTest("socks-open"), fd)) {
         reactor.Stop();
         return 72;
@@ -428,7 +417,7 @@ int TestHttpConnectSamePacketPayloadRemainsForTunnel() {
     TqClientIngressPeer peer = MakePeer("http-early");
     peer.HttpListen = "127.0.0.1:0";
     peer.StartTunnel = [&](const TunnelRequest& req, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
-        if (fd < 0) {
+        if (!TqSocketValid(fd)) {
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
         if (std::string(req.Host) != "example.com" || req.Port != 443) {
@@ -461,7 +450,7 @@ int TestHttpConnectSamePacketPayloadRemainsForTunnel() {
         return 91;
     }
 
-    int fd = -1;
+    TqSocketHandle fd = TqInvalidSocket;
     if (!ConnectTo(reactor.HttpListenAddressForTest("http-early"), fd)) {
         reactor.Stop();
         return 92;
@@ -511,7 +500,7 @@ int TestSocksOpenFailureWritesReplyThenRejects() {
 
     TqClientIngressPeer peer = MakePeer("socks-fail");
     peer.StartTunnel = [&](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
-        if (fd < 0) {
+        if (!TqSocketValid(fd)) {
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
         std::thread([onComplete, fakeHandle]() {
@@ -539,7 +528,7 @@ int TestSocksOpenFailureWritesReplyThenRejects() {
         return 101;
     }
 
-    int fd = -1;
+    TqSocketHandle fd = TqInvalidSocket;
     if (!ConnectTo(reactor.SocksListenAddressForTest("socks-fail"), fd)) {
         reactor.Stop();
         return 102;
@@ -622,6 +611,11 @@ int TestConcurrentStartStopDoesNotCrashOrDeadlock() {
 } // namespace
 
 int main() {
+    TqSocketStartup socketStartup;
+    if (!socketStartup.Ok()) {
+        return 1;
+    }
+
     int result = TestStartAddPeerCountRemoveStop();
     if (result != 0) return result;
     result = TestDuplicateAddPeerReturnsFalse();

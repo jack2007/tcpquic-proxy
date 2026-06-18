@@ -131,9 +131,12 @@ endif()
 
 if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
+        runtime/windows_reactor.cpp
         platform/quic_credentials_win.cpp
     )
 endif()
@@ -798,6 +801,27 @@ if(WIN32)
     target_link_libraries(tcpquic_platform_socket_test PRIVATE ws2_32)
 endif()
 
+if(WIN32)
+    add_executable(tcpquic_client_ingress_reactor_test
+        unittest/client_ingress_reactor_test.cpp
+        unittest/trace_proxy_stub.cpp
+        ingress/client_ingress_reactor.cpp
+        runtime/listen_socket.cpp
+        ingress/client_ingress_state.cpp
+        ingress/socks5_server.cpp
+        ingress/http_connect_server.cpp
+        ingress/proxy_auth.cpp
+        protocol/control_protocol.cpp
+        ${TCPQUIC_SERVER_TEST_SOURCES}
+        runtime/windows_reactor.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_client_ingress_reactor_test)
+    target_link_libraries(tcpquic_client_ingress_reactor_test PRIVATE Threads::Threads ws2_32)
+    target_compile_definitions(tcpquic_client_ingress_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+    set_property(TARGET tcpquic_client_ingress_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_client_ingress_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+endif()
+
 set(TCPQUIC_WINDOWS_TEST_TARGETS)
 if(WIN32)
     add_executable(tcpquic_windows_reactor_test
@@ -827,6 +851,7 @@ if(WIN32)
     target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING ${TCPQUIC_TEST_DEFS})
     tcpquic_link_mimalloc(tcpquic_windows_relay_worker_test)
     list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS
+        tcpquic_client_ingress_reactor_test
         tcpquic_windows_reactor_test
         tcpquic_windows_relay_worker_test
     )
