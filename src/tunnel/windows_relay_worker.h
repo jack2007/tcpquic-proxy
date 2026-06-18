@@ -5,6 +5,7 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_error.h"
+#include "trace.h"
 #include "tuning.h"
 
 #if defined(_WIN32)
@@ -62,6 +63,7 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t QuicSendFatalErrors{0};
     uint64_t Errors{0};
+    uint64_t ActiveRelays{0};
 };
 
 class TqWindowsRelayWorker {
@@ -143,6 +145,17 @@ private:
     void SetQuicReceiveEnabled(const std::shared_ptr<RelayContext>& relay, bool enabled);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);
+    TqTraceLinuxRelayStreamState BuildRelayTraceState(const std::shared_ptr<RelayContext>& relay) const;
+    void TraceRelayReceiveEvent(
+        const std::shared_ptr<RelayContext>& relay,
+        uint32_t bufferCount,
+        uint64_t totalBufferLength,
+        uint32_t receiveFlags,
+        bool fin) const;
+    void TraceRelayBackpressure(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* action,
+        const char* reason) const;
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
     bool PostQuicSend(std::unique_ptr<IoOperation> op, QUIC_SEND_FLAGS flags, bool repostOnBackpressure);
     void RetryPendingQuicSends(const std::shared_ptr<RelayContext>& relay);

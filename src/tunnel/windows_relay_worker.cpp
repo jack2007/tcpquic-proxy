@@ -4,6 +4,7 @@
 
 #include "msquic.hpp"
 #include "relay_buffer.h"
+#include "trace.h"
 
 #include <algorithm>
 #include <deque>
@@ -192,6 +193,7 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
     snapshot.Errors = Errors_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> guard(Lock_);
+        snapshot.ActiveRelays = Relays_.size();
         for (const auto& entry : Relays_) {
             if (entry.second) {
                 snapshot.PendingQuicReceiveBytes +=
@@ -563,6 +565,76 @@ void TqWindowsRelayWorker::CloseRelay(
     if (relay->PublicHandle != nullptr) {
         relay->PublicHandle->Stop.store(true);
     }
+    if (TqTraceEnabled()) {
+        TqTraceRelayUnregister("windows", BuildRelayTraceState(relay));
+    }
+}
+
+TqTraceLinuxRelayStreamState TqWindowsRelayWorker::BuildRelayTraceState(
+    const std::shared_ptr<RelayContext>& relay) const {
+    TqTraceLinuxRelayStreamState state{};
+    if (!relay) {
+        return state;
+    }
+    size_t pendingQuicSends = 0;
+    {
+        std::lock_guard<std::mutex> guard(relay->PendingQuicSendLock);
+        pendingQuicSends = relay->PendingQuicSends.size();
+    }
+    state.RelayId = relay->Id;
+    state.OutstandingQuicSends = pendingQuicSends;
+    state.OutstandingQuicSendBytes = 0;
+    state.PendingQuicReceiveBytes =
+        relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed);
+    state.PendingTcpWriteQueue =
+        relay->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed);
+    state.TcpReadClosed = relay->TcpRecvClosed.load(std::memory_order_relaxed);
+    state.StreamDetached = relay->Stream == nullptr;
+    return state;
+}
+
+void TqWindowsRelayWorker::TraceRelayReceiveEvent(
+    const std::shared_ptr<RelayContext>& relay,
+    uint32_t bufferCount,
+    uint64_t totalBufferLength,
+    uint32_t receiveFlags,
+    bool fin) const {
+    if (!relay || !TqTraceEnabled()) {
+        return;
+    }
+    TqTraceRelayStreamEvent(
+        "windows",
+        0,
+        relay->Id,
+        "receive",
+        0,
+        0,
+        0,
+        totalBufferLength,
+        bufferCount,
+        receiveFlags,
+        fin,
+        BuildRelayTraceState(relay));
+}
+
+void TqWindowsRelayWorker::TraceRelayBackpressure(
+    const std::shared_ptr<RelayContext>& relay,
+    const char* action,
+    const char* reason) const {
+    if (!relay || !TqTraceEnabled()) {
+        return;
+    }
+    const uint64_t maxPendingBytes = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
+    TqTraceRelayBackpressureEvent(
+        "windows",
+        0,
+        relay->Id,
+        action,
+        reason,
+        relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed),
+        maxPendingBytes,
+        maxPendingBytes == 0 ? 0 : maxPendingBytes / 2,
+        0);
 }
 
 void TqWindowsRelayWorker::FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason) {
@@ -572,9 +644,10 @@ void TqWindowsRelayWorker::FailRelayFatal(const std::shared_ptr<RelayContext>& r
             std::lock_guard<std::mutex> guard(relay->PendingQuicSendLock);
             pendingQuicSends = relay->PendingQuicSends.size();
         }
-        spdlog::error(
-            "windows relay unrecoverable error reason={} relay_id={} socket={} pending_quic_receive_bytes={} pending_quic_receive_queue={} pending_quic_sends={} inflight_quic_sends={} inflight_tcp_sends={}",
-            reason != nullptr ? reason : "unknown",
+        TqTraceRelayStopCondition("windows", 0, reason, BuildRelayTraceState(relay));
+        TqTraceRelayFatalError(
+            "windows",
+            reason,
             relay->Id,
             static_cast<uint64_t>(relay->TcpFd),
             relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed),
@@ -1174,11 +1247,13 @@ void TqWindowsRelayWorker::SetQuicReceiveEnabled(const std::shared_ptr<RelayCont
             return;
         }
         QuicReceiveResumedCount_.fetch_add(1, std::memory_order_relaxed);
+        TraceRelayBackpressure(relay, "resume", "pending_quic_receive_drain");
     } else {
         if (wasPaused) {
             return;
         }
         QuicReceivePausedCount_.fetch_add(1, std::memory_order_relaxed);
+        TraceRelayBackpressure(relay, "pause", "pending_quic_receive_cap");
     }
     if (relay->Stream != nullptr && relay->Stream->Handle != nullptr && MsQuic != nullptr &&
         MsQuic->StreamReceiveSetEnabled != nullptr) {
@@ -1466,6 +1541,10 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
 
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        uint64_t totalBufferLength = 0;
+        for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
+            totalBufferLength += event->RECEIVE.Buffers[i].Length;
+        }
         if (!worker->QueueDeferredQuicReceive(
                 relay,
                 stream,
@@ -1475,6 +1554,12 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             worker->FailRelayFatal(relay, "quic_receive_queue_failed");
             return QUIC_STATUS_SUCCESS;
         }
+        worker->TraceRelayReceiveEvent(
+            relay,
+            event->RECEIVE.BufferCount,
+            totalBufferLength,
+            event->RECEIVE.Flags,
+            fin);
         return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
@@ -1493,6 +1578,7 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             return QUIC_STATUS_SUCCESS;
         }
         relay->CloseAfterDrained.store(true);
+        TqTraceRelayStreamShutdown("windows", worker->BuildRelayTraceState(relay));
         (void)worker->CloseRelayIfDrained(relay);
     }
     return QUIC_STATUS_SUCCESS;
@@ -1562,6 +1648,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.ZstdDecompressNeedInput += snapshot.ZstdDecompressNeedInput;
         total.ZstdDecompressNeedOutput += snapshot.ZstdDecompressNeedOutput;
         total.ZstdDecompressFailures += snapshot.ZstdDecompressFailures;
+        total.FatalRelayResets += snapshot.FatalRelayResets;
+        total.GracefulRelayDrains += snapshot.GracefulRelayDrains;
+        total.TcpHardErrors += snapshot.TcpHardErrors;
+        total.QuicSendBackpressureEvents += snapshot.QuicSendBackpressureEvents;
+        total.QuicSendFatalErrors += snapshot.QuicSendFatalErrors;
+        total.ActiveRelays += snapshot.ActiveRelays;
         total.Errors += snapshot.Errors;
     }
     return total;

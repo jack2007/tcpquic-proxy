@@ -1,6 +1,7 @@
 #include "tuning.h"
 
 #include "config.h"
+#include "trace.h"
 
 #include <algorithm>
 #include <atomic>
@@ -315,9 +316,12 @@ void TqMaybeLogRuntimeObservationsLocked() {
     }
     g_Runtime.LastLogUnixMs = nowMs;
 
-    std::fprintf(stderr,
+    char line[320];
+    std::snprintf(
+        line,
+        sizeof(line),
         "tcpquic-proxy runtime: rtt=%ums%s throughput=%uMbps%s ideal_send=%llu%s "
-        "compress_ratio=%u.%u%%%s samples=%llu\n",
+        "compress_ratio=%u.%u%%%s samples=%llu",
         g_Runtime.Obs.MeasuredRttMs,
         g_Runtime.Obs.HasRtt ? "" : " (pending)",
         g_Runtime.Obs.ThroughputMbps,
@@ -329,6 +333,10 @@ void TqMaybeLogRuntimeObservationsLocked() {
         g_Runtime.CompObs.HasSample ? "" : " (pending)",
         static_cast<unsigned long long>(
             g_Runtime.Obs.SampleCount + g_Runtime.CompObs.SampleCount));
+    std::fprintf(stderr, "%s\n", line);
+    if (TqTraceEnabled()) {
+        TqTraceLogLine(line);
+    }
 }
 
 constexpr uint32_t kCompressRatioOffPermille = 980;
@@ -680,7 +688,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
         "read_chunk=%zu max_pending_buffer=%llu "
         "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu "
-        "initial_read_ahead=%llu\n",
+        "initial_read_ahead=%llu relay_workers=%u",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,
@@ -697,7 +705,38 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteMaxBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteBurstBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes),
-        static_cast<unsigned long long>(tuning.InitialQuicReadAheadBytes));
+        static_cast<unsigned long long>(tuning.InitialQuicReadAheadBytes),
+        tuning.LinuxRelayWorkerCount);
+#if defined(_WIN32)
+    std::fprintf(out,
+        " win_pending_recv_cap=%llu",
+        static_cast<unsigned long long>(tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay));
+#endif
+    std::fputc('\n', out);
+}
+
+void TqPrintRelayMemoryBudget(FILE* out) {
+    const uint32_t budgetMb = TqGetRelayMemoryBudget();
+    if (budgetMb == 0) {
+        return;
+    }
+    std::fprintf(out,
+        "tcpquic-proxy relay memory budget: %u MB (pool scales by active tunnels)\n",
+        budgetMb);
+}
+
+void TqPrintRelayBackend(FILE* out, const TqTuningConfig& tuning) {
+#if defined(__linux__)
+    std::fprintf(out,
+        "tcpquic-proxy relay backend: linux-epoll (%u workers)\n",
+        std::max(1u, tuning.LinuxRelayWorkerCount));
+#elif defined(_WIN32)
+    std::fprintf(out,
+        "tcpquic-proxy relay backend: windows-iocp (%u workers)\n",
+        std::max(1u, tuning.LinuxRelayWorkerCount));
+#else
+    std::fprintf(out, "tcpquic-proxy relay backend: unsupported\n");
+#endif
 }
 
 void TqSetActiveTcpSocketBuffer(int bytes) {

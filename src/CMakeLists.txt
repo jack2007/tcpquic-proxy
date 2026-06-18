@@ -234,6 +234,7 @@ set_property(TARGET tcpquic_quic_settings_test APPEND PROPERTY BUILD_RPATH "$ORI
 
 add_executable(tcpquic_trace_network_stats_test
     unittest/trace_network_stats_test.cpp
+    unittest/trace_metrics_stub.cpp
     runtime/trace.cpp
     platform/exe_path.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
@@ -610,10 +611,13 @@ set(TCPQUIC_WINDOWS_TEST_TARGETS)
 if(WIN32)
     add_executable(tcpquic_windows_relay_worker_test
         unittest/windows_relay_worker_test.cpp
+        unittest/trace_metrics_stub.cpp
         tunnel/windows_relay_worker.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         protocol/compress.cpp
+        runtime/trace.cpp
+        platform/exe_path.cpp
         platform/platform_socket_win.cpp
     )
     tcpquic_target_include_dirs(tcpquic_windows_relay_worker_test)

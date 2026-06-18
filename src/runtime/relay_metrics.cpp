@@ -178,8 +178,11 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     metrics.Backend = "worker";
+    metrics.ActiveRelays = snapshot.ActiveRelays;
     metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
     metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;
+    metrics.CurrentPendingQuicReceiveBytes = snapshot.PendingQuicReceiveBytes;
+    metrics.CurrentPendingQuicReceiveQueue = snapshot.PendingQuicReceiveQueueDepth;
     metrics.TcpReadBytes = snapshot.TcpSendBytes;
     metrics.TcpWriteBytes = snapshot.TcpSendBytes;
     metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;

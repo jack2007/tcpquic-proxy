@@ -4,6 +4,8 @@
 #include "control_protocol.h"
 #include "platform_socket.h"
 
+#include "relay_metrics.h"
+
 #include <cstdint>
 #include <string>
 
@@ -71,6 +73,55 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats);
 void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state);
 std::string TqFormatTraceLinuxRelayStreamShutdownLine(
     const TqTraceLinuxRelayStreamState& state);
+std::string TqFormatTraceRelayStateLine(
+    const char* eventName,
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayStreamEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* streamEvent,
+    uint64_t errorCode,
+    uint32_t status,
+    uint64_t absoluteOffset,
+    uint64_t totalBufferLength,
+    uint32_t bufferCount,
+    uint32_t receiveFlags,
+    bool fin,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayStopCondition(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayBackpressureEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* action,
+    const char* reason,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pauseThreshold,
+    uint64_t resumeThreshold,
+    uint64_t readAheadBytes);
+void TqTraceRelayStreamShutdown(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayUnregister(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayFatalError(
+    const char* backend,
+    const char* reason,
+    uint64_t relayId,
+    uint64_t socketOrFd,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t pendingQuicReceiveQueue,
+    uint64_t pendingQuicSends,
+    uint64_t inflightQuicSends,
+    uint64_t inflightTcpSends);
+std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metrics);
 
 uint64_t TqTraceStreamStarted(
     MsQuicConnection* connection,

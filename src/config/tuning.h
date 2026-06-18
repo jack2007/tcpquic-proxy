@@ -61,6 +61,8 @@ struct TqConfig;
 TqTuningMode TqParseTuningMode(const char* value);
 void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out);
 void TqPrintTuning(const TqTuningConfig& tuning, FILE* out);
+void TqPrintRelayMemoryBudget(FILE* out);
+void TqPrintRelayBackend(FILE* out, const TqTuningConfig& tuning);
 void TqSetActiveTcpSocketBuffer(int bytes);
 int TqGetActiveTcpSocketBuffer();
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb);

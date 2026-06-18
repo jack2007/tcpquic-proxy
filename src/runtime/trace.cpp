@@ -2,6 +2,7 @@
 
 #include "exe_path.h"
 #include "msquic.hpp"
+#include "relay_metrics.h"
 
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -229,6 +230,9 @@ void DumpPeriodicStats() {
     }
 
     LogInfo("event=stats_tick %s", TqTraceGlobalSnapshot().c_str());
+
+    const TqRelayMetricsSnapshot relayMetrics = TqSnapshotRelayMetrics();
+    LogInfo("event=stats_relay %s", TqFormatRelayMetricsSnapshotLine(relayMetrics).c_str());
 
     std::vector<TqQuicConnTraceSnapshot> conns;
     {
@@ -490,6 +494,177 @@ std::string FormatTraceLinuxRelayStateLine(
 std::string TqFormatTraceLinuxRelayStreamShutdownLine(
     const TqTraceLinuxRelayStreamState& state) {
     return FormatTraceLinuxRelayStateLine("linux_relay_stream_shutdown", state);
+}
+
+std::string TqFormatTraceRelayStateLine(
+    const char* eventName,
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state) {
+    char buffer[832];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "%s backend=%s",
+        FormatTraceLinuxRelayStateLine(eventName != nullptr ? eventName : "relay_state", state).c_str(),
+        backend != nullptr ? backend : "?");
+    return buffer;
+}
+
+void TqTraceRelayStreamEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* streamEvent,
+    uint64_t errorCode,
+    uint32_t status,
+    uint64_t absoluteOffset,
+    uint64_t totalBufferLength,
+    uint32_t bufferCount,
+    uint32_t receiveFlags,
+    bool fin,
+    const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    TqTraceLinuxRelayStreamState traceState = state;
+    traceState.WorkerIndex = workerIndex;
+    traceState.RelayId = relayId;
+    LogInfo(
+        "%s stream_event=%s error_code=%llu status=0x%x absolute_offset=%llu total_buffer_length=%llu buffer_count=%u receive_flags=0x%x fin=%d",
+        TqFormatTraceRelayStateLine("relay_stream_event", backend, traceState).c_str(),
+        streamEvent != nullptr ? streamEvent : "?",
+        static_cast<unsigned long long>(errorCode),
+        status,
+        static_cast<unsigned long long>(absoluteOffset),
+        static_cast<unsigned long long>(totalBufferLength),
+        bufferCount,
+        receiveFlags,
+        fin ? 1 : 0);
+}
+
+void TqTraceRelayStopCondition(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    TqTraceLinuxRelayStreamState traceState = state;
+    traceState.WorkerIndex = workerIndex;
+    LogInfo(
+        "%s trigger=%s",
+        TqFormatTraceRelayStateLine("relay_stop_condition", backend, traceState).c_str(),
+        trigger != nullptr ? trigger : "?");
+}
+
+void TqTraceRelayBackpressureEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* action,
+    const char* reason,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pauseThreshold,
+    uint64_t resumeThreshold,
+    uint64_t readAheadBytes) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo(
+        "event=relay_backpressure backend=%s worker=%u relay=%llu action=%s reason=%s outstanding_quic_send_bytes=%llu pause_threshold=%llu resume_threshold=%llu read_ahead=%llu",
+        backend != nullptr ? backend : "?",
+        workerIndex,
+        static_cast<unsigned long long>(relayId),
+        action != nullptr ? action : "?",
+        reason != nullptr ? reason : "?",
+        static_cast<unsigned long long>(outstandingQuicSendBytes),
+        static_cast<unsigned long long>(pauseThreshold),
+        static_cast<unsigned long long>(resumeThreshold),
+        static_cast<unsigned long long>(readAheadBytes));
+}
+
+void TqTraceRelayStreamShutdown(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo("%s", TqFormatTraceRelayStateLine("relay_stream_shutdown", backend, state).c_str());
+}
+
+void TqTraceRelayUnregister(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo("%s", TqFormatTraceRelayStateLine("relay_unregister", backend, state).c_str());
+}
+
+void TqTraceRelayFatalError(
+    const char* backend,
+    const char* reason,
+    uint64_t relayId,
+    uint64_t socketOrFd,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t pendingQuicReceiveQueue,
+    uint64_t pendingQuicSends,
+    uint64_t inflightQuicSends,
+    uint64_t inflightTcpSends) {
+    spdlog::error(
+        "{} relay unrecoverable error reason={} relay_id={} socket={} pending_quic_receive_bytes={} pending_quic_receive_queue={} pending_quic_sends={} inflight_quic_sends={} inflight_tcp_sends={}",
+        backend != nullptr ? backend : "relay",
+        reason != nullptr ? reason : "unknown",
+        relayId,
+        socketOrFd,
+        pendingQuicReceiveBytes,
+        pendingQuicReceiveQueue,
+        pendingQuicSends,
+        inflightQuicSends,
+        inflightTcpSends);
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    char buffer[512];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "event=relay_fatal backend=%s reason=%s relay_id=%llu socket=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu pending_quic_sends=%llu inflight_quic_sends=%llu inflight_tcp_sends=%llu",
+        backend != nullptr ? backend : "?",
+        reason != nullptr ? reason : "unknown",
+        static_cast<unsigned long long>(relayId),
+        static_cast<unsigned long long>(socketOrFd),
+        static_cast<unsigned long long>(pendingQuicReceiveBytes),
+        static_cast<unsigned long long>(pendingQuicReceiveQueue),
+        static_cast<unsigned long long>(pendingQuicSends),
+        static_cast<unsigned long long>(inflightQuicSends),
+        static_cast<unsigned long long>(inflightTcpSends));
+    LogInfo("%s", buffer);
+}
+
+std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metrics) {
+    char buffer[768];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "backend=%s pending_bytes=%llu active_relays=%llu relay_buffer_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu deferred_receive_complete_bytes=%llu max_pending_quic_receive_bytes=%llu quic_receive_paused=%llu quic_receive_resumed=%llu quic_send_backpressure=%llu fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu",
+        metrics.Backend != nullptr ? metrics.Backend : "?",
+        static_cast<unsigned long long>(metrics.PendingBytes),
+        static_cast<unsigned long long>(metrics.ActiveRelays),
+        static_cast<unsigned long long>(metrics.RelayBufferBytesInUse),
+        static_cast<unsigned long long>(metrics.TcpReadBytes),
+        static_cast<unsigned long long>(metrics.TcpWriteBytes),
+        static_cast<unsigned long long>(metrics.DeferredReceiveCompleteBytes),
+        static_cast<unsigned long long>(metrics.MaxPendingQuicReceiveBytes),
+        static_cast<unsigned long long>(metrics.QuicReceivePausedCount),
+        static_cast<unsigned long long>(metrics.QuicReceiveResumedCount),
+        static_cast<unsigned long long>(metrics.QuicSendBackpressureEvents),
+        static_cast<unsigned long long>(metrics.FatalRelayResets),
+        static_cast<unsigned long long>(metrics.TcpHardErrors),
+        static_cast<unsigned long long>(metrics.GracefulRelayDrains),
+        static_cast<unsigned long long>(metrics.Errors));
+    return buffer;
 }
 
 void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state) {

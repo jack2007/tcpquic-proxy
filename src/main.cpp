@@ -701,6 +701,8 @@ int main(int argc, char** argv) {
     TqTunnelReaperGuard reaperGuard;
     TqSetActiveTcpSocketBuffer(cfg.Tuning.TcpSocketBufferBytes);
     TqPrintTuning(cfg.Tuning, stderr);
+    TqPrintRelayMemoryBudget(stderr);
+    TqPrintRelayBackend(stderr, cfg.Tuning);
     if (TqRuntimeTuningEnabled(cfg)) {
         std::fprintf(stderr,
             "tcpquic-proxy runtime tuning: enabled (RTT/throughput feed next QUIC connection)\n");

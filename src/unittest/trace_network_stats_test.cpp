@@ -1,6 +1,7 @@
 #include "trace.h"
 
 #include "msquic.hpp"
+#include "relay_metrics.h"
 
 #include <string>
 
@@ -75,6 +76,47 @@ int main() {
         relayLine.find("tcp_write_shutdown_queued=1") == std::string::npos ||
         relayLine.find("stream_detached=0") == std::string::npos) {
         return 7;
+    }
+
+    const std::string windowsRelayLine = TqFormatTraceRelayStateLine(
+        "relay_stream_shutdown",
+        "windows",
+        TqTraceLinuxRelayStreamState{
+            0,
+            99,
+            1,
+            4096,
+            0,
+            0,
+            8192,
+            0,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true});
+    if (windowsRelayLine.find("event=relay_stream_shutdown") == std::string::npos) {
+        return 9;
+    }
+    if (windowsRelayLine.find("backend=windows") == std::string::npos ||
+        windowsRelayLine.find("relay=99") == std::string::npos) {
+        return 10;
+    }
+
+    TqRelayMetricsSnapshot metrics{};
+    metrics.Backend = "worker";
+    metrics.PendingBytes = 12345;
+    metrics.ActiveRelays = 3;
+    metrics.FatalRelayResets = 1;
+    const std::string metricsLine = TqFormatRelayMetricsSnapshotLine(metrics);
+    if (metricsLine.find("backend=worker") == std::string::npos ||
+        metricsLine.find("pending_bytes=12345") == std::string::npos ||
+        metricsLine.find("active_relays=3") == std::string::npos ||
+        metricsLine.find("fatal_relay_resets=1") == std::string::npos) {
+        return 11;
     }
 
     return 0;

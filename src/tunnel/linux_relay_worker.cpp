@@ -1,6 +1,7 @@
 #include "linux_relay_worker.h"
 
 #include <msquic.hpp>
+#include "trace.h"
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
@@ -173,17 +174,20 @@ void LogLinuxRelayError(
     uint64_t pendingQuicReceiveBytes,
     uint64_t outstandingQuicSends,
     uint64_t outstandingQuicSendBytes) {
-    spdlog::error(
-        "linux relay unrecoverable error reason={} relay_id={} tcp_fd={} status={} errno={} pending_tcp_write_bytes={} pending_quic_receive_bytes={} outstanding_quic_sends={} outstanding_quic_send_bytes={}",
-        reason != nullptr ? reason : "unknown",
+    TqTraceRelayFatalError(
+        "linux",
+        reason,
         relayId,
-        tcpFd,
-        status,
-        err,
-        pendingTcpWriteBytes,
+        static_cast<uint64_t>(tcpFd),
         pendingQuicReceiveBytes,
+        0,
         outstandingQuicSends,
-        outstandingQuicSendBytes);
+        outstandingQuicSends,
+        0);
+    (void)status;
+    (void)err;
+    (void)pendingTcpWriteBytes;
+    (void)outstandingQuicSendBytes;
 }
 
 std::string SocketAddressToString(const sockaddr_storage& storage, socklen_t length) {
