@@ -243,20 +243,25 @@ struct TqServerDialReactor::Impl {
     }
 
     bool RunOnce(int timeoutMs) {
-        std::lock_guard<std::mutex> guard(Lock);
-        return RunOnceUnlocked(timeoutMs);
+        std::unique_lock<std::mutex> guard(Lock);
+        return RunOnceUnlocked(timeoutMs, guard);
     }
 
-    bool RunOnceUnlocked(int timeoutMs) {
+    bool RunOnceUnlocked(int timeoutMs, std::unique_lock<std::mutex>& guard) {
         if (!Started) {
             return false;
         }
 
         const int waitMs = NextWaitMs(timeoutMs);
         bool didWork = RunDnsOnce(0);
-        didWork = Reactor.RunOnce(waitMs) || didWork;
+        didWork = Reactor.RunOnce(0) || didWork;
         didWork = RunDnsOnce(0) || didWork;
         didWork = ExpireAttempts() || didWork;
+        if (!didWork && waitMs > 0) {
+            guard.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+            guard.lock();
+        }
         return didWork;
     }
 

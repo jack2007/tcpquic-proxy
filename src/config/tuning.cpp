@@ -196,6 +196,8 @@ void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
         out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1u));
     out.LinuxRelayWorkerByteBudgetPerTick =
         std::min<uint64_t>(pendingBytes, 512ull * 1024 * 1024);
+    out.InitialQuicReadAheadBytes =
+        std::max<uint64_t>(out.InitialQuicReadAheadBytes, pendingBytes);
     out.LinuxRelayReadBatchBytes =
         std::max<uint64_t>(out.LinuxRelayReadBatchBytes, 4ull * 1024 * 1024);
     out.LinuxRelayQuicRecvBatchBytes =
@@ -211,6 +213,17 @@ void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
 void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
+    }
+    if (cfg.TuningOverrideRelayInflightBytes > 0) {
+        out.RelayDefaultIdealSend = cfg.TuningOverrideRelayInflightBytes;
+        if (out.RelayIoSize > 0) {
+            out.RelayMaxInFlightSends = ClampU32(
+                (cfg.TuningOverrideRelayInflightBytes + out.RelayIoSize - 1) /
+                    out.RelayIoSize,
+                1,
+                2048);
+            out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
+        }
     }
     if (cfg.TuningOverrideLinuxRelayReadChunkSize > 0) {
         out.LinuxRelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
@@ -402,16 +415,16 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         } else {
             ApplyWanDefaults(out);
         }
-        ApplyCustomOverrides(cfg, out);
         break;
     }
-    const uint64_t autoBudgetBytes = ComputeAutomaticRelayBudgetBytes(out);
-    TqSetRelayMemoryBudget(BytesToMbRoundUp(autoBudgetBytes));
-    TqApplyLinuxRelayDefaults(out, cfg.TuningMode, autoBudgetBytes);
-    if (cfg.TuningMode == TqTuningMode::Custom) {
-        ApplyHighBdpPipelineScaling(out);
-        ApplyCustomOverrides(cfg, out);
-    }
+    ApplyCustomOverrides(cfg, out);
+    const uint64_t budgetBytes = cfg.MaxMemoryMb > 0
+        ? static_cast<uint64_t>(cfg.MaxMemoryMb) * MiB
+        : ComputeAutomaticRelayBudgetBytes(out);
+    TqSetRelayMemoryBudget(BytesToMbRoundUp(budgetBytes));
+    TqApplyLinuxRelayDefaults(out, cfg.TuningMode, budgetBytes);
+    ApplyHighBdpPipelineScaling(out);
+    ApplyCustomOverrides(cfg, out);
 }
 
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb) {
@@ -547,7 +560,8 @@ void TqApplyRuntimeObservations(TqConfig& cfg) {
         cfg.Tuning.InitialRttMs = ClampU32(obs.MeasuredRttMs, 1, 60000);
     }
 
-    if (obs.HasIdealSend && obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
+    if (obs.HasIdealSend && cfg.TuningOverrideRelayInflightBytes == 0 &&
+        obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
         cfg.Tuning.RelayDefaultIdealSend = obs.IdealSendBytes;
         if (cfg.Tuning.RelayIoSize > 0) {
             const uint32_t maxContexts = ClampU32(
