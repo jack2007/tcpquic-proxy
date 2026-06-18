@@ -798,6 +798,17 @@ endif()
 
 set(TCPQUIC_WINDOWS_TEST_TARGETS)
 if(WIN32)
+    add_executable(tcpquic_windows_reactor_test
+        unittest/windows_reactor_test.cpp
+        runtime/windows_reactor.cpp
+        platform/platform_socket_win.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_windows_reactor_test)
+    target_link_libraries(tcpquic_windows_reactor_test PRIVATE ws2_32)
+    target_compile_definitions(tcpquic_windows_reactor_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING)
+    set_property(TARGET tcpquic_windows_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_windows_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_windows_relay_worker_test
         unittest/windows_relay_worker_test.cpp
         unittest/trace_metrics_stub.cpp
@@ -813,7 +824,10 @@ if(WIN32)
     target_link_libraries(tcpquic_windows_relay_worker_test PRIVATE ws2_32 inc warnings msquic logging base_link ${TCPQUIC_TEST_LIBS} spdlog::spdlog)
     target_compile_definitions(tcpquic_windows_relay_worker_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TQ_UNIT_TESTING ${TCPQUIC_TEST_DEFS})
     tcpquic_link_mimalloc(tcpquic_windows_relay_worker_test)
-    list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS tcpquic_windows_relay_worker_test)
+    list(APPEND TCPQUIC_WINDOWS_TEST_TARGETS
+        tcpquic_windows_reactor_test
+        tcpquic_windows_relay_worker_test
+    )
 endif()
 
 set(TCPQUIC_TEST_TARGETS
