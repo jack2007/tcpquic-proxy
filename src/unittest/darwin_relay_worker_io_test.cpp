@@ -1420,6 +1420,10 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == expected.size());
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == expected.size() - 3);
+    TqDarwinRelayWorkerSnapshot pendingSnapshot = worker.Snapshot();
+    CHECK(pendingSnapshot.CurrentPendingQuicReceiveBytes == expected.size());
+    CHECK(pendingSnapshot.PendingTcpWriteBytes == expected.size() - 3);
+    CHECK(pendingSnapshot.PendingBytes == expected.size());
     std::fill(payload.begin(), payload.end(), static_cast<uint8_t>('X'));
 
     ResetPartialSendMsg(0);
@@ -1893,7 +1897,7 @@ void QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics() {
 
     CHECK(snapshot.PendingTcpWriteQueue == 1);
     CHECK(snapshot.PendingTcpWriteBytes == sizeof(payload) - 1);
-    CHECK(snapshot.PendingBytes == 2 * (sizeof(payload) - 1));
+    CHECK(snapshot.PendingBytes == sizeof(payload) - 1);
     CHECK(snapshot.CurrentPendingQuicReceiveBytes == sizeof(payload) - 1);
     CHECK(snapshot.QuicReceiveViewCount == 1);
     CHECK(snapshot.QuicReceiveViewBytes == sizeof(payload) - 1);

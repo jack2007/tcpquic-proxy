@@ -2048,7 +2048,10 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
             snapshot.OutstandingQuicSends += relay->InFlightQuicSends;
             snapshot.OutstandingQuicSendBytes += relay->InFlightQuicSendBytes;
             snapshot.OutstandingQuicSends += relay->PendingQuicSends.size();
-            uint64_t relayPendingBytes = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
+            const uint64_t receivePathPendingBytes = std::max(
+                relay->PendingQuicReceiveBytes,
+                relay->PendingTcpWriteBytes);
+            uint64_t relayPendingBytes = receivePathPendingBytes;
             for (const auto& pendingSend : relay->PendingQuicSends) {
                 if (pendingSend != nullptr) {
                     snapshot.OutstandingQuicSendBytes += pendingSend->TotalBytes;
