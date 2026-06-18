@@ -1,35 +1,27 @@
 #pragma once
 
-#include <cstdint>
-#include <functional>
+#include "socket_reactor.h"
+
 #include <unordered_map>
 
-namespace TqLinuxReactorEvents {
-constexpr uint32_t Read = 0x1;
-constexpr uint32_t Write = 0x2;
-constexpr uint32_t Error = 0x4;
-} // namespace TqLinuxReactorEvents
-
-class TqLinuxReactor {
+class TqLinuxReactor final : public ITqSocketReactor {
 public:
-    using Handler = std::function<void(int fd, uint32_t events)>;
-
     TqLinuxReactor() = default;
-    ~TqLinuxReactor();
+    ~TqLinuxReactor() override;
 
     TqLinuxReactor(const TqLinuxReactor&) = delete;
     TqLinuxReactor& operator=(const TqLinuxReactor&) = delete;
 
-    bool Start();
-    void Stop();
-    bool Add(int fd, uint32_t events, Handler handler);
-    bool Modify(int fd, uint32_t events);
-    bool Remove(int fd);
-    bool Wake();
-    bool RunOnce(int timeoutMs);
+    bool Start() override;
+    void Stop() override;
+    bool Add(TqSocketHandle fd, uint32_t events, Handler handler) override;
+    bool Modify(TqSocketHandle fd, uint32_t events) override;
+    bool Remove(TqSocketHandle fd) override;
+    bool Wake() override;
+    bool RunOnce(int timeoutMs) override;
 
 private:
     int EpollFd{-1};
     int WakeFd{-1};
-    std::unordered_map<int, Handler> Handlers;
+    std::unordered_map<TqSocketHandle, Handler> Handlers;
 };

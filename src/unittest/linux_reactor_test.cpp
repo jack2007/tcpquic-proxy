@@ -49,7 +49,7 @@ int TestReadRemoveWake() {
     int observedFd = -1;
     uint32_t observedEvents = 0;
     char observedByte = '\0';
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Read,
+    if (!reactor.Add(fds[0], TqReactorEvents::Read,
             [&](int fd, uint32_t events) {
                 readHandlerRan = true;
                 observedFd = fd;
@@ -73,7 +73,7 @@ int TestReadRemoveWake() {
         return 5;
     }
     if (!readHandlerRan || observedFd != fds[0] ||
-        (observedEvents & TqLinuxReactorEvents::Read) == 0 || observedByte != payload) {
+        (observedEvents & TqReactorEvents::Read) == 0 || observedByte != payload) {
         reactor.Stop();
         ClosePair(fds);
         return 6;
@@ -127,12 +127,12 @@ int TestModifyReadWriteTransitions() {
     int writeEvents = 0;
     int readEvents = 0;
     char observed = '\0';
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Write,
+    if (!reactor.Add(fds[0], TqReactorEvents::Write,
             [&](int fd, uint32_t events) {
-                if ((events & TqLinuxReactorEvents::Write) != 0) {
+                if ((events & TqReactorEvents::Write) != 0) {
                     ++writeEvents;
                 }
-                if ((events & TqLinuxReactorEvents::Read) != 0) {
+                if ((events & TqReactorEvents::Read) != 0) {
                     ++readEvents;
                     (void)ReadByte(fd, observed);
                 }
@@ -147,7 +147,7 @@ int TestModifyReadWriteTransitions() {
         ClosePair(fds);
         return 23;
     }
-    if (!reactor.Modify(fds[0], TqLinuxReactorEvents::Read)) {
+    if (!reactor.Modify(fds[0], TqReactorEvents::Read)) {
         reactor.Stop();
         ClosePair(fds);
         return 24;
@@ -167,7 +167,7 @@ int TestModifyReadWriteTransitions() {
         ClosePair(fds);
         return 27;
     }
-    if (!reactor.Modify(fds[0], TqLinuxReactorEvents::Write)) {
+    if (!reactor.Modify(fds[0], TqReactorEvents::Write)) {
         reactor.Stop();
         ClosePair(fds);
         return 28;
@@ -200,18 +200,18 @@ int TestInvalidOperationsAndErrorOnly() {
         ClosePair(fds);
         return 42;
     }
-    if (reactor.Add(fds[0], TqLinuxReactorEvents::Read, TqLinuxReactor::Handler{})) {
+    if (reactor.Add(fds[0], TqReactorEvents::Read, TqLinuxReactor::Handler{})) {
         reactor.Stop();
         ClosePair(fds);
         return 43;
     }
-    if (reactor.Add(fds[0], TqLinuxReactorEvents::Read | UnknownEventBit,
+    if (reactor.Add(fds[0], TqReactorEvents::Read | UnknownEventBit,
             [](int, uint32_t) {})) {
         reactor.Stop();
         ClosePair(fds);
         return 44;
     }
-    if (reactor.Modify(fds[0], TqLinuxReactorEvents::Read)) {
+    if (reactor.Modify(fds[0], TqReactorEvents::Read)) {
         reactor.Stop();
         ClosePair(fds);
         return 45;
@@ -223,7 +223,7 @@ int TestInvalidOperationsAndErrorOnly() {
     }
 
     bool errorOnlyRan = false;
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Error,
+    if (!reactor.Add(fds[0], TqReactorEvents::Error,
             [&](int, uint32_t) {
                 errorOnlyRan = true;
             })) {
@@ -231,12 +231,12 @@ int TestInvalidOperationsAndErrorOnly() {
         ClosePair(fds);
         return 47;
     }
-    if (!reactor.Modify(fds[0], TqLinuxReactorEvents::Error)) {
+    if (!reactor.Modify(fds[0], TqReactorEvents::Error)) {
         reactor.Stop();
         ClosePair(fds);
         return 48;
     }
-    if (reactor.Modify(fds[0], TqLinuxReactorEvents::Error | UnknownEventBit)) {
+    if (reactor.Modify(fds[0], TqReactorEvents::Error | UnknownEventBit)) {
         reactor.Stop();
         ClosePair(fds);
         return 49;
@@ -270,9 +270,9 @@ int TestCallbackSelfRemove() {
     }
 
     int calls = 0;
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Read,
+    if (!reactor.Add(fds[0], TqReactorEvents::Read,
             [&](int fd, uint32_t events) {
-                if ((events & TqLinuxReactorEvents::Read) != 0) {
+                if ((events & TqReactorEvents::Read) != 0) {
                     char value = '\0';
                     (void)ReadByte(fd, value);
                     ++calls;
@@ -323,17 +323,17 @@ int TestCallbackSelfModify() {
 
     int readCalls = 0;
     int writeCalls = 0;
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Read,
+    if (!reactor.Add(fds[0], TqReactorEvents::Read,
             [&](int fd, uint32_t events) {
-                if ((events & TqLinuxReactorEvents::Read) != 0) {
+                if ((events & TqReactorEvents::Read) != 0) {
                     char value = '\0';
                     (void)ReadByte(fd, value);
                     ++readCalls;
-                    (void)reactor.Modify(fd, TqLinuxReactorEvents::Write);
+                    (void)reactor.Modify(fd, TqReactorEvents::Write);
                 }
-                if ((events & TqLinuxReactorEvents::Write) != 0) {
+                if ((events & TqReactorEvents::Write) != 0) {
                     ++writeCalls;
-                    (void)reactor.Modify(fd, TqLinuxReactorEvents::Read);
+                    (void)reactor.Modify(fd, TqReactorEvents::Read);
                 }
             })) {
         reactor.Stop();
@@ -374,7 +374,7 @@ int TestCallbackSelfStopAndStoppedOperations() {
     }
 
     int calls = 0;
-    if (!reactor.Add(fds[0], TqLinuxReactorEvents::Read,
+    if (!reactor.Add(fds[0], TqReactorEvents::Read,
             [&](int fd, uint32_t) {
                 char value = '\0';
                 (void)ReadByte(fd, value);
@@ -396,8 +396,8 @@ int TestCallbackSelfStopAndStoppedOperations() {
         return 104;
     }
     if (reactor.Wake() || reactor.RunOnce(10) ||
-        reactor.Add(fds[0], TqLinuxReactorEvents::Read, [](int, uint32_t) {}) ||
-        reactor.Modify(fds[0], TqLinuxReactorEvents::Read) ||
+        reactor.Add(fds[0], TqReactorEvents::Read, [](int, uint32_t) {}) ||
+        reactor.Modify(fds[0], TqReactorEvents::Read) ||
         reactor.Remove(fds[0])) {
         ClosePair(fds);
         return 105;

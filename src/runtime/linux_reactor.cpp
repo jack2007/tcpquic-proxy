@@ -9,10 +9,10 @@ namespace {
 
 uint32_t ToEpollEvents(uint32_t events) {
     uint32_t epollEvents = EPOLLRDHUP;
-    if ((events & TqLinuxReactorEvents::Read) != 0) {
+    if ((events & TqReactorEvents::Read) != 0) {
         epollEvents |= EPOLLIN;
     }
-    if ((events & TqLinuxReactorEvents::Write) != 0) {
+    if ((events & TqReactorEvents::Write) != 0) {
         epollEvents |= EPOLLOUT;
     }
     return epollEvents;
@@ -21,20 +21,20 @@ uint32_t ToEpollEvents(uint32_t events) {
 uint32_t FromEpollEvents(uint32_t events) {
     uint32_t reactorEvents = 0;
     if ((events & EPOLLIN) != 0) {
-        reactorEvents |= TqLinuxReactorEvents::Read;
+        reactorEvents |= TqReactorEvents::Read;
     }
     if ((events & EPOLLOUT) != 0) {
-        reactorEvents |= TqLinuxReactorEvents::Write;
+        reactorEvents |= TqReactorEvents::Write;
     }
     if ((events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) != 0) {
-        reactorEvents |= TqLinuxReactorEvents::Error;
+        reactorEvents |= TqReactorEvents::Error;
     }
     return reactorEvents;
 }
 
 bool HasRequestedEvents(uint32_t events) {
-    constexpr uint32_t ValidEvents = TqLinuxReactorEvents::Read |
-        TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error;
+    constexpr uint32_t ValidEvents = TqReactorEvents::Read |
+        TqReactorEvents::Write | TqReactorEvents::Error;
     return events != 0 && (events & ~ValidEvents) == 0;
 }
 
