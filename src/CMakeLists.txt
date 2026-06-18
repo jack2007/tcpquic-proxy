@@ -303,6 +303,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+    add_executable(tcpquic_linux_reactor_test
+        unittest/linux_reactor_test.cpp
+        runtime/linux_reactor.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_linux_reactor_test)
+    target_link_libraries(tcpquic_linux_reactor_test PRIVATE Threads::Threads)
+    set_property(TARGET tcpquic_linux_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_linux_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_relay_backend_selection_test
         unittest/relay_backend_selection_test.cpp
         unittest/trace_proxy_stub.cpp
@@ -323,6 +332,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_LINUX_TEST_TARGETS
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
+        tcpquic_linux_reactor_test
         tcpquic_relay_backend_selection_test
     )
 endif()
