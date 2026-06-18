@@ -21,6 +21,7 @@ BOOLEAN g_LastStreamReceiveEnabled = TRUE;
 std::mutex g_StreamSendMutex;
 std::vector<void*> g_StreamSendContexts;
 std::vector<std::vector<uint8_t>> g_StreamSendPayloads;
+QUIC_STATUS g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
 
 void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t bufferLength) {
     g_StreamReceiveCompleteBytes += bufferLength;
@@ -49,6 +50,9 @@ QUIC_STATUS QUIC_API FakeStreamSend(
         }
     }
     g_StreamSendPayloads.push_back(std::move(payload));
+    if (QUIC_FAILED(g_FakeStreamSendStatus)) {
+        return g_FakeStreamSendStatus;
+    }
     return QUIC_STATUS_SUCCESS;
 }
 
@@ -850,6 +854,165 @@ int main() {
             return 163;
         }
         receiveWorker.Stop();
+    }
+    {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamSend = FakeStreamSend;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+        g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+        ResetFakeStreamSends();
+
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            MsQuic = nullptr;
+            return 164;
+        }
+
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 165;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!receiveWorker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 166;
+        }
+
+        const char first[] = "backpressure-test";
+        if (TqSend(pair[1], first, std::strlen(first), TqSendFlags::None) != static_cast<int>(std::strlen(first))) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 167;
+        }
+        if (!WaitForFakeStreamSendCount(1, 2000)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 168;
+        }
+        void* callbackContext = stream->Context;
+        CompleteFakeStreamSends(receiveWorker, stream, callbackContext);
+
+        g_FakeStreamSendStatus = QUIC_STATUS_OUT_OF_MEMORY;
+        const char second[] = "backpressure-more";
+        if (TqSend(pair[1], second, std::strlen(second), TqSendFlags::None) != static_cast<int>(std::strlen(second))) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 169;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        TqWindowsRelayWorkerSnapshot snapshot{};
+        do {
+            snapshot = receiveWorker.Snapshot();
+            if (snapshot.QuicSendBackpressureEvents > 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (snapshot.QuicSendBackpressureEvents == 0 ||
+            handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.FatalRelayResets != 0) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 170;
+        }
+
+        g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+    }
+    {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamSend = FakeStreamSend;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+        g_FakeStreamSendStatus = QUIC_STATUS_INVALID_STATE;
+        ResetFakeStreamSends();
+
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 173;
+        }
+
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 173;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!receiveWorker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 172;
+        }
+
+        const char payload[] = "fatal-send-test";
+        if (TqSend(pair[1], payload, std::strlen(payload), TqSendFlags::None) != static_cast<int>(std::strlen(payload))) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 173;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        TqWindowsRelayWorkerSnapshot snapshot{};
+        do {
+            snapshot = receiveWorker.Snapshot();
+            if (snapshot.QuicSendFatalErrors > 0 &&
+                handle.Stop.load(std::memory_order_acquire) &&
+                snapshot.FatalRelayResets > 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (snapshot.QuicSendFatalErrors == 0 ||
+            !handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.FatalRelayResets == 0) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+            return 171;
+        }
+
+        g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
     }
     {
         QUIC_API_TABLE fakeApi{};
