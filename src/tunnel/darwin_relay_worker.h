@@ -7,11 +7,13 @@
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
+#include "relay_buffer.h"
 #include "tuning.h"
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -35,6 +37,27 @@ struct TqDarwinRelayRegistrationResult {
     bool Ok{false};
     uint64_t RelayId{0};
 };
+
+struct TqDarwinRelaySendOperation {
+    static constexpr uint64_t MagicValue = 0x545144415257534eULL;
+
+    uint64_t Magic{MagicValue};
+    uint64_t RelayId{0};
+    uint64_t TotalBytes{0};
+    bool Fin{false};
+    std::shared_ptr<void> BindingOwner;
+    std::vector<TqBufferView> Views;
+    std::vector<QUIC_BUFFER> QuicBuffers;
+};
+
+#if defined(TCPQUIC_TESTING)
+using TqDarwinRelayStreamSendForTest = QUIC_STATUS (*)(
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    QUIC_SEND_FLAGS flags,
+    void* context);
+#endif
 
 struct TqDarwinRelayWorkerConfig {
     uint32_t WorkerIndex{0};
@@ -61,6 +84,7 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t TcpWriteArmedRelays{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
+    uint64_t TcpReadBytes{0};
     uint64_t Errors{0};
 };
 
@@ -80,6 +104,14 @@ public:
     uint32_t DrainWakeForTest();
     bool RunningForTest() const;
     void SetRegisterTcpFiltersFailureForTest(bool fail);
+    void SetStreamSendForTest(TqDarwinRelayStreamSendForTest sendFn);
+    void* StreamCallbackContextForTest(uint64_t relayId);
+    std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
+    uint64_t KnownSendOperationCountForTest();
+    uint64_t PendingQuicSendCountForTest(uint64_t relayId);
+    uint64_t InFlightQuicSendCountForTest(uint64_t relayId);
+    uint64_t CompleteOneInFlightSendForTest(uint64_t relayId);
+    bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
@@ -92,6 +124,15 @@ public:
 
 private:
     struct RelayState;
+    struct CompletionState;
+    struct StreamBinding;
+    struct KnownSendOperationInfo {
+        uint64_t RelayId{0};
+        uint64_t TotalBytes{0};
+        bool Fin{false};
+        bool Submitting{false};
+        std::shared_ptr<void> BindingOwner;
+    };
 
     void Run();
     bool Wake();
@@ -105,6 +146,37 @@ private:
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     void ProcessKqueueEvent(const struct kevent& event);
     void ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
+    bool DrainTcpReadable(const std::shared_ptr<RelayState>& relay);
+    bool SubmitTcpBatchToQuic(
+        const std::shared_ptr<RelayState>& relay,
+        std::vector<TqBufferView>&& views,
+        bool fin);
+    bool TrySubmitQuicSendOperation(
+        const std::shared_ptr<RelayState>& relay,
+        std::unique_ptr<TqDarwinRelaySendOperation> operation);
+    void RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay);
+    void CompleteQuicSend(TqDarwinRelaySendOperation* operation);
+    bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
+    bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
+    bool SetTcpReadBackpressure(const std::shared_ptr<RelayState>& relay, bool paused);
+    void RetireRelay(const std::shared_ptr<RelayState>& relay);
+    void PurgeRetiredRelaysIfSafe();
+    bool WaitForKnownOperationsToDrain();
+    void DetachRetiredBindingsForDestruction();
+    void RegisterKnownSendOperation(
+        TqDarwinRelaySendOperation* operation,
+        const KnownSendOperationInfo& info);
+    bool MarkKnownSendOperationSubmitted(TqDarwinRelaySendOperation* operation);
+    bool UnregisterKnownSendOperation(
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info);
+    static bool UnregisterCompletionStateOperation(
+        const std::shared_ptr<CompletionState>& state,
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info);
+    static void ClearRetiredStreamCallbackIfSafe(StreamBinding* binding);
+    static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
+    bool IsKnownSendOperation(TqDarwinRelaySendOperation* operation) const;
 
     TqDarwinRelayWorkerConfig Config;
     int KqueueFd{-1};
@@ -114,12 +186,16 @@ private:
     mutable std::mutex LifecycleMutex;
     mutable std::mutex RelayMutex;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
+    std::deque<std::shared_ptr<RelayState>> RetiredRelays;
+    std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> KnownSendOperations;
+    std::vector<std::shared_ptr<StreamBinding>> RetiredStreamBindings;
     uint64_t NextRelayId{1};
 #if defined(TCPQUIC_TESTING)
     bool FailRegisterTcpFiltersForTest{false};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> Wakeups{0};
+    std::atomic<uint64_t> TcpReadBytes{0};
     std::atomic<uint64_t> Errors{0};
 };
 
