@@ -808,6 +808,50 @@ int main() {
         receiveWorker.Stop();
     }
     {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 160;
+        }
+        QUIC_STREAM_EVENT shutdown{};
+        shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = TRUE;
+        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
+            receiveWorker.Stop();
+            return 161;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 162;
+        }
+        QUIC_STREAM_EVENT shutdown{};
+        shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = FALSE;
+        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (snapshot.FatalRelayResets != 0) {
+            receiveWorker.Stop();
+            return 163;
+        }
+        receiveWorker.Stop();
+    }
+    {
         QUIC_API_TABLE fakeApi{};
         fakeApi.StreamSend = FakeStreamSend;
         MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
