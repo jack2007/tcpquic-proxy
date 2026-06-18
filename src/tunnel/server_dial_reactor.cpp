@@ -112,6 +112,11 @@ struct TqServerDialReactor::Impl {
         std::chrono::steady_clock::time_point Deadline;
     };
 
+    struct ReadyCompletion {
+        TqServerDialComplete Complete;
+        TqServerDialResult Result;
+    };
+
     TqAcl Acl;
     std::unique_ptr<ITqSocketReactor> Reactor;
     TqAresDnsResolver DnsResolver;
@@ -126,6 +131,7 @@ struct TqServerDialReactor::Impl {
     bool Started{false};
     uint64_t NextToken{1};
     std::unordered_map<uint64_t, std::unique_ptr<DialState>> Pending;
+    std::vector<ReadyCompletion> ReadyCompletions;
 
     explicit Impl(TqAcl acl)
         : Acl(std::move(acl))
@@ -209,39 +215,57 @@ struct TqServerDialReactor::Impl {
     }
 
     uint64_t Submit(TqServerDialRequest request) {
-        std::lock_guard<std::mutex> guard(Lock);
-        if (!Started || request.Host.empty() || request.Port == 0 || !request.Complete) {
-            return 0;
-        }
-
-        auto state = std::make_unique<DialState>();
-        state->Token = NextAvailableToken();
-        state->Request = std::move(request);
-        const uint64_t token = state->Token;
-        Pending.emplace(token, std::move(state));
-
-        std::vector<sockaddr_storage> literalAddrs;
-        if (ParseIpLiteral(Pending[token]->Request.Host, literalAddrs)) {
-            OnResolved(token, literalAddrs, true);
-            return token;
-        }
-
-        const uint64_t dnsId = Resolve(Pending[token]->Request.Host, Pending[token]->Request.Port,
-            [this, token](const TqDnsResolveResult& result) {
-                OnDnsResult(token, result);
-            });
-        if (dnsId == 0) {
-            auto it = Pending.find(token);
-            if (it != Pending.end()) {
-                CleanupState(*it->second, true);
-                Pending.erase(it);
+        uint64_t token = 0;
+        bool needsResolve = false;
+        std::string resolveHost;
+        uint16_t resolvePort = 0;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!Started || request.Host.empty() || request.Port == 0 || !request.Complete) {
+                return 0;
             }
-            return 0;
+
+            auto state = std::make_unique<DialState>();
+            state->Token = NextAvailableToken();
+            state->Request = std::move(request);
+            token = state->Token;
+            Pending.emplace(token, std::move(state));
+
+            std::vector<sockaddr_storage> literalAddrs;
+            if (ParseIpLiteral(Pending[token]->Request.Host, literalAddrs)) {
+                OnResolved(token, literalAddrs, true);
+            } else {
+                resolveHost = Pending[token]->Request.Host;
+                resolvePort = Pending[token]->Request.Port;
+                needsResolve = true;
+            }
         }
-        auto it = Pending.find(token);
-        if (it != Pending.end() && !it->second->DnsCallbackRan) {
-            it->second->DnsId = dnsId;
+
+        if (needsResolve) {
+            const uint64_t dnsId = Resolve(resolveHost, resolvePort,
+                [this, token](const TqDnsResolveResult& result) {
+                    OnDnsResult(token, result);
+                });
+            std::unique_lock<std::mutex> guard(Lock);
+            auto it = Pending.find(token);
+            if (it != Pending.end() && it->second->DnsCallbackRan) {
+                guard.unlock();
+                DrainReadyCompletions();
+                return token;
+            }
+            if (dnsId == 0) {
+                if (it != Pending.end()) {
+                    CleanupState(*it->second, true);
+                    Pending.erase(it);
+                }
+                return 0;
+            }
+            if (it != Pending.end() && !it->second->DnsCallbackRan) {
+                it->second->DnsId = dnsId;
+            }
         }
+
+        DrainReadyCompletions();
         return token;
     }
 
@@ -256,8 +280,13 @@ struct TqServerDialReactor::Impl {
     }
 
     bool RunOnce(int timeoutMs) {
-        std::unique_lock<std::mutex> guard(Lock);
-        return RunOnceUnlocked(timeoutMs, guard);
+        bool didWork = false;
+        {
+            std::unique_lock<std::mutex> guard(Lock);
+            didWork = RunOnceUnlocked(timeoutMs, guard);
+        }
+        DrainReadyCompletions();
+        return didWork;
     }
 
     bool RunOnceUnlocked(int timeoutMs, std::unique_lock<std::mutex>& guard) {
@@ -282,12 +311,13 @@ struct TqServerDialReactor::Impl {
     void RunLoop() {
         for (;;) {
             {
-                std::lock_guard<std::mutex> guard(Lock);
+                std::unique_lock<std::mutex> guard(Lock);
                 if (StopRequested.load(std::memory_order_acquire)) {
                     return;
                 }
+                (void)RunOnceUnlocked(50, guard);
             }
-            (void)RunOnce(50);
+            DrainReadyCompletions();
         }
     }
 #endif
@@ -334,6 +364,10 @@ struct TqServerDialReactor::Impl {
     }
 
     void OnDnsResult(uint64_t token, const TqDnsResolveResult& result) {
+        OnDnsResultUnlocked(token, result);
+    }
+
+    void OnDnsResultUnlocked(uint64_t token, const TqDnsResolveResult& result) {
         auto it = Pending.find(token);
         if (it == Pending.end()) {
             return;
@@ -436,6 +470,10 @@ struct TqServerDialReactor::Impl {
     }
 
     void OnConnectReady(uint64_t token, TqSocketHandle readyFd, uint32_t) {
+        OnConnectReadyUnlocked(token, readyFd);
+    }
+
+    void OnConnectReadyUnlocked(uint64_t token, TqSocketHandle readyFd) {
         auto it = Pending.find(token);
         if (it == Pending.end()) {
             return;
@@ -640,9 +678,9 @@ struct TqServerDialReactor::Impl {
         TqServerDialComplete complete = std::move(state.Request.Complete);
         Pending.erase(it);
         if (complete) {
-            complete(result);
-        } else {
-            CloseOwnedSocket(result.Fd);
+            ReadyCompletions.push_back({std::move(complete), result});
+        } else if (TqSocketValid(result.Fd)) {
+            TqCloseSocket(result.Fd);
         }
     }
 
@@ -662,7 +700,31 @@ struct TqServerDialReactor::Impl {
         TqServerDialComplete complete = std::move(state.Request.Complete);
         Pending.erase(it);
         if (complete) {
-            complete(result);
+            ReadyCompletions.push_back({std::move(complete), result});
+        }
+    }
+
+    void DrainReadyCompletions() {
+        for (;;) {
+            std::vector<ReadyCompletion> completions;
+            {
+                std::lock_guard<std::mutex> guard(Lock);
+                if (ReadyCompletions.empty()) {
+                    return;
+                }
+                completions.swap(ReadyCompletions);
+            }
+            RunReadyCompletions(completions);
+        }
+    }
+
+    void RunReadyCompletions(std::vector<ReadyCompletion>& completions) {
+        for (ReadyCompletion& completion : completions) {
+            if (completion.Complete) {
+                completion.Complete(completion.Result);
+            } else if (TqSocketValid(completion.Result.Fd)) {
+                TqCloseSocket(completion.Result.Fd);
+            }
         }
     }
 

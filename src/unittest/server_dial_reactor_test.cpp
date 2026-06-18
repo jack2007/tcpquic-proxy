@@ -2,6 +2,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -929,6 +931,172 @@ int TestSynchronousDnsSuccessDoesNotCancelCompletedQuery() {
     return 0;
 }
 
+int TestCompletionCanReenterCancel() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 140;
+    }
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.Connect = [](TqSocketHandle, const sockaddr*, socklen_t) {
+        return 0;
+    };
+    hooks.SetBlocking = [](TqSocketHandle) {
+        return true;
+    };
+    auto reactor = std::make_unique<TqServerDialReactor>(AllowAllAcl(), hooks);
+    if (!reactor->Start()) {
+        return 141;
+    }
+
+    bool completed = false;
+    TqServerDialReactor* reactorPtr = reactor.get();
+    uint64_t token = 0;
+    TqServerDialRequest request;
+    request.Host = "127.0.0.1";
+    request.Port = 443;
+    request.Complete = [&](const TqServerDialResult& result) {
+        completed = true;
+        reactorPtr->Cancel(token);
+        if (TqSocketValid(result.Fd)) {
+            TqCloseSocket(result.Fd);
+        }
+    };
+
+    std::future<uint64_t> submit = std::async(std::launch::async, [&]() {
+        return reactorPtr->Submit(std::move(request));
+    });
+    if (submit.wait_for(std::chrono::milliseconds(1000)) != std::future_status::ready) {
+        return 142;
+    }
+    token = submit.get();
+    if (token == 0) {
+        reactor->Stop();
+        return 143;
+    }
+    if (!completed) {
+        reactor->Stop();
+        return 144;
+    }
+    reactor->Stop();
+    return 0;
+}
+
+int TestCompletionCanReenterCancelFromAsyncPath() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 150;
+    }
+
+    sockaddr_storage address{};
+    if (!MakeLoopbackAddress(address, 443)) {
+        return 151;
+    }
+
+    FakeDns fakeDns;
+    fakeDns.Result.Completed = true;
+    fakeDns.Result.Success = true;
+    fakeDns.Result.Addresses.push_back(address);
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.Resolve = [&](const std::string&, uint16_t, TqDnsResolveCallback callback) {
+        return fakeDns.Resolve("", 0, std::move(callback));
+    };
+    hooks.CancelResolve = [&](uint64_t id) {
+        fakeDns.Cancel(id);
+    };
+    hooks.RunDnsOnce = [&](int timeoutMs) {
+        return fakeDns.RunOnce(timeoutMs);
+    };
+    hooks.Connect = [](TqSocketHandle, const sockaddr*, socklen_t) {
+        return 0;
+    };
+    hooks.SetBlocking = [](TqSocketHandle) {
+        return true;
+    };
+
+    TqServerDialReactor reactor(AllowAllAcl(), hooks);
+    if (!reactor.Start()) {
+        return 152;
+    }
+
+    bool completed = false;
+    uint64_t token = 0;
+    TqServerDialRequest request;
+    request.Host = "async-reenter.test";
+    request.Port = 443;
+    request.Complete = [&](const TqServerDialResult& result) {
+        completed = true;
+        reactor.Cancel(token);
+        if (TqSocketValid(result.Fd)) {
+            TqCloseSocket(result.Fd);
+        }
+    };
+
+    token = reactor.Submit(std::move(request));
+    if (token == 0) {
+        reactor.Stop();
+        return 153;
+    }
+    if (!RunUntil(completed, reactor, 1000)) {
+        reactor.Stop();
+        return 154;
+    }
+    reactor.Stop();
+    return 0;
+}
+
+int TestCompletionCallbackDoesNotHoldReactorLock() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 160;
+    }
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.Connect = [](TqSocketHandle, const sockaddr*, socklen_t) {
+        return 0;
+    };
+    hooks.SetBlocking = [](TqSocketHandle) {
+        return true;
+    };
+    auto reactor = std::make_unique<TqServerDialReactor>(AllowAllAcl(), hooks);
+    if (!reactor->Start()) {
+        return 161;
+    }
+
+    std::promise<bool> entered;
+    std::future<bool> enteredFuture = entered.get_future();
+    bool signaled = false;
+    uint64_t token = 0;
+    TqServerDialRequest request;
+    request.Host = "127.0.0.1";
+    request.Port = 443;
+    request.Complete = [&](const TqServerDialResult& result) {
+        signaled = true;
+        entered.set_value(true);
+        if (TqSocketValid(result.Fd)) {
+            TqCloseSocket(result.Fd);
+        }
+    };
+
+    token = reactor->Submit(std::move(request));
+    if (token == 0) {
+        reactor->Stop();
+        return 162;
+    }
+    reactor->Cancel(token);
+    if (enteredFuture.wait_for(std::chrono::milliseconds(1000)) != std::future_status::ready) {
+        reactor->Stop();
+        return 163;
+    }
+    if (!enteredFuture.get() || !signaled) {
+        reactor->Stop();
+        return 164;
+    }
+    reactor->Stop();
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -985,6 +1153,18 @@ int main() {
         return result;
     }
     result = TestSynchronousDnsSuccessDoesNotCancelCompletedQuery();
+    if (result != 0) {
+        return result;
+    }
+    result = TestCompletionCanReenterCancel();
+    if (result != 0) {
+        return result;
+    }
+    result = TestCompletionCanReenterCancelFromAsyncPath();
+    if (result != 0) {
+        return result;
+    }
+    result = TestCompletionCallbackDoesNotHoldReactorLock();
     if (result != 0) {
         return result;
     }
