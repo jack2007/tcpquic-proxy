@@ -133,6 +133,7 @@ if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
         ingress/client_ingress_reactor.cpp
         ingress/client_ingress_state.cpp
+        tunnel/client_tunnel_open.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
