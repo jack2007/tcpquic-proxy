@@ -1,16 +1,14 @@
 #include "client_ingress_reactor.h"
 
 #include "http_connect_server.h"
+#include "listen_socket.h"
+#include "scoped_socket.h"
 #include "socks5_server.h"
 
-#include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
 #include <future>
-#include <limits>
 #include <memory>
-#include <netdb.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
@@ -21,208 +19,11 @@ constexpr int TqMaxIngressAcceptsPerEvent = 64;
 // Avoid reading past the SOCKS/HTTP handshake boundary; payload must remain queued for relay.
 constexpr size_t TqIngressReadBufferSize = 1;
 
-struct TqParsedHostPort {
-    std::string Host;
-    uint16_t Port{};
-};
-
-struct TqListenSocket {
-    int Fd{-1};
-    std::string Address;
-};
-
-class TqScopedFd {
-public:
-    explicit TqScopedFd(int fd = -1) : Fd(fd) {}
-    ~TqScopedFd() { Reset(); }
-
-    TqScopedFd(const TqScopedFd&) = delete;
-    TqScopedFd& operator=(const TqScopedFd&) = delete;
-
-    int Get() const { return Fd; }
-
-    int Release() {
-        const int fd = Fd;
-        Fd = -1;
-        return fd;
+void TqCloseFd(TqSocketHandle& fd) {
+    if (TqSocketValid(fd)) {
+        TqCloseSocket(fd);
+        fd = TqInvalidSocket;
     }
-
-    void Reset(int fd = -1) {
-        if (Fd >= 0) {
-            (void)::close(Fd);
-        }
-        Fd = fd;
-    }
-
-private:
-    int Fd{-1};
-};
-
-void TqCloseFd(int& fd) {
-    if (fd >= 0) {
-        (void)::close(fd);
-        fd = -1;
-    }
-}
-
-bool TqParsePortAllowZero(const std::string& text, uint16_t& port) {
-    if (text.empty()) {
-        return false;
-    }
-
-    unsigned long value = 0;
-    for (char ch : text) {
-        if (ch < '0' || ch > '9') {
-            return false;
-        }
-        value = (value * 10) + static_cast<unsigned long>(ch - '0');
-        if (value > std::numeric_limits<uint16_t>::max()) {
-            return false;
-        }
-    }
-
-    port = static_cast<uint16_t>(value);
-    return true;
-}
-
-bool TqParseHostPortAllowZero(const std::string& target, TqParsedHostPort& out) {
-    if (target.empty() || target.find("://") != std::string::npos) {
-        return false;
-    }
-
-    std::string host;
-    std::string portText;
-    if (target.front() == '[') {
-        const size_t close = target.find(']');
-        if (close == std::string::npos || close + 2 > target.size() || target[close + 1] != ':') {
-            return false;
-        }
-        host = target.substr(1, close - 1);
-        portText = target.substr(close + 2);
-    } else {
-        const size_t colon = target.rfind(':');
-        if (colon == std::string::npos || colon + 1 >= target.size()) {
-            return false;
-        }
-        host = target.substr(0, colon);
-        portText = target.substr(colon + 1);
-        if (host.find(':') != std::string::npos) {
-            return false;
-        }
-    }
-
-    uint16_t port = 0;
-    if (!TqParsePortAllowZero(portText, port)) {
-        return false;
-    }
-
-    out.Host = std::move(host);
-    out.Port = port;
-    return true;
-}
-
-bool TqSetNonBlockingCloseOnExec(int fd) {
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        return false;
-    }
-
-    const int fdFlags = ::fcntl(fd, F_GETFD, 0);
-    if (fdFlags < 0 || ::fcntl(fd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
-        return false;
-    }
-    return true;
-}
-
-bool TqSetReuseAddress(int fd) {
-    int value = 1;
-    return ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value)) == 0;
-}
-
-std::string TqBoundAddressString(int fd, const std::string& requestedHost) {
-    sockaddr_storage storage{};
-    socklen_t length = sizeof(storage);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &length) != 0) {
-        return {};
-    }
-
-    char host[INET6_ADDRSTRLEN]{};
-    uint16_t port = 0;
-    if (storage.ss_family == AF_INET) {
-        const auto* addr = reinterpret_cast<const sockaddr_in*>(&storage);
-        if (::inet_ntop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        port = ntohs(addr->sin_port);
-        return std::string(host) + ":" + std::to_string(port);
-    }
-
-    if (storage.ss_family == AF_INET6) {
-        const auto* addr = reinterpret_cast<const sockaddr_in6*>(&storage);
-        if (::inet_ntop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        port = ntohs(addr->sin6_port);
-        return "[" + std::string(host) + "]:" + std::to_string(port);
-    }
-
-    if (!requestedHost.empty()) {
-        return requestedHost + ":0";
-    }
-    return {};
-}
-
-bool TqCreateNonBlockingListenSocket(const std::string& listen, TqListenSocket& out) {
-    TqParsedHostPort hostPort{};
-    if (!TqParseHostPortAllowZero(listen, hostPort)) {
-        return false;
-    }
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    addrinfo* result = nullptr;
-    const std::string port = std::to_string(hostPort.Port);
-    const int status = ::getaddrinfo(
-        hostPort.Host.empty() ? nullptr : hostPort.Host.c_str(),
-        port.c_str(),
-        &hints,
-        &result);
-    if (status != 0) {
-        return false;
-    }
-
-    for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        int rawFd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC, ai->ai_protocol);
-        TqScopedFd fd(rawFd);
-        if (fd.Get() < 0 && (errno == EINVAL || errno == EPROTONOSUPPORT)) {
-            fd.Reset(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
-            if (fd.Get() >= 0 && !TqSetNonBlockingCloseOnExec(fd.Get())) {
-                fd.Reset();
-                continue;
-            }
-        }
-        if (fd.Get() < 0) {
-            continue;
-        }
-
-        (void)TqSetReuseAddress(fd.Get());
-        if (::bind(fd.Get(), ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd.Get(), SOMAXCONN) == 0) {
-            std::string address = TqBoundAddressString(fd.Get(), hostPort.Host);
-            if (address.empty()) {
-                continue;
-            }
-            out.Fd = fd.Release();
-            out.Address = std::move(address);
-            ::freeaddrinfo(result);
-            return true;
-        }
-    }
-
-    ::freeaddrinfo(result);
-    return false;
 }
 
 TqClientIngressProto TqToIngressProto(bool socks) {
@@ -358,12 +159,12 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
     const bool added = EnqueueSync([this, peer, socks, http]() {
         std::lock_guard<std::mutex> lock(Mutex);
         auto cleanup = [&]() {
-            if (socks->Fd >= 0) {
+            if (TqSocketValid(socks->Fd)) {
                 (void)Reactor.Remove(socks->Fd);
                 Listens.erase(socks->Fd);
                 TqCloseFd(socks->Fd);
             }
-            if (http->Fd >= 0) {
+            if (TqSocketValid(http->Fd)) {
                 (void)Reactor.Remove(http->Fd);
                 Listens.erase(http->Fd);
                 TqCloseFd(http->Fd);
@@ -386,7 +187,7 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
             return false;
         }
 
-        if (http->Fd >= 0) {
+        if (TqSocketValid(http->Fd)) {
             Listens.emplace(http->Fd, ListenEntry{peer.PeerId, ListenProto::HttpConnect});
             if (!Reactor.Add(http->Fd, TqReactorEvents::Read,
                     [this](int fd, uint32_t events) {
@@ -405,8 +206,8 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
         entry.HttpFd = http->Fd;
         entry.SocksAddress = socks->Address;
         entry.HttpAddress = http->Address;
-        socks->Fd = -1;
-        http->Fd = -1;
+        socks->Fd = TqInvalidSocket;
+        http->Fd = TqInvalidSocket;
         Peers.emplace(peer.PeerId, std::move(entry));
         return true;
     });
@@ -524,9 +325,13 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
         int clientFd = ::accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (clientFd < 0 && errno == ENOSYS) {
             clientFd = ::accept(listenFd, nullptr, nullptr);
-            if (clientFd >= 0 && !TqSetNonBlockingCloseOnExec(clientFd)) {
-                TqCloseFd(clientFd);
-                continue;
+            if (clientFd >= 0) {
+                const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
+                if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
+                    ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
+                    TqCloseFd(clientFd);
+                    continue;
+                }
             }
         }
 
@@ -835,7 +640,7 @@ void TqClientIngressReactor::CloseClientLocked(int clientFd, bool closeFd) {
         return;
     }
     if (closeFd) {
-        int fd = clientFd;
+        TqSocketHandle fd = clientFd;
         TqCloseFd(fd);
     }
 }
@@ -855,12 +660,12 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
         return;
     }
 
-    if (it->second.SocksFd >= 0) {
+    if (TqSocketValid(it->second.SocksFd)) {
         (void)Reactor.Remove(it->second.SocksFd);
         Listens.erase(it->second.SocksFd);
         TqCloseFd(it->second.SocksFd);
     }
-    if (it->second.HttpFd >= 0) {
+    if (TqSocketValid(it->second.HttpFd)) {
         (void)Reactor.Remove(it->second.HttpFd);
         Listens.erase(it->second.HttpFd);
         TqCloseFd(it->second.HttpFd);
@@ -881,11 +686,11 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
 
 void TqClientIngressReactor::CloseAllLocked() {
     for (auto& item : Peers) {
-        if (item.second.SocksFd >= 0) {
+        if (TqSocketValid(item.second.SocksFd)) {
             (void)Reactor.Remove(item.second.SocksFd);
             TqCloseFd(item.second.SocksFd);
         }
-        if (item.second.HttpFd >= 0) {
+        if (TqSocketValid(item.second.HttpFd)) {
             (void)Reactor.Remove(item.second.HttpFd);
             TqCloseFd(item.second.HttpFd);
         }

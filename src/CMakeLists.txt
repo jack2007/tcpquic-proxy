@@ -117,6 +117,7 @@ set(TCPQUIC_PROXY_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_PROXY_SOURCES
         ingress/client_ingress_reactor.cpp
+        runtime/listen_socket.cpp
         ingress/client_ingress_state.cpp
         tunnel/server_dial_reactor.cpp
         tunnel/ares_dns_resolver.cpp
@@ -366,6 +367,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/client_ingress_reactor_test.cpp
         unittest/trace_proxy_stub.cpp
         ingress/client_ingress_reactor.cpp
+        runtime/listen_socket.cpp
         ingress/client_ingress_state.cpp
         ingress/socks5_server.cpp
         ingress/http_connect_server.cpp
