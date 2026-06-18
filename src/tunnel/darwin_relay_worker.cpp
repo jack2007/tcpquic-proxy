@@ -8,13 +8,14 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <utility>
 
 namespace {
 constexpr uintptr_t kWakeIdent = 1;
 }
 
 TqDarwinRelayWorker::TqDarwinRelayWorker(const TqDarwinRelayWorkerConfig& config)
-    : Config(config) {}
+    : Config(config), EventQueue(config.EventQueueCapacity) {}
 
 TqDarwinRelayWorker::~TqDarwinRelayWorker() {
     Stop();
@@ -77,6 +78,69 @@ bool TqDarwinRelayWorker::Wake() {
     return true;
 }
 
+bool TqDarwinRelayWorker::EnqueueEvent(TqDarwinRelayEvent&& event) {
+    if (!EventQueue.TryPush(std::move(event))) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    (void)Wake();
+    return true;
+}
+
+#if defined(TCPQUIC_TESTING)
+bool TqDarwinRelayWorker::StartForTest() {
+    Running.store(true, std::memory_order_release);
+    return true;
+}
+
+bool TqDarwinRelayWorker::EnqueueForTest(TqDarwinRelayEvent event) {
+    return EnqueueEvent(std::move(event));
+}
+
+uint32_t TqDarwinRelayWorker::DrainWakeForTest() {
+    return DrainWakeEvents();
+}
+
+bool TqDarwinRelayWorker::RunningForTest() const {
+    return Running.load(std::memory_order_acquire);
+}
+#endif
+
+uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
+    uint32_t processed = 0;
+    TqDarwinRelayEvent event{};
+    while (processed < budget && EventQueue.TryPop(event)) {
+        ++processed;
+        switch (event.Type) {
+        case TqDarwinRelayEventType::Shutdown:
+            Running.store(false, std::memory_order_release);
+            break;
+        case TqDarwinRelayEventType::StopRelay:
+            break;
+        default:
+            break;
+        }
+        event = TqDarwinRelayEvent{};
+    }
+    if (processed > 0) {
+        EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
+    }
+    return processed;
+}
+
+uint32_t TqDarwinRelayWorker::DrainWakeEvents() {
+    uint32_t totalProcessed = 0;
+    const uint32_t budget = Config.EventBudget == 0 ? 1 : Config.EventBudget;
+    for (;;) {
+        const uint32_t processed = DrainEvents(budget);
+        totalProcessed += processed;
+        if (processed < budget || EventQueue.SizeApprox() == 0) {
+            break;
+        }
+    }
+    return totalProcessed;
+}
+
 void TqDarwinRelayWorker::Run() {
     struct kevent events[16];
     while (Running.load(std::memory_order_acquire)) {
@@ -89,9 +153,9 @@ void TqDarwinRelayWorker::Run() {
             continue;
         }
 
-        EventsProcessed.fetch_add(static_cast<uint64_t>(count), std::memory_order_relaxed);
         for (int i = 0; i < count; ++i) {
             if (events[i].filter == EVFILT_USER && events[i].ident == kWakeIdent) {
+                (void)DrainWakeEvents();
                 continue;
             }
         }
@@ -112,6 +176,7 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
     TqDarwinRelayWorkerSnapshot snapshot{};
     snapshot.EventsProcessed = EventsProcessed.load(std::memory_order_relaxed);
     snapshot.Wakeups = Wakeups.load(std::memory_order_relaxed);
+    snapshot.PendingEvents = EventQueue.SizeApprox();
     snapshot.Errors = Errors.load(std::memory_order_relaxed);
     return snapshot;
 }

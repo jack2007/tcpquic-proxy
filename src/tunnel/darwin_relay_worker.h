@@ -3,6 +3,7 @@
 #if defined(__APPLE__)
 
 #include "compress.h"
+#include "darwin_relay_event_queue.h"
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
@@ -72,6 +73,12 @@ public:
 
     bool Start();
     void Stop();
+#if defined(TCPQUIC_TESTING)
+    bool StartForTest();
+    bool EnqueueForTest(TqDarwinRelayEvent event);
+    uint32_t DrainWakeForTest();
+    bool RunningForTest() const;
+#endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
     TqDarwinRelayWorkerSnapshot Snapshot() const;
@@ -84,10 +91,14 @@ public:
 private:
     void Run();
     bool Wake();
+    bool EnqueueEvent(TqDarwinRelayEvent&& event);
+    uint32_t DrainEvents(uint32_t budget);
+    uint32_t DrainWakeEvents();
 
     TqDarwinRelayWorkerConfig Config;
     int KqueueFd{-1};
     std::atomic<bool> Running{false};
+    TqDarwinRelayEventQueue EventQueue;
     std::thread Thread;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> Wakeups{0};
