@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <csignal>
 #include <cerrno>
@@ -62,6 +64,54 @@ void CompleteFakeSends(TqLinuxRelayWorker& worker, MsQuicStream* stream) {
         complete.SEND_COMPLETE.ClientContext = context;
         (void)worker.DispatchStreamEventForTest(stream, &complete);
     }
+}
+
+bool MakeTcpLoopbackPair(int out[2]) {
+    out[0] = -1;
+    out[1] = -1;
+    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listener < 0) {
+        return false;
+    }
+    int reuse = 1;
+    (void)::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(listener, 1) != 0) {
+        ::close(listener);
+        return false;
+    }
+
+    socklen_t addrLen = sizeof(addr);
+    if (::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &addrLen) != 0) {
+        ::close(listener);
+        return false;
+    }
+
+    const int client = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (client < 0) {
+        ::close(listener);
+        return false;
+    }
+    if (::connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        ::close(client);
+        ::close(listener);
+        return false;
+    }
+
+    const int server = ::accept(listener, nullptr, nullptr);
+    ::close(listener);
+    if (server < 0) {
+        ::close(client);
+        return false;
+    }
+    out[0] = server;
+    out[1] = client;
+    return true;
 }
 
 } // namespace
@@ -157,6 +207,62 @@ int main() {
 
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+        int fds[2]{-1, -1};
+        if (!MakeTcpLoopbackPair(fds)) {
+            worker.Stop();
+            return 1;
+        }
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = nullptr;
+        registration.Handle = nullptr;
+        registration.EnableQuicSends = false;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        linger resetLinger{};
+        resetLinger.l_onoff = 1;
+        resetLinger.l_linger = 0;
+        (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &resetLinger, sizeof(resetLinger));
+        ::close(fds[1]);
+
+        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN | EPOLLERR | EPOLLRDHUP)) {
+            worker.Stop();
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.TcpReadHardErrors != 0 || snapshot.FatalRelayResets != 0 ||
+            snapshot.TcpReadClosedRelays != 1) {
+            std::fprintf(stderr,
+                "expected tcp reset during read to close input gracefully, read_errors=%llu "
+                "resets=%llu read_closed=%llu errno=%llu\n",
+                static_cast<unsigned long long>(snapshot.TcpReadHardErrors),
+                static_cast<unsigned long long>(snapshot.FatalRelayResets),
+                static_cast<unsigned long long>(snapshot.TcpReadClosedRelays),
+                static_cast<unsigned long long>(snapshot.LastTcpReadErrno));
+            worker.Stop();
+            return 1;
+        }
+
+        worker.Stop();
     }
 
     {

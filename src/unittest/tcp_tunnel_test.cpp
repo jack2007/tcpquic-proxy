@@ -2,6 +2,9 @@
 #include "quic_session.h"
 #include "speed_test.h"
 #include "relay.h"
+#if defined(__linux__)
+#include "server_dial_reactor.h"
+#endif
 #include "tcp_dialer.h"
 #include "tcp_tunnel.h"
 #include "tunnel_registry.h"
@@ -19,6 +22,10 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount);
 void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context);
 void TqTestDispatchShutdownComplete(TqTunnelContext* context);
 void TqReleaseTestClientOpenOwner(TqTunnelContext* context);
+#if defined(__linux__)
+TqTunnelContext* TqCreateTestServerOpenLegacyPendingTunnel(unsigned* destroyCount);
+bool TqTestCancelServerDialAndHasPending(TqTunnelContext* context);
+#endif
 #endif
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -476,6 +483,24 @@ std::vector<uint8_t> BuildOpenRequestBytes(const char* host, uint16_t port) {
     return encoded;
 }
 
+std::vector<uint8_t> BuildDomainOpenRequestBytes(const char* host, uint16_t port) {
+    TqOpenRequest req{};
+    req.Flags = TQ_FLAG_DNS_REMOTE;
+    req.AddrType = TQ_ADDR_DOMAIN;
+    req.Port = port;
+    const size_t hostLen = std::strlen(host);
+    if (hostLen == 0 || hostLen > 255) {
+        return {};
+    }
+    req.Addr.assign(host, host + hostLen);
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeOpenRequest(req, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
+}
+
 std::vector<uint8_t> BuildSpeedStartBytes(uint32_t sessionId) {
     TqSpeedStart start{};
     start.SessionId = sessionId;
@@ -839,6 +864,303 @@ int TestServerIncomingLoopbackAllowedByEphemeralAuthorizer() {
     if (!DispatchFakeShutdownComplete(deniedStream)) return 268;
     return 0;
 }
+
+#if defined(__linux__)
+int TestLegacyServerOpenCancelKeepsPendingUntilDetachedDialFinishes() {
+    unsigned destroyCount = 0;
+    TqTunnelContext* ctx = TqCreateTestServerOpenLegacyPendingTunnel(&destroyCount);
+    if (ctx == nullptr) return 327;
+
+    TqTestArmSelfDeleteOnShutdown(ctx);
+    if (!TqTestCancelServerDialAndHasPending(ctx)) {
+        TqDestroyTestRegisteredTunnel(ctx);
+        return 328;
+    }
+    TqTestDispatchShutdownComplete(ctx);
+    if (destroyCount != 0) {
+        return 329;
+    }
+    TqDestroyTestRegisteredTunnel(ctx);
+    if (destroyCount != 1) return 330;
+    return 0;
+}
+
+int TestServerOpenCancelDoesNotUseFreedTunnel() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 315;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    struct FakePendingDns {
+        uint64_t Id{0};
+        uint64_t CancelledId{0};
+        std::string Host;
+        uint16_t Port{0};
+        TqDnsResolveCallback Callback;
+    } dns;
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.Resolve = [&dns](
+                       const std::string& host,
+                       uint16_t port,
+                       TqDnsResolveCallback callback) {
+        dns.Id = 77;
+        dns.Host = host;
+        dns.Port = port;
+        dns.Callback = std::move(callback);
+        return dns.Id;
+    };
+    hooks.CancelResolve = [&dns](uint64_t id) {
+        dns.CancelledId = id;
+        if (dns.Id == id) {
+            dns.Id = 0;
+            dns.Callback = {};
+        }
+    };
+    hooks.RunDnsOnce = [](int) {
+        return false;
+    };
+
+    TqAcl reactorAcl;
+    reactorAcl.AllowCidrs.push_back("127.0.0.0/8");
+    TqServerDialReactor reactor(reactorAcl, std::move(hooks));
+    if (!reactor.Start()) return 316;
+    TqSetServerDialReactor(&reactor);
+
+    TqAcl tunnelAcl;
+    tunnelAcl.AllowCidrs.push_back("10.0.0.0/8");
+    TqConfig cfg{};
+    bool completed = false;
+    bool aclDenied = false;
+    auto* conn = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x7201));
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7202));
+    TqHandleServerIncomingStream(
+        conn,
+        rawStream,
+        tunnelAcl,
+        cfg,
+        nullptr,
+        [&completed]() { completed = true; },
+        [&aclDenied]() { aclDenied = true; });
+
+    const std::vector<uint8_t> openBytes =
+        BuildDomainOpenRequestBytes("cancel.test", 443);
+    if (openBytes.empty()) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 317;
+    }
+
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(openBytes.size()),
+        const_cast<uint8_t*>(openBytes.data()),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, event)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 318;
+    }
+
+    if (dns.Host != "cancel.test") {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 319;
+    }
+    if (dns.Port != 443) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 320;
+    }
+    if (aclDenied) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 321;
+    }
+
+    if (TqAbortConnectionTunnels(conn) != 1) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 322;
+    }
+    if (dns.CancelledId != 77) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 323;
+    }
+
+    if (!DispatchFakeShutdownComplete(rawStream)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 324;
+    }
+    if (!completed) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 325;
+    }
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (WaitForFakeSend(rawStream, responseBytes, responseFlags, 100)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        return 326;
+    }
+
+    TqSetServerDialReactor(nullptr);
+    reactor.Stop();
+    return 0;
+}
+
+int TestServerOpenReactorAllowsEphemeralLoopback() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 331;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+    bool handedOutFd = false;
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.CreateSocket = [&fds, &handedOutFd](int, int, int) {
+        if (handedOutFd || !TqSocketPair(fds)) {
+            return TqInvalidSocket;
+        }
+        handedOutFd = true;
+        return fds[0];
+    };
+    hooks.SetNonBlocking = [](TqSocketHandle) {
+        return true;
+    };
+    hooks.Connect = [](TqSocketHandle, const sockaddr*, socklen_t) {
+        return 0;
+    };
+
+    TqAcl reactorAcl;
+    reactorAcl.AllowCidrs.push_back("10.0.0.0/8");
+    TqServerDialReactor reactor(reactorAcl, std::move(hooks));
+    if (!reactor.Start()) return 332;
+    TqSetServerDialReactor(&reactor);
+
+    TqAcl tunnelAcl;
+    tunnelAcl.AllowCidrs.push_back("10.0.0.0/8");
+    TqConfig cfg{};
+    FakeEphemeralTargetAuthorizer authorizer("127.0.0.1", 443);
+    bool completed = false;
+    bool aclDenied = false;
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7203));
+    TqHandleServerIncomingStreamForTest(
+        nullptr,
+        rawStream,
+        tunnelAcl,
+        cfg,
+        &authorizer,
+        [&completed]() { completed = true; },
+        [&aclDenied]() { aclDenied = true; });
+
+    const std::vector<uint8_t> openBytes = BuildOpenRequestBytes("127.0.0.1", 443);
+    if (openBytes.empty()) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 333;
+    }
+
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(openBytes.size()),
+        const_cast<uint8_t*>(openBytes.data()),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, event)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 334;
+    }
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 335;
+    }
+
+    TqOpenResponse response{};
+    if (!TqDecodeOpenResponse(responseBytes.data(), responseBytes.size(), response)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 336;
+    }
+    if (!response.Ok || response.Error != TqOpenError::Ok) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 337;
+    }
+    if (aclDenied) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 338;
+    }
+    if (responseFlags != QUIC_SEND_FLAG_NONE) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 339;
+    }
+
+    MsQuicStream* wrappedStream = LookupFakeMsQuicStream(rawStream);
+    TqTunnelContext* tunnelContext = LookupFakeTunnelContext(rawStream);
+    if (wrappedStream == nullptr || tunnelContext == nullptr) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 340;
+    }
+    if (!DispatchFakeSendComplete(rawStream)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 341;
+    }
+    if (!ReapPreparedFakeTunnel(wrappedStream, tunnelContext)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 342;
+    }
+    if (!DispatchFakeShutdownComplete(rawStream)) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 343;
+    }
+    if (!completed) {
+        TqSetServerDialReactor(nullptr);
+        reactor.Stop();
+        if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+        return 344;
+    }
+
+    TqSetServerDialReactor(nullptr);
+    reactor.Stop();
+    if (TqSocketValid(fds[1])) TqCloseSocket(fds[1]);
+    return 0;
+}
+#endif
 
 int TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort() {
     TqSocketStartup startup;
@@ -1302,6 +1624,11 @@ int main() {
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
+#if defined(__linux__)
+    if (int rc = TestLegacyServerOpenCancelKeepsPendingUntilDetachedDialFinishes()) return rc;
+    if (int rc = TestServerOpenCancelDoesNotUseFreedTunnel()) return rc;
+    if (int rc = TestServerOpenReactorAllowsEphemeralLoopback()) return rc;
+#endif
     if (int rc = TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort()) return rc;
     if (int rc = TestServerIncomingSpeedControlDispatchesToController()) return rc;
     if (int rc = TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort()) return rc;

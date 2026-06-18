@@ -76,10 +76,10 @@ int main() {
         if (usage.find("--download-sink-test") != std::string::npos) return 137;
         if (usage.find("--enable-encrypt") == std::string::npos) return 138;
         if (usage.find("--disable-1rtt-encryption") != std::string::npos) return 139;
-        if (usage.find("--relay-inflight-bytes") != std::string::npos) return 144;
-        if (usage.find("--relay-io-size <bytes>      Windows relay IO buffer size") == std::string::npos) return 145;
+        if (usage.find("--relay-inflight-bytes <n>") == std::string::npos) return 144;
+        if (usage.find("--relay-io-size <bytes>      Override relay IO size") == std::string::npos) return 145;
         if (usage.find("Linux relay TCP read chunk size") == std::string::npos) return 146;
-        if (usage.find("--max-memory-mb") != std::string::npos) return 149;
+        if (usage.find("--max-memory-mb <n>") == std::string::npos) return 149;
     }
     {
         std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","http_listen":"127.0.0.1:18001","quic_connections":4,"compress":"auto","enabled":true}]})json");
@@ -472,8 +472,34 @@ int main() {
             "ca.crt"};
         TqConfig cfg;
         std::string err;
-        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 147;
-        if (err.find("unknown option: --relay-inflight-bytes") == std::string::npos) return 148;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 147;
+        if (cfg.TuningOverrideRelayInflightBytes != 1048576) return 148;
+        if (cfg.Tuning.RelayDefaultIdealSend != 1048576) return 149;
+        if (cfg.Tuning.RelayMaxInFlightSends < 1) return 150;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:4433",
+            "--relay-inflight-bytes",
+            "1073741824",
+            "--relay-io-size",
+            "1048576",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key",
+            "--ca",
+            "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
+        if (cfg.Tuning.RelayMaxInFlightSends != 1024) return 157;
+        if (cfg.Tuning.TcpSocketBufferBytes != 64 * 1024 * 1024) return 158;
+        if (cfg.Tuning.LinuxRelayPerTunnelPendingBytes != 512ull * 1024 * 1024) return 159;
+        if (cfg.Tuning.InitialQuicReadAheadBytes != 512ull * 1024 * 1024) return 160;
     }
     {
         const char* args[] = {
@@ -493,8 +519,8 @@ int main() {
             "ca.crt"};
         TqConfig cfg;
         std::string err;
-        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 150;
-        if (err.find("unknown option: --max-memory-mb") == std::string::npos) return 151;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 151;
+        if (cfg.MaxMemoryMb != 4096) return 152;
     }
     {
         std::string file = WriteTempConfig(R"json({

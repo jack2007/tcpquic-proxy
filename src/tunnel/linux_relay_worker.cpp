@@ -164,6 +164,10 @@ uint64_t PendingTcpWriteBytes(const std::deque<TqBufferView>& writes) {
     return bytes;
 }
 
+bool IsTcpReadGracefulCloseError(int error) {
+    return error == ECONNRESET;
+}
+
 void LogLinuxRelayError(
     const char* reason,
     uint64_t relayId,
@@ -1105,6 +1109,16 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+        if (IsTcpReadGracefulCloseError(errno)) {
+            if (!relay->TcpReadClosed) {
+                relay->TcpReadClosed = true;
+                ArmTcpReadable(relay, false);
+                if (!FinishTcpToQuic(relay)) {
+                    SetRelayStop(relay, "tcp_read_reset_quic_fin_failed");
+                }
+            }
             break;
         }
         const uint64_t savedErrno = static_cast<uint64_t>(errno);

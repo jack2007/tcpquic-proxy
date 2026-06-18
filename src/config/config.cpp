@@ -357,6 +357,10 @@ private:
             if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
             if (key == "io_size") {
                 if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
+            } else if (key == "inflight_bytes") {
+                if (!ParseNonZeroUint32(
+                        cfg.TuningOverrideRelayInflightBytes,
+                        "relay.inflight_bytes")) return false;
             } else if (key == "initial_quic_read_ahead") {
                 if (!ParseNonZeroUint32(
                         cfg.TuningOverrideInitialQuicReadAheadBytes,
@@ -961,7 +965,9 @@ void TqPrintUsage(FILE* out) {
         "  --tuning <mode>              auto|lan|wan|custom (default wan)\n"
         "  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP\n"
         "  --target-rtt-ms <n>          Target RTT for auto/custom BDP\n"
-        "  --relay-io-size <bytes>      Windows relay IO buffer size\n"
+        "  --max-memory-mb <n>          Cap relay pool memory across tunnels\n"
+        "  --relay-io-size <bytes>      Override relay IO size\n"
+        "  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes\n"
         "  --initial-quic-read-ahead <bytes>\n"
         "                              Initial/minimum read-ahead bytes (default 1048576)\n"
         "  --linux-relay-read-chunk-size <bytes>\n"
@@ -1353,6 +1359,17 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --target-rtt-ms";
                 return false;
             }
+        } else if (GetOptionValue(arg, "--max-memory-mb", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--max-memory-mb", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.MaxMemoryMb) || cfg.MaxMemoryMb == 0) {
+                err = "invalid value for --max-memory-mb";
+                return false;
+            }
         } else if (GetOptionValue(arg, "--relay-io-size", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--relay-io-size", err);
@@ -1362,6 +1379,18 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayIoSize)) {
                 err = "invalid value for --relay-io-size";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-inflight-bytes", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-inflight-bytes", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideRelayInflightBytes) ||
+                cfg.TuningOverrideRelayInflightBytes == 0) {
+                err = "invalid value for --relay-inflight-bytes";
                 return false;
             }
         } else if (GetOptionValue(arg, "--initial-quic-read-ahead", value)) {

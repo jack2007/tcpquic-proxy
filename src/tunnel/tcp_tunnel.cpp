@@ -1,10 +1,14 @@
 #include "tcp_tunnel.h"
 
+#include "client_tunnel_open.h"
 #include "compress.h"
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "quic_session.h"
 #include "relay.h"
+#if defined(__linux__)
+#include "server_dial_reactor.h"
+#endif
 #include "speed_test.h"
 #include "tcp_dialer.h"
 #include "trace.h"
@@ -36,6 +40,16 @@ namespace {
 
 constexpr auto TqOpenTimeout = std::chrono::seconds(10);
 constexpr int TqTcpDialTimeoutMs = 10 * 1000;
+
+std::atomic<TqServerDialReactor*> g_serverDialReactor{nullptr};
+
+TqServerDialReactor* TqGetServerDialReactor() {
+#if defined(__linux__)
+    return g_serverDialReactor.load(std::memory_order_acquire);
+#else
+    return nullptr;
+#endif
+}
 
 struct TqTunnelSendContext {
     QUIC_BUFFER Buffer;
@@ -255,6 +269,65 @@ bool TqResolveAllowedTarget(
 
 } // namespace
 
+struct TqClientTunnelOpenHandle final {
+    enum class State {
+        Opening,
+        OpenSucceeded,
+        OpenFailed,
+        Accepted,
+        Rejected,
+        Cancelled,
+    };
+
+    std::mutex Lock;
+    TqTunnelContext* Context{nullptr};
+    TqClientTunnelOpenComplete OnComplete;
+    TqTunnelStartResult Result{};
+    State OpenState{State::Opening};
+    std::atomic<unsigned> RefCount{1};
+};
+
+void TqRetainClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+    handle->RefCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TqReleaseClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+    if (handle->RefCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete handle;
+    }
+}
+
+void TqNotifyClientTunnelOpenComplete(
+    TqClientTunnelOpenHandle* handle,
+    TqTunnelStartResult result) {
+    if (handle == nullptr) {
+        return;
+    }
+
+    TqClientTunnelOpenComplete onComplete;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState != TqClientTunnelOpenHandle::State::Opening) {
+            return;
+        }
+        handle->OpenState = result.Ok
+            ? TqClientTunnelOpenHandle::State::OpenSucceeded
+            : TqClientTunnelOpenHandle::State::OpenFailed;
+        handle->Result = result;
+        onComplete = std::move(handle->OnComplete);
+    }
+
+    if (onComplete) {
+        onComplete(handle, result);
+    }
+}
+
 struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
@@ -288,6 +361,7 @@ public:
     }
 
     ~TqTunnelContext() {
+        (void)CancelServerDialAndMaybeDelete();
         UnregisterFromConnection();
         EmitTraceClosed();
         if (OnComplete) {
@@ -311,6 +385,13 @@ public:
 
     void SetStream(MsQuicStream* stream) {
         Stream = stream;
+    }
+
+    void SetAsyncClientOpenHandle(TqClientTunnelOpenHandle* handle, uint8_t flags) {
+        std::lock_guard<std::mutex> guard(Lock);
+        AsyncClientOpenHandle = handle;
+        AsyncClientOpenFlags = flags;
+        TqRetainClientTunnelOpenHandle(handle);
     }
 
     bool SendOpenRequest(const TqOpenRequest& req) {
@@ -414,8 +495,41 @@ public:
     }
 
     void CloseTcp() {
+        (void)CancelServerDialAndMaybeDelete();
         std::lock_guard<std::mutex> guard(Lock);
         CloseTcpLocked();
+    }
+
+    bool CancelServerDialAndMaybeDelete() {
+#if defined(__linux__)
+        TqServerDialReactor* reactor = nullptr;
+        uint64_t token = 0;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!ServerDialPendingWithReactor && !ServerDialCallbackActive) {
+                return ShouldDeletePreRelayLocked();
+            }
+            reactor = ServerDialReactor;
+            token = ServerDialToken;
+        }
+        if (reactor != nullptr && token != 0) {
+            reactor->Cancel(token);
+        }
+
+        std::lock_guard<std::mutex> guard(Lock);
+        if (ServerDialPendingWithReactor && ServerDialReactor == reactor &&
+            ServerDialToken == token) {
+            ServerDialReactor = nullptr;
+            ServerDialToken = 0;
+            ServerDialPendingWithReactor = false;
+            if (!ServerDialCallbackActive) {
+                PendingServerOpen = false;
+            }
+        }
+        return ShouldDeletePreRelayLocked();
+#else
+        return false;
+#endif
     }
 
     void TraceRelayStopping(const char* reason) {
@@ -470,6 +584,173 @@ public:
         return ShouldDeletePreRelayLocked();
     }
 
+    bool CancelAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterCancel = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterCancel = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        return deleteAfterCancel;
+    }
+
+    bool AbandonAsyncClientOpenWithoutClosingTcp(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterAbandon = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            TcpFd = TqInvalidSocket;
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterAbandon = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        return deleteAfterAbandon;
+    }
+
+    bool AcceptAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            AsyncClientOpenAccepted = true;
+            SelfDeleteOnShutdown = true;
+            PendingClientRelay = true;
+            PendingClientRelayFlags = AsyncClientOpenFlags;
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        if (StartPendingClientRelay()) {
+            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
+                delete this;
+            }
+            return true;
+        }
+        if (IsPendingClientRelayWaitingForOpenSendComplete()) {
+            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
+                delete this;
+            }
+            return true;
+        }
+        if (AbortAcceptedClientOpenBeforeRelay()) {
+            delete this;
+        }
+        return false;
+    }
+
+    bool RejectAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterReject = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterReject = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        if (deleteAfterReject) {
+            delete this;
+        }
+        return true;
+    }
+
+    bool IsPendingClientRelayWaitingForOpenSendComplete() {
+        std::lock_guard<std::mutex> guard(Lock);
+        return AsyncClientOpenAccepted && PendingClientRelay && !OpenSendComplete &&
+            !RelayStarted && !ShutdownComplete && !StreamShutdownQueued;
+    }
+
+    bool AbortAcceptedClientOpenBeforeRelay() {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterAbort = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!AsyncClientOpenAccepted || RelayStarted || ShutdownComplete ||
+                StreamShutdownQueued) {
+                return false;
+            }
+            PendingClientRelay = false;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterAbort = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        return deleteAfterAbort;
+    }
+
     bool FinishClientOpenAndStartRelay(uint8_t flags) {
         {
             std::lock_guard<std::mutex> guard(Lock);
@@ -506,6 +787,23 @@ public:
     void ResumeServerOpenFromBufferedData() {
         TryHandleServerOpen();
     }
+
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(__linux__)
+    void TestMarkLegacyServerOpenPending() {
+        std::lock_guard<std::mutex> guard(Lock);
+        PendingServerOpen = true;
+        ServerDialReactor = nullptr;
+        ServerDialToken = 0;
+        ServerDialCallbackActive = false;
+        ServerDialPendingWithReactor = false;
+    }
+
+    bool TestCancelServerDialAndHasPending() {
+        (void)CancelServerDialAndMaybeDelete();
+        std::lock_guard<std::mutex> guard(Lock);
+        return PendingServerOpen;
+    }
+#endif
 
     void RegisterWithConnectionIfNeeded() {
         if (QuicConn != nullptr && !RegisteredWithConnection) {
@@ -544,6 +842,7 @@ public:
             }
             CloseTcpLocked();
         }
+        (void)CancelServerDialAndMaybeDelete();
         StateChanged.notify_all();
 
         if (stopRelay) {
@@ -596,17 +895,21 @@ private:
                     std::lock_guard<std::mutex> guard(Lock);
                     OpenSendComplete = true;
                 }
-                StartPendingClientRelay();
+                if (!StartPendingClientRelay()) {
+                    deleteAfterEvent = AbortAcceptedClientOpenBeforeRelay();
+                }
             }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
+            (void)CancelServerDialAndMaybeDelete();
             if (Role == TqTunnelRole::ClientOpen) {
                 TryCompleteClientOpen();
             }
             CompleteOpen(false, TqOpenResponse{false, TqOpenError::Internal, 0});
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+            (void)CancelServerDialAndMaybeDelete();
             if (Role == TqTunnelRole::ClientOpen) {
                 TryCompleteClientOpen();
             }
@@ -663,6 +966,112 @@ private:
         CompleteOpen(ok && response.Ok, response);
     }
 
+#if defined(__linux__)
+    bool BeginServerDialCallback(
+        TqServerDialReactor* reactor,
+        const TqServerDialResult& result) {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (!PendingServerOpen || ServerDialReactor != reactor) {
+            if (TqSocketValid(result.Fd)) {
+                TqCloseSocket(result.Fd);
+            }
+            return false;
+        }
+        ServerDialCallbackActive = true;
+        ServerDialToken = 0;
+        ServerDialPendingWithReactor = true;
+        return true;
+    }
+
+    void TryHandleServerOpenWithReactor(
+        const TqOpenRequest& req,
+        const std::string& host,
+        TqServerDialReactor* reactor) {
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingServerOpen = true;
+            ServerDialReactor = reactor;
+            ServerDialToken = 0;
+            ServerDialCallbackActive = false;
+            ServerDialPendingWithReactor = true;
+        }
+        if (ServerOpenDispatched.exchange(true, std::memory_order_acq_rel)) {
+            bool deleteAfterDuplicate = false;
+            {
+                std::lock_guard<std::mutex> guard(Lock);
+                PendingServerOpen = false;
+                ServerDialReactor = nullptr;
+                ServerDialToken = 0;
+                ServerDialPendingWithReactor = false;
+                deleteAfterDuplicate = ShouldDeletePreRelayLocked();
+            }
+            if (deleteAfterDuplicate) {
+                delete this;
+            }
+            return;
+        }
+
+        if (TraceTunnelId != 0) {
+            TqTraceTargetTcpDialing(TraceTunnelId, TraceTarget.c_str());
+        }
+
+        TqServerDialRequest dialRequest;
+        dialRequest.Host = host;
+        dialRequest.Port = req.Port;
+        dialRequest.TraceTunnelId = TraceTunnelId;
+        dialRequest.BypassAclForAuthorizedLoopback =
+            TqIsAllowedEphemeralLoopbackTarget(req, host, Authorizer);
+        dialRequest.Complete =
+            [this, reactor, req](const TqServerDialResult& result) {
+                if (!BeginServerDialCallback(reactor, result)) {
+                    return;
+                }
+                FinishServerOpenAfterReactorDial(req, result);
+                ServerOpenFinished();
+            };
+
+        const uint64_t token = reactor->Submit(std::move(dialRequest));
+        if (token == 0) {
+            bool sendFailure = false;
+            bool deleteAfterSubmitFailure = false;
+            {
+                std::lock_guard<std::mutex> guard(Lock);
+                if (PendingServerOpen && ServerDialReactor == reactor &&
+                    !ServerDialCallbackActive) {
+                    PendingServerOpen = false;
+                    ServerDialReactor = nullptr;
+                    ServerDialToken = 0;
+                    ServerDialPendingWithReactor = false;
+                    sendFailure = !AbortedByConnection && !ShutdownComplete &&
+                        !StreamShutdownQueued;
+                    deleteAfterSubmitFailure = ShouldDeletePreRelayLocked();
+                }
+            }
+            if (sendFailure) {
+                SendOpenFailure(TqOpenError::Internal);
+            }
+            if (deleteAfterSubmitFailure) {
+                delete this;
+            }
+            return;
+        }
+
+        bool cancelReturnedToken = false;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (PendingServerOpen && ServerDialReactor == reactor &&
+                !ServerDialCallbackActive) {
+                ServerDialToken = token;
+            } else {
+                cancelReturnedToken = true;
+            }
+        }
+        if (cancelReturnedToken) {
+            reactor->Cancel(token);
+        }
+    }
+#endif
+
     void TryHandleServerOpen() {
         if (ServerOpenDispatched.load(std::memory_order_acquire)) {
             return;
@@ -699,6 +1108,13 @@ private:
             TqTraceIncOpenRx(connId);
         }
 
+#if defined(__linux__)
+        if (TqServerDialReactor* reactor = TqGetServerDialReactor()) {
+            TryHandleServerOpenWithReactor(req, host, reactor);
+            return;
+        }
+#endif
+
         std::vector<sockaddr_storage> addrs;
         TqOpenError error = TqOpenError::Internal;
         if (Acl == nullptr || !TqResolveAllowedTarget(req, *Acl, Authorizer, addrs, error)) {
@@ -732,6 +1148,69 @@ private:
             ServerOpenFinished();
         }).detach();
     }
+
+#if defined(__linux__)
+    void FinishServerOpenAfterReactorDial(
+        TqOpenRequest req,
+        const TqServerDialResult& result) {
+        if (!result.Done || result.Error != TqOpenError::Ok ||
+            !TqSocketValid(result.Fd)) {
+            const TqOpenError error = result.Done ? result.Error : TqOpenError::Internal;
+            if (TraceTunnelId != 0) {
+                TqTraceTargetTcpFailed(TraceTunnelId, error);
+            }
+            if (error == TqOpenError::AclDenied && OnAclDenied) {
+                OnAclDenied();
+            }
+            SendOpenFailure(error);
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            TcpFd = result.Fd;
+            if (AbortedByConnection || ShutdownComplete) {
+                CloseTcpLocked();
+                return;
+            }
+            if (TraceTunnelId != 0) {
+                TraceTargetTcpOpen = true;
+                TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
+            }
+        }
+
+        if (IsAbortedOrShutdown()) {
+            CloseTcp();
+            return;
+        }
+
+        std::vector<uint8_t> encoded;
+        const uint32_t connId =
+            QuicConn != nullptr ? TqLookupServerConnectionId(QuicConn) : 0;
+        if (IsAbortedOrShutdown()) {
+            CloseTcp();
+            return;
+        }
+        const bool encodedOk = TqEncodeOpenResponse(
+            TqOpenResponse{true, TqOpenError::Ok, connId},
+            encoded);
+        const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
+        if (!sendOk) {
+            if (!IsAbortedOrShutdown()) {
+                SendOpenFailure(TqOpenError::Internal);
+            }
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AbortedByConnection || ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
+            PendingServerRelay = true;
+            PendingServerRelayFlags = req.Flags;
+        }
+    }
+#endif
 
     void FinishServerOpenAfterDial(
         TqOpenRequest req,
@@ -806,6 +1285,10 @@ private:
         {
             std::lock_guard<std::mutex> guard(Lock);
             PendingServerOpen = false;
+            ServerDialToken = 0;
+            ServerDialReactor = nullptr;
+            ServerDialCallbackActive = false;
+            ServerDialPendingWithReactor = false;
             deleteAfterFinish = ShouldDeletePreRelayLocked();
         }
         if (deleteAfterFinish) {
@@ -892,6 +1375,27 @@ private:
             TqTraceOpenResult(TraceTunnelId, ok && response.Ok, response.Error, response.ConnId);
         }
         StateChanged.notify_all();
+        CompleteAsyncClientOpenIfNeeded(ok, response);
+    }
+
+    void CompleteAsyncClientOpenIfNeeded(bool ok, const TqOpenResponse& response) {
+        TqClientTunnelOpenHandle* handle = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (Role != TqTunnelRole::ClientOpen || AsyncClientOpenHandle == nullptr) {
+                return;
+            }
+            handle = AsyncClientOpenHandle;
+            TqRetainClientTunnelOpenHandle(handle);
+        }
+
+        const TqTunnelStartResult result{
+            ok && response.Ok,
+            response.Error,
+            TraceTunnelId,
+        };
+        TqNotifyClientTunnelOpenComplete(handle, result);
+        TqReleaseClientTunnelOpenHandle(handle);
     }
 
     void EmitTraceClosed() {
@@ -981,6 +1485,12 @@ private:
     bool PendingServerOpen{false};
     bool PendingServerRelay{false};
     uint8_t PendingServerRelayFlags{0};
+#if defined(__linux__)
+    TqServerDialReactor* ServerDialReactor{nullptr};
+    uint64_t ServerDialToken{0};
+    bool ServerDialCallbackActive{false};
+    bool ServerDialPendingWithReactor{false};
+#endif
     bool PendingClientRelay{false};
     uint8_t PendingClientRelayFlags{0};
     bool OpenSendComplete{false};
@@ -988,6 +1498,9 @@ private:
     bool RegisteredWithConnection{false};
     bool AbortedByConnection{false};
     bool ClientOpenOwnerActive{Role == TqTunnelRole::ClientOpen};
+    TqClientTunnelOpenHandle* AsyncClientOpenHandle{nullptr};
+    uint8_t AsyncClientOpenFlags{0};
+    bool AsyncClientOpenAccepted{false};
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
@@ -1114,12 +1627,184 @@ TqTunnelStartResult TqStartClientTunnelInternal(
 
 } // namespace
 
+void TqSetServerDialReactor(TqServerDialReactor* reactor) {
+    g_serverDialReactor.store(reactor, std::memory_order_release);
+}
+
 TqTunnelStartResult TqStartClientTunnel(
     MsQuicConnection* conn,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg) {
     return TqStartClientTunnelInternal(conn, req, clientTcpFd, cfg, false, nullptr);
+}
+
+TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg,
+    TqClientTunnelOpenComplete onComplete) {
+    if (!TqSocketValid(clientTcpFd)) {
+        return nullptr;
+    }
+
+    if (conn == nullptr || !conn->IsValid()) {
+        return nullptr;
+    }
+
+    TqOpenRequest openReq{};
+    if (!TqBuildOpenRequest(req, cfg, openReq)) {
+        return nullptr;
+    }
+
+    auto* handle = new (std::nothrow) TqClientTunnelOpenHandle();
+    if (handle == nullptr) {
+        return nullptr;
+    }
+    handle->OnComplete = std::move(onComplete);
+
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        clientTcpFd,
+        cfg,
+        nullptr,
+        nullptr,
+        conn,
+        false,
+        nullptr);
+    if (context == nullptr) {
+        delete handle;
+        return nullptr;
+    }
+
+    auto* stream = new (std::nothrow) MsQuicStream(
+        *conn,
+        QUIC_STREAM_OPEN_FLAG_NONE,
+        CleanUpAutoDelete,
+        TqTunnelContext::Callback,
+        context);
+    if (stream == nullptr || !stream->IsValid()) {
+        delete stream;
+        delete context;
+        delete handle;
+        return nullptr;
+    }
+
+    context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
+
+    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
+    const uint32_t connId = TqLookupClientTraceConnId(conn);
+    const uint64_t tunnelId =
+        TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
+    context->AssignTrace(tunnelId, target);
+    context->SetIngressTraceProto(req.IngressTraceProto);
+
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        handle->Context = context;
+    }
+    context->SetAsyncClientOpenHandle(handle, openReq.Flags);
+
+    if (!context->SendOpenRequest(openReq)) {
+        std::fprintf(stderr, "tcpquic-proxy: async client tunnel failed to send open request\n");
+        bool deleteContext = false;
+        {
+            std::lock_guard<std::mutex> guard(handle->Lock);
+            handle->OpenState = TqClientTunnelOpenHandle::State::Cancelled;
+            handle->Context = nullptr;
+        }
+        if (context->AbandonAsyncClientOpenWithoutClosingTcp(handle)) {
+            deleteContext = true;
+        }
+        TqReleaseClientTunnelOpenHandle(handle);
+        if (deleteContext) {
+            delete context;
+        }
+        return nullptr;
+    }
+
+    return handle;
+}
+
+void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+
+    TqTunnelContext* context = nullptr;
+    bool releaseUser = false;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState == TqClientTunnelOpenHandle::State::Accepted ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Rejected ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Cancelled) {
+            return;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Cancelled;
+        context = handle->Context;
+        handle->Context = nullptr;
+        releaseUser = true;
+    }
+
+    if (context != nullptr && context->CancelAsyncClientOpen(handle)) {
+        delete context;
+    }
+    if (releaseUser) {
+        TqReleaseClientTunnelOpenHandle(handle);
+    }
+}
+
+bool TqAcceptClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return false;
+    }
+
+    TqTunnelContext* context = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState != TqClientTunnelOpenHandle::State::OpenSucceeded ||
+            handle->Context == nullptr) {
+            return false;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Accepted;
+        context = handle->Context;
+        handle->Context = nullptr;
+    }
+
+    const bool accepted = context->AcceptAsyncClientOpen(handle);
+    TqReleaseClientTunnelOpenHandle(handle);
+    return accepted;
+}
+
+void TqRejectClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+
+    TqTunnelContext* context = nullptr;
+    bool releaseUser = false;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState == TqClientTunnelOpenHandle::State::Accepted ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Rejected ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Cancelled) {
+            return;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Rejected;
+        context = handle->Context;
+        handle->Context = nullptr;
+        releaseUser = true;
+    }
+
+    if (context != nullptr) {
+        (void)context->RejectAsyncClientOpen(handle);
+    }
+    if (releaseUser) {
+        TqReleaseClientTunnelOpenHandle(handle);
+    }
 }
 
 TqTunnelStartResult TqStartClientTunnelReceiveSink(
@@ -1511,6 +2196,39 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
         nullptr,
         std::move(onComplete));
 }
+
+#if defined(__linux__)
+TqTunnelContext* TqCreateTestServerOpenLegacyPendingTunnel(unsigned* destroyCount) {
+    TqConfig cfg;
+    auto onComplete = [destroyCount]() {
+        if (destroyCount != nullptr) {
+            ++(*destroyCount);
+        }
+    };
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ServerOpen,
+        nullptr,
+        TqInvalidSocket,
+        cfg,
+        nullptr,
+        nullptr,
+        nullptr,
+        false,
+        nullptr,
+        std::move(onComplete));
+    if (context != nullptr) {
+        context->TestMarkLegacyServerOpenPending();
+    }
+    return context;
+}
+
+bool TqTestCancelServerDialAndHasPending(TqTunnelContext* context) {
+    if (context == nullptr) {
+        return false;
+    }
+    return context->TestCancelServerDialAndHasPending();
+}
+#endif
 
 void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context) {
     if (context != nullptr) {

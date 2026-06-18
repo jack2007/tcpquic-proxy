@@ -8,7 +8,7 @@
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| 主程序 | `build/bin/Release/tcpquic-proxy` | client / server 代理二进制（**静态链入 msquic + quictls + zstd + spdlog**） |
+| 主程序 | `build/bin/Release/tcpquic-proxy` | client / server 代理二进制（**静态链入 msquic + quictls + zstd + c-ares + spdlog**） |
 | msquic 静态库（中间产物） | `build/msquic/bin/Release/libmsquic.a` | 单体归档库，已链入主程序，部署无需拷贝 |
 | 单元测试 | `build/bin/Release/tcpquic_*_test` | 各模块单元测试可执行文件 |
 | 压测工具（可选） | `build/msquic/bin/Release/secnetperf` | msquic 自带性能工具（需 `-DQUIC_BUILD_PERF=ON`） |
@@ -51,6 +51,7 @@ sudo apt install git cmake build-essential perl
 | [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS/mTLS（msquic 嵌套子模块，**首次构建从源码编译**） | 随 msquic 子模块 |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `v1.5.7` |
 | [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `v1.2.1-2576-gd1d1b6ff` |
+| [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `v1.34.6` |
 
 仓库中还包含 `third_party/lz4` 子模块，但**顶层 CMake 当前未引用**；主构建不依赖 lz4。
 
@@ -70,7 +71,7 @@ sudo apt install git cmake build-essential perl
 
 - `libnuma`、`libstdc++`、`libgcc_s`、`libc`、`libm`（系统 glibc 环境）
 
-msquic（含 quictls）、zstd、spdlog 均已静态编入 `tcpquic-proxy`。**默认部署只需拷贝单个可执行文件**，无需 `libmsquic.so`。
+msquic（含 quictls）、zstd、c-ares、spdlog 均已静态编入 `tcpquic-proxy`。**默认部署只需拷贝单个可执行文件**，无需 `libmsquic.so`。
 
 若使用 `-DTCPQUIC_MSQUIC_SHARED=ON` 构建，则需同时部署 `libmsquic.so*`（或通过 RPATH 指向 `build/msquic/bin/Release/`）。
 
@@ -103,7 +104,7 @@ cd tcpquic-proxy
 git submodule update --init --recursive
 ```
 
-此步骤会拉取 msquic、zstd、spdlog 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
+此步骤会拉取 msquic、zstd、spdlog、c-ares 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
 
 验证子模块：
 
@@ -111,7 +112,7 @@ git submodule update --init --recursive
 git submodule status
 ```
 
-应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog` 等均为已检出 commit，而非 `-` 前缀的空目录。
+应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares` 等均为已检出 commit，而非 `-` 前缀的空目录。
 
 ### Step 3：选择构建目录
 

@@ -438,8 +438,8 @@ int main() {
         if (body.find("\"role\":\"client\"") == std::string::npos) return 76;
         if (body.find("\"status\":\"healthy\"") == std::string::npos) return 77;
         if (body.find("\"quic_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 78;
-        if (body.find("\"socks_listen\":\"127.0.0.1:1080\"") == std::string::npos) return 79;
-        if (body.find("\"http_listen\":\"127.0.0.1:8080\"") == std::string::npos) return 80;
+        if (body.find("\"socks_listen\":\"127.0.0.1:1080\"") == std::string::npos) return 180;
+        if (body.find("\"http_listen\":\"127.0.0.1:8080\"") == std::string::npos) return 181;
         if (body.find("\"uptime_seconds\":9") == std::string::npos) return 81;
         if (body.find("\"connection_count\":4") == std::string::npos) return 82;
         if (body.find("\"connected_connections\":3") == std::string::npos) return 83;
