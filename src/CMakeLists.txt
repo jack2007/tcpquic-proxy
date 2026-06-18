@@ -111,6 +111,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_PROXY_SOURCES
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+    )
+endif()
+
 if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
         tunnel/relay_alloc.cpp
