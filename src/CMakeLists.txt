@@ -41,6 +41,17 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+set(CARES_STATIC ON CACHE BOOL "" FORCE)
+set(CARES_SHARED OFF CACHE BOOL "" FORCE)
+set(CARES_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(CARES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CARES_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/c-ares ${CMAKE_BINARY_DIR}/c-ares)
+if(NOT TARGET c-ares::cares AND TARGET c-ares)
+    add_library(c-ares::cares ALIAS c-ares)
+endif()
+set(TCPQUIC_CARES_TARGET c-ares::cares)
+
 set(TCPQUIC_SOURCE_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/acl
@@ -105,9 +116,15 @@ set(TCPQUIC_PROXY_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_PROXY_SOURCES
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/linux_relay_worker.cpp
+        runtime/linux_reactor.cpp
     )
 endif()
 
@@ -129,6 +146,9 @@ endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(tcpquic-proxy PRIVATE ${TCPQUIC_CARES_TARGET} Threads::Threads)
+endif()
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
 tcpquic_link_mimalloc(tcpquic-proxy)
 
@@ -292,6 +312,60 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+    add_executable(tcpquic_linux_reactor_test
+        unittest/linux_reactor_test.cpp
+        runtime/linux_reactor.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_linux_reactor_test)
+    target_link_libraries(tcpquic_linux_reactor_test PRIVATE Threads::Threads)
+    set_property(TARGET tcpquic_linux_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_linux_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_ares_dns_resolver_test
+        unittest/ares_dns_resolver_test.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_ares_dns_resolver_test)
+    target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+    target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE TQ_UNIT_TESTING=1)
+    set_property(TARGET tcpquic_ares_dns_resolver_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_ares_dns_resolver_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_server_dial_reactor_test
+        unittest/server_dial_reactor_test.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        acl/acl.cpp
+        acl/acl_filter.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_server_dial_reactor_test)
+    target_link_libraries(tcpquic_server_dial_reactor_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+    target_compile_definitions(tcpquic_server_dial_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+    set_property(TARGET tcpquic_server_dial_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_server_dial_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_client_ingress_reactor_test
+        unittest/client_ingress_reactor_test.cpp
+        unittest/trace_proxy_stub.cpp
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
+        ingress/socks5_server.cpp
+        ingress/http_connect_server.cpp
+        ingress/proxy_auth.cpp
+        protocol/control_protocol.cpp
+        ${TCPQUIC_SERVER_TEST_SOURCES}
+        runtime/linux_reactor.cpp
+    )
+    tcpquic_target_include_dirs(tcpquic_client_ingress_reactor_test)
+    target_link_libraries(tcpquic_client_ingress_reactor_test PRIVATE Threads::Threads)
+    target_compile_definitions(tcpquic_client_ingress_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+    set_property(TARGET tcpquic_client_ingress_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_client_ingress_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_relay_backend_selection_test
         unittest/relay_backend_selection_test.cpp
         unittest/trace_proxy_stub.cpp
@@ -312,6 +386,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_LINUX_TEST_TARGETS
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
+        tcpquic_linux_reactor_test
+        tcpquic_ares_dns_resolver_test
+        tcpquic_server_dial_reactor_test
+        tcpquic_client_ingress_reactor_test
         tcpquic_relay_backend_selection_test
     )
 endif()
@@ -358,6 +436,10 @@ add_executable(tcpquic_speed_test_test
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
+        runtime/linux_reactor.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/linux_relay_worker.cpp
@@ -372,6 +454,9 @@ if(WIN32)
 endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
 target_link_libraries(tcpquic_speed_test_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link spdlog::spdlog)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(tcpquic_speed_test_test PRIVATE ${TCPQUIC_CARES_TARGET})
+endif()
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_speed_test_test PRIVATE msquic_platform)
 endif()
@@ -394,6 +479,16 @@ add_executable(tcpquic_acl_test
 tcpquic_target_include_dirs(tcpquic_acl_test)
 set_property(TARGET tcpquic_acl_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_acl_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_acl_filter_test
+    unittest/acl_filter_test.cpp
+    acl/acl.cpp
+    acl/acl_filter.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_acl_filter_test)
+set_property(TARGET tcpquic_acl_filter_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_acl_filter_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_config_router_test
     unittest/config_router_test.cpp
@@ -438,6 +533,10 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_TUNNEL_TEST_SOURCES
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        acl/acl_filter.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/linux_relay_worker.cpp
@@ -456,10 +555,16 @@ if(TCPQUIC_TEST_INCLUDES)
     target_include_directories(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
 endif()
 target_link_libraries(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(tcpquic_tunnel_test PRIVATE ${TCPQUIC_CARES_TARGET})
+endif()
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_tunnel_test PRIVATE msquic_platform)
 endif()
 target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(tcpquic_tunnel_test PRIVATE TQ_UNIT_TESTING=1)
+endif()
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -481,6 +586,55 @@ else()
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:tcpquic_tunnel_test>")
 endif()
 set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
+
+set(TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
+    unittest/client_tunnel_open_test.cpp
+    tunnel/client_tunnel_open.cpp
+    tunnel/tcp_tunnel.cpp
+    tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
+    tunnel/tunnel_reaper.cpp
+    config/tuning.cpp
+    protocol/control_protocol.cpp
+    acl/acl.cpp
+    protocol/compress.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/linux_relay_worker.cpp
+    )
+endif()
+add_executable(tcpquic_client_tunnel_open_test ${TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES})
+tcpquic_target_include_dirs(tcpquic_client_tunnel_open_test)
+if(TCPQUIC_TEST_INCLUDES)
+    target_include_directories(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
+endif()
+target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_CARES_TARGET})
+endif()
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE msquic_platform)
+endif()
+target_compile_definitions(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(tcpquic_client_tunnel_open_test PRIVATE TQ_UNIT_TESTING=1)
+endif()
+set_property(TARGET tcpquic_client_tunnel_open_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_client_tunnel_open_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    tcpquic_link_mimalloc(tcpquic_client_tunnel_open_test)
+endif()
+if(WIN32)
+    tcpquic_link_mimalloc(tcpquic_client_tunnel_open_test)
+endif()
 
 set(TCPQUIC_POSIX_TEST_TARGETS)
 if(NOT WIN32)
@@ -538,6 +692,21 @@ tcpquic_target_include_dirs(tcpquic_socks5_test)
 target_link_libraries(tcpquic_socks5_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_socks5_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_socks5_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_client_ingress_state_test
+    unittest/client_ingress_state_test.cpp
+    unittest/trace_proxy_stub.cpp
+    ingress/client_ingress_state.cpp
+    ingress/socks5_server.cpp
+    ingress/http_connect_server.cpp
+    ingress/proxy_auth.cpp
+    protocol/control_protocol.cpp
+    ${TCPQUIC_SERVER_TEST_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_client_ingress_state_test)
+target_link_libraries(tcpquic_client_ingress_state_test PRIVATE Threads::Threads)
+set_property(TARGET tcpquic_client_ingress_state_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_client_ingress_state_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_admin_http_test
     unittest/admin_http_test.cpp
@@ -641,12 +810,15 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_control_test
     tcpquic_speed_test_test
     tcpquic_acl_test
+    tcpquic_acl_filter_test
     tcpquic_config_router_test
     tcpquic_proxy_auth_test
     tcpquic_compress_test
     tcpquic_tunnel_test
+    tcpquic_client_tunnel_open_test
     tcpquic_http_connect_test
     tcpquic_socks5_test
+    tcpquic_client_ingress_state_test
     tcpquic_admin_http_test
     tcpquic_router_runtime_test
     tcpquic_production_linkage_guard_test

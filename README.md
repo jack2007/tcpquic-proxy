@@ -2,7 +2,7 @@
 
 独立仓库实现的 **TCP-over-QUIC 隧道代理**。在 A、B 两节点各运行一个进程，预先建立 QUIC 长连接；本地应用通过 **SOCKS5** 或 **HTTP CONNECT** 接入代理，每个 TCP 连接映射为一条 QUIC 双向 Stream，由 B 侧按动态目标发起 TCP 拨号。
 
-底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，压缩库来自 [zstd](https://github.com/facebook/zstd)，TLS 来自 msquic 内嵌的 [quictls](https://github.com/quictls/openssl)；均以 Git 子模块 vendored（详见下方 [依赖](#依赖)）。
+底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，压缩库来自 [zstd](https://github.com/facebook/zstd)，异步 DNS 解析来自 [c-ares](https://github.com/c-ares/c-ares)，TLS 来自 msquic 内嵌的 [quictls](https://github.com/quictls/openssl)；均以源码形式 vendored（详见下方 [依赖](#依赖)）。
 
 **典型场景：**
 
@@ -33,17 +33,18 @@
 
 ## 依赖
 
-### Vendored 库（Git 子模块，无需系统 dev 包）
+### Vendored 库（源码随仓库提供，无需系统 dev 包）
 
 | 组件 | 路径 | 用途 |
 |------|------|------|
 | [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 栈 |
 | [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS/mTLS（msquic 子模块，**首次构建从源码编译**） |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
+| [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 |
 
-当前 pin：msquic `v2.5.2-24-g0efce2bc9`、zstd `v1.5.7`。
+当前 pin：msquic `v2.5.2-24-g0efce2bc9`、zstd `v1.5.7`、c-ares `v1.34.6`。
 
-**不需要** 安装 `libzstd-dev`、`libssl-dev` 等系统库；`git submodule update --init --recursive` 会拉齐上述源码并由 CMake 一并构建。
+**不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，仓库内 vendored 的 c-ares 也会由 CMake 一并构建。
 
 ### 构建工具
 
@@ -65,7 +66,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 ### 运行时
 
-`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread、libnuma 等），**不依赖** 系统安装的 libzstd / libssl / libmsquic。默认将 msquic（含 quictls）、zstd、spdlog **静态链入** 主程序，部署时只需拷贝单个 `tcpquic-proxy` 可执行文件。
+`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread、libnuma 等），**不依赖** 系统安装的 libzstd / libssl / libmsquic / libc-ares。默认将 msquic（含 quictls）、zstd、c-ares、spdlog **静态链入** 主程序，部署时只需拷贝单个 `tcpquic-proxy` 可执行文件。
 
 ### 测试与脚本（不链接进二进制）
 
