@@ -312,6 +312,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET tcpquic_linux_reactor_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+    add_executable(tcpquic_ares_dns_resolver_test
+        unittest/ares_dns_resolver_test.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_ares_dns_resolver_test)
+    target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+    target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE TQ_UNIT_TESTING=1)
+    set_property(TARGET tcpquic_ares_dns_resolver_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_ares_dns_resolver_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_relay_backend_selection_test
         unittest/relay_backend_selection_test.cpp
         unittest/trace_proxy_stub.cpp
@@ -333,6 +345,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
         tcpquic_linux_reactor_test
+        tcpquic_ares_dns_resolver_test
         tcpquic_relay_backend_selection_test
     )
 endif()
