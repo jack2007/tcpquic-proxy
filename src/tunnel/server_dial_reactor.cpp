@@ -406,7 +406,7 @@ struct TqServerDialReactor::Impl {
             state.Fd = fd;
             state.Deadline =
                 std::chrono::steady_clock::now() + std::chrono::milliseconds(kConnectAttemptTimeoutMs);
-            if (!Reactor.Add(fd, TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error,
+            if (!Reactor.Add(fd, TqReactorEvents::Write | TqReactorEvents::Error,
                     [this, token](int readyFd, uint32_t events) {
                         OnConnectReady(token, readyFd, events);
                     })) {

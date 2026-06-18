@@ -220,10 +220,10 @@ struct TqAresDnsResolver::Impl {
 
         ares_fd_events_t fdEvent{};
         fdEvent.fd = static_cast<ares_socket_t>(fd);
-        if ((events & (TqLinuxReactorEvents::Read | TqLinuxReactorEvents::Error)) != 0) {
+        if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
             fdEvent.events |= ARES_FD_EVENT_READ;
         }
-        if ((events & TqLinuxReactorEvents::Write) != 0) {
+        if ((events & TqReactorEvents::Write) != 0) {
             fdEvent.events |= ARES_FD_EVENT_WRITE;
         }
 
@@ -311,10 +311,10 @@ struct TqAresDnsResolver::Impl {
     static uint32_t ToReactorEvents(int readable, int writable) {
         uint32_t events = 0;
         if (readable != 0) {
-            events |= TqLinuxReactorEvents::Read;
+            events |= TqReactorEvents::Read;
         }
         if (writable != 0) {
-            events |= TqLinuxReactorEvents::Write;
+            events |= TqReactorEvents::Write;
         }
         return events;
     }

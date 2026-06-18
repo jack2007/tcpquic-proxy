@@ -376,9 +376,9 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
         }
 
         Listens.emplace(socks->Fd, ListenEntry{peer.PeerId, ListenProto::Socks5});
-        if (!Reactor.Add(socks->Fd, TqLinuxReactorEvents::Read,
+        if (!Reactor.Add(socks->Fd, TqReactorEvents::Read,
                 [this](int fd, uint32_t events) {
-                    if ((events & (TqLinuxReactorEvents::Read | TqLinuxReactorEvents::Error)) != 0) {
+                    if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
                         AcceptLoop(fd);
                     }
                 })) {
@@ -388,9 +388,9 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
 
         if (http->Fd >= 0) {
             Listens.emplace(http->Fd, ListenEntry{peer.PeerId, ListenProto::HttpConnect});
-            if (!Reactor.Add(http->Fd, TqLinuxReactorEvents::Read,
+            if (!Reactor.Add(http->Fd, TqReactorEvents::Read,
                     [this](int fd, uint32_t events) {
-                        if ((events & (TqLinuxReactorEvents::Read | TqLinuxReactorEvents::Error)) != 0) {
+                        if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
                             AcceptLoop(fd);
                         }
                     })) {
@@ -546,7 +546,7 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
             client.AcceptTunnel = peerIt->second.Peer.AcceptTunnel;
             client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
             client.CancelTunnel = peerIt->second.Peer.CancelTunnel;
-            if (!Reactor.Add(clientFd, TqLinuxReactorEvents::Read,
+            if (!Reactor.Add(clientFd, TqReactorEvents::Read,
                     [this](int fd, uint32_t events) {
                         HandleClientEvents(fd, events);
                     })) {
@@ -568,13 +568,13 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
 }
 
 void TqClientIngressReactor::HandleClientEvents(int clientFd, uint32_t events) {
-    if ((events & TqLinuxReactorEvents::Read) != 0) {
+    if ((events & TqReactorEvents::Read) != 0) {
         HandleClientRead(clientFd);
     }
-    if ((events & TqLinuxReactorEvents::Write) != 0) {
+    if ((events & TqReactorEvents::Write) != 0) {
         HandleClientWrite(clientFd);
     }
-    if ((events & TqLinuxReactorEvents::Error) != 0) {
+    if ((events & TqReactorEvents::Error) != 0) {
         std::lock_guard<std::mutex> lock(Mutex);
         if (Clients.find(clientFd) != Clients.end()) {
             CloseClientLocked(clientFd, true);
@@ -723,11 +723,11 @@ void TqClientIngressReactor::HandleClientWrite(int clientFd) {
 
 void TqClientIngressReactor::HandleIngressResult(int clientFd, TqClientIngressResult result) {
     if (result == TqClientIngressResult::NeedRead) {
-        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Read);
+        (void)Reactor.Modify(clientFd, TqReactorEvents::Read);
         return;
     }
     if (result == TqClientIngressResult::NeedWrite) {
-        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error);
+        (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
         return;
     }
     if (result == TqClientIngressResult::ReadyToOpen) {
@@ -759,7 +759,7 @@ void TqClientIngressReactor::StartClientOpen(int clientFd) {
         rejectTunnel = client.RejectTunnel;
         socks = client.Proto == ListenProto::Socks5;
         client.Phase = ClientPhase::Opening;
-        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Error);
+        (void)Reactor.Modify(clientFd, TqReactorEvents::Error);
     }
 
     if (!startTunnel) {
@@ -817,7 +817,7 @@ void TqClientIngressReactor::CompleteClientOpen(
     client.OpenSucceeded = result.Ok;
     client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
     client.Phase = ClientPhase::WritingOpenResponse;
-    (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error);
+    (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
 }
 
 void TqClientIngressReactor::CloseClientLocked(int clientFd, bool closeFd) {

@@ -111,8 +111,8 @@ void TqLinuxReactor::Stop() {
     CloseFd(EpollFd);
 }
 
-bool TqLinuxReactor::Add(int fd, uint32_t events, Handler handler) {
-    if (EpollFd < 0 || fd < 0 || !HasRequestedEvents(events) || !handler) {
+bool TqLinuxReactor::Add(TqSocketHandle fd, uint32_t events, Handler handler) {
+    if (EpollFd < 0 || !TqSocketValid(fd) || !HasRequestedEvents(events) || !handler) {
         return false;
     }
 
@@ -127,8 +127,8 @@ bool TqLinuxReactor::Add(int fd, uint32_t events, Handler handler) {
     return true;
 }
 
-bool TqLinuxReactor::Modify(int fd, uint32_t events) {
-    if (EpollFd < 0 || fd < 0 || !HasRequestedEvents(events) ||
+bool TqLinuxReactor::Modify(TqSocketHandle fd, uint32_t events) {
+    if (EpollFd < 0 || !TqSocketValid(fd) || !HasRequestedEvents(events) ||
         Handlers.find(fd) == Handlers.end()) {
         return false;
     }
@@ -139,8 +139,8 @@ bool TqLinuxReactor::Modify(int fd, uint32_t events) {
     return ::epoll_ctl(EpollFd, EPOLL_CTL_MOD, fd, &event) == 0;
 }
 
-bool TqLinuxReactor::Remove(int fd) {
-    if (EpollFd < 0 || fd < 0) {
+bool TqLinuxReactor::Remove(TqSocketHandle fd) {
+    if (EpollFd < 0 || !TqSocketValid(fd)) {
         return false;
     }
     auto it = Handlers.find(fd);
