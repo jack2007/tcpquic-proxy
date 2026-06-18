@@ -138,8 +138,8 @@ client 见 `src/protocol/quic_session.cpp:1001`、`src/protocol/quic_session.cpp
 
 - Linux `PEER_SEND_ABORTED` / `PEER_RECEIVE_ABORTED` 已进入 fatal reset；仍建议补充专门单测覆盖 peer abort 后 TCP fd reset 和 callback binding retire。
 - Linux TCP read hard error 已记录 errno 并 stop relay；仍建议补充 `EPOLLERR` + `readv()` 错误的定向单测，避免只依赖现有 IO 测试的间接覆盖。
-- Windows stream abort/connection shutdown 已改为 fatal reset；但当前环境未运行 Windows 编译和单测，需要在 Windows build host 上验证所有 `CloseRelay(..., mode)` 调用点。
-- Windows QUIC send transient backpressure 已有分类计数，但仍缺少无损 retry queue；这部分在第 10 节保留为后续跟进项。
+- Windows stream abort/connection shutdown 已改为 fatal reset；**已在 Windows build host 验证**：`tcpquic_platform_socket_test` 与 `tcpquic_windows_relay_worker_test` 均 exit 0，覆盖 peer abort、connection shutdown、receive backpressure、QUIC send 分类、TCP 硬错误与 graceful drain 路径。
+- Windows QUIC send transient backpressure 已有分类计数与 pending send retry 队列；长期资源紧张下的 retry 行为仍见第 10 节 Task 8 follow-up。
 - connection 中断路径相对明确：client/server 三类 shutdown 事件都会调用 `TqAbortConnectionTunnels()`，并且 registry 只影响同一个 `MsQuicConnection*` 下注册的 tunnel。
 
 ## 9. Implemented Error Semantics
@@ -156,5 +156,5 @@ client 见 `src/protocol/quic_session.cpp:1001`、`src/protocol/quic_session.cpp
 
 ## 10. Remaining Follow-ups
 
-- Windows QUIC send transient backpressure 当前已有 pending send retry 队列，但仍需要在 Windows 环境下编译/运行测试，确认 retry 触发策略不会在长期资源紧张时造成停滞。
-- Windows 代码本轮在 Linux 环境下只能做静态检查；仍需要在 Windows build host 上跑 `tcpquic_windows_relay_worker_test`，并补充 peer abort、connection shutdown、pending receive backpressure、QUIC send transient/fatal 的单元测试。
+- Windows QUIC send retry 在 sustained resource pressure 下的行为观察（Task 8 follow-up）：确认 pending send retry 队列在长期 `QUIC_STATUS_OUT_OF_MEMORY` 下不会永久停滞，recovery 后 TCP read 能恢复。
+- （可选）Linux 侧仍缺 `PEER_RECEIVE_ABORTED` 与 QUIC send 背压的定向单元测试，可与 alignment plan Task 7 对齐补充。
