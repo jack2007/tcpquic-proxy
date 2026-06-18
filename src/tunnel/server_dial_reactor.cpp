@@ -398,7 +398,7 @@ struct TqServerDialReactor::Impl {
             }
             if (!SetNonBlocking(fd)) {
                 RecordInternalFailure(state);
-                TqCloseSocket(fd);
+                CloseSocket(fd);
                 continue;
             }
 
@@ -412,7 +412,7 @@ struct TqServerDialReactor::Impl {
             const int connectError = LastSocketError(fd);
             if (!TqSocketInProgress(connectError)) {
                 RecordConnectFailure(state, connectError);
-                TqCloseSocket(fd);
+                CloseSocket(fd);
                 continue;
             }
 
@@ -424,7 +424,7 @@ struct TqServerDialReactor::Impl {
                         OnConnectReady(token, readyFd, events);
                     })) {
                 state.Fd = TqInvalidSocket;
-                TqCloseSocket(fd);
+                CloseSocket(fd);
                 Complete(token, TqOpenError::Internal);
                 return;
             }
@@ -683,6 +683,23 @@ struct TqServerDialReactor::Impl {
             state.Registered = false;
         }
         CloseOwnedSocket(state.Fd);
+    }
+
+    void CloseSocket(TqSocketHandle fd) {
+#ifdef TQ_UNIT_TESTING
+        if (Hooks.CloseSocket) {
+            Hooks.CloseSocket(fd);
+            return;
+        }
+#endif
+        TqCloseSocket(fd);
+    }
+
+    void CloseOwnedSocket(TqSocketHandle& fd) {
+        if (TqSocketValid(fd)) {
+            CloseSocket(fd);
+            fd = TqInvalidSocket;
+        }
     }
 };
 

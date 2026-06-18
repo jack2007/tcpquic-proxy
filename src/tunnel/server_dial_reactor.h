@@ -39,6 +39,7 @@ public:
         std::function<int(TqSocketHandle, const sockaddr*, socklen_t)> Connect;
         std::function<int(TqSocketHandle)> GetLastSocketError;
         std::function<int(TqSocketHandle, int*)> GetSocketError;
+        std::function<void(TqSocketHandle)> CloseSocket;
         int ConnectTimeoutMs{10000};
     };
 #endif

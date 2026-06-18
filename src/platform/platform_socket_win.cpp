@@ -58,7 +58,7 @@ bool TqSocketWouldBlock(int error) {
 }
 
 bool TqSocketInProgress(int error) {
-    return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
+    return error == WSAEWOULDBLOCK || error == WSAEINPROGRESS || error == WSAEINVAL;
 }
 
 bool TqSocketInterrupted(int error) {
@@ -71,7 +71,7 @@ bool TqSocketConnectionRefused(int error) {
 
 bool TqSocketTimeoutLike(int error) {
     return error == WSAETIMEDOUT || error == WSAEHOSTUNREACH ||
-        error == WSAENETUNREACH || error == WSAEWOULDBLOCK;
+        error == WSAENETUNREACH || error == WSAEWOULDBLOCK || error == WSAEINPROGRESS;
 }
 
 int TqConnect(TqSocketHandle socket, const sockaddr* address, socklen_t addressLength) {
