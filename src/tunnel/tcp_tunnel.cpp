@@ -6,9 +6,7 @@
 #include "platform_socket.h"
 #include "quic_session.h"
 #include "relay.h"
-#if defined(__linux__)
 #include "server_dial_reactor.h"
-#endif
 #include "speed_test.h"
 #include "tcp_dialer.h"
 #include "trace.h"
@@ -44,11 +42,7 @@ constexpr int TqTcpDialTimeoutMs = 10 * 1000;
 std::atomic<TqServerDialReactor*> g_serverDialReactor{nullptr};
 
 TqServerDialReactor* TqGetServerDialReactor() {
-#if defined(__linux__)
     return g_serverDialReactor.load(std::memory_order_acquire);
-#else
-    return nullptr;
-#endif
 }
 
 struct TqTunnelSendContext {
@@ -501,7 +495,6 @@ public:
     }
 
     bool CancelServerDialAndMaybeDelete() {
-#if defined(__linux__)
         TqServerDialReactor* reactor = nullptr;
         uint64_t token = 0;
         {
@@ -527,9 +520,6 @@ public:
             }
         }
         return ShouldDeletePreRelayLocked();
-#else
-        return false;
-#endif
     }
 
     void TraceRelayStopping(const char* reason) {
@@ -788,7 +778,7 @@ public:
         TryHandleServerOpen();
     }
 
-#if defined(TCPQUIC_TUNNEL_TESTING) && defined(__linux__)
+#if defined(TCPQUIC_TUNNEL_TESTING)
     void TestMarkLegacyServerOpenPending() {
         std::lock_guard<std::mutex> guard(Lock);
         PendingServerOpen = true;
@@ -966,7 +956,6 @@ private:
         CompleteOpen(ok && response.Ok, response);
     }
 
-#if defined(__linux__)
     bool BeginServerDialCallback(
         TqServerDialReactor* reactor,
         const TqServerDialResult& result) {
@@ -1070,7 +1059,6 @@ private:
             reactor->Cancel(token);
         }
     }
-#endif
 
     void TryHandleServerOpen() {
         if (ServerOpenDispatched.load(std::memory_order_acquire)) {
@@ -1108,12 +1096,10 @@ private:
             TqTraceIncOpenRx(connId);
         }
 
-#if defined(__linux__)
         if (TqServerDialReactor* reactor = TqGetServerDialReactor()) {
             TryHandleServerOpenWithReactor(req, host, reactor);
             return;
         }
-#endif
 
         std::vector<sockaddr_storage> addrs;
         TqOpenError error = TqOpenError::Internal;
@@ -1149,7 +1135,6 @@ private:
         }).detach();
     }
 
-#if defined(__linux__)
     void FinishServerOpenAfterReactorDial(
         TqOpenRequest req,
         const TqServerDialResult& result) {
@@ -1210,7 +1195,6 @@ private:
             PendingServerRelayFlags = req.Flags;
         }
     }
-#endif
 
     void FinishServerOpenAfterDial(
         TqOpenRequest req,
@@ -1485,12 +1469,10 @@ private:
     bool PendingServerOpen{false};
     bool PendingServerRelay{false};
     uint8_t PendingServerRelayFlags{0};
-#if defined(__linux__)
     TqServerDialReactor* ServerDialReactor{nullptr};
     uint64_t ServerDialToken{0};
     bool ServerDialCallbackActive{false};
     bool ServerDialPendingWithReactor{false};
-#endif
     bool PendingClientRelay{false};
     uint8_t PendingClientRelayFlags{0};
     bool OpenSendComplete{false};

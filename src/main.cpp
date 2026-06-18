@@ -5,9 +5,7 @@
 #include "acl.h"
 #include "client_ingress_reactor.h"
 #include "client_tunnel_open.h"
-#if defined(__linux__)
 #include "server_dial_reactor.h"
-#endif
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "speed_test.h"
@@ -644,7 +642,6 @@ int RunServer(const TqConfig& cfg) {
     metrics->Listen = cfg.QuicListen;
     const auto started = std::chrono::steady_clock::now();
 
-#if defined(__linux__)
     TqServerDialReactor serverDial(acl);
     if (!serverDial.Start()) {
         std::lock_guard<std::mutex> guard(metrics->Lock);
@@ -661,7 +658,6 @@ int RunServer(const TqConfig& cfg) {
         }
     } serverDialGuard{&serverDial};
     TqSetServerDialReactor(&serverDial);
-#endif
 
     QuicServerSession quic;
     quic.SetConnectionHandler([metrics](MsQuicConnection*) {
