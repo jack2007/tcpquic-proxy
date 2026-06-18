@@ -54,6 +54,43 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats&) { return {
 void TqTraceRelayStopping(uint64_t, const char*, const char*, const char*, uint64_t, const char*) {
 }
 
+void TqTraceRelayStreamEvent(
+    const char*,
+    uint32_t,
+    uint64_t,
+    const char*,
+    uint64_t,
+    uint32_t,
+    uint64_t,
+    uint64_t,
+    uint32_t,
+    uint32_t,
+    bool,
+    const TqTraceLinuxRelayStreamState&) {
+}
+
+void TqTraceRelayStopCondition(
+    const char*, uint32_t, const char*, const TqTraceLinuxRelayStreamState&) {
+}
+
+void TqTraceRelayBackpressureEvent(
+    const char*,
+    uint32_t,
+    uint64_t,
+    const char*,
+    const char*,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t) {
+}
+
+void TqTraceRelayStreamShutdown(const char*, const TqTraceLinuxRelayStreamState&) {
+}
+
+void TqTraceRelayUnregister(const char*, const TqTraceLinuxRelayStreamState&) {
+}
+
 void TqTraceRelayFatalError(
     const char*,
     const char*,

@@ -555,7 +555,6 @@ set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN
 
 set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     unittest/router_runtime_test.cpp
-    unittest/trace_proxy_stub.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp

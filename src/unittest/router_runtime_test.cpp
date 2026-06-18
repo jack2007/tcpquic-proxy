@@ -1,8 +1,111 @@
 #include "router_runtime.h"
 #include "server_metrics.h"
+#include "trace.h"
 
 #include <string>
 #include <vector>
+
+bool TqTraceEnabled() {
+    return false;
+}
+
+void TqTraceLogLine(const char* line) {
+    (void)line;
+}
+
+void TqTraceRelayStreamEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* streamEvent,
+    uint64_t errorCode,
+    uint32_t status,
+    uint64_t absoluteOffset,
+    uint64_t totalBufferLength,
+    uint32_t bufferCount,
+    uint32_t receiveFlags,
+    bool fin,
+    const TqTraceLinuxRelayStreamState& state) {
+    (void)backend;
+    (void)workerIndex;
+    (void)relayId;
+    (void)streamEvent;
+    (void)errorCode;
+    (void)status;
+    (void)absoluteOffset;
+    (void)totalBufferLength;
+    (void)bufferCount;
+    (void)receiveFlags;
+    (void)fin;
+    (void)state;
+}
+
+void TqTraceRelayStopCondition(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state) {
+    (void)backend;
+    (void)workerIndex;
+    (void)trigger;
+    (void)state;
+}
+
+void TqTraceRelayBackpressureEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* action,
+    const char* reason,
+    uint64_t outstandingQuicSendBytes,
+    uint64_t pauseThreshold,
+    uint64_t resumeThreshold,
+    uint64_t readAheadBytes) {
+    (void)backend;
+    (void)workerIndex;
+    (void)relayId;
+    (void)action;
+    (void)reason;
+    (void)outstandingQuicSendBytes;
+    (void)pauseThreshold;
+    (void)resumeThreshold;
+    (void)readAheadBytes;
+}
+
+void TqTraceRelayStreamShutdown(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state) {
+    (void)backend;
+    (void)state;
+}
+
+void TqTraceRelayUnregister(
+    const char* backend,
+    const TqTraceLinuxRelayStreamState& state) {
+    (void)backend;
+    (void)state;
+}
+
+void TqTraceRelayFatalError(
+    const char* backend,
+    const char* reason,
+    uint64_t relayId,
+    uint64_t socketOrFd,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t pendingQuicReceiveQueue,
+    uint64_t pendingQuicSends,
+    uint64_t inflightQuicSends,
+    uint64_t inflightTcpSends) {
+    (void)backend;
+    (void)reason;
+    (void)relayId;
+    (void)socketOrFd;
+    (void)pendingQuicReceiveBytes;
+    (void)pendingQuicReceiveQueue;
+    (void)pendingQuicSends;
+    (void)inflightQuicSends;
+    (void)inflightTcpSends;
+}
 
 class FakeAdapter : public TqPeerRuntimeAdapter {
 public:
