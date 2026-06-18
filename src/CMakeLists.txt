@@ -41,6 +41,17 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+set(CARES_STATIC ON CACHE BOOL "" FORCE)
+set(CARES_SHARED OFF CACHE BOOL "" FORCE)
+set(CARES_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(CARES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(CARES_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/c-ares ${CMAKE_BINARY_DIR}/c-ares)
+if(NOT TARGET c-ares::cares AND TARGET c-ares)
+    add_library(c-ares::cares ALIAS c-ares)
+endif()
+set(TCPQUIC_CARES_TARGET c-ares::cares)
+
 set(TCPQUIC_SOURCE_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/acl
