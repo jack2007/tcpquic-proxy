@@ -57,6 +57,9 @@ using TqDarwinRelayStreamSendForTest = QUIC_STATUS (*)(
     uint32_t bufferCount,
     QUIC_SEND_FLAGS flags,
     void* context);
+using TqDarwinRelayReceiveCompleteForTest = void (*)(MsQuicStream* stream, uint64_t byteCount);
+using TqDarwinRelayReceiveSetEnabledForTest = QUIC_STATUS (*)(MsQuicStream* stream, bool enabled);
+using TqDarwinRelaySendMsgForTest = ssize_t (*)(TqSocketHandle fd, const struct msghdr* msg);
 #endif
 
 struct TqDarwinRelayWorkerConfig {
@@ -105,6 +108,11 @@ public:
     bool RunningForTest() const;
     void SetRegisterTcpFiltersFailureForTest(bool fail);
     void SetStreamSendForTest(TqDarwinRelayStreamSendForTest sendFn);
+    void SetReceiveCompleteForTest(TqDarwinRelayReceiveCompleteForTest completeFn);
+    void SetReceiveSetEnabledForTest(TqDarwinRelayReceiveSetEnabledForTest setEnabledFn);
+    void SetSendMsgForTest(TqDarwinRelaySendMsgForTest sendMsgFn);
+    bool FlushTcpWritableForTest(uint64_t relayId);
+    bool InvokeQuicReceiveViewForTest(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     void* StreamCallbackContextForTest(uint64_t relayId);
     std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
     uint64_t KnownSendOperationCountForTest();
@@ -112,6 +120,8 @@ public:
     uint64_t InFlightQuicSendCountForTest(uint64_t relayId);
     uint64_t CompleteOneInFlightSendForTest(uint64_t relayId);
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
+    uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
+    uint64_t PendingTcpWriteBytesForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
@@ -159,6 +169,28 @@ private:
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool SetTcpReadBackpressure(const std::shared_ptr<RelayState>& relay, bool paused);
+    bool QueueDeferredQuicReceive(
+        const std::shared_ptr<RelayState>& relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin);
+    uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
+    uint64_t LowPendingQuicReceiveBytesPerRelay() const;
+    void ProcessQuicReceiveViewEvent(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    bool EnqueueQuicReceiveForTcp(
+        const std::shared_ptr<RelayState>& relay,
+        const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    bool DiscardDeferredQuicReceive(
+        const std::shared_ptr<RelayState>& relay,
+        const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    bool FlushTcpWrites(const std::shared_ptr<RelayState>& relay);
+    void CompleteDeferredQuicReceive(
+        const std::shared_ptr<RelayState>& relay,
+        const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    bool SetQuicReceiveEnabled(const std::shared_ptr<RelayState>& relay, bool enabled);
+    void MaybePauseQuicReceive(const std::shared_ptr<RelayState>& relay);
+    void MaybeResumeQuicReceive(const std::shared_ptr<RelayState>& relay);
     void RetireRelay(const std::shared_ptr<RelayState>& relay);
     void PurgeRetiredRelaysIfSafe();
     bool WaitForKnownOperationsToDrain();
@@ -196,6 +228,8 @@ private:
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> Wakeups{0};
     std::atomic<uint64_t> TcpReadBytes{0};
+    std::atomic<uint64_t> QuicReceivePausedCount{0};
+    std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> Errors{0};
 };
 
