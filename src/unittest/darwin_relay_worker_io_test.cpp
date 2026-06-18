@@ -1169,6 +1169,43 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
     CHECK(close(fds[1]) == 0);
 }
 
+void TcpErrorEventClosesAndRetiresRelay() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    TqDarwinRelayWorker worker(config);
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, EV_ERROR, ECONNRESET));
+    TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
+    CHECK(snapshot.ActiveRelays == 0);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+
+    const char payload[] = "after-error-close";
+    (void)write(fds[0], payload, sizeof(payload) - 1);
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    snapshot = worker.Snapshot();
+    CHECK(snapshot.ActiveRelays == 0);
+
+    worker.Stop();
+    CHECK(close(fds[0]) == 0);
+    CHECK(close(fds[1]) == 0);
+}
+
 void StopAfterCompletionLeavesNoKnownOperations() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -1870,6 +1907,7 @@ int main() {
     MagicMismatchKnownOperationCleansAccounting();
     StopThenLateCompletionDoesNotUseDanglingWorker();
     StopThenLateTcpEventIgnoresRetiredRelay();
+    TcpErrorEventClosesAndRetiresRelay();
     StopAfterCompletionLeavesNoKnownOperations();
     UnknownSendCompleteContextIsIgnoredWithoutFreeing();
     StopReturnedLateCompletionUsesCurrentStreamCallback();

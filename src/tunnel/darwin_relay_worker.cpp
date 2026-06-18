@@ -103,6 +103,9 @@ struct TqDarwinRelayWorker::RelayState {
     bool TcpWriteArmed{false};
     bool TcpReadPausedByQuicBacklog{false};
     bool TcpReadClosed{false};
+    bool TcpWriteClosed{false};
+    bool QuicSendClosed{false};
+    bool QuicReceiveClosed{false};
     bool QuicSendFinSubmitted{false};
     bool QuicSendFinCompleted{false};
     bool Closing{false};
@@ -553,6 +556,9 @@ void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) 
     {
         std::unique_lock<std::mutex> relayLock(relay->Mutex);
         relay->Closing = true;
+        relay->TcpReadClosed = true;
+        relay->TcpWriteClosed = true;
+        relay->QuicReceiveClosed = true;
         relay->TcpReadArmed = false;
         relay->TcpWriteArmed = false;
         relay->PendingQuicSends.clear();
@@ -623,6 +629,24 @@ void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) 
     if (binding != nullptr) {
         RetiredStreamBindings.push_back(std::move(binding));
     }
+}
+
+void TqDarwinRelayWorker::CloseRelay(const std::shared_ptr<RelayState>& relay) {
+    if (relay == nullptr) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(RelayMutex);
+        const auto it = Relays.find(relay->Id);
+        if (it == Relays.end() || it->second != relay) {
+            return;
+        }
+        Relays.erase(it);
+    }
+    RemoveTcpFilters(relay);
+    RetireRelay(relay);
+    PurgeRetiredRelaysIfSafe();
 }
 
 void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
@@ -880,23 +904,21 @@ void TqDarwinRelayWorker::ProcessTcpEvents(uint64_t relayId, int16_t filter, uin
     }
 
     if ((flags & EV_ERROR) != 0) {
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            relay->Closing = true;
-        }
         Errors.fetch_add(1, std::memory_order_relaxed);
+        CloseRelay(relay);
         return;
     }
 
     if (filter == EVFILT_READ) {
         if (!DrainTcpReadable(relay)) {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            relay->Closing = true;
+            CloseRelay(relay);
         }
         return;
     }
     if (filter == EVFILT_WRITE) {
-        (void)FlushTcpWrites(relay);
+        if (!FlushTcpWrites(relay)) {
+            CloseRelay(relay);
+        }
         return;
     }
 }
@@ -1107,6 +1129,7 @@ bool TqDarwinRelayWorker::SubmitTcpBatchToQuic(
         if (fin) {
             std::lock_guard<std::mutex> relayLock(relay->Mutex);
             relay->QuicSendFinCompleted = true;
+            relay->QuicSendClosed = true;
         }
         return true;
     }
@@ -1286,6 +1309,7 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
                 : 0;
             if (info.Fin) {
                 relay->QuicSendFinCompleted = true;
+                relay->QuicSendClosed = true;
             }
             closing = relay->Closing;
         }
@@ -1701,6 +1725,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
                 (void)::shutdown(relay->TcpFd, SHUT_WR);
                 relay->TcpWriteShutdownQueued = false;
                 relay->TcpWriteArmed = false;
+                relay->TcpWriteClosed = true;
                 return true;
             } else {
                 relay->TcpWriteArmed = false;

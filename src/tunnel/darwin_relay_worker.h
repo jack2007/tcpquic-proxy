@@ -194,6 +194,7 @@ private:
     void MaybePauseQuicReceive(const std::shared_ptr<RelayState>& relay);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayState>& relay);
     void RetireRelay(const std::shared_ptr<RelayState>& relay);
+    void CloseRelay(const std::shared_ptr<RelayState>& relay);
     void PurgeRetiredRelaysIfSafe();
     bool WaitForKnownOperationsToDrain();
     void DetachRetiredBindingsForDestruction();
