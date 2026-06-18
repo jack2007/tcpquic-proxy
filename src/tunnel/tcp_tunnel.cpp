@@ -1,5 +1,6 @@
 #include "tcp_tunnel.h"
 
+#include "client_tunnel_open.h"
 #include "compress.h"
 #include "msquic.hpp"
 #include "platform_socket.h"
@@ -255,6 +256,77 @@ bool TqResolveAllowedTarget(
 
 } // namespace
 
+struct TqClientTunnelOpenHandle final {
+    enum class State {
+        Opening,
+        OpenSucceeded,
+        OpenFailed,
+        Accepted,
+        Rejected,
+        Cancelled,
+    };
+
+    std::mutex Lock;
+    TqTunnelContext* Context{nullptr};
+    TqClientTunnelOpenComplete OnComplete;
+    TqTunnelStartResult Result{};
+    State OpenState{State::Opening};
+    std::atomic<unsigned> RefCount{1};
+};
+
+void TqRetainClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+    handle->RefCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TqReleaseClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+    if (handle->RefCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        delete handle;
+    }
+}
+
+struct TqClientOpenNotifyResult {
+    bool Delivered{false};
+    bool CleanupContext{false};
+};
+
+TqClientOpenNotifyResult TqNotifyClientTunnelOpenComplete(
+    TqClientTunnelOpenHandle* handle,
+    TqTunnelStartResult result) {
+    TqClientOpenNotifyResult notify{};
+    if (handle == nullptr) {
+        return notify;
+    }
+
+    TqClientTunnelOpenComplete onComplete;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState != TqClientTunnelOpenHandle::State::Opening) {
+            return notify;
+        }
+        handle->OpenState = result.Ok
+            ? TqClientTunnelOpenHandle::State::OpenSucceeded
+            : TqClientTunnelOpenHandle::State::OpenFailed;
+        handle->Result = result;
+        if (!result.Ok) {
+            handle->Context = nullptr;
+            notify.CleanupContext = true;
+        }
+        onComplete = std::move(handle->OnComplete);
+    }
+
+    if (onComplete) {
+        onComplete(handle, result);
+    }
+    notify.Delivered = true;
+    return notify;
+}
+
 struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
@@ -311,6 +383,13 @@ public:
 
     void SetStream(MsQuicStream* stream) {
         Stream = stream;
+    }
+
+    void SetAsyncClientOpenHandle(TqClientTunnelOpenHandle* handle, uint8_t flags) {
+        std::lock_guard<std::mutex> guard(Lock);
+        AsyncClientOpenHandle = handle;
+        AsyncClientOpenFlags = flags;
+        TqRetainClientTunnelOpenHandle(handle);
     }
 
     bool SendOpenRequest(const TqOpenRequest& req) {
@@ -470,6 +549,173 @@ public:
         return ShouldDeletePreRelayLocked();
     }
 
+    bool CancelAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterCancel = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterCancel = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        return deleteAfterCancel;
+    }
+
+    bool AbandonAsyncClientOpenWithoutClosingTcp(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterAbandon = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            TcpFd = TqInvalidSocket;
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterAbandon = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        return deleteAfterAbandon;
+    }
+
+    bool AcceptAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            AsyncClientOpenAccepted = true;
+            SelfDeleteOnShutdown = true;
+            PendingClientRelay = true;
+            PendingClientRelayFlags = AsyncClientOpenFlags;
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        if (StartPendingClientRelay()) {
+            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
+                delete this;
+            }
+            return true;
+        }
+        if (IsPendingClientRelayWaitingForOpenSendComplete()) {
+            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
+                delete this;
+            }
+            return true;
+        }
+        if (AbortAcceptedClientOpenBeforeRelay()) {
+            delete this;
+        }
+        return false;
+    }
+
+    bool RejectAsyncClientOpen(TqClientTunnelOpenHandle* handle) {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterReject = false;
+        TqClientTunnelOpenHandle* releaseHandle = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (AsyncClientOpenHandle != handle) {
+                return false;
+            }
+            releaseHandle = AsyncClientOpenHandle;
+            AsyncClientOpenHandle = nullptr;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr &&
+                !ShutdownComplete && !StreamShutdownQueued) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterReject = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        TqReleaseClientTunnelOpenHandle(releaseHandle);
+        if (deleteAfterReject) {
+            delete this;
+        }
+        return true;
+    }
+
+    bool IsPendingClientRelayWaitingForOpenSendComplete() {
+        std::lock_guard<std::mutex> guard(Lock);
+        return AsyncClientOpenAccepted && PendingClientRelay && !OpenSendComplete &&
+            !RelayStarted && !ShutdownComplete && !StreamShutdownQueued;
+    }
+
+    bool AbortAcceptedClientOpenBeforeRelay() {
+        MsQuicStream* stream = nullptr;
+        bool shutdownStream = false;
+        bool deleteAfterAbort = false;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (!AsyncClientOpenAccepted || RelayStarted || ShutdownComplete ||
+                StreamShutdownQueued) {
+                return false;
+            }
+            PendingClientRelay = false;
+            ClientOpenOwnerActive = false;
+            SelfDeleteOnShutdown = true;
+            CloseTcpLocked();
+            if (Stream != nullptr && Stream->Handle != nullptr) {
+                stream = Stream;
+                shutdownStream = true;
+                StreamShutdownQueued = true;
+            }
+            deleteAfterAbort = ShouldDeletePreRelayLocked();
+        }
+        if (shutdownStream) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+        return deleteAfterAbort;
+    }
+
     bool FinishClientOpenAndStartRelay(uint8_t flags) {
         {
             std::lock_guard<std::mutex> guard(Lock);
@@ -596,7 +842,9 @@ private:
                     std::lock_guard<std::mutex> guard(Lock);
                     OpenSendComplete = true;
                 }
-                StartPendingClientRelay();
+                if (!StartPendingClientRelay()) {
+                    deleteAfterEvent = AbortAcceptedClientOpenBeforeRelay();
+                }
             }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
@@ -892,6 +1140,44 @@ private:
             TqTraceOpenResult(TraceTunnelId, ok && response.Ok, response.Error, response.ConnId);
         }
         StateChanged.notify_all();
+        CompleteAsyncClientOpenIfNeeded(ok, response);
+    }
+
+    void CompleteAsyncClientOpenIfNeeded(bool ok, const TqOpenResponse& response) {
+        TqClientTunnelOpenHandle* handle = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (Role != TqTunnelRole::ClientOpen || AsyncClientOpenHandle == nullptr) {
+                return;
+            }
+            handle = AsyncClientOpenHandle;
+            TqRetainClientTunnelOpenHandle(handle);
+        }
+
+        const TqTunnelStartResult result{
+            ok && response.Ok,
+            response.Error,
+            TraceTunnelId,
+        };
+        const TqClientOpenNotifyResult delivered =
+            TqNotifyClientTunnelOpenComplete(handle, result);
+        if (delivered.CleanupContext) {
+            TqClientTunnelOpenHandle* releaseHandle = nullptr;
+            {
+                std::lock_guard<std::mutex> guard(Lock);
+                if (AsyncClientOpenHandle == handle) {
+                    releaseHandle = AsyncClientOpenHandle;
+                    AsyncClientOpenHandle = nullptr;
+                }
+            }
+            CloseTcp();
+            ArmSelfDeleteOnShutdown();
+            TqReleaseClientTunnelOpenHandle(releaseHandle);
+            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
+                delete this;
+            }
+        }
+        TqReleaseClientTunnelOpenHandle(handle);
     }
 
     void EmitTraceClosed() {
@@ -988,6 +1274,9 @@ private:
     bool RegisteredWithConnection{false};
     bool AbortedByConnection{false};
     bool ClientOpenOwnerActive{Role == TqTunnelRole::ClientOpen};
+    TqClientTunnelOpenHandle* AsyncClientOpenHandle{nullptr};
+    uint8_t AsyncClientOpenFlags{0};
+    bool AsyncClientOpenAccepted{false};
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
@@ -1120,6 +1409,174 @@ TqTunnelStartResult TqStartClientTunnel(
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg) {
     return TqStartClientTunnelInternal(conn, req, clientTcpFd, cfg, false, nullptr);
+}
+
+TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg,
+    TqClientTunnelOpenComplete onComplete) {
+    if (!TqSocketValid(clientTcpFd)) {
+        return nullptr;
+    }
+
+    if (conn == nullptr || !conn->IsValid()) {
+        return nullptr;
+    }
+
+    TqOpenRequest openReq{};
+    if (!TqBuildOpenRequest(req, cfg, openReq)) {
+        return nullptr;
+    }
+
+    auto* handle = new (std::nothrow) TqClientTunnelOpenHandle();
+    if (handle == nullptr) {
+        return nullptr;
+    }
+    handle->OnComplete = std::move(onComplete);
+
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        clientTcpFd,
+        cfg,
+        nullptr,
+        nullptr,
+        conn,
+        false,
+        nullptr);
+    if (context == nullptr) {
+        delete handle;
+        return nullptr;
+    }
+
+    auto* stream = new (std::nothrow) MsQuicStream(
+        *conn,
+        QUIC_STREAM_OPEN_FLAG_NONE,
+        CleanUpAutoDelete,
+        TqTunnelContext::Callback,
+        context);
+    if (stream == nullptr || !stream->IsValid()) {
+        delete stream;
+        delete context;
+        delete handle;
+        return nullptr;
+    }
+
+    context->SetStream(stream);
+    context->RegisterWithConnectionIfNeeded();
+
+    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
+    const uint32_t connId = TqLookupClientTraceConnId(conn);
+    const uint64_t tunnelId =
+        TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
+    context->AssignTrace(tunnelId, target);
+    context->SetIngressTraceProto(req.IngressTraceProto);
+
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        handle->Context = context;
+    }
+    context->SetAsyncClientOpenHandle(handle, openReq.Flags);
+
+    if (!context->SendOpenRequest(openReq)) {
+        std::fprintf(stderr, "tcpquic-proxy: async client tunnel failed to send open request\n");
+        bool deleteContext = false;
+        {
+            std::lock_guard<std::mutex> guard(handle->Lock);
+            handle->OpenState = TqClientTunnelOpenHandle::State::Cancelled;
+            handle->Context = nullptr;
+        }
+        if (context->AbandonAsyncClientOpenWithoutClosingTcp(handle)) {
+            deleteContext = true;
+        }
+        TqReleaseClientTunnelOpenHandle(handle);
+        if (deleteContext) {
+            delete context;
+        }
+        return nullptr;
+    }
+
+    return handle;
+}
+
+void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+
+    TqTunnelContext* context = nullptr;
+    bool releaseUser = false;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState == TqClientTunnelOpenHandle::State::Accepted ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Rejected ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Cancelled) {
+            return;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Cancelled;
+        context = handle->Context;
+        handle->Context = nullptr;
+        releaseUser = true;
+    }
+
+    if (context != nullptr && context->CancelAsyncClientOpen(handle)) {
+        delete context;
+    }
+    if (releaseUser) {
+        TqReleaseClientTunnelOpenHandle(handle);
+    }
+}
+
+bool TqAcceptClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return false;
+    }
+
+    TqTunnelContext* context = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState != TqClientTunnelOpenHandle::State::OpenSucceeded ||
+            handle->Context == nullptr) {
+            return false;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Accepted;
+        context = handle->Context;
+        handle->Context = nullptr;
+    }
+
+    const bool accepted = context->AcceptAsyncClientOpen(handle);
+    TqReleaseClientTunnelOpenHandle(handle);
+    return accepted;
+}
+
+void TqRejectClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
+    if (handle == nullptr) {
+        return;
+    }
+
+    TqTunnelContext* context = nullptr;
+    bool releaseUser = false;
+    {
+        std::lock_guard<std::mutex> guard(handle->Lock);
+        if (handle->OpenState == TqClientTunnelOpenHandle::State::Accepted ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Rejected ||
+            handle->OpenState == TqClientTunnelOpenHandle::State::Cancelled) {
+            return;
+        }
+        handle->OpenState = TqClientTunnelOpenHandle::State::Rejected;
+        context = handle->Context;
+        handle->Context = nullptr;
+        releaseUser = true;
+    }
+
+    if (context != nullptr) {
+        (void)context->RejectAsyncClientOpen(handle);
+    }
+    if (releaseUser) {
+        TqReleaseClientTunnelOpenHandle(handle);
+    }
 }
 
 TqTunnelStartResult TqStartClientTunnelReceiveSink(

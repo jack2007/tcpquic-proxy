@@ -12,6 +12,7 @@
 
 struct MsQuicConnection;
 struct MsQuicStream;
+struct TqClientTunnelOpenHandle;
 class TqEphemeralTargetAuthorizer;
 class TqServerSpeedTestController;
 

@@ -513,6 +513,38 @@ else()
 endif()
 set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
+set(TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
+    unittest/client_tunnel_open_test.cpp
+    tunnel/client_tunnel_open.cpp
+    tunnel/tcp_tunnel.cpp
+    tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
+    tunnel/tunnel_reaper.cpp
+    config/tuning.cpp
+    protocol/control_protocol.cpp
+    acl/acl.cpp
+    protocol/compress.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+add_executable(tcpquic_client_tunnel_open_test ${TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES})
+tcpquic_target_include_dirs(tcpquic_client_tunnel_open_test)
+if(TCPQUIC_TEST_INCLUDES)
+    target_include_directories(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
+endif()
+target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE msquic_platform)
+endif()
+target_compile_definitions(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
+set_property(TARGET tcpquic_client_tunnel_open_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_client_tunnel_open_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    tcpquic_link_mimalloc(tcpquic_client_tunnel_open_test)
+endif()
+if(WIN32)
+    tcpquic_link_mimalloc(tcpquic_client_tunnel_open_test)
+endif()
+
 set(TCPQUIC_POSIX_TEST_TARGETS)
 if(NOT WIN32)
     add_executable(tcpquic_tcp_sink_bench_test
@@ -692,6 +724,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_proxy_auth_test
     tcpquic_compress_test
     tcpquic_tunnel_test
+    tcpquic_client_tunnel_open_test
     tcpquic_http_connect_test
     tcpquic_socks5_test
     tcpquic_client_ingress_state_test
