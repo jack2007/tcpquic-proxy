@@ -1229,11 +1229,23 @@ int main() {
         }
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-        while (!handle.Stop.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline) {
+        TqWindowsRelayWorkerSnapshot snapshot{};
+        do {
+            snapshot = receiveWorker.Snapshot();
+            if (handle.Stop.load(std::memory_order_acquire) && snapshot.TcpHardErrors > 0 &&
+                snapshot.FatalRelayResets > 0) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+        if (snapshot.TcpHardErrors == 0 || snapshot.FatalRelayResets == 0 ||
+            !handle.Stop.load(std::memory_order_acquire)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 181;
         }
-        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.RelayBufferBytesInUse != 0) {
+        if (snapshot.RelayBufferBytesInUse != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
