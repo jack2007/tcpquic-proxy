@@ -283,6 +283,27 @@ tcpquic_link_mimalloc(tcpquic_relay_buffer_test)
 set_property(TARGET tcpquic_relay_buffer_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_relay_buffer_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+set(TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES
+    unittest/ares_dns_resolver_test.cpp
+    tunnel/ares_dns_resolver.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+if(WIN32)
+    list(APPEND TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES runtime/windows_reactor.cpp)
+else()
+    list(APPEND TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES runtime/linux_reactor.cpp)
+endif()
+add_executable(tcpquic_ares_dns_resolver_test ${TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES})
+tcpquic_target_include_dirs(tcpquic_ares_dns_resolver_test)
+target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE TQ_UNIT_TESTING=1)
+set_property(TARGET tcpquic_ares_dns_resolver_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_ares_dns_resolver_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+if(WIN32)
+    target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE ws2_32)
+endif()
+
 set(TCPQUIC_LINUX_TEST_TARGETS)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_relay_worker_queue_test
@@ -325,18 +346,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(tcpquic_linux_reactor_test PRIVATE Threads::Threads)
     set_property(TARGET tcpquic_linux_reactor_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-
-    add_executable(tcpquic_ares_dns_resolver_test
-        unittest/ares_dns_resolver_test.cpp
-        tunnel/ares_dns_resolver.cpp
-        runtime/linux_reactor.cpp
-        ${TCPQUIC_PLATFORM_SOURCES}
-    )
-    tcpquic_target_include_dirs(tcpquic_ares_dns_resolver_test)
-    target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
-    target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE TQ_UNIT_TESTING=1)
-    set_property(TARGET tcpquic_ares_dns_resolver_test PROPERTY FOLDER "tools")
-    set_property(TARGET tcpquic_ares_dns_resolver_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
     add_executable(tcpquic_server_dial_reactor_test
         unittest/server_dial_reactor_test.cpp
@@ -407,7 +416,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
         tcpquic_linux_reactor_test
-        tcpquic_ares_dns_resolver_test
         tcpquic_server_dial_reactor_test
         tcpquic_server_dial_reactor_worker_test
         tcpquic_client_ingress_reactor_test
@@ -865,6 +873,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
     tcpquic_control_test
+    tcpquic_ares_dns_resolver_test
     tcpquic_speed_test_test
     tcpquic_acl_test
     tcpquic_acl_filter_test

@@ -1,15 +1,35 @@
 #include "ares_dns_resolver.h"
 
+#if defined(_WIN32)
+#include "windows_reactor.h"
+#else
 #include "linux_reactor.h"
+#endif
 
 #include <ares.h>
 
 #include <algorithm>
 #include <cstring>
+#if !defined(_WIN32)
 #include <sys/time.h>
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+namespace {
+
+#if defined(_WIN32)
+using TqAresReactor = TqWindowsReactor;
+#else
+using TqAresReactor = TqLinuxReactor;
+#endif
+
+TqSocketHandle TqAresSocketToHandle(ares_socket_t socketFd) {
+    return static_cast<TqSocketHandle>(socketFd);
+}
+
+} // namespace
 
 struct TqAresDnsResolver::Impl {
     struct PendingQuery {
@@ -21,13 +41,15 @@ struct TqAresDnsResolver::Impl {
         TqDnsResolveCallback Callback;
     };
 
-    TqLinuxReactor Reactor;
+    TqSocketStartup SocketStartup;
+    TqAresReactor Reactor;
     ares_channel_t* Channel{nullptr};
     uint64_t NextId{1};
+    bool AresLibraryInitialized{false};
     bool CallbackCompleted{false};
     std::unordered_map<uint64_t, PendingQuery*> Pending;
     std::vector<uint64_t> CompletedIds;
-    std::unordered_set<int> RegisteredSockets;
+    std::unordered_set<TqSocketHandle> RegisteredSockets;
 
     static void SockStateCallback(void* data, ares_socket_t socketFd, int readable, int writable) {
         auto* self = static_cast<Impl*>(data);
@@ -87,8 +109,15 @@ struct TqAresDnsResolver::Impl {
         if (Channel != nullptr) {
             return true;
         }
-        if (!Reactor.Start()) {
+        if (!SocketStartup.Ok() || !Reactor.Start()) {
             return false;
+        }
+        if (!AresLibraryInitialized) {
+            if (ares_library_init(ARES_LIB_INIT_ALL) != ARES_SUCCESS) {
+                Reactor.Stop();
+                return false;
+            }
+            AresLibraryInitialized = true;
         }
 
         ares_options options{};
@@ -122,6 +151,10 @@ struct TqAresDnsResolver::Impl {
             Channel = nullptr;
         }
         Reactor.Stop();
+        if (AresLibraryInitialized) {
+            ares_library_cleanup();
+            AresLibraryInitialized = false;
+        }
         CallbackCompleted = false;
     }
 
@@ -182,7 +215,10 @@ struct TqAresDnsResolver::Impl {
             return;
         }
 
-        const int fd = static_cast<int>(socketFd);
+        const TqSocketHandle fd = TqAresSocketToHandle(socketFd);
+        if (!TqSocketValid(fd)) {
+            return;
+        }
         const uint32_t events = ToReactorEvents(readable, writable);
         auto it = RegisteredSockets.find(fd);
         if (events == 0) {
@@ -194,7 +230,7 @@ struct TqAresDnsResolver::Impl {
         }
 
         if (it == RegisteredSockets.end()) {
-            if (Reactor.Add(fd, events, [this](int readyFd, uint32_t readyEvents) {
+            if (Reactor.Add(fd, events, [this](TqSocketHandle readyFd, uint32_t readyEvents) {
                     ProcessFd(readyFd, readyEvents);
                 })) {
                 RegisteredSockets.insert(fd);
@@ -205,7 +241,7 @@ struct TqAresDnsResolver::Impl {
         if (!Reactor.Modify(fd, events)) {
             (void)Reactor.Remove(fd);
             RegisteredSockets.erase(it);
-            if (Reactor.Add(fd, events, [this](int readyFd, uint32_t readyEvents) {
+            if (Reactor.Add(fd, events, [this](TqSocketHandle readyFd, uint32_t readyEvents) {
                     ProcessFd(readyFd, readyEvents);
                 })) {
                 RegisteredSockets.insert(fd);
@@ -213,8 +249,8 @@ struct TqAresDnsResolver::Impl {
         }
     }
 
-    void ProcessFd(int fd, uint32_t events) {
-        if (Channel == nullptr) {
+    void ProcessFd(TqSocketHandle fd, uint32_t events) {
+        if (Channel == nullptr || !TqSocketValid(fd)) {
             return;
         }
 

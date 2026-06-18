@@ -3,11 +3,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <netinet/in.h>
+#if !defined(_WIN32)
 #include <signal.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
+#endif
+#include <thread>
 
 namespace {
 
@@ -157,6 +158,9 @@ int ChildRunOnceInfiniteTimeoutWithPendingQuery() {
 }
 
 int TestInfiniteTimeoutUsesAresTimeoutForPendingQuery() {
+#if defined(_WIN32)
+    return 0;
+#else
     const pid_t child = ::fork();
     if (child < 0) {
         return 70;
@@ -183,6 +187,7 @@ int TestInfiniteTimeoutUsesAresTimeoutForPendingQuery() {
     (void)::kill(child, SIGKILL);
     (void)::waitpid(child, &status, 0);
     return 73;
+#endif
 }
 
 int TestInfiniteTimeoutWaitSelectionUsesAresTimeout() {
