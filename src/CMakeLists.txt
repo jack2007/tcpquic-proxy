@@ -570,6 +570,21 @@ target_link_libraries(tcpquic_socks5_test PRIVATE Threads::Threads)
 set_property(TARGET tcpquic_socks5_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_socks5_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_client_ingress_state_test
+    unittest/client_ingress_state_test.cpp
+    unittest/trace_proxy_stub.cpp
+    ingress/client_ingress_state.cpp
+    ingress/socks5_server.cpp
+    ingress/http_connect_server.cpp
+    ingress/proxy_auth.cpp
+    protocol/control_protocol.cpp
+    ${TCPQUIC_SERVER_TEST_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_client_ingress_state_test)
+target_link_libraries(tcpquic_client_ingress_state_test PRIVATE Threads::Threads)
+set_property(TARGET tcpquic_client_ingress_state_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_client_ingress_state_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_admin_http_test
     unittest/admin_http_test.cpp
     runtime/admin_http.cpp
@@ -679,6 +694,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_tunnel_test
     tcpquic_http_connect_test
     tcpquic_socks5_test
+    tcpquic_client_ingress_state_test
     tcpquic_admin_http_test
     tcpquic_router_runtime_test
     tcpquic_production_linkage_guard_test
