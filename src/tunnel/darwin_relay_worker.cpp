@@ -82,6 +82,12 @@ struct TqDarwinRelayWorker::StreamBinding : public std::enable_shared_from_this<
     uint64_t RelayId{0};
 };
 
+struct TqDarwinRelayPendingTcpWrite {
+    TqBufferView View;
+    std::shared_ptr<TqDarwinPendingQuicReceive> Receive;
+    uint64_t ReceiveBytesRemaining{0};
+};
+
 struct TqDarwinRelayWorker::RelayState {
     mutable std::mutex Mutex;
     uint64_t Id{0};
@@ -108,7 +114,7 @@ struct TqDarwinRelayWorker::RelayState {
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> PendingQuicReceives;
     uint64_t PendingQuicReceiveBytes{0};
     bool QuicReceivePaused{false};
-    std::deque<TqBufferView> PendingTcpWrites;
+    std::deque<std::shared_ptr<TqDarwinRelayPendingTcpWrite>> PendingTcpWrites;
     uint64_t PendingTcpWriteBytes{0};
     bool TcpWriteShutdownQueued{false};
     uint64_t TcpWriteBytes{0};
@@ -1479,7 +1485,7 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
         decompressor = relay->Decompressor;
     }
 
-    std::deque<TqBufferView> tcpWrites;
+    std::deque<std::shared_ptr<TqDarwinRelayPendingTcpWrite>> tcpWrites;
     const size_t chunkSize = std::max<size_t>(1, Config.ReadChunkSize);
     auto appendOutput = [&](const uint8_t* data, size_t size) -> bool {
         size_t offset = 0;
@@ -1494,7 +1500,12 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
             std::memcpy(buffer->Data(), data + offset, length);
             buffer->SetLength(length);
             uint8_t* bufferData = buffer->Data();
-            tcpWrites.push_back(TqBufferView{bufferData, length, std::move(buffer)});
+            TqBufferView view{bufferData, length, std::move(buffer)};
+            auto write = std::make_shared<TqDarwinRelayPendingTcpWrite>();
+            write->View = std::move(view);
+            write->Receive = receive;
+            write->ReceiveBytesRemaining = length;
+            tcpWrites.push_back(std::move(write));
             offset += length;
         }
         return true;
@@ -1549,29 +1560,38 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
         if (relay->Closing) {
             return false;
         }
-        for (auto& view : tcpWrites) {
-            relay->PendingTcpWriteBytes += view.Len;
-            relay->PendingTcpWrites.push_back(std::move(view));
-        }
-        receive->PendingCompleteBytes = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
-            ? 0
-            : receive->TotalLength;
-        receive->CompletedLength = receive->TotalLength;
-        relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
-            ? relay->PendingQuicReceiveBytes - receive->TotalLength
-            : 0;
-        for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
-            if (*it == receive) {
-                relay->PendingQuicReceives.erase(it);
-                break;
+        uint64_t remainingTcpWriteBytes = 0;
+        for (auto& write : tcpWrites) {
+            if (write == nullptr) {
+                continue;
             }
+            remainingTcpWriteBytes += write->ReceiveBytesRemaining;
+            relay->PendingTcpWriteBytes += write->View.Len;
+            relay->PendingTcpWrites.push_back(std::move(write));
+        }
+        if (remainingTcpWriteBytes == 0) {
+            receive->PendingCompleteBytes = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
+                ? 0
+                : receive->TotalLength;
+            receive->CompletedLength = receive->TotalLength;
+            relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
+                ? relay->PendingQuicReceiveBytes - receive->TotalLength
+                : 0;
+            for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
+                if (*it == receive) {
+                    relay->PendingQuicReceives.erase(it);
+                    break;
+                }
+            }
+            completedReceive = receive;
         }
         if (receive->Fin) {
             relay->TcpWriteShutdownQueued = true;
         }
-        completedReceive = receive;
     }
-    CompleteDeferredQuicReceive(relay, completedReceive);
+    if (completedReceive != nullptr) {
+        CompleteDeferredQuicReceive(relay, completedReceive);
+    }
     MaybeResumeQuicReceive(relay);
     return true;
 }
@@ -1623,7 +1643,9 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
     uint64_t burstBytes = 0;
     for (;;) {
         std::vector<iovec> iov;
+        std::vector<std::shared_ptr<TqDarwinRelayPendingTcpWrite>> writeSnapshot;
         iov.reserve(std::max<uint32_t>(1, Config.MaxIov));
+        writeSnapshot.reserve(std::max<uint32_t>(1, Config.MaxIov));
         uint64_t attemptedBytes = 0;
         {
             std::lock_guard<std::mutex> relayLock(relay->Mutex);
@@ -1640,7 +1662,11 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
                 maxWriteBytes = maxWriteBytes == 0 ? remainingBurst : std::min(maxWriteBytes, remainingBurst);
             }
             if (!relay->PendingTcpWrites.empty()) {
-                for (const auto& view : relay->PendingTcpWrites) {
+                for (const auto& write : relay->PendingTcpWrites) {
+                    if (write == nullptr) {
+                        continue;
+                    }
+                    const auto& view = write->View;
                     if (iov.size() >= std::max<uint32_t>(1, Config.MaxIov) ||
                         (maxWriteBytes != 0 && attemptedBytes >= maxWriteBytes)) {
                         break;
@@ -1656,6 +1682,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
                     item.iov_base = view.Data;
                     item.iov_len = static_cast<size_t>(length);
                     iov.push_back(item);
+                    writeSnapshot.push_back(write);
                     attemptedBytes += length;
                 }
             } else if (relay->TcpWriteShutdownQueued) {
@@ -1679,26 +1706,69 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
         if (sent > 0) {
             uint64_t remaining = static_cast<uint64_t>(sent);
             burstBytes += remaining;
+            std::vector<std::shared_ptr<TqDarwinPendingQuicReceive>> completedReceives;
             {
                 std::lock_guard<std::mutex> relayLock(relay->Mutex);
+                if (relay->Closing) {
+                    return false;
+                }
                 relay->TcpWriteBytes += static_cast<uint64_t>(sent);
                 while (remaining > 0 && !relay->PendingTcpWrites.empty()) {
-                    auto& front = relay->PendingTcpWrites.front();
-                    if (remaining >= front.Len) {
-                        remaining -= front.Len;
-                        relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= front.Len
-                            ? relay->PendingTcpWriteBytes - front.Len
+                    auto front = relay->PendingTcpWrites.front();
+                    if (front == nullptr) {
+                        relay->PendingTcpWrites.pop_front();
+                        continue;
+                    }
+                    auto receive = front->Receive;
+                    const uint64_t consumed = std::min<uint64_t>(remaining, front->View.Len);
+                    if (front->ReceiveBytesRemaining >= consumed) {
+                        front->ReceiveBytesRemaining -= consumed;
+                    } else {
+                        front->ReceiveBytesRemaining = 0;
+                    }
+                    if (remaining >= front->View.Len) {
+                        remaining -= front->View.Len;
+                        relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= front->View.Len
+                            ? relay->PendingTcpWriteBytes - front->View.Len
                             : 0;
                         relay->PendingTcpWrites.pop_front();
                     } else {
-                        front.Data += remaining;
-                        front.Len -= remaining;
+                        front->View.Data += remaining;
+                        front->View.Len -= remaining;
                         relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= remaining
                             ? relay->PendingTcpWriteBytes - remaining
                             : 0;
                         remaining = 0;
                     }
+                    bool receiveHasPendingWrites = false;
+                    if (receive != nullptr) {
+                        for (const auto& pendingWrite : relay->PendingTcpWrites) {
+                            if (pendingWrite != nullptr && pendingWrite->Receive == receive &&
+                                pendingWrite->ReceiveBytesRemaining != 0) {
+                                receiveHasPendingWrites = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (receive != nullptr && !receiveHasPendingWrites &&
+                        receive->PendingCompleteBytes == 0 && receive->CompletedLength < receive->TotalLength) {
+                        receive->PendingCompleteBytes = receive->TotalLength;
+                        receive->CompletedLength = receive->TotalLength;
+                        relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
+                            ? relay->PendingQuicReceiveBytes - receive->TotalLength
+                            : 0;
+                        for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
+                            if (*it == receive) {
+                                relay->PendingQuicReceives.erase(it);
+                                break;
+                            }
+                        }
+                        completedReceives.push_back(receive);
+                    }
                 }
+            }
+            for (const auto& receive : completedReceives) {
+                CompleteDeferredQuicReceive(relay, receive);
             }
             MaybeResumeQuicReceive(relay);
             continue;

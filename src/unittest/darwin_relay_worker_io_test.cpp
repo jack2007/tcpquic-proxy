@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <chrono>
 #include <thread>
@@ -32,6 +34,12 @@ std::atomic<int> g_sendMsgMode{0};
 std::atomic<QUIC_STATUS> g_receiveSetEnabledStatus{QUIC_STATUS_SUCCESS};
 std::atomic<uint64_t> g_receiveSetEnabledCalls{0};
 std::atomic<int> g_lastReceiveSetEnabled{-1};
+std::mutex g_blockingSendMutex;
+std::condition_variable g_blockingSendReady;
+std::condition_variable g_blockingSendContinue;
+bool g_blockingSendEntered{false};
+bool g_blockingSendMayContinue{false};
+bool g_blockingSendReturned{false};
 
 struct FailingDecompressor final : ITqDecompressor {
     bool Decompress(const uint8_t*, size_t, std::vector<uint8_t>&) override {
@@ -202,6 +210,56 @@ ssize_t PartialSendMsg(TqSocketHandle fd, const struct msghdr* msg) {
         }
     }
     return sendmsg(fd, msg, 0);
+}
+
+ssize_t BlockingSendMsg(TqSocketHandle fd, const struct msghdr* msg) {
+    g_sendMsgCalls.fetch_add(1, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_blockingSendMutex);
+        g_blockingSendEntered = true;
+    }
+    g_blockingSendReady.notify_one();
+    {
+        std::unique_lock<std::mutex> lock(g_blockingSendMutex);
+        g_blockingSendContinue.wait(lock, [] { return g_blockingSendMayContinue; });
+    }
+    if (msg == nullptr || msg->msg_iov == nullptr || msg->msg_iovlen == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    const auto* iov = static_cast<const iovec*>(msg->msg_iov);
+    const ssize_t result = send(fd, iov[0].iov_base, iov[0].iov_len, 0);
+    {
+        std::lock_guard<std::mutex> lock(g_blockingSendMutex);
+        g_blockingSendReturned = true;
+    }
+    g_blockingSendReady.notify_one();
+    return result;
+}
+
+void ResetBlockingSendMsg() {
+    std::lock_guard<std::mutex> lock(g_blockingSendMutex);
+    g_blockingSendEntered = false;
+    g_blockingSendMayContinue = false;
+    g_blockingSendReturned = false;
+}
+
+void ReleaseBlockingSendMsg() {
+    {
+        std::lock_guard<std::mutex> lock(g_blockingSendMutex);
+        g_blockingSendMayContinue = true;
+    }
+    g_blockingSendContinue.notify_one();
+}
+
+bool WaitForBlockingSendMsg() {
+    std::unique_lock<std::mutex> lock(g_blockingSendMutex);
+    return g_blockingSendReady.wait_for(lock, std::chrono::seconds(2), [] { return g_blockingSendEntered; });
+}
+
+bool WaitForBlockingSendMsgReturned() {
+    std::unique_lock<std::mutex> lock(g_blockingSendMutex);
+    return g_blockingSendReady.wait_for(lock, std::chrono::seconds(2), [] { return g_blockingSendReturned; });
 }
 
 void ResetFakeReceiveComplete() {
@@ -1252,9 +1310,8 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == expected.size());
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == expected.size());
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == expected.size() - 3);
     std::fill(payload.begin(), payload.end(), static_cast<uint8_t>('X'));
 
@@ -1266,6 +1323,8 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == expected.size());
 
     std::vector<uint8_t> output(expected.size());
     size_t total = 0;
@@ -1280,6 +1339,63 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     worker.SetSendMsgForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CHECK(close(fds[0]) == 0);
+    CHECK(close(fds[1]) == 0);
+}
+
+void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    ResetFakeReceiveComplete();
+    ResetBlockingSendMsg();
+
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxIov = 1;
+
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    worker.SetSendMsgForTest(BlockingSendMsg);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "flush-unregister-race";
+    QUIC_BUFFER quicBuffer{};
+    quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
+    quicBuffer.Length = static_cast<uint32_t>(sizeof(payload) - 1);
+    QUIC_STREAM_EVENT receiveEvent{};
+    receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receiveEvent.RECEIVE.BufferCount = 1;
+    receiveEvent.RECEIVE.Buffers = &quicBuffer;
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+
+    CHECK(WaitForBlockingSendMsg());
+    worker.UnregisterRelay(result.RelayId);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    ReleaseBlockingSendMsg();
+    CHECK(WaitForBlockingSendMsgReturned());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+
+    worker.SetSendMsgForTest(nullptr);
+    worker.SetReceiveCompleteForTest(nullptr);
     worker.Stop();
     CHECK(close(fds[0]) == 0);
     CHECK(close(fds[1]) == 0);
@@ -1332,14 +1448,14 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(g_sendMsgCalls.load(std::memory_order_acquire) != 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == sizeof(payload) - 1);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == sizeof(payload) - 1 - 3);
 
     SetSendMsgMode(1);
     CHECK(worker.FlushTcpWritableForTest(result.RelayId));
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == sizeof(payload) - 1);
 
     SetSendMsgMode(4);
     CHECK(!worker.FlushTcpWritableForTest(result.RelayId));
@@ -1413,8 +1529,8 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
            std::chrono::steady_clock::now() < completeDeadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == sizeof(payload) - 1);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == sizeof(payload) - 1);
 
     CHECK(worker.FlushTcpWritableForTest(result.RelayId));
@@ -1437,6 +1553,8 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     CHECK(snapshot.QuicReceiveResumedCount == 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
 
     worker.SetSendMsgForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -1705,6 +1823,7 @@ int main() {
     RegisterAfterStopFailsWithoutPublishingHandle();
     QuicReceiveCallbackReturnsPending();
     QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush();
+    QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister();
     QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce();
     QuicReceivePauseAndResumeFollowsTcpWritePressure();
     QuicReceivePauseFailureRollsBackAndCompletesReceive();
