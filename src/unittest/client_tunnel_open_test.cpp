@@ -566,8 +566,11 @@ int TestFailureResponseCompletesAndCleansUpWithoutRelay() {
     if (completions != 1 || completedHandle != handle) return 53;
     if (completedResult.Ok || completedResult.Error != TqOpenError::AclDenied) return 54;
     if (g_relay_start_count != 0) return 55;
-    if (FakeShutdownCount(stream) == 0) return 56;
+    if (FakeShutdownCount(stream) != 0) return 56;
+    const char byte = 'x';
+    if (TqSend(fake.Fds[1], &byte, 1, TqSendFlags::None) != 1) return 57;
     TqRejectClientTunnelOpen(handle);
+    if (FakeShutdownCount(stream) == 0) return 58;
     return 0;
 }
 

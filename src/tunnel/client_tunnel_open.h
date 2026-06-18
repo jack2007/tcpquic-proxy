@@ -25,7 +25,9 @@ using TqClientTunnelOpenComplete =
 // - onComplete is a notification only. A successful result does not start relay
 //   until the caller explicitly accepts the handle.
 // - Failed completion results still require TqRejectClientTunnelOpen or
-//   TqCancelClientTunnelOpen to release caller ownership of the handle.
+//   TqCancelClientTunnelOpen to release caller ownership of the handle; the
+//   clientTcpFd remains open until that terminal call so callers can send a
+//   protocol failure response first.
 // - The handle pointer passed to onComplete is valid for the duration of that
 //   callback and remains valid afterward until the caller invokes a terminal API.
 TqClientTunnelOpenHandle* TqStartClientTunnelAsync(

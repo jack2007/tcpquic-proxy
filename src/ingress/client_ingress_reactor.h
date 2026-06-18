@@ -1,7 +1,9 @@
 #pragma once
 
+#include "client_ingress_state.h"
 #include "config.h"
 #include "linux_reactor.h"
+#include "client_tunnel_open.h"
 
 #include <atomic>
 #include <cstddef>
@@ -13,11 +15,23 @@
 #include <thread>
 #include <unordered_map>
 
+using TqClientIngressTunnelStartFn =
+    std::function<TqClientTunnelOpenHandle*(
+        const TunnelRequest&,
+        TqSocketHandle,
+        TqClientTunnelOpenComplete)>;
+using TqClientIngressTunnelAcceptFn = std::function<bool(TqClientTunnelOpenHandle*)>;
+using TqClientIngressTunnelCloseFn = std::function<void(TqClientTunnelOpenHandle*)>;
+
 struct TqClientIngressPeer {
     std::string PeerId;
     std::string SocksListen;
     std::string HttpListen;
     TqConfig Config;
+    TqClientIngressTunnelStartFn StartTunnel;
+    TqClientIngressTunnelAcceptFn AcceptTunnel;
+    TqClientIngressTunnelCloseFn RejectTunnel;
+    TqClientIngressTunnelCloseFn CancelTunnel;
 };
 
 class TqClientIngressReactor {
@@ -64,15 +78,42 @@ private:
         ListenProto Proto{ListenProto::Socks5};
     };
 
+    enum class ClientPhase {
+        Handshake,
+        Opening,
+        WritingOpenResponse,
+    };
+
     struct ClientEntry {
         std::string PeerId;
         ListenProto Proto{ListenProto::Socks5};
+        TqClientIngressState State{TqClientIngressProto::Socks5};
+        TqClientIngressTunnelStartFn StartTunnel;
+        TqClientIngressTunnelAcceptFn AcceptTunnel;
+        TqClientIngressTunnelCloseFn RejectTunnel;
+        TqClientIngressTunnelCloseFn CancelTunnel;
+        ClientPhase Phase{ClientPhase::Handshake};
+        std::string PendingWrite;
+        TqClientTunnelOpenHandle* OpenHandle{nullptr};
+        bool OpenSucceeded{false};
     };
 
     void Run();
     bool EnqueueSync(std::function<bool()> task);
+    bool EnqueueAsync(std::function<void()> task);
     void ProcessPendingTasks();
     void AcceptLoop(int listenFd);
+    void HandleClientEvents(int clientFd, uint32_t events);
+    void HandleClientRead(int clientFd);
+    void HandleClientWrite(int clientFd);
+    void HandleIngressResult(int clientFd, TqClientIngressResult result);
+    void StartClientOpen(int clientFd);
+    void CompleteClientOpen(
+        int clientFd,
+        TqClientTunnelOpenHandle* handle,
+        TqTunnelStartResult result);
+    void CloseClientLocked(int clientFd, bool closeFd);
+    void CloseClientOwnedByTunnelLocked(int clientFd);
     void RemovePeerLocked(const std::string& peerId);
     void CloseAllLocked();
 

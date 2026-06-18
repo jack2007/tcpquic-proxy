@@ -1,5 +1,8 @@
 #include "client_ingress_reactor.h"
 
+#include "http_connect_server.h"
+#include "socks5_server.h"
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <fcntl.h>
@@ -10,10 +13,13 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
 constexpr int TqMaxIngressAcceptsPerEvent = 64;
+// Avoid reading past the SOCKS/HTTP handshake boundary; payload must remain queued for relay.
+constexpr size_t TqIngressReadBufferSize = 1;
 
 struct TqParsedHostPort {
     std::string Host;
@@ -217,6 +223,55 @@ bool TqCreateNonBlockingListenSocket(const std::string& listen, TqListenSocket& 
 
     ::freeaddrinfo(result);
     return false;
+}
+
+TqClientIngressProto TqToIngressProto(bool socks) {
+    return socks
+        ? TqClientIngressProto::Socks5
+        : TqClientIngressProto::HttpConnect;
+}
+
+std::string TqBuildSocks5Response(TqOpenError error) {
+    const uint8_t response[] = {
+        0x05,
+        TqSocks5RepForOpenError(error),
+        0x00,
+        0x01,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00};
+    return std::string(reinterpret_cast<const char*>(response), sizeof(response));
+}
+
+std::string TqBuildHttpConnectResponse(TqOpenError error) {
+    const int status = TqHttpStatusForOpenError(error);
+    const char* reason = "Internal Server Error";
+    switch (status) {
+    case 200:
+        reason = "Connection Established";
+        break;
+    case 400:
+        reason = "Bad Request";
+        break;
+    case 403:
+        reason = "Forbidden";
+        break;
+    case 502:
+        reason = "Bad Gateway";
+        break;
+    case 504:
+        reason = "Gateway Timeout";
+        break;
+    default:
+        break;
+    }
+    return "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\n\r\n";
+}
+
+std::string TqBuildOpenResponse(bool socks, TqOpenError error) {
+    if (socks) {
+        return TqBuildSocks5Response(error);
+    }
+    return TqBuildHttpConnectResponse(error);
 }
 
 } // namespace
@@ -427,6 +482,19 @@ bool TqClientIngressReactor::EnqueueSync(std::function<bool()> task) {
     return future.get();
 }
 
+bool TqClientIngressReactor::EnqueueAsync(std::function<void()> task) {
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    if (State != LifecycleState::Running || !Running.load(std::memory_order_acquire)) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        PendingTasks.emplace_back(std::move(task));
+    }
+    (void)Reactor.Wake();
+    return true;
+}
+
 void TqClientIngressReactor::ProcessPendingTasks() {
     std::deque<std::function<void()>> tasks;
     {
@@ -464,7 +532,28 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
 
         if (clientFd >= 0) {
             std::lock_guard<std::mutex> lock(Mutex);
-            Clients.emplace(clientFd, ClientEntry{peerId, proto});
+            const auto peerIt = Peers.find(peerId);
+            if (peerIt == Peers.end()) {
+                TqCloseFd(clientFd);
+                continue;
+            }
+
+            ClientEntry client{};
+            client.PeerId = peerId;
+            client.Proto = proto;
+            client.State = TqClientIngressState(TqToIngressProto(proto == ListenProto::Socks5));
+            client.StartTunnel = peerIt->second.Peer.StartTunnel;
+            client.AcceptTunnel = peerIt->second.Peer.AcceptTunnel;
+            client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
+            client.CancelTunnel = peerIt->second.Peer.CancelTunnel;
+            if (!Reactor.Add(clientFd, TqLinuxReactorEvents::Read,
+                    [this](int fd, uint32_t events) {
+                        HandleClientEvents(fd, events);
+                    })) {
+                TqCloseFd(clientFd);
+                continue;
+            }
+            Clients.emplace(clientFd, std::move(client));
             continue;
         }
 
@@ -476,6 +565,288 @@ void TqClientIngressReactor::AcceptLoop(int listenFd) {
         }
         return;
     }
+}
+
+void TqClientIngressReactor::HandleClientEvents(int clientFd, uint32_t events) {
+    if ((events & TqLinuxReactorEvents::Read) != 0) {
+        HandleClientRead(clientFd);
+    }
+    if ((events & TqLinuxReactorEvents::Write) != 0) {
+        HandleClientWrite(clientFd);
+    }
+    if ((events & TqLinuxReactorEvents::Error) != 0) {
+        std::lock_guard<std::mutex> lock(Mutex);
+        if (Clients.find(clientFd) != Clients.end()) {
+            CloseClientLocked(clientFd, true);
+        }
+    }
+}
+
+void TqClientIngressReactor::HandleClientRead(int clientFd) {
+    for (;;) {
+        uint8_t buffer[TqIngressReadBufferSize]{};
+        const ssize_t received = ::recv(clientFd, buffer, sizeof(buffer), 0);
+        if (received > 0) {
+            TqClientIngressResult result = TqClientIngressResult::Close;
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                auto it = Clients.find(clientFd);
+                if (it == Clients.end() || it->second.Phase != ClientPhase::Handshake) {
+                    return;
+                }
+                result = it->second.State.Feed(buffer, static_cast<size_t>(received));
+            }
+            HandleIngressResult(clientFd, result);
+            if (result != TqClientIngressResult::NeedRead) {
+                return;
+            }
+            continue;
+        }
+
+        if (received == 0) {
+            std::lock_guard<std::mutex> lock(Mutex);
+            CloseClientLocked(clientFd, true);
+            return;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(Mutex);
+        CloseClientLocked(clientFd, true);
+        return;
+    }
+}
+
+void TqClientIngressReactor::HandleClientWrite(int clientFd) {
+    for (;;) {
+        TqClientIngressTunnelAcceptFn acceptTunnel;
+        TqClientIngressTunnelCloseFn rejectTunnel;
+        TqClientTunnelOpenHandle* completedHandle = nullptr;
+        bool completedOpenSucceeded = false;
+        bool removeOwnedByTunnel = false;
+        bool closeOwnedByReactor = false;
+        bool feedAfterHandshakeWrite = false;
+
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            auto it = Clients.find(clientFd);
+            if (it == Clients.end()) {
+                return;
+            }
+            ClientEntry& client = it->second;
+            const bool handshakeWrite = client.Phase == ClientPhase::Handshake;
+            const std::string& pending = handshakeWrite ? client.State.PendingWrite() : client.PendingWrite;
+            if (pending.empty()) {
+                if (handshakeWrite) {
+                    feedAfterHandshakeWrite = true;
+                } else {
+                    completedHandle = client.OpenHandle;
+                    completedOpenSucceeded = client.OpenSucceeded;
+                    acceptTunnel = client.AcceptTunnel;
+                    rejectTunnel = client.RejectTunnel;
+                    removeOwnedByTunnel = completedHandle != nullptr;
+                    closeOwnedByReactor = completedHandle == nullptr;
+                }
+            } else {
+                const ssize_t sent = ::send(clientFd, pending.data(), pending.size(), MSG_NOSIGNAL);
+                if (sent > 0) {
+                    if (handshakeWrite) {
+                        client.State.MarkWriteComplete(static_cast<size_t>(sent));
+                        feedAfterHandshakeWrite = client.State.PendingWrite().empty();
+                    } else {
+                        client.PendingWrite.erase(0, static_cast<size_t>(sent));
+                        if (client.PendingWrite.empty()) {
+                            completedHandle = client.OpenHandle;
+                            completedOpenSucceeded = client.OpenSucceeded;
+                            acceptTunnel = client.AcceptTunnel;
+                            rejectTunnel = client.RejectTunnel;
+                            removeOwnedByTunnel = completedHandle != nullptr;
+                            closeOwnedByReactor = completedHandle == nullptr;
+                        }
+                    }
+                } else if (sent < 0 && errno == EINTR) {
+                    continue;
+                } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    return;
+                } else {
+                    CloseClientLocked(clientFd, true);
+                    return;
+                }
+            }
+        }
+
+        if (feedAfterHandshakeWrite) {
+            TqClientIngressResult result = TqClientIngressResult::Close;
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                auto it = Clients.find(clientFd);
+                if (it == Clients.end() || it->second.Phase != ClientPhase::Handshake) {
+                    return;
+                }
+                result = it->second.State.Feed(nullptr, 0);
+            }
+            HandleIngressResult(clientFd, result);
+            return;
+        }
+
+        if (completedHandle != nullptr) {
+            if (completedOpenSucceeded) {
+                bool accepted = false;
+                if (acceptTunnel) {
+                    accepted = acceptTunnel(completedHandle);
+                }
+                if (!accepted && rejectTunnel) {
+                    rejectTunnel(completedHandle);
+                }
+            } else if (rejectTunnel) {
+                rejectTunnel(completedHandle);
+            }
+        }
+
+        if (removeOwnedByTunnel) {
+            std::lock_guard<std::mutex> lock(Mutex);
+            CloseClientOwnedByTunnelLocked(clientFd);
+            return;
+        }
+        if (closeOwnedByReactor) {
+            std::lock_guard<std::mutex> lock(Mutex);
+            CloseClientLocked(clientFd, true);
+            return;
+        }
+    }
+}
+
+void TqClientIngressReactor::HandleIngressResult(int clientFd, TqClientIngressResult result) {
+    if (result == TqClientIngressResult::NeedRead) {
+        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Read);
+        return;
+    }
+    if (result == TqClientIngressResult::NeedWrite) {
+        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error);
+        return;
+    }
+    if (result == TqClientIngressResult::ReadyToOpen) {
+        StartClientOpen(clientFd);
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(Mutex);
+    CloseClientLocked(clientFd, true);
+}
+
+void TqClientIngressReactor::StartClientOpen(int clientFd) {
+    TunnelRequest request{};
+    TqClientIngressTunnelStartFn startTunnel;
+    TqClientIngressTunnelCloseFn rejectTunnel;
+    bool socks = true;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = Clients.find(clientFd);
+        if (it == Clients.end()) {
+            return;
+        }
+        ClientEntry& client = it->second;
+        if (client.Phase != ClientPhase::Handshake) {
+            return;
+        }
+        request = client.State.Request();
+        startTunnel = client.StartTunnel;
+        rejectTunnel = client.RejectTunnel;
+        socks = client.Proto == ListenProto::Socks5;
+        client.Phase = ClientPhase::Opening;
+        (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Error);
+    }
+
+    if (!startTunnel) {
+        CompleteClientOpen(clientFd, nullptr, TqTunnelStartResult{false, TqOpenError::Internal, 0});
+        return;
+    }
+
+    TqClientTunnelOpenHandle* handle = startTunnel(
+        request,
+        clientFd,
+        [this, clientFd](TqClientTunnelOpenHandle* completedHandle, TqTunnelStartResult result) {
+            (void)EnqueueAsync([this, clientFd, completedHandle, result]() {
+                CompleteClientOpen(clientFd, completedHandle, result);
+            });
+        });
+
+    if (handle == nullptr) {
+        CompleteClientOpen(clientFd, nullptr, TqTunnelStartResult{false, TqOpenError::Internal, 0});
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(Mutex);
+    auto it = Clients.find(clientFd);
+    if (it == Clients.end()) {
+        if (rejectTunnel) {
+            rejectTunnel(handle);
+        }
+        return;
+    }
+    it->second.OpenHandle = handle;
+    it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
+}
+
+void TqClientIngressReactor::CompleteClientOpen(
+    int clientFd,
+    TqClientTunnelOpenHandle* handle,
+    TqTunnelStartResult result) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    auto it = Clients.find(clientFd);
+    if (it == Clients.end()) {
+        return;
+    }
+    ClientEntry& client = it->second;
+    if (client.Phase != ClientPhase::Opening) {
+        return;
+    }
+    if (client.OpenHandle != nullptr && handle != nullptr && client.OpenHandle != handle) {
+        return;
+    }
+    if (client.OpenHandle == nullptr) {
+        client.OpenHandle = handle;
+    }
+
+    const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
+    client.OpenSucceeded = result.Ok;
+    client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
+    client.Phase = ClientPhase::WritingOpenResponse;
+    (void)Reactor.Modify(clientFd, TqLinuxReactorEvents::Write | TqLinuxReactorEvents::Error);
+}
+
+void TqClientIngressReactor::CloseClientLocked(int clientFd, bool closeFd) {
+    auto it = Clients.find(clientFd);
+    if (it == Clients.end()) {
+        return;
+    }
+    ClientEntry client = std::move(it->second);
+    Clients.erase(it);
+    (void)Reactor.Remove(clientFd);
+    if (client.OpenHandle != nullptr) {
+        if (client.CancelTunnel) {
+            client.CancelTunnel(client.OpenHandle);
+        }
+        return;
+    }
+    if (closeFd) {
+        int fd = clientFd;
+        TqCloseFd(fd);
+    }
+}
+
+void TqClientIngressReactor::CloseClientOwnedByTunnelLocked(int clientFd) {
+    auto it = Clients.find(clientFd);
+    if (it == Clients.end()) {
+        return;
+    }
+    Clients.erase(it);
+    (void)Reactor.Remove(clientFd);
 }
 
 void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
@@ -495,14 +866,14 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
         TqCloseFd(it->second.HttpFd);
     }
 
-    for (auto clientIt = Clients.begin(); clientIt != Clients.end();) {
+    std::vector<int> clientFds;
+    for (auto clientIt = Clients.begin(); clientIt != Clients.end(); ++clientIt) {
         if (clientIt->second.PeerId == peerId) {
-            int fd = clientIt->first;
-            TqCloseFd(fd);
-            clientIt = Clients.erase(clientIt);
-        } else {
-            ++clientIt;
+            clientFds.push_back(clientIt->first);
         }
+    }
+    for (int fd : clientFds) {
+        CloseClientLocked(fd, true);
     }
 
     Peers.erase(it);
@@ -520,9 +891,13 @@ void TqClientIngressReactor::CloseAllLocked() {
         }
     }
 
-    for (auto& item : Clients) {
-        int fd = item.first;
-        TqCloseFd(fd);
+    std::vector<int> clientFds;
+    clientFds.reserve(Clients.size());
+    for (const auto& item : Clients) {
+        clientFds.push_back(item.first);
+    }
+    for (int fd : clientFds) {
+        CloseClientLocked(fd, true);
     }
 
     Clients.clear();

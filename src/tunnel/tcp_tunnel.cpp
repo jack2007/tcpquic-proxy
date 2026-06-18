@@ -290,41 +290,29 @@ void TqReleaseClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
     }
 }
 
-struct TqClientOpenNotifyResult {
-    bool Delivered{false};
-    bool CleanupContext{false};
-};
-
-TqClientOpenNotifyResult TqNotifyClientTunnelOpenComplete(
+void TqNotifyClientTunnelOpenComplete(
     TqClientTunnelOpenHandle* handle,
     TqTunnelStartResult result) {
-    TqClientOpenNotifyResult notify{};
     if (handle == nullptr) {
-        return notify;
+        return;
     }
 
     TqClientTunnelOpenComplete onComplete;
     {
         std::lock_guard<std::mutex> guard(handle->Lock);
         if (handle->OpenState != TqClientTunnelOpenHandle::State::Opening) {
-            return notify;
+            return;
         }
         handle->OpenState = result.Ok
             ? TqClientTunnelOpenHandle::State::OpenSucceeded
             : TqClientTunnelOpenHandle::State::OpenFailed;
         handle->Result = result;
-        if (!result.Ok) {
-            handle->Context = nullptr;
-            notify.CleanupContext = true;
-        }
         onComplete = std::move(handle->OnComplete);
     }
 
     if (onComplete) {
         onComplete(handle, result);
     }
-    notify.Delivered = true;
-    return notify;
 }
 
 struct TqTunnelContext final {
@@ -1159,24 +1147,7 @@ private:
             response.Error,
             TraceTunnelId,
         };
-        const TqClientOpenNotifyResult delivered =
-            TqNotifyClientTunnelOpenComplete(handle, result);
-        if (delivered.CleanupContext) {
-            TqClientTunnelOpenHandle* releaseHandle = nullptr;
-            {
-                std::lock_guard<std::mutex> guard(Lock);
-                if (AsyncClientOpenHandle == handle) {
-                    releaseHandle = AsyncClientOpenHandle;
-                    AsyncClientOpenHandle = nullptr;
-                }
-            }
-            CloseTcp();
-            ArmSelfDeleteOnShutdown();
-            TqReleaseClientTunnelOpenHandle(releaseHandle);
-            if (ReleaseClientOpenOwnerAndMaybeDelete()) {
-                delete this;
-            }
-        }
+        TqNotifyClientTunnelOpenComplete(handle, result);
         TqReleaseClientTunnelOpenHandle(handle);
     }
 

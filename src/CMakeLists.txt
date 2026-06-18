@@ -116,9 +116,12 @@ set(TCPQUIC_PROXY_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_PROXY_SOURCES
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/linux_relay_worker.cpp
+        runtime/linux_reactor.cpp
     )
 endif()
 
@@ -341,7 +344,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 
     add_executable(tcpquic_client_ingress_reactor_test
         unittest/client_ingress_reactor_test.cpp
+        unittest/trace_proxy_stub.cpp
         ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
+        ingress/socks5_server.cpp
+        ingress/http_connect_server.cpp
+        ingress/proxy_auth.cpp
+        protocol/control_protocol.cpp
+        ${TCPQUIC_SERVER_TEST_SOURCES}
         runtime/linux_reactor.cpp
     )
     tcpquic_target_include_dirs(tcpquic_client_ingress_reactor_test)
