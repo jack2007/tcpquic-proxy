@@ -67,6 +67,8 @@ int main() {
         if (usage.find("--listen <addr>") == std::string::npos) return 130;
         if (usage.find("--reconnect-interval-ms <n>") == std::string::npos) return 131;
         if (usage.find("default 3000") == std::string::npos) return 132;
+        if (usage.find("--keepalive-ms <n>") == std::string::npos) return 154;
+        if (usage.find("default 5000, 1000..15000") == std::string::npos) return 155;
         if (usage.find("--compress <mode>            auto|zstd|off (default off)") == std::string::npos) return 133;
         if (usage.find("--quic-") != std::string::npos) return 134;
         if (usage.find("QUIC") != std::string::npos) return 135;
@@ -339,6 +341,41 @@ int main() {
         if (err.find("--reconnect-interval-ms") == std::string::npos) return 66;
     }
     {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
+        if (cfg.QuicKeepAliveIntervalMs != 5000) return 157;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--keepalive-ms", "1000", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 158;
+        if (cfg.QuicKeepAliveIntervalMs != 1000) return 159;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--keepalive-ms=15000", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 160;
+        if (cfg.QuicKeepAliveIntervalMs != 15000) return 161;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--keepalive-ms", "999", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 162;
+        if (err.find("--keepalive-ms") == std::string::npos) return 163;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--keepalive-ms", "15001", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 164;
+        if (err.find("--keepalive-ms") == std::string::npos) return 165;
+    }
+    {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--download-sink-test", "30", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
         TqConfig cfg;
         std::string err;
@@ -477,7 +514,7 @@ int main() {
     {
         std::string file = WriteTempConfig(R"json({
             "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
-            "proto":{"profile":"low-latency","connections":8,"connection_stream_count":2048,"reconnect_interval_ms":5000},
+            "proto":{"profile":"low-latency","connections":8,"connection_stream_count":2048,"reconnect_interval_ms":5000,"keepalive_ms":15000},
             "client":{"download_test":30,"handshake_threads":4},
             "trace":{"enabled":true,"interval_sec":2,"connect_on_start":true},
             "peers":[{
@@ -499,11 +536,24 @@ int main() {
         if (cfg.Router.Peers[0].QuicConnections != 8) return 95;
         if (cfg.QuicConnectionStreamCount != 2048) return 96;
         if (cfg.QuicReconnectIntervalMs != 5000) return 96;
+        if (cfg.QuicKeepAliveIntervalMs != 15000) return 166;
         if (cfg.SpeedTestMode != TqSpeedTestMode::Download) return 97;
         if (cfg.SpeedTestDurationSec != 30) return 98;
         if (cfg.QuicProfile != TqQuicProfile::LowLatency) return 99;
         if (cfg.HandshakeThreads != 4) return 100;
         if (!cfg.Trace || cfg.TraceIntervalSec != 2 || !cfg.TraceConnectOnStart) return 101;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "proto":{"keepalive_ms":999},
+            "peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 167;
+        if (err.find("proto.keepalive_ms") == std::string::npos) return 168;
     }
     {
         std::string file = WriteTempConfig(R"json({

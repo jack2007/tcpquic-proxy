@@ -56,6 +56,7 @@ struct TqConfig {
     uint32_t QuicConnections = 1;
     uint32_t QuicConnectionStreamCount = 1024;
     uint32_t QuicReconnectIntervalMs{3000};
+    uint32_t QuicKeepAliveIntervalMs{5000};
     uint32_t WarmupMb{0};
     std::string WarmupTarget;
     std::string WarmupPath{"/"};

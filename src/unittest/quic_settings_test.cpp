@@ -23,6 +23,10 @@ int main() {
         clientSettings.NetStatsEventEnabled != TRUE) {
         return 14;
     }
+    if (clientSettings.IsSet.KeepAliveIntervalMs != TRUE ||
+        clientSettings.KeepAliveIntervalMs != cfg.QuicKeepAliveIntervalMs) {
+        return 16;
+    }
 
     const MsQuicSettings serverSettings = TqMakeMsQuicSettings(cfg, true);
     if (serverSettings.IsSet.StreamMultiReceiveEnabled != TRUE ||
@@ -39,6 +43,17 @@ int main() {
     if (serverSettings.IsSet.NetStatsEventEnabled != TRUE ||
         serverSettings.NetStatsEventEnabled != TRUE) {
         return 15;
+    }
+    if (serverSettings.IsSet.KeepAliveIntervalMs != TRUE ||
+        serverSettings.KeepAliveIntervalMs != cfg.QuicKeepAliveIntervalMs) {
+        return 17;
+    }
+
+    cfg.QuicKeepAliveIntervalMs = 15000;
+    const MsQuicSettings keepAliveSettings = TqMakeMsQuicSettings(cfg, false);
+    if (keepAliveSettings.IsSet.KeepAliveIntervalMs != TRUE ||
+        keepAliveSettings.KeepAliveIntervalMs != 15000) {
+        return 18;
     }
 
     cfg.QuicConnectionStreamCount = 2048;

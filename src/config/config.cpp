@@ -16,6 +16,8 @@
 namespace {
 
 constexpr uint32_t TqMaxQuicConnectionStreamCount = 65535;
+constexpr uint32_t TqMinQuicKeepAliveIntervalMs = 1000;
+constexpr uint32_t TqMaxQuicKeepAliveIntervalMs = 15000;
 
 const char* NextArg(int& i, int argc, char** argv, const char* flag, std::string& err) {
     if (i + 1 >= argc) {
@@ -306,6 +308,13 @@ private:
                 }
             } else if (key == "reconnect_interval_ms") {
                 if (!ParseReconnectInterval(cfg.QuicReconnectIntervalMs)) return Error("invalid proto.reconnect_interval_ms");
+            } else if (key == "keepalive_ms") {
+                if (!ParseUint32InRange(
+                        TqMinQuicKeepAliveIntervalMs,
+                        TqMaxQuicKeepAliveIntervalMs,
+                        cfg.QuicKeepAliveIntervalMs)) {
+                    return Error("invalid proto.keepalive_ms");
+                }
             } else if (key == "fcw") {
                 if (!ParseUint32(cfg.TuningOverrideQuicFcw)) return Error("invalid proto.fcw");
             } else if (key == "srw") {
@@ -932,6 +941,7 @@ void TqPrintUsage(FILE* out) {
         "                              Max bidirectional streams per connection (default 1024)\n"
         "  --reconnect-interval-ms <n>\n"
         "                              Client reconnect interval in ms (default 3000, 1000..60000)\n"
+        "  --keepalive-ms <n>          Keepalive interval in ms (default 5000, 1000..15000)\n"
         "  --handshake-threads <n>      SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
         "  --download-test <sec>        Built-in end-to-end download speed test\n"
         "  --upload-test <sec>          Built-in end-to-end upload speed test\n"
@@ -1146,6 +1156,21 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 cfg.QuicReconnectIntervalMs < 1000 ||
                 cfg.QuicReconnectIntervalMs > 60000) {
                 err = "invalid value for --reconnect-interval-ms (must be 1000..60000)";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--keepalive-ms", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--keepalive-ms", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqMinQuicKeepAliveIntervalMs,
+                    TqMaxQuicKeepAliveIntervalMs,
+                    cfg.QuicKeepAliveIntervalMs)) {
+                err = "invalid value for --keepalive-ms (must be 1000..15000)";
                 return false;
             }
         } else if (GetOptionValue(arg, "--warmup-mb", value)) {

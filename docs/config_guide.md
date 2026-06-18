@@ -37,6 +37,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
     "connections": 16,
     "connection_stream_count": 1024,
     "reconnect_interval_ms": 3000,
+    "keepalive_ms": 5000,
 
     // QUIC transport overrides for high-BDP/high-throughput tests.
     "fcw": 1073741824,
@@ -173,6 +174,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `proto.connections` | client | Default QUIC connection count inherited by peers. |
 | `proto.connection_stream_count` | client/server | Max bidirectional streams allowed per QUIC connection, range 1..65535. |
 | `proto.reconnect_interval_ms` | client | Default reconnect interval inherited by peers, 1000..60000 ms. |
+| `proto.keepalive_ms` | client/server | Keepalive interval, 1000..15000 ms. Defaults to 5000. |
 | `proto.fcw` | client/server | QUIC connection flow-control window override. |
 | `proto.srw` | client/server | QUIC stream receive window override. |
 | `proto.iw` | client/server | QUIC initial congestion window in packets. |

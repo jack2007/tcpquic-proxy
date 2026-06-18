@@ -293,14 +293,15 @@ Usage: tcpquic-proxy client|server [options]
 |------|------|--------|------|
 | `--socks-listen` | client | `127.0.0.1:1080` | SOCKS5 监听地址 |
 | `--http-listen` | client | `127.0.0.1:8080` | HTTP CONNECT 监听地址 |
-| `--quic-peer` | client | （必填） | B 节点 QUIC 地址 `host:port` |
-| `--quic-listen` | server | （必填） | QUIC 监听 `host:port` |
-| `--quic-cert` | 双方 | （必填） | 本端证书 PEM |
-| `--quic-key` | 双方 | （必填） | 本端私钥 PEM |
-| `--quic-ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
-| `--quic-connections` | client | `1` | QUIC 连接池大小（最大 128） |
-| `--quic-connection-stream-count` | client/server | `1024` | 每条 QUIC 连接允许的双向 stream 上限（范围 `1..65535`） |
-| `--quic-reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
+| `--peer` | client | （必填） | B 节点 QUIC 地址 `host:port` |
+| `--listen` | server | （必填） | QUIC 监听 `host:port` |
+| `--cert` | 双方 | （必填） | 本端证书 PEM |
+| `--key` | 双方 | （必填） | 本端私钥 PEM |
+| `--ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
+| `--connections` | client | `1` | QUIC 连接池大小（最大 128） |
+| `--connection-stream-count` | client/server | `1024` | 每条 QUIC 连接允许的双向 stream 上限（范围 `1..65535`） |
+| `--reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
+| `--keepalive-ms` | client/server | `5000` | QUIC keepalive interval, range `1000..15000` |
 | `--download-test` | client | 空 | 内置端到端 download 吞吐测试秒数 |
 | `--upload-test` | client | 空 | 内置端到端 upload 吞吐测试秒数 |
 | `--compress` | 双方 | `auto` | `auto` / `zstd` / `off` |

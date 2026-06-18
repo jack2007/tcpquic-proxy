@@ -23,7 +23,6 @@ extern const MsQuicApi* MsQuic;
 namespace {
 
 constexpr char TqAlpn[] = "tcpquic-tunnel/1";
-constexpr uint32_t TqKeepAliveMs = 15 * 1000;
 constexpr uint64_t TqIdleTimeoutMs = 60 * 1000;
 
 struct TqEndpoint {
@@ -122,7 +121,7 @@ std::string TqFormatConnectionAddr(MsQuicConnection* connection, uint32_t param)
 MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     MsQuicSettings settings;
     settings.SetCongestionControlAlgorithm(QUIC_CONGESTION_CONTROL_ALGORITHM_BBR);
-    settings.SetKeepAlive(TqKeepAliveMs);
+    settings.SetKeepAlive(cfg.QuicKeepAliveIntervalMs);
     settings.SetIdleTimeoutMs(TqIdleTimeoutMs);
     settings.SetPeerBidiStreamCount(static_cast<uint16_t>(cfg.QuicConnectionStreamCount));
     settings.SetStreamRecvWindowDefault(cfg.Tuning.StreamRecvWindow);
