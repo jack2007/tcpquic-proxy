@@ -8,8 +8,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct MsQuicConnection;
+typedef struct QUIC_STATISTICS_V2 QUIC_STATISTICS_V2;
 
 struct TqTraceNetworkStats {
     uint32_t BytesInFlight{0};
@@ -69,6 +71,7 @@ void TqTraceQuicDisconnected(
     uint32_t connId,
     const char* role);
 void TqTraceQuicNetworkStats(MsQuicConnection* connection, const TqTraceNetworkStats& stats);
+std::vector<std::string> TqFormatTraceQuicStatsLines(const QUIC_STATISTICS_V2& stats);
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats);
 void TqTraceLinuxRelayStreamShutdown(const TqTraceLinuxRelayStreamState& state);
 std::string TqFormatTraceLinuxRelayStreamShutdownLine(

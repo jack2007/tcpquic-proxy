@@ -163,7 +163,9 @@ bool CollectQuicStats(MsQuicConnection* connection, QUIC_STATISTICS_V2& stats) {
     return QUIC_SUCCEEDED(connection->GetStatistics(&stats));
 }
 
-std::vector<std::string> FormatQuicStatsLines(const QUIC_STATISTICS_V2& stats) {
+} // namespace
+
+std::vector<std::string> TqFormatTraceQuicStatsLines(const QUIC_STATISTICS_V2& stats) {
     std::vector<std::string> lines;
     char line[512];
     std::snprintf(
@@ -184,13 +186,19 @@ std::vector<std::string> FormatQuicStatsLines(const QUIC_STATISTICS_V2& stats) {
         static_cast<unsigned long long>(stats.SendTotalStreamBytes),
         static_cast<unsigned long long>(stats.RecvTotalStreamBytes));
     lines.emplace_back(line);
+    const double lossRate =
+        stats.SendTotalPackets == 0
+            ? 0.0
+            : static_cast<double>(stats.SendSuspectedLostPackets) * 100.0 /
+                  static_cast<double>(stats.SendTotalPackets);
     std::snprintf(
         line,
         sizeof(line),
-        "pkts: tx=%llu rx=%llu lost=%llu spurious_lost=%llu reordered=%llu decrypt_fail=%llu",
+        "pkts: tx=%llu rx=%llu lost=%llu loss_rate=%.2f%% spurious_lost=%llu reordered=%llu decrypt_fail=%llu",
         static_cast<unsigned long long>(stats.SendTotalPackets),
         static_cast<unsigned long long>(stats.RecvTotalPackets),
         static_cast<unsigned long long>(stats.SendSuspectedLostPackets),
+        lossRate,
         static_cast<unsigned long long>(stats.SendSpuriousLostPackets),
         static_cast<unsigned long long>(stats.RecvReorderedPackets),
         static_cast<unsigned long long>(stats.RecvDecryptionFailures));
@@ -205,6 +213,8 @@ std::vector<std::string> FormatQuicStatsLines(const QUIC_STATISTICS_V2& stats) {
     lines.emplace_back(line);
     return lines;
 }
+
+namespace {
 
 struct TqQuicConnTraceSnapshot {
     MsQuicConnection* connection{nullptr};
@@ -271,7 +281,7 @@ void DumpPeriodicStats() {
             continue;
         }
 
-        auto lines = FormatQuicStatsLines(stats);
+        auto lines = TqFormatTraceQuicStatsLines(stats);
         if (conn.hasNetStats) {
             lines.push_back(TqFormatTraceNetworkStatsLine(conn.netStats));
         }
@@ -973,7 +983,7 @@ void TqTraceQuicConnected(
 
     QUIC_STATISTICS_V2 stats{};
     const bool haveStats = CollectQuicStats(connection, stats);
-    const auto lines = haveStats ? FormatQuicStatsLines(stats) : std::vector<std::string>{};
+    const auto lines = haveStats ? TqFormatTraceQuicStatsLines(stats) : std::vector<std::string>{};
 
     LogInfo(
         "event=quic_connected role=%s conn=%u slot=%u local=%s peer=%s %s",
@@ -1060,7 +1070,7 @@ void TqTraceQuicDisconnected(
 
     QUIC_STATISTICS_V2 stats{};
     const bool haveStats = CollectQuicStats(connection, stats);
-    auto lines = haveStats ? FormatQuicStatsLines(stats) : std::vector<std::string>{};
+    auto lines = haveStats ? TqFormatTraceQuicStatsLines(stats) : std::vector<std::string>{};
     if (hasNetStats) {
         lines.push_back(TqFormatTraceNetworkStatsLine(netStats));
     }

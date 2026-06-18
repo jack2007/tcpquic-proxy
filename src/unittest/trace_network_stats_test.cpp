@@ -8,6 +8,46 @@
 const MsQuicApi* MsQuic = nullptr;
 
 int main() {
+    QUIC_STATISTICS_V2 quicStats{};
+    quicStats.SendTotalPackets = 300;
+    quicStats.RecvTotalPackets = 200;
+    quicStats.SendSuspectedLostPackets = 100;
+    quicStats.SendSpuriousLostPackets = 7;
+    quicStats.RecvReorderedPackets = 5;
+    quicStats.RecvDecryptionFailures = 3;
+    const std::vector<std::string> quicLines = TqFormatTraceQuicStatsLines(quicStats);
+    bool foundPacketStats = false;
+    for (const std::string& quicLine : quicLines) {
+        if (quicLine.find("pkts:") == std::string::npos) {
+            continue;
+        }
+        foundPacketStats = true;
+        if (quicLine.find("tx=300") == std::string::npos ||
+            quicLine.find("lost=100") == std::string::npos ||
+            quicLine.find("loss_rate=33.33%") == std::string::npos) {
+            return 12;
+        }
+    }
+    if (!foundPacketStats) {
+        return 13;
+    }
+
+    QUIC_STATISTICS_V2 zeroPacketStats{};
+    const std::vector<std::string> zeroQuicLines = TqFormatTraceQuicStatsLines(zeroPacketStats);
+    bool foundZeroPacketStats = false;
+    for (const std::string& quicLine : zeroQuicLines) {
+        if (quicLine.find("pkts:") == std::string::npos) {
+            continue;
+        }
+        foundZeroPacketStats = true;
+        if (quicLine.find("loss_rate=0.00%") == std::string::npos) {
+            return 14;
+        }
+    }
+    if (!foundZeroPacketStats) {
+        return 15;
+    }
+
     const std::string line = TqFormatTraceNetworkStatsLine(TqTraceNetworkStats{
         1234,
         5678,
