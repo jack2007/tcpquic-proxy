@@ -760,6 +760,54 @@ int main() {
         MsQuic = nullptr;
     }
     {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 150;
+        }
+        QUIC_STREAM_EVENT aborted{};
+        aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
+            receiveWorker.Stop();
+            return 151;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 152;
+        }
+        QUIC_STREAM_EVENT aborted{};
+        aborted.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
+            receiveWorker.Stop();
+            return 153;
+        }
+        receiveWorker.Stop();
+    }
+    {
         QUIC_API_TABLE fakeApi{};
         fakeApi.StreamSend = FakeStreamSend;
         MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
