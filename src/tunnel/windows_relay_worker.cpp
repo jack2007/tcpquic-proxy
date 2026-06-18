@@ -872,7 +872,7 @@ bool TqWindowsRelayWorker::QueueDeferredQuicReceive(
         pendingBytes = relay->PendingQuicReceiveBytes.fetch_add(
             view->TotalLength, std::memory_order_relaxed) + view->TotalLength;
         if (pendingBytes >= maxPendingBytes &&
-            !relay->QuicReceivePaused.exchange(true, std::memory_order_acq_rel)) {
+            !relay->QuicReceivePaused.load(std::memory_order_acquire)) {
             SetQuicReceiveEnabled(relay, false);
         }
     }
