@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 struct MsQuicStream;
@@ -78,6 +79,7 @@ public:
     bool EnqueueForTest(TqDarwinRelayEvent event);
     uint32_t DrainWakeForTest();
     bool RunningForTest() const;
+    void SetRegisterTcpFiltersFailureForTest(bool fail);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
@@ -89,17 +91,33 @@ public:
         _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
+    struct RelayState;
+
     void Run();
     bool Wake();
     bool EnqueueEvent(TqDarwinRelayEvent&& event);
     uint32_t DrainEvents(uint32_t budget);
     uint32_t DrainWakeEvents();
+    bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
+    bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
+    void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
+    void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
+    std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
+    void ProcessKqueueEvent(const struct kevent& event);
+    void ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
 
     TqDarwinRelayWorkerConfig Config;
     int KqueueFd{-1};
     std::atomic<bool> Running{false};
     TqDarwinRelayEventQueue EventQueue;
     std::thread Thread;
+    mutable std::mutex LifecycleMutex;
+    mutable std::mutex RelayMutex;
+    std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
+    uint64_t NextRelayId{1};
+#if defined(TCPQUIC_TESTING)
+    bool FailRegisterTcpFiltersForTest{false};
+#endif
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> Wakeups{0};
     std::atomic<uint64_t> Errors{0};
