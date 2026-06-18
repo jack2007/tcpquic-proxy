@@ -15300,7 +15300,7 @@ if test ${lt_cv_dlopen_self+y}
 then :
   printf %s "(cached) " >&6
 else $as_nop
-  	  if test yes = "$cross_compiling"; then :
+	  if test yes = "$cross_compiling"; then :
   lt_cv_dlopen_self=cross
 else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
@@ -15407,7 +15407,7 @@ if test ${lt_cv_dlopen_self_static+y}
 then :
   printf %s "(cached) " >&6
 else $as_nop
-  	  if test yes = "$cross_compiling"; then :
+	  if test yes = "$cross_compiling"; then :
   lt_cv_dlopen_self_static=cross
 else
   lt_dlunknown=0; lt_dlno_uscore=1; lt_dlneed_uscore=2
@@ -30279,5 +30279,3 @@ if test -n "$ac_unrecognized_opts" && test "$enable_option_checking" != no; then
   { printf "%s\n" "$as_me:${as_lineno-$LINENO}: WARNING: unrecognized options: $ac_unrecognized_opts" >&5
 printf "%s\n" "$as_me: WARNING: unrecognized options: $ac_unrecognized_opts" >&2;}
 fi
-
-

@@ -62,5 +62,3 @@ vtest: arestest.exe
 
 clean:
 	$(RM) $(OBJS) arestest.exe aresfuzz.exe aresfuzzname.exe dnsdump.exe
-
-

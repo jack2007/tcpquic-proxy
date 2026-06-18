@@ -225,7 +225,7 @@ $(LINK_ARG): $(__MAKEFILES__)
 	%create $^@
 	@%append $^@ system nt dll
 	@%append $^@ file { $(OBJS_DYN) }
-	@%append $^@ option res=$(RESOURCE), implib=$(LIBNAME)_imp.lib 
+	@%append $^@ option res=$(RESOURCE), implib=$(LIBNAME)_imp.lib
 	@%append $^@ $(LFLAGS)
 	@%append $^@ libpath $(SYS_LIBS)
 #	@%append $^@ library clib3r.lib
@@ -239,5 +239,3 @@ $(LINK_ARG): $(__MAKEFILES__)
 $(LIB_ARG): $(__MAKEFILES__)
 	%create $^@
 	@for %f in ($(OBJS_STAT)) do @%append $^@ +- %f
-
-

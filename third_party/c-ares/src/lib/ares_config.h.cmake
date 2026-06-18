@@ -490,4 +490,3 @@
 
 /* Define to 1 if pthread_init() exists */
 #cmakedefine HAVE_PTHREAD_INIT 1
-

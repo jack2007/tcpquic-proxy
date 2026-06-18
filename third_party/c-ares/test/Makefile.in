@@ -133,7 +133,7 @@ ares_queryloop_DEPENDENCIES = $(top_builddir)/src/lib/libcares.la \
 AM_V_lt = $(am__v_lt_@AM_V@)
 am__v_lt_ = $(am__v_lt_@AM_DEFAULT_V@)
 am__v_lt_0 = --silent
-am__v_lt_1 = 
+am__v_lt_1 =
 am__objects_2 = ares-test-fuzz.$(OBJEXT) ares-fuzz.$(OBJEXT)
 am_aresfuzz_OBJECTS = $(am__objects_2)
 aresfuzz_OBJECTS = $(am_aresfuzz_OBJECTS)
@@ -188,12 +188,12 @@ am__v_P_1 = :
 AM_V_GEN = $(am__v_GEN_@AM_V@)
 am__v_GEN_ = $(am__v_GEN_@AM_DEFAULT_V@)
 am__v_GEN_0 = @echo "  GEN     " $@;
-am__v_GEN_1 = 
+am__v_GEN_1 =
 AM_V_at = $(am__v_at_@AM_V@)
 am__v_at_ = $(am__v_at_@AM_DEFAULT_V@)
 am__v_at_0 = @
-am__v_at_1 = 
-DEFAULT_INCLUDES = 
+am__v_at_1 =
+DEFAULT_INCLUDES =
 depcomp = $(SHELL) $(top_srcdir)/config/depcomp
 am__maybe_remake_depfiles = depfiles
 am__depfiles_remade = ./$(DEPDIR)/ares-fuzz.Po \
@@ -235,7 +235,7 @@ LTCOMPILE = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
 AM_V_CC = $(am__v_CC_@AM_V@)
 am__v_CC_ = $(am__v_CC_@AM_DEFAULT_V@)
 am__v_CC_0 = @echo "  CC      " $@;
-am__v_CC_1 = 
+am__v_CC_1 =
 CCLD = $(CC)
 LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) \
@@ -243,7 +243,7 @@ LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
 AM_V_CCLD = $(am__v_CCLD_@AM_V@)
 am__v_CCLD_ = $(am__v_CCLD_@AM_DEFAULT_V@)
 am__v_CCLD_0 = @echo "  CCLD    " $@;
-am__v_CCLD_1 = 
+am__v_CCLD_1 =
 CXXCOMPILE = $(CXX) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) \
 	$(AM_CPPFLAGS) $(CPPFLAGS) $(AM_CXXFLAGS) $(CXXFLAGS)
 LTCXXCOMPILE = $(LIBTOOL) $(AM_V_lt) --tag=CXX $(AM_LIBTOOLFLAGS) \
@@ -253,7 +253,7 @@ LTCXXCOMPILE = $(LIBTOOL) $(AM_V_lt) --tag=CXX $(AM_LIBTOOLFLAGS) \
 AM_V_CXX = $(am__v_CXX_@AM_V@)
 am__v_CXX_ = $(am__v_CXX_@AM_DEFAULT_V@)
 am__v_CXX_0 = @echo "  CXX     " $@;
-am__v_CXX_1 = 
+am__v_CXX_1 =
 CXXLD = $(CXX)
 CXXLINK = $(LIBTOOL) $(AM_V_lt) --tag=CXX $(AM_LIBTOOLFLAGS) \
 	$(LIBTOOLFLAGS) --mode=link $(CXXLD) $(AM_CXXFLAGS) \
@@ -261,7 +261,7 @@ CXXLINK = $(LIBTOOL) $(AM_V_lt) --tag=CXX $(AM_LIBTOOLFLAGS) \
 AM_V_CXXLD = $(am__v_CXXLD_@AM_V@)
 am__v_CXXLD_ = $(am__v_CXXLD_@AM_DEFAULT_V@)
 am__v_CXXLD_0 = @echo "  CXXLD   " $@;
-am__v_CXXLD_1 = 
+am__v_CXXLD_1 =
 SOURCES = $(ares_queryloop_SOURCES) $(aresfuzz_SOURCES) \
 	$(aresfuzzname_SOURCES) $(arestest_SOURCES) $(dnsdump_SOURCES)
 DIST_SOURCES = $(ares_queryloop_SOURCES) $(aresfuzz_SOURCES) \
@@ -768,23 +768,23 @@ clean-noinstPROGRAMS:
 	echo " rm -f" $$list; \
 	rm -f $$list
 
-ares_queryloop$(EXEEXT): $(ares_queryloop_OBJECTS) $(ares_queryloop_DEPENDENCIES) $(EXTRA_ares_queryloop_DEPENDENCIES) 
+ares_queryloop$(EXEEXT): $(ares_queryloop_OBJECTS) $(ares_queryloop_DEPENDENCIES) $(EXTRA_ares_queryloop_DEPENDENCIES)
 	@rm -f ares_queryloop$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(ares_queryloop_OBJECTS) $(ares_queryloop_LDADD) $(LIBS)
 
-aresfuzz$(EXEEXT): $(aresfuzz_OBJECTS) $(aresfuzz_DEPENDENCIES) $(EXTRA_aresfuzz_DEPENDENCIES) 
+aresfuzz$(EXEEXT): $(aresfuzz_OBJECTS) $(aresfuzz_DEPENDENCIES) $(EXTRA_aresfuzz_DEPENDENCIES)
 	@rm -f aresfuzz$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(aresfuzz_OBJECTS) $(aresfuzz_LDADD) $(LIBS)
 
-aresfuzzname$(EXEEXT): $(aresfuzzname_OBJECTS) $(aresfuzzname_DEPENDENCIES) $(EXTRA_aresfuzzname_DEPENDENCIES) 
+aresfuzzname$(EXEEXT): $(aresfuzzname_OBJECTS) $(aresfuzzname_DEPENDENCIES) $(EXTRA_aresfuzzname_DEPENDENCIES)
 	@rm -f aresfuzzname$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(aresfuzzname_OBJECTS) $(aresfuzzname_LDADD) $(LIBS)
 
-arestest$(EXEEXT): $(arestest_OBJECTS) $(arestest_DEPENDENCIES) $(EXTRA_arestest_DEPENDENCIES) 
+arestest$(EXEEXT): $(arestest_OBJECTS) $(arestest_DEPENDENCIES) $(EXTRA_arestest_DEPENDENCIES)
 	@rm -f arestest$(EXEEXT)
 	$(AM_V_CXXLD)$(arestest_LINK) $(arestest_OBJECTS) $(arestest_LDADD) $(LIBS)
 
-dnsdump$(EXEEXT): $(dnsdump_OBJECTS) $(dnsdump_DEPENDENCIES) $(EXTRA_dnsdump_DEPENDENCIES) 
+dnsdump$(EXEEXT): $(dnsdump_OBJECTS) $(dnsdump_DEPENDENCIES) $(EXTRA_dnsdump_DEPENDENCIES)
 	@rm -f dnsdump$(EXEEXT)
 	$(AM_V_CXXLD)$(CXXLINK) $(dnsdump_OBJECTS) $(dnsdump_LDADD) $(LIBS)
 
@@ -1408,7 +1408,7 @@ $(TEST_SUITE_LOG): $(TEST_LOGS)
 	fi;								\
 	$$success || exit 1
 
-check-TESTS: 
+check-TESTS:
 	@list='$(RECHECK_LOGS)';           test -z "$$list" || rm -f $$list
 	@list='$(RECHECK_LOGS:.log=.trs)'; test -z "$$list" || rm -f $$list
 	@test -z "$(TEST_SUITE_LOG)" || rm -f $(TEST_SUITE_LOG)
@@ -1418,7 +1418,7 @@ check-TESTS:
 	log_list=`echo $$log_list`; trs_list=`echo $$trs_list`; \
 	$(MAKE) $(AM_MAKEFLAGS) $(TEST_SUITE_LOG) TEST_LOGS="$$log_list"; \
 	exit $$?;
-recheck: all 
+recheck: all
 	@test -z "$(TEST_SUITE_LOG)" || rm -f $(TEST_SUITE_LOG)
 	@set +e; $(am__set_TESTS_bases); \
 	bases=`for i in $$bases; do echo $$i; done \

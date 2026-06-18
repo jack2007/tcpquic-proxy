@@ -38,5 +38,3 @@ release:
 * Pavel P (@pps83)
 * Sean Harmer (@seanharmer)
 * Uwe (@nixblik)
-
-

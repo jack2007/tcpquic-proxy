@@ -72,4 +72,3 @@ To generate code coverage information:
  - Run the tests with `test/arestest`.
  - Generate code coverage output with `make code-coverage-capture` in the
    library directory (i.e. not in `test/`).
-

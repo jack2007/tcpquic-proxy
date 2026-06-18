@@ -20,4 +20,3 @@ copy /Y include\ares_build.h.dist include\ares_build.h
 :end_ares_build_h
 
 :end_all
-

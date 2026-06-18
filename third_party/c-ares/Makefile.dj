@@ -146,4 +146,3 @@ depend: $(GENERATED) Makefile.dj
 	$(CC) -MM $(CFLAGS) $(CSRC) | $(DEP_REPLACE) > depend.dj
 
 -include depend.dj
-

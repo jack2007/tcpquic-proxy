@@ -1,5 +1,5 @@
 #***************************************************************************
-# Project        ___       __ _ _ __ ___  ___ 
+# Project        ___       __ _ _ __ ___  ___
 #               / __|____ / _` | '__/ _ \/ __|
 #              | (_|_____| (_| | | |  __/\__ \
 #               \___|     \__,_|_|  \___||___/
@@ -15,8 +15,8 @@ Name: c-ares
 URL: https://c-ares.org/
 Description: asynchronous DNS lookup library
 Version: @CARES_VERSION@
-Requires: 
-Requires.private: 
+Requires:
+Requires.private:
 Cflags: -I${includedir}
 Cflags.private: -DCARES_STATICLIB
 Libs: -L${libdir} -lcares

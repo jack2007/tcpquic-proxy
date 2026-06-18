@@ -15,7 +15,7 @@ IF (CARES_SHARED)
 	# Include resource file in windows builds for versioned DLLs
 	IF (WIN32)
 		TARGET_SOURCES (${PROJECT_NAME} PRIVATE cares.rc)
-		
+
 		# Check for use of llvm-rc (implies clang is being used). We need to set the
 		# compile flags to use the correct codepage for the resource compiler.
 		# This is needed for the copyright symbol to be encoded correctly.
@@ -155,7 +155,3 @@ IF (CARES_STATIC)
 		ADD_LIBRARY (${PROJECT_NAME}::cares ALIAS ${LIBNAME})
 	ENDIF ()
 ENDIF ()
-
-
-
-
