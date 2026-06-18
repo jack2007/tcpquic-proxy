@@ -4,9 +4,13 @@
 #include <cstdint>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if !defined(_WIN32)
@@ -132,6 +136,45 @@ bool WaitUntil(std::function<bool()> predicate) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return predicate();
+}
+
+bool WaitBrieflyFor(std::function<bool()> predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return predicate();
+}
+
+struct DeferredOpen {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    TqClientTunnelOpenComplete Complete;
+    bool Started{false};
+};
+
+bool StartSocksOpen(
+    TqClientIngressReactor& reactor,
+    const std::string& peerId,
+    TqSocketHandle& fd,
+    std::vector<uint8_t>& response) {
+    fd = TqInvalidSocket;
+    if (!ConnectTo(reactor.SocksListenAddressForTest(peerId), fd)) {
+        return false;
+    }
+    const std::vector<uint8_t> handshakeAndConnect = {
+        0x05, 0x01, 0x00,
+        0x05, 0x01, 0x00, 0x03, 0x0b,
+        'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
+        0x00, 0x50};
+    if (!SendAll(fd, handshakeAndConnect)) {
+        return false;
+    }
+    return ReadExactWithTimeout(fd, 2, response) &&
+        response.size() == 2 && response[0] == 0x05 && response[1] == 0x00;
 }
 
 TqClientIngressPeer MakePeer(const std::string& id) {
@@ -296,9 +339,9 @@ int TestDestructorCleansUp() {
 
 int TestSocksHandshakeStartsFakeOpenAndReturnsSuccess() {
     int startCalls = 0;
-    int acceptCalls = 0;
-    int rejectCalls = 0;
-    int cancelCalls = 0;
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
     std::string host;
     uint16_t port = 0;
     auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x1));
@@ -576,6 +619,249 @@ int TestSocksOpenFailureWritesReplyThenRejects() {
     return 0;
 }
 
+int TestRemovePeerBeforeLateCompletionCancelsOnce() {
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x4));
+    auto deferred = std::make_shared<DeferredOpen>();
+
+    TqClientIngressPeer peer = MakePeer("late-remove");
+    peer.StartTunnel = [deferred, fakeHandle](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            deferred->Complete = std::move(onComplete);
+            deferred->Started = true;
+        }
+        deferred->Cv.notify_all();
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [&](TqClientTunnelOpenHandle*) {
+        ++acceptCalls;
+        return true;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++rejectCalls;
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++cancelCalls;
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 110;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 111;
+    }
+
+    TqSocketHandle fd = TqInvalidSocket;
+    std::vector<uint8_t> response;
+    if (!StartSocksOpen(reactor, "late-remove", fd, response)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 112;
+    }
+    if (!WaitUntil([&]() {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            return deferred->Started;
+        })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 113;
+    }
+    if (!reactor.RemovePeer("late-remove")) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 114;
+    }
+    if (!WaitUntil([&]() { return cancelCalls == 1; })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 115;
+    }
+
+    TqClientTunnelOpenComplete complete;
+    {
+        std::lock_guard<std::mutex> lock(deferred->Mutex);
+        complete = deferred->Complete;
+    }
+    complete(fakeHandle, TqTunnelStartResult{true, TqOpenError::Ok, 101});
+    if (WaitBrieflyFor([&]() { return acceptCalls != 0 || rejectCalls != 0 || cancelCalls != 1; })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 116;
+    }
+
+    CloseFd(fd);
+    reactor.Stop();
+    return 0;
+}
+
+int TestStopBeforeQueuedCompletionRejectsOnce() {
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x5));
+    auto deferred = std::make_shared<DeferredOpen>();
+
+    TqClientIngressPeer peer = MakePeer("late-stop");
+    peer.StartTunnel = [deferred, fakeHandle](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            deferred->Complete = std::move(onComplete);
+            deferred->Started = true;
+        }
+        deferred->Cv.notify_all();
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [&](TqClientTunnelOpenHandle*) {
+        ++acceptCalls;
+        return true;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++rejectCalls;
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++cancelCalls;
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 120;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 121;
+    }
+    TqSocketHandle fd = TqInvalidSocket;
+    std::vector<uint8_t> response;
+    if (!StartSocksOpen(reactor, "late-stop", fd, response)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 122;
+    }
+    if (!WaitUntil([&]() {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            return deferred->Started;
+        })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 123;
+    }
+
+    TqClientTunnelOpenComplete complete;
+    {
+        std::lock_guard<std::mutex> lock(deferred->Mutex);
+        complete = deferred->Complete;
+    }
+    std::thread completeThread([complete, fakeHandle]() mutable {
+        complete(fakeHandle, TqTunnelStartResult{true, TqOpenError::Ok, 102});
+    });
+    reactor.Stop();
+    completeThread.join();
+
+    if (acceptCalls != 0 || rejectCalls + cancelCalls != 1) {
+        CloseFd(fd);
+        return 124;
+    }
+    CloseFd(fd);
+    return 0;
+}
+
+int TestCompletionAfterStopRejectsOnce() {
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x6));
+    auto deferred = std::make_shared<DeferredOpen>();
+
+    TqClientIngressPeer peer = MakePeer("post-stop");
+    peer.StartTunnel = [deferred, fakeHandle](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            deferred->Complete = std::move(onComplete);
+            deferred->Started = true;
+        }
+        deferred->Cv.notify_all();
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [&](TqClientTunnelOpenHandle*) {
+        ++acceptCalls;
+        return true;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++rejectCalls;
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++cancelCalls;
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 130;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 131;
+    }
+    TqSocketHandle fd = TqInvalidSocket;
+    std::vector<uint8_t> response;
+    if (!StartSocksOpen(reactor, "post-stop", fd, response)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 132;
+    }
+    if (!WaitUntil([&]() {
+            std::lock_guard<std::mutex> lock(deferred->Mutex);
+            return deferred->Started;
+        })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 133;
+    }
+
+    reactor.Stop();
+    if (cancelCalls != 1) {
+        CloseFd(fd);
+        return 134;
+    }
+    TqClientTunnelOpenComplete complete;
+    {
+        std::lock_guard<std::mutex> lock(deferred->Mutex);
+        complete = deferred->Complete;
+    }
+    complete(fakeHandle, TqTunnelStartResult{true, TqOpenError::Ok, 103});
+    if (WaitBrieflyFor([&]() { return acceptCalls != 0 || rejectCalls != 0 || cancelCalls != 1; })) {
+        CloseFd(fd);
+        return 135;
+    }
+    CloseFd(fd);
+    return 0;
+}
+
 int TestConcurrentStartStopDoesNotCrashOrDeadlock() {
     for (int i = 0; i < 200; ++i) {
         TqClientIngressReactor reactor;
@@ -629,6 +915,12 @@ int main() {
     result = TestHttpConnectSamePacketPayloadRemainsForTunnel();
     if (result != 0) return result;
     result = TestSocksOpenFailureWritesReplyThenRejects();
+    if (result != 0) return result;
+    result = TestRemovePeerBeforeLateCompletionCancelsOnce();
+    if (result != 0) return result;
+    result = TestStopBeforeQueuedCompletionRejectsOnce();
+    if (result != 0) return result;
+    result = TestCompletionAfterStopRejectsOnce();
     if (result != 0) return result;
     result = TestConcurrentStartStopDoesNotCrashOrDeadlock();
     if (result != 0) return result;

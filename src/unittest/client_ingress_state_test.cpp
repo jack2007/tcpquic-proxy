@@ -405,19 +405,27 @@ int TestSocksUserPassAuthSuccess() {
         return 96;
     }
     const std::string& pending = state.PendingWrite();
-    if (pending.size() != 4 ||
+    if (pending.size() != 2 ||
         static_cast<uint8_t>(pending[0]) != 0x05 ||
-        static_cast<uint8_t>(pending[1]) != 0x02 ||
-        static_cast<uint8_t>(pending[2]) != 0x01 ||
-        static_cast<uint8_t>(pending[3]) != 0x00) {
+        static_cast<uint8_t>(pending[1]) != 0x02) {
         return 97;
     }
-    state.MarkWriteComplete(4);
-    if (state.Feed(nullptr, 0) != TqClientIngressResult::ReadyToOpen) {
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::NeedWrite) {
         return 98;
     }
-    if (!CheckDomainRequest(state.Request(), "example.com", 443, 1)) {
+    const std::string& authPending = state.PendingWrite();
+    if (authPending.size() != 2 ||
+        static_cast<uint8_t>(authPending[0]) != 0x01 ||
+        static_cast<uint8_t>(authPending[1]) != 0x00) {
         return 99;
+    }
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::ReadyToOpen) {
+        return 110;
+    }
+    if (!CheckDomainRequest(state.Request(), "example.com", 443, 1)) {
+        return 111;
     }
     return 0;
 }
@@ -435,14 +443,22 @@ int TestSocksUserPassAuthFailureClosesAfterStatus() {
         return 100;
     }
     const std::string& pending = state.PendingWrite();
-    if (pending.size() != 4 ||
-        static_cast<uint8_t>(pending[1]) != 0x02 ||
-        static_cast<uint8_t>(pending[3]) != 0x01) {
+    if (pending.size() != 2 || static_cast<uint8_t>(pending[1]) != 0x02) {
         return 101;
     }
-    state.MarkWriteComplete(4);
-    if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::NeedWrite) {
         return 102;
+    }
+    const std::string& authPending = state.PendingWrite();
+    if (authPending.size() != 2 ||
+        static_cast<uint8_t>(authPending[0]) != 0x01 ||
+        static_cast<uint8_t>(authPending[1]) != 0x01) {
+        return 112;
+    }
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+        return 113;
     }
     return 0;
 }

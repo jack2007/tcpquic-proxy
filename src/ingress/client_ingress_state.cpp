@@ -136,10 +136,10 @@ TqClientIngressResult TqClientIngressState::FeedSocks5() {
                 ReadBuffer.begin(),
                 ReadBuffer.begin() + static_cast<std::ptrdiff_t>(authLen));
             WriteBuffer.clear();
-        WriteBuffer.push_back(static_cast<char>(TqSocks5UserPassVersion));
-        WriteBuffer.push_back(static_cast<char>(valid ? TqSocks5AuthSuccess : TqSocks5AuthFailure));
-        CloseAfterWrite = !valid;
-        SocksAuthPending = false;
+            WriteBuffer.push_back(static_cast<char>(TqSocks5UserPassVersion));
+            WriteBuffer.push_back(static_cast<char>(valid ? TqSocks5AuthSuccess : TqSocks5AuthFailure));
+            CloseAfterWrite = !valid;
+            SocksAuthPending = false;
             SocksGreetingDone = valid;
             return TqClientIngressResult::NeedWrite;
         }
@@ -184,53 +184,9 @@ TqClientIngressResult TqClientIngressState::FeedSocks5() {
             return TqClientIngressResult::NeedWrite;
         }
 
-        if (ReadBuffer.size() < greetingLen + 2) {
-            WriteBuffer.assign("\x05\x02", 2);
-            ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
-            SocksAuthPending = true;
-            return TqClientIngressResult::NeedWrite;
-        }
-        if (ReadBuffer[greetingLen] != TqSocks5UserPassVersion) {
-            return TqClientIngressResult::Close;
-        }
-        const size_t usernameLen = ReadBuffer[greetingLen + 1];
-        if (usernameLen == 0 || usernameLen > TqProxyAuthTable::kMaxFieldBytes) {
-            return TqClientIngressResult::Close;
-        }
-        if (ReadBuffer.size() < greetingLen + 2 + usernameLen + 1) {
-            WriteBuffer.assign("\x05\x02", 2);
-            ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
-            SocksAuthPending = true;
-            return TqClientIngressResult::NeedWrite;
-        }
-        const size_t passwordLenOffset = greetingLen + 2 + usernameLen;
-        const size_t passwordLen = ReadBuffer[passwordLenOffset];
-        if (passwordLen == 0 || passwordLen > TqProxyAuthTable::kMaxFieldBytes) {
-            return TqClientIngressResult::Close;
-        }
-        const size_t authLen = 2 + usernameLen + 1 + passwordLen;
-        if (ReadBuffer.size() < greetingLen + authLen) {
-            WriteBuffer.assign("\x05\x02", 2);
-            ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
-            SocksAuthPending = true;
-            return TqClientIngressResult::NeedWrite;
-        }
-
-        const std::string username(
-            ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen + 2),
-            ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen + 2 + usernameLen));
-        const std::string password(
-            ReadBuffer.begin() + static_cast<std::ptrdiff_t>(passwordLenOffset + 1),
-            ReadBuffer.begin() + static_cast<std::ptrdiff_t>(passwordLenOffset + 1 + passwordLen));
-        const bool valid = Auth->Validate(username, password);
-        ReadBuffer.erase(
-            ReadBuffer.begin(),
-            ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen + authLen));
         WriteBuffer.assign("\x05\x02", 2);
-        WriteBuffer.push_back(static_cast<char>(TqSocks5UserPassVersion));
-        WriteBuffer.push_back(static_cast<char>(valid ? TqSocks5AuthSuccess : TqSocks5AuthFailure));
-        CloseAfterWrite = !valid;
-        SocksGreetingDone = valid;
+        ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
+        SocksAuthPending = true;
         return TqClientIngressResult::NeedWrite;
     }
 

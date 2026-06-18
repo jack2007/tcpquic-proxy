@@ -146,6 +146,15 @@ private:
         TqTunnelStartResult result,
         TqClientIngressTunnelCloseFn rejectTunnel,
         std::shared_ptr<OpenCompletionState> completionState);
+    static bool MarkOpenCompletionTerminal(const std::shared_ptr<OpenCompletionState>& completionState);
+    static void RejectOpenHandleOnce(
+        TqClientTunnelOpenHandle* handle,
+        const TqClientIngressTunnelCloseFn& rejectTunnel,
+        const std::shared_ptr<OpenCompletionState>& completionState);
+    static void CancelOpenHandleOnce(
+        TqClientTunnelOpenHandle* handle,
+        const TqClientIngressTunnelCloseFn& cancelTunnel,
+        const std::shared_ptr<OpenCompletionState>& completionState);
     void CloseClientLocked(TqSocketHandle clientFd, bool closeFd);
     void CloseClientOwnedByTunnelLocked(TqSocketHandle clientFd);
     void RemovePeerLocked(const std::string& peerId);
