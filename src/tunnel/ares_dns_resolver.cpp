@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
 #if !defined(_WIN32)
 #include <sys/time.h>
 #endif
@@ -29,6 +30,40 @@ TqSocketHandle TqAresSocketToHandle(ares_socket_t socketFd) {
     return static_cast<TqSocketHandle>(socketFd);
 }
 
+class TqAresLibraryGuard {
+public:
+    static bool Acquire() {
+        std::lock_guard<std::mutex> lock(Mutex());
+        if (RefCount() == 0 && ares_library_init(ARES_LIB_INIT_ALL) != ARES_SUCCESS) {
+            return false;
+        }
+        ++RefCount();
+        return true;
+    }
+
+    static void Release() {
+        std::lock_guard<std::mutex> lock(Mutex());
+        if (RefCount() == 0) {
+            return;
+        }
+        --RefCount();
+        if (RefCount() == 0) {
+            ares_library_cleanup();
+        }
+    }
+
+private:
+    static std::mutex& Mutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+
+    static size_t& RefCount() {
+        static size_t refCount = 0;
+        return refCount;
+    }
+};
+
 } // namespace
 
 struct TqAresDnsResolver::Impl {
@@ -45,7 +80,7 @@ struct TqAresDnsResolver::Impl {
     TqAresReactor Reactor;
     ares_channel_t* Channel{nullptr};
     uint64_t NextId{1};
-    bool AresLibraryInitialized{false};
+    bool AresLibraryAcquired{false};
     bool CallbackCompleted{false};
     std::unordered_map<uint64_t, PendingQuery*> Pending;
     std::vector<uint64_t> CompletedIds;
@@ -109,23 +144,29 @@ struct TqAresDnsResolver::Impl {
         if (Channel != nullptr) {
             return true;
         }
-        if (!SocketStartup.Ok() || !Reactor.Start()) {
+        if (!SocketStartup.Ok()) {
             return false;
         }
-        if (!AresLibraryInitialized) {
-            if (ares_library_init(ARES_LIB_INIT_ALL) != ARES_SUCCESS) {
-                Reactor.Stop();
-                return false;
-            }
-            AresLibraryInitialized = true;
+        if (!Reactor.Start()) {
+            return false;
         }
+        if (!TqAresLibraryGuard::Acquire()) {
+            Reactor.Stop();
+            return false;
+        }
+        AresLibraryAcquired = true;
 
         ares_options options{};
         options.sock_state_cb = &Impl::SockStateCallback;
         options.sock_state_cb_data = this;
         if (ares_init_options(&Channel, &options, ARES_OPT_SOCK_STATE_CB) != ARES_SUCCESS) {
-            Reactor.Stop();
             Channel = nullptr;
+            AresLibraryAcquired = false;
+            TqAresLibraryGuard::Release();
+            Reactor.Stop();
+            CallbackCompleted = false;
+            RegisteredSockets.clear();
+            CompletedIds.clear();
             return false;
         }
         return true;
@@ -144,16 +185,16 @@ struct TqAresDnsResolver::Impl {
         }
         Pending.clear();
         CompletedIds.clear();
-        RegisteredSockets.clear();
         if (Channel != nullptr) {
             ares_cancel(Channel);
             ares_destroy(Channel);
             Channel = nullptr;
         }
+        RegisteredSockets.clear();
         Reactor.Stop();
-        if (AresLibraryInitialized) {
-            ares_library_cleanup();
-            AresLibraryInitialized = false;
+        if (AresLibraryAcquired) {
+            AresLibraryAcquired = false;
+            TqAresLibraryGuard::Release();
         }
         CallbackCompleted = false;
     }

@@ -3,12 +3,13 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <thread>
+#include <vector>
 #if !defined(_WIN32)
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
-#include <thread>
 
 namespace {
 
@@ -131,6 +132,102 @@ int TestStopIsIdempotentAndResolveAfterStopFails() {
     return 0;
 }
 
+int TestMultipleResolverLifecycle() {
+    TqAresDnsResolver first;
+    TqAresDnsResolver second;
+    TqAresDnsResolver third;
+
+    if (!first.Start()) {
+        return 50;
+    }
+    if (!second.Start()) {
+        first.Stop();
+        return 51;
+    }
+    first.Stop();
+    if (!third.Start()) {
+        second.Stop();
+        return 52;
+    }
+
+    bool callbackRan = false;
+    TqDnsResolveResult observed{};
+    const uint64_t id = second.Resolve("localhost", 443,
+        [&](const TqDnsResolveResult& result) {
+            callbackRan = true;
+            observed = result;
+        });
+    if (id == 0) {
+        second.Stop();
+        third.Stop();
+        return 53;
+    }
+    if (!RunUntilCallback(second, callbackRan, 5000)) {
+        second.Stop();
+        third.Stop();
+        return 54;
+    }
+    if (!observed.Completed || !observed.Success) {
+        second.Stop();
+        third.Stop();
+        return 55;
+    }
+
+    second.Stop();
+    third.Stop();
+
+    if (!first.Start()) {
+        return 56;
+    }
+    first.Stop();
+    return 0;
+}
+
+int TestConcurrentResolverLifecycle() {
+    constexpr int kResolverCount = 4;
+    std::vector<int> results(kResolverCount, 0);
+    std::vector<std::thread> threads;
+    threads.reserve(kResolverCount);
+
+    for (int i = 0; i < kResolverCount; ++i) {
+        threads.emplace_back([&, i]() {
+            TqAresDnsResolver resolver;
+            if (!resolver.Start()) {
+                results[static_cast<size_t>(i)] = 60;
+                return;
+            }
+            bool callbackRan = false;
+            const uint64_t id = resolver.Resolve("localhost", 443,
+                [&](const TqDnsResolveResult&) {
+                    callbackRan = true;
+                });
+            if (id == 0) {
+                resolver.Stop();
+                results[static_cast<size_t>(i)] = 61;
+                return;
+            }
+            resolver.Cancel(id);
+            (void)resolver.RunOnce(0);
+            if (callbackRan) {
+                resolver.Stop();
+                results[static_cast<size_t>(i)] = 62;
+                return;
+            }
+            resolver.Stop();
+        });
+    }
+
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    for (int result : results) {
+        if (result != 0) {
+            return result;
+        }
+    }
+    return 0;
+}
+
 int ChildRunOnceInfiniteTimeoutWithPendingQuery() {
     TqAresDnsResolver resolver;
     if (!resolver.Start()) {
@@ -190,24 +287,20 @@ int TestInfiniteTimeoutUsesAresTimeoutForPendingQuery() {
 #endif
 }
 
-int TestInfiniteTimeoutWaitSelectionUsesAresTimeout() {
+int TestNoPendingTimeoutSelectionIsStable() {
     TqAresDnsResolver resolver;
     if (!resolver.Start()) {
         return 80;
     }
 
-    const uint64_t id = resolver.Resolve("tcpquic-wait-selection.invalid", 443,
-        [](const TqDnsResolveResult&) {});
-    if (id == 0) {
-        resolver.Stop();
-        return 81;
-    }
-
-    const int waitMs = resolver.TestOnlyNextWaitMs(-1);
-    resolver.Cancel(id);
+    const int infiniteWaitMs = resolver.TestOnlyNextWaitMs(-1);
+    const int boundedWaitMs = resolver.TestOnlyNextWaitMs(25);
     resolver.Stop();
 
-    if (waitMs < 0) {
+    if (infiniteWaitMs != -1) {
+        return 81;
+    }
+    if (boundedWaitMs != 25) {
         return 82;
     }
     return 0;
@@ -228,9 +321,17 @@ int main() {
     if (result != 0) {
         return result;
     }
+    result = TestMultipleResolverLifecycle();
+    if (result != 0) {
+        return result;
+    }
+    result = TestConcurrentResolverLifecycle();
+    if (result != 0) {
+        return result;
+    }
     result = TestInfiniteTimeoutUsesAresTimeoutForPendingQuery();
     if (result != 0) {
         return result;
     }
-    return TestInfiniteTimeoutWaitSelectionUsesAresTimeout();
+    return TestNoPendingTimeoutSelectionIsStable();
 }
