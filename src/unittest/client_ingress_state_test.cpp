@@ -3,6 +3,7 @@
 #include "control_protocol.h"
 
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -216,8 +217,16 @@ int TestSocksPostReadyFeedBuffersData() {
 int TestSocksUnsupportedAuthCloses() {
     TqClientIngressState state(TqClientIngressProto::Socks5);
     const uint8_t greeting[] = {0x05, 0x02, 0x01, 0x02};
-    if (state.Feed(greeting, sizeof(greeting)) != TqClientIngressResult::Close) {
+    if (state.Feed(greeting, sizeof(greeting)) != TqClientIngressResult::NeedWrite) {
         return 45;
+    }
+    const std::string& pending = state.PendingWrite();
+    if (pending.size() != 2 || static_cast<uint8_t>(pending[1]) != 0xFF) {
+        return 46;
+    }
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+        return 47;
     }
     return 0;
 }
@@ -358,6 +367,144 @@ int TestHttpExactlyCapIncompleteHeaderCloses() {
     return 0;
 }
 
+int TestSocksUserPassAuthRequiredRejectsNoAuth() {
+    auto auth = std::make_shared<TqProxyAuthTable>(
+        std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+    TqClientIngressState state(TqClientIngressProto::Socks5, auth);
+    const uint8_t greeting[] = {0x05, 0x01, 0x00};
+
+    if (state.Feed(greeting, sizeof(greeting)) != TqClientIngressResult::NeedWrite) {
+        return 93;
+    }
+    const std::string& pending = state.PendingWrite();
+    if (pending.size() != 2 ||
+        static_cast<uint8_t>(pending[0]) != 0x05 ||
+        static_cast<uint8_t>(pending[1]) != 0xFF) {
+        return 94;
+    }
+    state.MarkWriteComplete(2);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+        return 95;
+    }
+    return 0;
+}
+
+int TestSocksUserPassAuthSuccess() {
+    auto auth = std::make_shared<TqProxyAuthTable>(
+        std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+    TqClientIngressState state(TqClientIngressProto::Socks5, auth);
+    const std::vector<uint8_t> data{
+        0x05, 0x01, 0x02,
+        0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x08,
+        's', 'e', 'c', 'r', 'e', 't', '-', 'a',
+        0x05, 0x01, 0x00, 0x03, 0x0b,
+        'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o', 'm',
+        0x01, 0xbb};
+
+    if (state.Feed(data.data(), data.size()) != TqClientIngressResult::NeedWrite) {
+        return 96;
+    }
+    const std::string& pending = state.PendingWrite();
+    if (pending.size() != 4 ||
+        static_cast<uint8_t>(pending[0]) != 0x05 ||
+        static_cast<uint8_t>(pending[1]) != 0x02 ||
+        static_cast<uint8_t>(pending[2]) != 0x01 ||
+        static_cast<uint8_t>(pending[3]) != 0x00) {
+        return 97;
+    }
+    state.MarkWriteComplete(4);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::ReadyToOpen) {
+        return 98;
+    }
+    if (!CheckDomainRequest(state.Request(), "example.com", 443, 1)) {
+        return 99;
+    }
+    return 0;
+}
+
+int TestSocksUserPassAuthFailureClosesAfterStatus() {
+    auto auth = std::make_shared<TqProxyAuthTable>(
+        std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+    TqClientIngressState state(TqClientIngressProto::Socks5, auth);
+    const std::vector<uint8_t> data{
+        0x05, 0x01, 0x02,
+        0x01, 0x05, 'a', 'l', 'i', 'c', 'e', 0x05,
+        'w', 'r', 'o', 'n', 'g'};
+
+    if (state.Feed(data.data(), data.size()) != TqClientIngressResult::NeedWrite) {
+        return 100;
+    }
+    const std::string& pending = state.PendingWrite();
+    if (pending.size() != 4 ||
+        static_cast<uint8_t>(pending[1]) != 0x02 ||
+        static_cast<uint8_t>(pending[3]) != 0x01) {
+        return 101;
+    }
+    state.MarkWriteComplete(4);
+    if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+        return 102;
+    }
+    return 0;
+}
+
+int TestHttpConnectAuthRequiredRejectsMissingOrWrong() {
+    auto auth = std::make_shared<TqProxyAuthTable>(
+        std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+    {
+        TqClientIngressState state(TqClientIngressProto::HttpConnect, auth);
+        const std::string request =
+            "CONNECT example.org:8443 HTTP/1.1\r\n"
+            "Host: example.org:8443\r\n"
+            "\r\n";
+        if (state.Feed(reinterpret_cast<const uint8_t*>(request.data()), request.size()) !=
+            TqClientIngressResult::NeedWrite) {
+            return 103;
+        }
+        if (state.PendingWrite().find("407 Proxy Authentication Required") == std::string::npos) {
+            return 104;
+        }
+        state.MarkWriteComplete(state.PendingWrite().size());
+        if (state.Feed(nullptr, 0) != TqClientIngressResult::Close) {
+            return 105;
+        }
+    }
+    {
+        TqClientIngressState state(TqClientIngressProto::HttpConnect, auth);
+        const std::string request =
+            "CONNECT example.org:8443 HTTP/1.1\r\n"
+            "Host: example.org:8443\r\n"
+            "Proxy-Authorization: Basic YWxpY2U6d3Jvbmc=\r\n"
+            "\r\n";
+        if (state.Feed(reinterpret_cast<const uint8_t*>(request.data()), request.size()) !=
+            TqClientIngressResult::NeedWrite) {
+            return 106;
+        }
+        if (state.PendingWrite().find("407 Proxy Authentication Required") == std::string::npos) {
+            return 107;
+        }
+    }
+    return 0;
+}
+
+int TestHttpConnectAuthSuccess() {
+    auto auth = std::make_shared<TqProxyAuthTable>(
+        std::vector<TqProxyAuthUser>{{"alice", "secret-a"}});
+    TqClientIngressState state(TqClientIngressProto::HttpConnect, auth);
+    const std::string request =
+        "CONNECT example.org:8443 HTTP/1.1\r\n"
+        "Host: example.org:8443\r\n"
+        "Proxy-Authorization: Basic YWxpY2U6c2VjcmV0LWE=\r\n"
+        "\r\n";
+    if (state.Feed(reinterpret_cast<const uint8_t*>(request.data()), request.size()) !=
+        TqClientIngressResult::ReadyToOpen) {
+        return 108;
+    }
+    if (!CheckDomainRequest(state.Request(), "example.org", 8443, 2)) {
+        return 109;
+    }
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -397,6 +544,18 @@ int main() {
     if (rc != 0) {
         return rc;
     }
+    rc = TestSocksUserPassAuthRequiredRejectsNoAuth();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = TestSocksUserPassAuthSuccess();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = TestSocksUserPassAuthFailureClosesAfterStatus();
+    if (rc != 0) {
+        return rc;
+    }
     rc = TestHttpConnectReady();
     if (rc != 0) {
         return rc;
@@ -426,6 +585,14 @@ int main() {
         return rc;
     }
     rc = TestHttpExactlyCapIncompleteHeaderCloses();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = TestHttpConnectAuthRequiredRejectsMissingOrWrong();
+    if (rc != 0) {
+        return rc;
+    }
+    rc = TestHttpConnectAuthSuccess();
     if (rc != 0) {
         return rc;
     }

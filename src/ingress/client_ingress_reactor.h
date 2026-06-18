@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -47,7 +48,7 @@ struct TqClientIngressPeer {
 
 class TqClientIngressReactor {
 public:
-    TqClientIngressReactor() = default;
+    TqClientIngressReactor();
     ~TqClientIngressReactor();
 
     TqClientIngressReactor(const TqClientIngressReactor&) = delete;
@@ -95,6 +96,11 @@ private:
         WritingOpenResponse,
     };
 
+    struct OpenCompletionState {
+        std::mutex Mutex;
+        bool TerminalCalled{false};
+    };
+
     struct ClientEntry {
         std::string PeerId;
         ListenProto Proto{ListenProto::Socks5};
@@ -106,7 +112,15 @@ private:
         ClientPhase Phase{ClientPhase::Handshake};
         std::string PendingWrite;
         TqClientTunnelOpenHandle* OpenHandle{nullptr};
+        std::shared_ptr<OpenCompletionState> OpenCompletion;
         bool OpenSucceeded{false};
+    };
+
+    struct CompletionToken {
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        TqClientIngressReactor* Reactor{nullptr};
+        size_t ActiveCallbacks{0};
     };
 
     void Run();
@@ -122,7 +136,16 @@ private:
     void CompleteClientOpen(
         TqSocketHandle clientFd,
         TqClientTunnelOpenHandle* handle,
-        TqTunnelStartResult result);
+        TqTunnelStartResult result,
+        TqClientIngressTunnelCloseFn rejectTunnel = TqClientIngressTunnelCloseFn{},
+        std::shared_ptr<OpenCompletionState> completionState = nullptr);
+    bool EnqueueOpenCompletion(
+        const std::weak_ptr<CompletionToken>& token,
+        TqSocketHandle clientFd,
+        TqClientTunnelOpenHandle* handle,
+        TqTunnelStartResult result,
+        TqClientIngressTunnelCloseFn rejectTunnel,
+        std::shared_ptr<OpenCompletionState> completionState);
     void CloseClientLocked(TqSocketHandle clientFd, bool closeFd);
     void CloseClientOwnedByTunnelLocked(TqSocketHandle clientFd);
     void RemovePeerLocked(const std::string& peerId);
@@ -135,6 +158,7 @@ private:
     std::atomic<bool> Running{false};
     TqSocketStartup SocketStartup;
     TqClientIngressPlatformReactor Reactor;
+    std::shared_ptr<CompletionToken> CompletionTokenPtr{std::make_shared<CompletionToken>()};
     std::thread Worker;
     std::deque<std::function<void()>> PendingTasks;
     std::unordered_map<std::string, PeerEntry> Peers;

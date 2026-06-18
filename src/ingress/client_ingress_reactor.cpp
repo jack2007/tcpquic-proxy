@@ -111,6 +111,10 @@ std::string TqBuildOpenResponse(bool socks, TqOpenError error) {
 
 } // namespace
 
+TqClientIngressReactor::TqClientIngressReactor() {
+    CompletionTokenPtr->Reactor = this;
+}
+
 TqClientIngressReactor::~TqClientIngressReactor() {
     Stop();
 }
@@ -159,7 +163,9 @@ void TqClientIngressReactor::Stop() {
     if (Worker.joinable()) {
         Worker.join();
     }
+    ProcessPendingTasks();
 
+    std::shared_ptr<CompletionToken> oldToken;
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
         {
@@ -168,7 +174,20 @@ void TqClientIngressReactor::Stop() {
             PendingTasks.clear();
         }
         Reactor.Stop();
+        oldToken = std::move(CompletionTokenPtr);
+        {
+            std::lock_guard<std::mutex> tokenLock(oldToken->Mutex);
+            oldToken->Reactor = nullptr;
+        }
+        CompletionTokenPtr = std::make_shared<CompletionToken>();
+        CompletionTokenPtr->Reactor = this;
         State = LifecycleState::Stopped;
+    }
+    if (oldToken) {
+        std::unique_lock<std::mutex> tokenLock(oldToken->Mutex);
+        oldToken->Cv.wait(tokenLock, [&]() {
+            return oldToken->ActiveCallbacks == 0;
+        });
     }
     LifecycleCv.notify_all();
 }
@@ -372,7 +391,11 @@ void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
             ClientEntry client{};
             client.PeerId = peerId;
             client.Proto = proto;
-            client.State = TqClientIngressState(TqToIngressProto(proto == ListenProto::Socks5));
+            std::shared_ptr<const TqProxyAuthTable> auth =
+                std::make_shared<TqProxyAuthTable>(peerIt->second.Peer.Config.Router.ProxyAuth);
+            client.State = TqClientIngressState(
+                TqToIngressProto(proto == ListenProto::Socks5),
+                auth);
             client.StartTunnel = peerIt->second.Peer.StartTunnel;
             client.AcceptTunnel = peerIt->second.Peer.AcceptTunnel;
             client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
@@ -575,6 +598,8 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
     TqClientIngressTunnelStartFn startTunnel;
     TqClientIngressTunnelCloseFn rejectTunnel;
     bool socks = true;
+    std::weak_ptr<CompletionToken> completionToken;
+    std::shared_ptr<OpenCompletionState> completionState;
     {
         std::lock_guard<std::mutex> lock(Mutex);
         auto it = Clients.find(clientFd);
@@ -589,6 +614,9 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         startTunnel = client.StartTunnel;
         rejectTunnel = client.RejectTunnel;
         socks = client.Proto == ListenProto::Socks5;
+        completionToken = CompletionTokenPtr;
+        completionState = std::make_shared<OpenCompletionState>();
+        client.OpenCompletion = completionState;
         client.Phase = ClientPhase::Opening;
         (void)Reactor.Modify(clientFd, TqReactorEvents::Error);
     }
@@ -601,13 +629,64 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
     TqClientTunnelOpenHandle* handle = startTunnel(
         request,
         clientFd,
-        [this, clientFd](TqClientTunnelOpenHandle* completedHandle, TqTunnelStartResult result) {
-            (void)EnqueueAsync([this, clientFd, completedHandle, result]() {
-                CompleteClientOpen(clientFd, completedHandle, result);
-            });
+        [completionToken, clientFd, rejectTunnel, completionState](
+            TqClientTunnelOpenHandle* completedHandle,
+            TqTunnelStartResult result) mutable {
+            auto token = completionToken.lock();
+            if (!token) {
+                if (completedHandle != nullptr && rejectTunnel) {
+                    if (completionState) {
+                        std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+                        completionState->TerminalCalled = true;
+                    }
+                    rejectTunnel(completedHandle);
+                }
+                return;
+            }
+            TqClientIngressReactor* reactor = nullptr;
+            {
+                std::lock_guard<std::mutex> tokenLock(token->Mutex);
+                reactor = token->Reactor;
+                if (reactor != nullptr) {
+                    ++token->ActiveCallbacks;
+                }
+            }
+            if (reactor == nullptr) {
+                if (completedHandle != nullptr && rejectTunnel) {
+                    if (completionState) {
+                        std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+                        completionState->TerminalCalled = true;
+                    }
+                    rejectTunnel(completedHandle);
+                }
+                return;
+            }
+            const bool queued = reactor->EnqueueOpenCompletion(
+                completionToken,
+                clientFd,
+                completedHandle,
+                result,
+                rejectTunnel,
+                completionState);
+            {
+                std::lock_guard<std::mutex> tokenLock(token->Mutex);
+                --token->ActiveCallbacks;
+            }
+            token->Cv.notify_all();
+            if (!queued && completedHandle != nullptr && rejectTunnel) {
+                if (completionState) {
+                    std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+                    completionState->TerminalCalled = true;
+                }
+                rejectTunnel(completedHandle);
+            }
         });
 
     if (handle == nullptr) {
+        if (completionState) {
+            std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+            completionState->TerminalCalled = true;
+        }
         CompleteClientOpen(clientFd, nullptr, TqTunnelStartResult{false, TqOpenError::Internal, 0});
         return;
     }
@@ -626,22 +705,81 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
     }
 }
 
+bool TqClientIngressReactor::EnqueueOpenCompletion(
+    const std::weak_ptr<CompletionToken>& token,
+    TqSocketHandle clientFd,
+    TqClientTunnelOpenHandle* handle,
+    TqTunnelStartResult result,
+    TqClientIngressTunnelCloseFn rejectTunnel,
+    std::shared_ptr<OpenCompletionState> completionState) {
+    return EnqueueAsync([token,
+                            clientFd,
+                            handle,
+                            result,
+                            rejectTunnel = std::move(rejectTunnel),
+                            completionState = std::move(completionState)]() mutable {
+        auto lockedToken = token.lock();
+        if (!lockedToken) {
+            if (handle != nullptr && rejectTunnel) {
+                if (completionState) {
+                    std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+                    completionState->TerminalCalled = true;
+                }
+                rejectTunnel(handle);
+            }
+            return;
+        }
+        TqClientIngressReactor* reactor = nullptr;
+        {
+            std::lock_guard<std::mutex> tokenLock(lockedToken->Mutex);
+            reactor = lockedToken->Reactor;
+        }
+        if (reactor == nullptr) {
+            if (handle != nullptr && rejectTunnel) {
+                if (completionState) {
+                    std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+                    completionState->TerminalCalled = true;
+                }
+                rejectTunnel(handle);
+            }
+            return;
+        }
+        reactor->CompleteClientOpen(clientFd, handle, result, rejectTunnel, completionState);
+    });
+}
+
 void TqClientIngressReactor::CompleteClientOpen(
     TqSocketHandle clientFd,
     TqClientTunnelOpenHandle* handle,
-    TqTunnelStartResult result) {
+    TqTunnelStartResult result,
+    TqClientIngressTunnelCloseFn rejectTunnel,
+    std::shared_ptr<OpenCompletionState> completionState) {
+    bool terminalAlreadyCalled = false;
+    if (completionState) {
+        std::lock_guard<std::mutex> completionLock(completionState->Mutex);
+        terminalAlreadyCalled = completionState->TerminalCalled;
+    }
     bool writeNow = false;
     {
         std::lock_guard<std::mutex> lock(Mutex);
         auto it = Clients.find(clientFd);
         if (it == Clients.end()) {
+            if (handle != nullptr && rejectTunnel && !terminalAlreadyCalled) {
+                rejectTunnel(handle);
+            }
             return;
         }
         ClientEntry& client = it->second;
         if (client.Phase != ClientPhase::Opening) {
+            if (handle != nullptr && rejectTunnel && !terminalAlreadyCalled) {
+                rejectTunnel(handle);
+            }
             return;
         }
         if (client.OpenHandle != nullptr && handle != nullptr && client.OpenHandle != handle) {
+            if (rejectTunnel && !terminalAlreadyCalled) {
+                rejectTunnel(handle);
+            }
             return;
         }
         if (client.OpenHandle == nullptr) {
@@ -649,6 +787,7 @@ void TqClientIngressReactor::CompleteClientOpen(
         }
 
         const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
+        client.OpenCompletion = completionState;
         client.OpenSucceeded = result.Ok;
         client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
         client.Phase = ClientPhase::WritingOpenResponse;
@@ -668,6 +807,10 @@ void TqClientIngressReactor::CloseClientLocked(TqSocketHandle clientFd, bool clo
     ClientEntry client = std::move(it->second);
     Clients.erase(it);
     (void)Reactor.Remove(clientFd);
+    if (client.OpenCompletion && client.OpenHandle != nullptr) {
+        std::lock_guard<std::mutex> completionLock(client.OpenCompletion->Mutex);
+        client.OpenCompletion->TerminalCalled = true;
+    }
     if (client.OpenHandle != nullptr) {
         if (client.CancelTunnel) {
             client.CancelTunnel(client.OpenHandle);
