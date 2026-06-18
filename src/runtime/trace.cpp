@@ -171,11 +171,11 @@ std::vector<std::string> TqFormatTraceQuicStatsLines(const QUIC_STATISTICS_V2& s
     std::snprintf(
         line,
         sizeof(line),
-        "rtt: cur=%uus min=%uus max=%uus var=%uus",
-        stats.Rtt,
-        stats.MinRtt,
-        stats.MaxRtt,
-        stats.RttVariance);
+        "rtt: cur=%.3fms min=%.3fms max=%.3fms var=%.3fms",
+        static_cast<double>(stats.Rtt) / 1000.0,
+        static_cast<double>(stats.MinRtt) / 1000.0,
+        static_cast<double>(stats.MaxRtt) / 1000.0,
+        static_cast<double>(stats.RttVariance) / 1000.0);
     lines.emplace_back(line);
     std::snprintf(
         line,
@@ -896,13 +896,13 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u posted=%llu ideal=%llu srtt=%lluus cwnd=%u",
+        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u posted=%llu ideal=%llu srtt=%.3fms cwnd=%u",
         static_cast<unsigned long long>(stats.BandwidthBytesPerSecond),
         bandwidthMbps,
         stats.BytesInFlight,
         static_cast<unsigned long long>(stats.PostedBytes),
         static_cast<unsigned long long>(stats.IdealBytes),
-        static_cast<unsigned long long>(stats.SmoothedRttUs),
+        static_cast<double>(stats.SmoothedRttUs) / 1000.0,
         stats.CongestionWindow);
     return buffer;
 }

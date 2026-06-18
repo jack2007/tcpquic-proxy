@@ -68,7 +68,7 @@ int main() {
     if (line.find("bytes_in_flight=1234") == std::string::npos ||
         line.find("posted=5678") == std::string::npos ||
         line.find("ideal=9012") == std::string::npos ||
-        line.find("srtt=70000us") == std::string::npos ||
+        line.find("srtt=70.000ms") == std::string::npos ||
         line.find("cwnd=64000") == std::string::npos) {
         return 4;
     }
