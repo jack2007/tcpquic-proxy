@@ -2,10 +2,9 @@
 
 #include "socket_reactor.h"
 
-#include <unordered_map>
-
 #if defined(_WIN32)
-#include <vector>
+#include <cstddef>
+#include <unordered_map>
 #endif
 
 class TqWindowsReactor final : public ITqSocketReactor {
@@ -34,6 +33,7 @@ private:
 
     WSAEVENT WakeEvent_{WSA_INVALID_EVENT};
     std::unordered_map<TqSocketHandle, Entry> Entries_;
+    size_t NextWaitOffset_{0};
 #else
     bool Started_{false};
 #endif

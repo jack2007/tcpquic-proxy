@@ -2,6 +2,7 @@
 
 #include "platform_socket.h"
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -178,25 +179,86 @@ int TestChunkedWaitBeyondMaximumEvents() {
         }
     }
 
-    const TqSocketHandle sender = sockets.back();
-    if (!SendByte(sender, 'z')) {
-        for (TqSocketHandle fd : sockets) {
-            TqCloseSocket(fd);
+    for (int i = 0; i < PairCount; ++i) {
+        const char payload = static_cast<char>('a' + (i % 26));
+        if (!SendByte(sockets[(i * 2) + 1], payload)) {
+            for (TqSocketHandle fd : sockets) {
+                TqCloseSocket(fd);
+            }
+            reactor.Stop();
+            return 33;
         }
-        reactor.Stop();
-        return 33;
     }
-    if (!reactor.RunOnce(100) || calls != 1 || observedByte != 'z') {
+
+    for (int i = 0; i < PairCount; ++i) {
+        if (!reactor.RunOnce(100)) {
+            for (TqSocketHandle fd : sockets) {
+                TqCloseSocket(fd);
+            }
+            reactor.Stop();
+            return 34;
+        }
+    }
+    if (calls != PairCount || observedByte == '\0') {
         for (TqSocketHandle fd : sockets) {
             TqCloseSocket(fd);
         }
         reactor.Stop();
-        return 34;
+        return 35;
     }
 
     reactor.Stop();
     for (TqSocketHandle fd : sockets) {
         TqCloseSocket(fd);
+    }
+    return 0;
+}
+
+int TestChunkedWaitTimeoutIsBounded() {
+    TqWindowsReactor reactor;
+    if (!reactor.Start()) {
+        return 50;
+    }
+
+    constexpr int PairCount = (WSA_MAXIMUM_WAIT_EVENTS * 2) + 3;
+    std::vector<TqSocketHandle> sockets;
+    sockets.reserve(PairCount * 2);
+
+    for (int i = 0; i < PairCount; ++i) {
+        TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!MakeSocketPair(fds)) {
+            for (TqSocketHandle fd : sockets) {
+                TqCloseSocket(fd);
+            }
+            reactor.Stop();
+            return 51;
+        }
+        sockets.push_back(fds[0]);
+        sockets.push_back(fds[1]);
+        if (!reactor.Add(fds[0], TqReactorEvents::Read, [](TqSocketHandle, uint32_t) {})) {
+            for (TqSocketHandle fd : sockets) {
+                TqCloseSocket(fd);
+            }
+            reactor.Stop();
+            return 52;
+        }
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    const bool result = reactor.RunOnce(100);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+
+    reactor.Stop();
+    for (TqSocketHandle fd : sockets) {
+        TqCloseSocket(fd);
+    }
+
+    if (result) {
+        return 53;
+    }
+    if (elapsed > std::chrono::milliseconds(250)) {
+        return 54;
     }
     return 0;
 }
@@ -268,6 +330,10 @@ int main() {
         return result;
     }
     result = TestChunkedWaitBeyondMaximumEvents();
+    if (result != 0) {
+        return result;
+    }
+    result = TestChunkedWaitTimeoutIsBounded();
     if (result != 0) {
         return result;
     }

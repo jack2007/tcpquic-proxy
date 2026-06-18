@@ -80,6 +80,7 @@ void TqWindowsReactor::Stop() {
         CloseEvent(item.second.Event);
     }
     Entries_.clear();
+    NextWaitOffset_ = 0;
     CloseEvent(WakeEvent_);
 }
 
@@ -151,82 +152,114 @@ bool TqWindowsReactor::RunOnce(int timeoutMs) {
         sockets.push_back(item.first);
     }
 
-    const DWORD waitTimeout = timeoutMs < 0 ? WSA_INFINITE : static_cast<DWORD>(timeoutMs);
     const size_t socketChunkSize = WSA_MAXIMUM_WAIT_EVENTS - 1;
-    bool handledWork = false;
 
-    for (size_t offset = 0;; offset += socketChunkSize) {
+    auto dispatchReady = [&](size_t socketIndex) -> int {
+        if (socketIndex >= sockets.size()) {
+            return -1;
+        }
+
+        const TqSocketHandle fd = sockets[socketIndex];
+        auto it = Entries_.find(fd);
+        if (it == Entries_.end()) {
+            return 0;
+        }
+
+        WSANETWORKEVENTS networkEvents{};
+        if (::WSAEnumNetworkEvents(fd, it->second.Event, &networkEvents) != 0) {
+            return -1;
+        }
+
+        uint32_t reactorEvents = FromNetworkEvents(networkEvents.lNetworkEvents, networkEvents.iErrorCode);
+        reactorEvents &= (it->second.Events | TqReactorEvents::Error);
+        if (reactorEvents == 0) {
+            return 0;
+        }
+
+        Handler handler = it->second.Callback;
+        handler(fd, reactorEvents);
+        return 1;
+    };
+
+    const size_t chunkCount = sockets.empty() ? 0 :
+        (sockets.size() + socketChunkSize - 1) / socketChunkSize;
+    const size_t startChunk = chunkCount == 0 ? 0 :
+        (NextWaitOffset_ / socketChunkSize) % chunkCount;
+
+    auto waitChunk = [&](size_t chunk, DWORD timeout) -> int {
         std::vector<WSAEVENT> waitEvents;
         waitEvents.reserve(WSA_MAXIMUM_WAIT_EVENTS);
         waitEvents.push_back(WakeEvent_);
 
+        const size_t offset = chunk * socketChunkSize;
         const size_t remaining = offset < sockets.size() ? sockets.size() - offset : 0;
-        const size_t chunkCount = std::min(socketChunkSize, remaining);
-        for (size_t i = 0; i < chunkCount; ++i) {
+        const size_t eventCount = std::min(socketChunkSize, remaining);
+        for (size_t i = 0; i < eventCount; ++i) {
             auto it = Entries_.find(sockets[offset + i]);
             if (it != Entries_.end()) {
                 waitEvents.push_back(it->second.Event);
             }
         }
 
-        if (waitEvents.size() == 1 && offset != 0) {
-            break;
-        }
-
         const DWORD result = ::WSAWaitForMultipleEvents(
             static_cast<DWORD>(waitEvents.size()),
             waitEvents.data(),
             FALSE,
-            waitTimeout,
+            timeout,
             FALSE);
         if (result == WSA_WAIT_FAILED) {
-            return false;
+            return -1;
         }
         if (result == WSA_WAIT_TIMEOUT) {
-            if (chunkCount < socketChunkSize || sockets.empty()) {
-                return handledWork;
-            }
-            continue;
+            return 0;
         }
 
         const DWORD index = result - WSA_WAIT_EVENT_0;
         if (index >= waitEvents.size()) {
-            return false;
+            return -1;
         }
         if (index == 0) {
             (void)::WSAResetEvent(WakeEvent_);
-            return handledWork;
+            return 2;
         }
 
-        const size_t socketIndex = offset + index - 1;
-        if (socketIndex >= sockets.size()) {
+        const int dispatchResult = dispatchReady(offset + index - 1);
+        if (dispatchResult > 0) {
+            const size_t nextSocket = offset + index;
+            NextWaitOffset_ = sockets.empty() ? 0 : nextSocket % sockets.size();
+        }
+        return dispatchResult;
+    };
+
+    if (chunkCount == 0) {
+        const DWORD result = ::WSAWaitForMultipleEvents(1, &WakeEvent_, FALSE,
+            timeoutMs < 0 ? WSA_INFINITE : static_cast<DWORD>(timeoutMs), FALSE);
+        if (result == WSA_WAIT_FAILED) {
             return false;
         }
-
-        const TqSocketHandle fd = sockets[socketIndex];
-        auto it = Entries_.find(fd);
-        if (it == Entries_.end()) {
-            return handledWork;
+        if (result == WSA_WAIT_EVENT_0) {
+            (void)::WSAResetEvent(WakeEvent_);
         }
-
-        WSANETWORKEVENTS networkEvents{};
-        if (::WSAEnumNetworkEvents(fd, it->second.Event, &networkEvents) != 0) {
-            return false;
-        }
-
-        uint32_t reactorEvents = FromNetworkEvents(networkEvents.lNetworkEvents, networkEvents.iErrorCode);
-        reactorEvents &= (it->second.Events | TqReactorEvents::Error);
-        if (reactorEvents == 0) {
-            return handledWork;
-        }
-
-        Handler handler = it->second.Callback;
-        handler(fd, reactorEvents);
-        handledWork = true;
-        return true;
+        return false;
     }
 
-    return handledWork;
+    for (size_t step = 0; step < chunkCount; ++step) {
+        const size_t chunk = (startChunk + step) % chunkCount;
+        const int result = waitChunk(chunk, 0);
+        if (result < 0) {
+            return false;
+        }
+        if (result > 0) {
+            return result == 1;
+        }
+    }
+
+    const DWORD waitTimeout = timeoutMs < 0 ? WSA_INFINITE : static_cast<DWORD>(timeoutMs);
+    const int result = waitChunk(startChunk, waitTimeout);
+    if (result < 0) {
+        return false;
+    }
+    return result == 1;
 }
 
 #else
