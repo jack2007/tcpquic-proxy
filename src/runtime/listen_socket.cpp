@@ -130,6 +130,35 @@ bool TqPrepareListenSocket(TqSocketHandle socket) {
     return true;
 }
 
+TqSocketHandle TqOpenPreparedListenSocket(const addrinfo* ai) {
+#if defined(_WIN32)
+    TqScopedSocket fd(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+    if (!TqSocketValid(fd.Get()) || !TqPrepareListenSocket(fd.Get())) {
+        return TqInvalidSocket;
+    }
+    return fd.Release();
+#else
+    TqScopedSocket fd(::socket(
+        ai->ai_family,
+        ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
+        ai->ai_protocol));
+    if (TqSocketValid(fd.Get())) {
+        return fd.Release();
+    }
+
+    const int socketError = errno;
+    if (socketError != EINVAL && socketError != EPROTONOSUPPORT) {
+        return TqInvalidSocket;
+    }
+
+    fd.Reset(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+    if (!TqSocketValid(fd.Get()) || !TqPrepareListenSocket(fd.Get())) {
+        return TqInvalidSocket;
+    }
+    return fd.Release();
+#endif
+}
+
 } // namespace
 
 bool TqCreateNonBlockingListenSocket(const std::string& listen, TqListenSocket& out) {
@@ -155,8 +184,8 @@ bool TqCreateNonBlockingListenSocket(const std::string& listen, TqListenSocket& 
     }
 
     for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        TqScopedSocket fd(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
-        if (!TqSocketValid(fd.Get()) || !TqPrepareListenSocket(fd.Get())) {
+        TqScopedSocket fd(TqOpenPreparedListenSocket(ai));
+        if (!TqSocketValid(fd.Get())) {
             continue;
         }
 

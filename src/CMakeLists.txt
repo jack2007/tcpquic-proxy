@@ -102,6 +102,7 @@ set(TCPQUIC_PROXY_SOURCES
     ingress/socks5_server.cpp
     tunnel/relay.cpp
     runtime/thread_pool.cpp
+    runtime/listen_socket.cpp
     tunnel/tunnel_reaper.cpp
     runtime/warmup.cpp
     runtime/admin_http.cpp
@@ -117,7 +118,6 @@ set(TCPQUIC_PROXY_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_PROXY_SOURCES
         ingress/client_ingress_reactor.cpp
-        runtime/listen_socket.cpp
         ingress/client_ingress_state.cpp
         tunnel/server_dial_reactor.cpp
         tunnel/ares_dns_resolver.cpp
