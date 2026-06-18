@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -263,6 +264,113 @@ int TestChunkedWaitTimeoutIsBounded() {
     return 0;
 }
 
+int TestChunkedWaitRotatesToLaterChunk() {
+    TqWindowsReactor reactor;
+    if (!reactor.Start()) {
+        return 60;
+    }
+
+    constexpr int PairCount = WSA_MAXIMUM_WAIT_EVENTS + 3;
+    std::vector<TqSocketHandle> sockets;
+    sockets.reserve(PairCount * 2);
+    std::vector<TqSocketHandle> peers;
+    peers.reserve(PairCount);
+    std::vector<TqSocketHandle> dispatchOrder;
+    dispatchOrder.reserve(PairCount);
+    TqSocketHandle observedFd = TqInvalidSocket;
+
+    auto cleanup = [&]() {
+        reactor.Stop();
+        for (TqSocketHandle fd : sockets) {
+            TqCloseSocket(fd);
+        }
+    };
+
+    for (int i = 0; i < PairCount; ++i) {
+        TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!MakeSocketPair(fds)) {
+            cleanup();
+            return 61;
+        }
+        sockets.push_back(fds[0]);
+        sockets.push_back(fds[1]);
+        peers.push_back(fds[1]);
+        if (!reactor.Add(fds[0], TqReactorEvents::Read,
+                [&](TqSocketHandle fd, uint32_t events) {
+                    if ((events & TqReactorEvents::Read) != 0) {
+                        char value = '\0';
+                        (void)RecvByte(fd, value);
+                        dispatchOrder.push_back(fd);
+                        observedFd = fd;
+                    }
+                })) {
+            cleanup();
+            return 62;
+        }
+    }
+
+    for (int i = 0; i < PairCount; ++i) {
+        if (!SendByte(peers[i], static_cast<char>('A' + (i % 26)))) {
+            cleanup();
+            return 63;
+        }
+    }
+    for (int i = 0; i < PairCount; ++i) {
+        if (!reactor.RunOnce(100)) {
+            cleanup();
+            return 64;
+        }
+    }
+    if (dispatchOrder.size() != static_cast<size_t>(PairCount)) {
+        cleanup();
+        return 65;
+    }
+
+    constexpr size_t LaterChunkIndex = WSA_MAXIMUM_WAIT_EVENTS - 1;
+    const TqSocketHandle targetFd = dispatchOrder[LaterChunkIndex];
+    TqSocketHandle targetPeer = TqInvalidSocket;
+    for (int i = 0; i < PairCount; ++i) {
+        if (sockets[i * 2] == targetFd) {
+            targetPeer = peers[i];
+            break;
+        }
+    }
+    if (!TqSocketValid(targetPeer)) {
+        cleanup();
+        return 66;
+    }
+
+    observedFd = TqInvalidSocket;
+    bool runResult = false;
+    std::chrono::milliseconds elapsed{0};
+    std::thread waiter([&]() {
+        const auto start = std::chrono::steady_clock::now();
+        runResult = reactor.RunOnce(1000);
+        elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (!SendByte(targetPeer, 'z')) {
+        waiter.join();
+        cleanup();
+        return 67;
+    }
+    waiter.join();
+
+    if (!runResult || observedFd != targetFd) {
+        cleanup();
+        return 68;
+    }
+    if (elapsed > std::chrono::milliseconds(500)) {
+        cleanup();
+        return 69;
+    }
+
+    cleanup();
+    return 0;
+}
+
 int TestInvalidOperations() {
     TqWindowsReactor reactor;
     if (!reactor.Start()) {
@@ -334,6 +442,10 @@ int main() {
         return result;
     }
     result = TestChunkedWaitTimeoutIsBounded();
+    if (result != 0) {
+        return result;
+    }
+    result = TestChunkedWaitRotatesToLaterChunk();
     if (result != 0) {
         return result;
     }

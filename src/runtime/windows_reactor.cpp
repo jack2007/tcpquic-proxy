@@ -3,6 +3,8 @@
 #if defined(_WIN32)
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <vector>
 
 namespace {
@@ -254,12 +256,42 @@ bool TqWindowsReactor::RunOnce(int timeoutMs) {
         }
     }
 
-    const DWORD waitTimeout = timeoutMs < 0 ? WSA_INFINITE : static_cast<DWORD>(timeoutMs);
-    const int result = waitChunk(startChunk, waitTimeout);
-    if (result < 0) {
-        return false;
+    if (chunkCount == 1) {
+        const DWORD waitTimeout = timeoutMs < 0 ? WSA_INFINITE : static_cast<DWORD>(timeoutMs);
+        const int result = waitChunk(startChunk, waitTimeout);
+        if (result < 0) {
+            return false;
+        }
+        return result == 1;
     }
-    return result == 1;
+
+    constexpr DWORD WaitChunkMs = 10;
+    const auto deadline = timeoutMs >= 0 ?
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs) :
+        std::chrono::steady_clock::time_point::max();
+    size_t chunk = startChunk;
+    while (true) {
+        DWORD waitTimeout = WaitChunkMs;
+        if (timeoutMs >= 0) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                return false;
+            }
+
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            waitTimeout = static_cast<DWORD>(std::min<int64_t>(WaitChunkMs, remaining.count()));
+        }
+
+        const int result = waitChunk(chunk, waitTimeout);
+        if (result < 0) {
+            return false;
+        }
+        if (result > 0) {
+            return result == 1;
+        }
+
+        chunk = (chunk + 1) % chunkCount;
+    }
 }
 
 #else
