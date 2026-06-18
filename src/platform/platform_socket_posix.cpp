@@ -20,6 +20,17 @@ void TqCloseSocket(TqSocketHandle socket) {
     }
 }
 
+void TqResetSocket(TqSocketHandle socket) {
+    if (!TqSocketValid(socket)) {
+        return;
+    }
+    linger resetLinger{};
+    resetLinger.l_onoff = 1;
+    resetLinger.l_linger = 0;
+    (void)::setsockopt(socket, SOL_SOCKET, SO_LINGER, &resetLinger, sizeof(resetLinger));
+    (void)::close(socket);
+}
+
 bool TqSetNonBlocking(TqSocketHandle socket) {
     const int flags = ::fcntl(socket, F_GETFL, 0);
     return flags >= 0 && ::fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;

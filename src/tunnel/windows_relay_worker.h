@@ -4,6 +4,7 @@
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
+#include "relay_error.h"
 #include "tuning.h"
 
 #if defined(_WIN32)
@@ -55,6 +56,11 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t ZstdDecompressNeedInput{0};
     uint64_t ZstdDecompressNeedOutput{0};
     uint64_t ZstdDecompressFailures{0};
+    uint64_t FatalRelayResets{0};
+    uint64_t GracefulRelayDrains{0};
+    uint64_t TcpHardErrors{0};
+    uint64_t QuicSendBackpressureEvents{0};
+    uint64_t QuicSendFatalErrors{0};
     uint64_t Errors{0};
 };
 
@@ -138,8 +144,13 @@ private:
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
-    void CloseRelay(const std::shared_ptr<RelayContext>& relay);
+    bool PostQuicSend(std::unique_ptr<IoOperation> op, QUIC_SEND_FLAGS flags, bool repostOnBackpressure);
+    void RetryPendingQuicSends(const std::shared_ptr<RelayContext>& relay);
+    void CloseRelay(const std::shared_ptr<RelayContext>& relay, TqRelayCloseMode mode);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
+    void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
+    void RecordTcpHardErrorAndFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
+    bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
 
     void* Iocp_{nullptr};
     std::thread Thread_;
@@ -166,6 +177,11 @@ private:
     std::atomic<uint64_t> ZstdDecompressNeedInput_{0};
     std::atomic<uint64_t> ZstdDecompressNeedOutput_{0};
     std::atomic<uint64_t> ZstdDecompressFailures_{0};
+    std::atomic<uint64_t> FatalRelayResets_{0};
+    std::atomic<uint64_t> GracefulRelayDrains_{0};
+    std::atomic<uint64_t> TcpHardErrors_{0};
+    std::atomic<uint64_t> QuicSendBackpressureEvents_{0};
+    std::atomic<uint64_t> QuicSendFatalErrors_{0};
     std::atomic<uint64_t> Errors_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};

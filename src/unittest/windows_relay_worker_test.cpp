@@ -724,13 +724,14 @@ int main() {
         event.RECEIVE.Buffers = &buffer;
 
         const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
-        if (status == QUIC_STATUS_PENDING) {
+        if (status != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 62;
         }
         const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (snapshot.PendingQuicReceiveBytes != 0 || snapshot.PendingQuicReceiveQueueDepth != 0) {
+        if (snapshot.PendingQuicReceiveBytes != sizeof(data) ||
+            snapshot.PendingQuicReceiveQueueDepth != 1) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 63;
@@ -740,7 +741,7 @@ int main() {
             MsQuic = nullptr;
             return 64;
         }
-        if (snapshot.Errors < 1) {
+        if (snapshot.Errors != 0) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 66;
@@ -750,7 +751,7 @@ int main() {
             MsQuic = nullptr;
             return 67;
         }
-        if (!handle.Stop.load(std::memory_order_acquire)) {
+        if (handle.Stop.load(std::memory_order_acquire)) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 65;

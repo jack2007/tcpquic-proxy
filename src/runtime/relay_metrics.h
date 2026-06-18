@@ -108,7 +108,10 @@ struct TqRelayMetricsSnapshot {
     uint64_t QuicSendBufferTooLargeFailures{0};
     uint64_t QuicSendOperationAllocFailures{0};
     uint64_t QuicSendApiFailures{0};
+    uint64_t QuicSendBackpressureEvents{0};
+    uint64_t QuicSendFatalErrors{0};
     uint64_t QuicReceiveViewFailures{0};
+    uint64_t QuicReceiveViewBackpressureQueued{0};
     uint64_t QuicReceiveViewAllocFailures{0};
     uint64_t QuicReceiveViewNullBufferFailures{0};
     uint64_t QuicReceiveViewEmptyFailures{0};
@@ -119,6 +122,11 @@ struct TqRelayMetricsSnapshot {
     uint64_t QuicReceiveTcpBufferAcquireAllocFailures{0};
     uint64_t TcpWriteHardErrors{0};
     uint64_t LastTcpWriteErrno{0};
+    uint64_t TcpReadHardErrors{0};
+    uint64_t LastTcpReadErrno{0};
+    uint64_t FatalRelayResets{0};
+    uint64_t TcpHardErrors{0};
+    uint64_t GracefulRelayDrains{0};
     int64_t LastQuicSendStatus{0};
 };
 

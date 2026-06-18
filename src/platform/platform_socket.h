@@ -46,6 +46,7 @@ private:
 
 bool TqSocketValid(TqSocketHandle socket);
 void TqCloseSocket(TqSocketHandle socket);
+void TqResetSocket(TqSocketHandle socket);
 bool TqSetNonBlocking(TqSocketHandle socket);
 int TqLastSocketError();
 bool TqSocketWouldBlock(int error);

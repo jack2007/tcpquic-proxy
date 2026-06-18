@@ -155,7 +155,10 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicSendBufferTooLargeFailures = snapshot.QuicSendBufferTooLargeFailures;
     metrics.QuicSendOperationAllocFailures = snapshot.QuicSendOperationAllocFailures;
     metrics.QuicSendApiFailures = snapshot.QuicSendApiFailures;
+    metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
+    metrics.QuicSendFatalErrors = snapshot.QuicSendFatalErrors;
     metrics.QuicReceiveViewFailures = snapshot.QuicReceiveViewFailures;
+    metrics.QuicReceiveViewBackpressureQueued = snapshot.QuicReceiveViewBackpressureQueued;
     metrics.QuicReceiveViewAllocFailures = snapshot.QuicReceiveViewAllocFailures;
     metrics.QuicReceiveViewNullBufferFailures = snapshot.QuicReceiveViewNullBufferFailures;
     metrics.QuicReceiveViewEmptyFailures = snapshot.QuicReceiveViewEmptyFailures;
@@ -168,6 +171,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         snapshot.QuicReceiveTcpBufferAcquireAllocFailures;
     metrics.TcpWriteHardErrors = snapshot.TcpWriteHardErrors;
     metrics.LastTcpWriteErrno = snapshot.LastTcpWriteErrno;
+    metrics.TcpReadHardErrors = snapshot.TcpReadHardErrors;
+    metrics.LastTcpReadErrno = snapshot.LastTcpReadErrno;
+    metrics.FatalRelayResets = snapshot.FatalRelayResets;
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
@@ -189,6 +195,11 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.MaxPendingQuicReceiveQueue = snapshot.MaxPendingQuicReceiveQueueDepth;
     metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
+    metrics.FatalRelayResets = snapshot.FatalRelayResets;
+    metrics.TcpHardErrors = snapshot.TcpHardErrors;
+    metrics.GracefulRelayDrains = snapshot.GracefulRelayDrains;
+    metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
+    metrics.QuicSendFatalErrors = snapshot.QuicSendFatalErrors;
     metrics.Errors = snapshot.Errors;
 #endif
     return metrics;
@@ -330,7 +341,13 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_quic_send_operation_alloc_failures\":"
         << metrics.QuicSendOperationAllocFailures;
     out << ",\"linux_relay_quic_send_api_failures\":" << metrics.QuicSendApiFailures;
+    out << ",\"linux_relay_quic_send_backpressure_events\":"
+        << metrics.QuicSendBackpressureEvents;
+    out << ",\"linux_relay_quic_send_fatal_errors\":"
+        << metrics.QuicSendFatalErrors;
     out << ",\"linux_relay_quic_receive_view_failures\":" << metrics.QuicReceiveViewFailures;
+    out << ",\"linux_relay_quic_receive_view_backpressure_queued\":"
+        << metrics.QuicReceiveViewBackpressureQueued;
     out << ",\"linux_relay_quic_receive_view_alloc_failures\":"
         << metrics.QuicReceiveViewAllocFailures;
     out << ",\"linux_relay_quic_receive_view_null_buffer_failures\":"
@@ -349,5 +366,10 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.QuicReceiveTcpBufferAcquireAllocFailures;
     out << ",\"linux_relay_tcp_write_hard_errors\":" << metrics.TcpWriteHardErrors;
     out << ",\"linux_relay_last_tcp_write_errno\":" << metrics.LastTcpWriteErrno;
+    out << ",\"linux_relay_tcp_read_hard_errors\":" << metrics.TcpReadHardErrors;
+    out << ",\"linux_relay_last_tcp_read_errno\":" << metrics.LastTcpReadErrno;
+    out << ",\"linux_relay_fatal_relay_resets\":" << metrics.FatalRelayResets;
+    out << ",\"windows_relay_tcp_hard_errors\":" << metrics.TcpHardErrors;
+    out << ",\"windows_relay_graceful_relay_drains\":" << metrics.GracefulRelayDrains;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }

@@ -421,12 +421,18 @@ int main() {
         if (body.find("\"linux_relay_quic_send_buffer_too_large_failures\":") == std::string::npos) return 140;
         if (body.find("\"linux_relay_quic_send_operation_alloc_failures\":") == std::string::npos) return 141;
         if (body.find("\"linux_relay_quic_send_api_failures\":") == std::string::npos) return 142;
+        if (body.find("\"linux_relay_quic_send_backpressure_events\":") == std::string::npos) return 157;
+        if (body.find("\"linux_relay_quic_send_fatal_errors\":") == std::string::npos) return 158;
+        if (body.find("\"linux_relay_quic_receive_view_backpressure_queued\":") == std::string::npos) return 159;
         if (body.find("\"linux_relay_quic_receive_decompress_failures\":") == std::string::npos) return 135;
         if (body.find("\"linux_relay_quic_receive_view_alloc_failures\":") == std::string::npos) return 143;
         if (body.find("\"linux_relay_quic_receive_view_null_buffer_failures\":") == std::string::npos) return 144;
         if (body.find("\"linux_relay_quic_receive_view_empty_failures\":") == std::string::npos) return 145;
         if (body.find("\"linux_relay_quic_receive_view_enqueue_failures\":") == std::string::npos) return 146;
         if (body.find("\"linux_relay_tcp_write_hard_errors\":") == std::string::npos) return 136;
+        if (body.find("\"linux_relay_tcp_read_hard_errors\":") == std::string::npos) return 160;
+        if (body.find("\"linux_relay_last_tcp_read_errno\":") == std::string::npos) return 161;
+        if (body.find("\"linux_relay_fatal_relay_resets\":") == std::string::npos) return 162;
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 126;
         if (body.find("\"linux_relay_max_tcp_write_sendmsg_bytes\":") == std::string::npos) return 127;
         if (body.find("\"linux_relay_tcp_write_eagain_count\":") == std::string::npos) return 128;

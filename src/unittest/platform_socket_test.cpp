@@ -36,5 +36,14 @@ int main() {
     pair[0] = TqInvalidSocket;
     pair[1] = TqInvalidSocket;
     assert(!TqSocketValid(pair[0]));
+
+    TqSocketHandle resetPair[2]{TqInvalidSocket, TqInvalidSocket};
+    assert(TqSocketPair(resetPair));
+    assert(TqSocketValid(resetPair[0]));
+    assert(TqSocketValid(resetPair[1]));
+    TqResetSocket(resetPair[0]);
+    resetPair[0] = TqInvalidSocket;
+    TqCloseSocket(resetPair[1]);
+    resetPair[1] = TqInvalidSocket;
     return 0;
 }

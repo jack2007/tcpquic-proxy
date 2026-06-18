@@ -23,6 +23,22 @@ void TqCloseSocket(TqSocketHandle socket) {
     }
 }
 
+void TqResetSocket(TqSocketHandle socket) {
+    if (!TqSocketValid(socket)) {
+        return;
+    }
+    linger resetLinger{};
+    resetLinger.l_onoff = 1;
+    resetLinger.l_linger = 0;
+    (void)::setsockopt(
+        socket,
+        SOL_SOCKET,
+        SO_LINGER,
+        reinterpret_cast<const char*>(&resetLinger),
+        sizeof(resetLinger));
+    (void)::closesocket(socket);
+}
+
 bool TqSetNonBlocking(TqSocketHandle socket) {
     u_long mode = 1;
     return ::ioctlsocket(socket, FIONBIO, &mode) == 0;

@@ -1,6 +1,7 @@
 #include "linux_relay_worker.h"
 
 #include <msquic.hpp>
+#include <spdlog/spdlog.h>
 
 #include <algorithm>
 #include <chrono>
@@ -113,6 +114,24 @@ extern "C" void TqTraceLinuxRelayBackpressureEvent(
 
 namespace {
 
+#if defined(TQ_UNIT_TESTING)
+TqLinuxRelayStreamSendForTest g_linuxRelayStreamSendForTest = nullptr;
+#endif
+
+QUIC_STATUS TqLinuxRelayStreamSend(
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    QUIC_SEND_FLAGS flags,
+    void* context) {
+#if defined(TQ_UNIT_TESTING)
+    if (g_linuxRelayStreamSendForTest != nullptr) {
+        return g_linuxRelayStreamSendForTest(stream, buffers, bufferCount, flags, context);
+    }
+#endif
+    return stream->Send(buffers, bufferCount, flags, context);
+}
+
 ssize_t WritevNoSignal(int fd, const iovec* iov, int iovcnt) {
     msghdr message{};
     message.msg_iov = const_cast<iovec*>(iov);
@@ -142,6 +161,29 @@ uint64_t PendingTcpWriteBytes(const std::deque<TqBufferView>& writes) {
         bytes += view.Len;
     }
     return bytes;
+}
+
+void LogLinuxRelayError(
+    const char* reason,
+    uint64_t relayId,
+    int tcpFd,
+    int64_t status,
+    uint64_t err,
+    uint64_t pendingTcpWriteBytes,
+    uint64_t pendingQuicReceiveBytes,
+    uint64_t outstandingQuicSends,
+    uint64_t outstandingQuicSendBytes) {
+    spdlog::error(
+        "linux relay unrecoverable error reason={} relay_id={} tcp_fd={} status={} errno={} pending_tcp_write_bytes={} pending_quic_receive_bytes={} outstanding_quic_sends={} outstanding_quic_send_bytes={}",
+        reason != nullptr ? reason : "unknown",
+        relayId,
+        tcpFd,
+        status,
+        err,
+        pendingTcpWriteBytes,
+        pendingQuicReceiveBytes,
+        outstandingQuicSends,
+        outstandingQuicSendBytes);
 }
 
 std::string SocketAddressToString(const sockaddr_storage& storage, socklen_t length) {
@@ -181,6 +223,12 @@ std::string GetSocketNameString(int fd, bool peer) {
 
 }  // namespace
 
+#if defined(TQ_UNIT_TESTING)
+void TqLinuxRelaySetStreamSendForTest(TqLinuxRelayStreamSendForTest sendFn) {
+    g_linuxRelayStreamSendForTest = sendFn;
+}
+#endif
+
 struct TqLinuxRelayWorker::StreamRelayBinding {
     TqLinuxRelayWorker* Worker{nullptr};
     std::atomic<RelayState*> Relay{nullptr};
@@ -209,9 +257,12 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool QuicSendFinCompleted{false};
     uint64_t OutstandingQuicSends{0};
     uint64_t OutstandingQuicSendBytes{0};
+    std::deque<std::unique_ptr<TqLinuxRelaySendOperation>> PendingQuicSendRetries;
     uint64_t TcpReadBytes{0};
     std::deque<TqBufferView> PendingTcpWrites;
     std::deque<std::shared_ptr<TqPendingQuicReceive>> PendingQuicReceives;
+    std::mutex CallbackPendingQuicReceiveLock;
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> CallbackPendingQuicReceives;
     uint64_t PendingQuicReceiveBytes{0};
     bool QuicReceivePaused{false};
     bool TcpWriteShutdownQueued{false};
@@ -362,6 +413,9 @@ void TqLinuxRelayWorker::RecordError(RelayErrorKind kind) {
         break;
     case RelayErrorKind::TcpWriteHard:
         TcpWriteHardErrors.fetch_add(1);
+        break;
+    case RelayErrorKind::TcpReadHard:
+        TcpReadHardErrors.fetch_add(1);
         break;
     }
 }
@@ -584,6 +638,62 @@ void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
     relay->Handle->Stop.store(true, std::memory_order_release);
 }
 
+void TqLinuxRelayWorker::FailRelayFatal(RelayState* relay, const char* trigger, bool abortStream) {
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    FatalRelayResets.fetch_add(1);
+    LogLinuxRelayError(
+        trigger,
+        relay->Id,
+        relay->TcpFd,
+        LastQuicSendStatus.load(),
+        LastTcpReadErrno.load(),
+        PendingTcpWriteBytes(relay->PendingTcpWrites),
+        relay->PendingQuicReceiveBytes,
+        relay->OutstandingQuicSends,
+        relay->OutstandingQuicSendBytes);
+    SetRelayStop(relay, trigger);
+    relay->Closing = true;
+    if (EpollFd >= 0 && relay->TcpFd >= 0) {
+        (void)::epoll_ctl(EpollFd, EPOLL_CTL_DEL, relay->TcpFd, nullptr);
+    }
+    if (relay->TcpFd >= 0) {
+        TqResetSocket(relay->TcpFd);
+        relay->TcpFd = -1;
+    }
+    auto* binding = relay->StreamBinding;
+    if (binding != nullptr) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+    }
+    if (abortStream && relay->Stream != nullptr && relay->Stream->Handle != nullptr) {
+        (void)relay->Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+    }
+    if (relay->Stream != nullptr && relay->Stream->Context == binding) {
+        relay->Stream->Callback = MsQuicStream::NoOpCallback;
+        relay->Stream->Context = nullptr;
+    }
+    relay->Stream = nullptr;
+    relay->StreamBinding = nullptr;
+    if (binding != nullptr) {
+        std::lock_guard<std::mutex> guard(RetiredBindingLock);
+        RetiredStreamBindings.emplace_back(binding);
+    }
+    relay->PendingTcpWrites.clear();
+    for (auto& pending : relay->PendingQuicReceives) {
+        if (pending) {
+            FlushDeferredReceiveCompletion(*pending, true);
+        }
+    }
+    relay->PendingQuicReceives.clear();
+    relay->PendingQuicReceiveBytes = 0;
+    {
+        std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
+        relay->CallbackPendingQuicReceives.clear();
+    }
+}
+
 uint64_t TqLinuxRelayWorker::CurrentMaxBufferedQuicSendBytes() const {
     if (Config.UseDynamicQuicReadAhead) {
         return TqRelayCurrentQuicReadAheadBytes();
@@ -698,6 +808,16 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         ++processed;
     }
     EventsProcessed.fetch_add(processed);
+
+    std::vector<std::shared_ptr<RelayState>> activeRelays;
+    {
+        std::lock_guard<std::mutex> guard(RelayLock);
+        activeRelays.assign(Relays.begin(), Relays.end());
+    }
+    for (const auto& relay : activeRelays) {
+        RetryPendingQuicSends(relay.get());
+        DrainCallbackPendingQuicReceives(relay.get());
+    }
 
     PurgeRetiredRelaysIfIdle();
 
@@ -983,6 +1103,10 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             break;
         }
+        const uint64_t savedErrno = static_cast<uint64_t>(errno);
+        RecordError(RelayErrorKind::TcpReadHard);
+        LastTcpReadErrno.store(savedErrno);
+        FailRelayFatal(relay, "tcp_read_hard_error", true);
         break;
     }
 }
@@ -1121,15 +1245,27 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
                 RecordError(RelayErrorKind::QuicSend);
                 return false;
             }
-            const QUIC_STATUS status = relay->Stream->Send(nullptr, 0, QUIC_SEND_FLAG_FIN, nullptr);
-            if (QUIC_FAILED(status)) {
+            auto* operation = new (std::nothrow) TqLinuxRelaySendOperation{};
+            if (operation == nullptr) {
                 RecordError(RelayErrorKind::QuicSend);
-                QuicSendApiFailures.fetch_add(1);
-                LastQuicSendStatus.store(static_cast<int64_t>(status));
+                QuicSendOperationAllocFailures.fetch_add(1);
+                QuicSendFatalErrors.fetch_add(1);
+                LogLinuxRelayError(
+                    "quic_fin_send_operation_alloc_failed",
+                    relay->Id,
+                    relay->TcpFd,
+                    0,
+                    0,
+                    PendingTcpWriteBytes(relay->PendingTcpWrites),
+                    relay->PendingQuicReceiveBytes,
+                    relay->OutstandingQuicSends,
+                    relay->OutstandingQuicSendBytes);
                 return false;
             }
-            relay->QuicSendFinCompleted = true;
-            MaybeStopFullyClosedRelay(relay, "quic_fin_completed_empty_send");
+            operation->RelayId = relay->Id;
+            operation->Fin = true;
+            relay->QuicSendFinSubmitted = true;
+            return TrySubmitQuicSendOperation(relay, operation);
         }
         return true;
     }
@@ -1161,6 +1297,17 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
         if (view.Len > UINT32_MAX) {
             RecordError(RelayErrorKind::QuicSend);
             QuicSendBufferTooLargeFailures.fetch_add(1);
+            QuicSendFatalErrors.fetch_add(1);
+            LogLinuxRelayError(
+                "quic_send_buffer_too_large",
+                relay->Id,
+                relay->TcpFd,
+                0,
+                0,
+                PendingTcpWriteBytes(relay->PendingTcpWrites),
+                relay->PendingQuicReceiveBytes,
+                relay->OutstandingQuicSends,
+                relay->OutstandingQuicSendBytes);
             return false;
         }
         QUIC_BUFFER buffer{};
@@ -1174,6 +1321,17 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
     if (operation == nullptr) {
         RecordError(RelayErrorKind::QuicSend);
         QuicSendOperationAllocFailures.fetch_add(1);
+        QuicSendFatalErrors.fetch_add(1);
+        LogLinuxRelayError(
+            "quic_send_operation_alloc_failed",
+            relay->Id,
+            relay->TcpFd,
+            0,
+            0,
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes);
         return false;
     }
     operation->RelayId = relay->Id;
@@ -1184,29 +1342,109 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
     }
     operation->Views = std::move(views);
     operation->QuicBuffers = std::move(quicBuffers);
+    return TrySubmitQuicSendOperation(relay, operation);
+}
+
+bool TqLinuxRelayWorker::TrySubmitQuicSendOperation(
+    RelayState* relay,
+    TqLinuxRelaySendOperation* operation) {
+    if (relay == nullptr || operation == nullptr) {
+        delete operation;
+        return false;
+    }
     MsQuicStream* stream = relay->Stream;
-    if (stream == nullptr || stream->Handle == nullptr) {
+    if (stream == nullptr || stream->Handle == nullptr || relay->Closing) {
         delete operation;
         RecordError(RelayErrorKind::QuicSend);
+        QuicSendFatalErrors.fetch_add(1);
+        LogLinuxRelayError(
+            "quic_send_invalid_stream",
+            relay->Id,
+            relay->TcpFd,
+            0,
+            0,
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes);
         return false;
     }
 
-    const QUIC_STATUS status = stream->Send(
-        operation->QuicBuffers.data(),
+    const QUIC_STATUS status = TqLinuxRelayStreamSend(
+        stream,
+        operation->QuicBuffers.empty() ? nullptr : operation->QuicBuffers.data(),
         static_cast<uint32_t>(operation->QuicBuffers.size()),
-        flags,
+        operation->Fin ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE,
         operation);
     if (QUIC_FAILED(status)) {
+        LastQuicSendStatus.store(static_cast<int64_t>(status));
+        if (IsQuicSendBackpressureStatus(status)) {
+            QuicSendBackpressureEvents.fetch_add(1);
+            SetTcpReadBackpressure(relay, true, "quic_send_resource");
+            ArmTcpReadable(relay, false);
+            relay->PendingQuicSendRetries.emplace_back(operation);
+            return true;
+        }
         delete operation;
         RecordError(RelayErrorKind::QuicSend);
         QuicSendApiFailures.fetch_add(1);
-        LastQuicSendStatus.store(static_cast<int64_t>(status));
+        QuicSendFatalErrors.fetch_add(1);
+        LogLinuxRelayError(
+            "quic_send_api_failed",
+            relay->Id,
+            relay->TcpFd,
+            static_cast<int64_t>(status),
+            0,
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes);
         return false;
     }
     ++relay->OutstandingQuicSends;
-    relay->OutstandingQuicSendBytes += totalBytes;
+    relay->OutstandingQuicSendBytes += operation->TotalBytes;
     QuicSendOperations.fetch_add(1);
     return true;
+}
+
+void TqLinuxRelayWorker::RetryPendingQuicSends(RelayState* relay) {
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    while (!relay->PendingQuicSendRetries.empty()) {
+        std::unique_ptr<TqLinuxRelaySendOperation> operation =
+            std::move(relay->PendingQuicSendRetries.front());
+        relay->PendingQuicSendRetries.pop_front();
+        if (operation == nullptr) {
+            continue;
+        }
+        if (!TrySubmitQuicSendOperation(relay, operation.release())) {
+            LogLinuxRelayError(
+                "quic_send_retry_failed",
+                relay->Id,
+                relay->TcpFd,
+                LastQuicSendStatus.load(),
+                0,
+                PendingTcpWriteBytes(relay->PendingTcpWrites),
+                relay->PendingQuicReceiveBytes,
+                relay->OutstandingQuicSends,
+                relay->OutstandingQuicSendBytes);
+            SetRelayStop(relay, "quic_send_retry_failed");
+            return;
+        }
+        if (!relay->PendingQuicSendRetries.empty()) {
+            return;
+        }
+    }
+    if (relay->PendingQuicSendRetries.empty() &&
+        ShouldResumeTcpReadForQuicBacklog(relay)) {
+        SetTcpReadBackpressure(relay, false, "quic_send_retry_drained");
+        ArmTcpReadable(relay, true);
+    }
+}
+
+bool TqLinuxRelayWorker::IsQuicSendBackpressureStatus(QUIC_STATUS status) const {
+    return status == QUIC_STATUS_OUT_OF_MEMORY || status == QUIC_STATUS_BUFFER_TOO_SMALL;
 }
 
 void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
@@ -1367,11 +1605,19 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     event.RelayId = relay->Id;
     event.TotalLength = view->TotalLength;
     event.Fin = fin;
-    event.ReceiveView = std::move(view);
+    event.ReceiveView = view;
     if (!Enqueue(std::move(event))) {
-        QuicReceiveViewFailures.fetch_add(1);
-        QuicReceiveViewEnqueueFailures.fetch_add(1);
-        return false;
+        QuicReceiveViewBackpressureQueued.fetch_add(1);
+        {
+            std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
+            relay->CallbackPendingQuicReceives.push_back(std::move(view));
+        }
+        if (!relay->QuicReceivePaused) {
+            relay->QuicReceivePaused = true;
+            SetQuicReceiveEnabled(relay, false);
+        }
+        Wake();
+        return true;
     }
     return true;
 }
@@ -1458,6 +1704,30 @@ void TqLinuxRelayWorker::ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event) {
     UpdateAtomicMax(MaxPendingQuicReceiveQueueObserved, relay->PendingQuicReceives.size());
     MaybePauseQuicReceive(relay.get());
     FlushDeferredQuicReceives(relay.get());
+}
+
+void TqLinuxRelayWorker::DrainCallbackPendingQuicReceives(RelayState* relay) {
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> pending;
+    {
+        std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
+        pending.swap(relay->CallbackPendingQuicReceives);
+    }
+    while (!pending.empty()) {
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::QuicReceiveView;
+        event.RelayId = relay->Id;
+        event.ReceiveView = std::move(pending.front());
+        pending.pop_front();
+        if (event.ReceiveView != nullptr) {
+            event.TotalLength = event.ReceiveView->TotalLength;
+            event.Fin = event.ReceiveView->Fin;
+        }
+        ProcessQuicReceiveViewEvent(event);
+    }
+    MaybeResumeQuicReceive(relay);
 }
 
 void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
@@ -1635,6 +1905,16 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         const uint64_t savedErrno = static_cast<uint64_t>(errno);
         relay->LastTcpWriteErrno = savedErrno;
         LastTcpWriteErrno.store(savedErrno);
+        LogLinuxRelayError(
+            "tcp_write_hard_error",
+            relay->Id,
+            relay->TcpFd,
+            LastQuicSendStatus.load(),
+            savedErrno,
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes);
         SetRelayStop(relay, "tcp_write_hard_error");
         for (auto& pending : relay->PendingQuicReceives) {
             if (pending) {
@@ -2141,6 +2421,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.QuicReceiveViewSlicesGt16 = QuicReceiveViewSlicesGt16.load();
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
+    snapshot.QuicReceiveViewBackpressureQueued = QuicReceiveViewBackpressureQueued.load();
     snapshot.Errors = Errors.load();
     snapshot.EventQueueFullErrors = EventQueueFullErrors.load();
     snapshot.TcpReadBufferAcquireFailures = TcpReadBufferAcquireFailures.load();
@@ -2159,6 +2440,8 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     snapshot.QuicSendBufferTooLargeFailures = QuicSendBufferTooLargeFailures.load();
     snapshot.QuicSendOperationAllocFailures = QuicSendOperationAllocFailures.load();
     snapshot.QuicSendApiFailures = QuicSendApiFailures.load();
+    snapshot.QuicSendBackpressureEvents = QuicSendBackpressureEvents.load();
+    snapshot.QuicSendFatalErrors = QuicSendFatalErrors.load();
     snapshot.QuicReceiveViewFailures = QuicReceiveViewFailures.load();
     snapshot.QuicReceiveViewAllocFailures = QuicReceiveViewAllocFailures.load();
     snapshot.QuicReceiveViewNullBufferFailures = QuicReceiveViewNullBufferFailures.load();
@@ -2172,6 +2455,9 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
         QuicReceiveTcpBufferAcquireAllocFailures.load();
     snapshot.TcpWriteHardErrors = TcpWriteHardErrors.load();
     snapshot.LastTcpWriteErrno = LastTcpWriteErrno.load();
+    snapshot.TcpReadHardErrors = TcpReadHardErrors.load();
+    snapshot.LastTcpReadErrno = LastTcpReadErrno.load();
+    snapshot.FatalRelayResets = FatalRelayResets.load();
     snapshot.LastQuicSendStatus = LastQuicSendStatus.load();
     snapshot.EventProducerThreadsObserved = EventProducerThreadCount.load();
     snapshot.MultipleEventProducerThreadsObserved =
@@ -2216,6 +2502,13 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
             }
             snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
             snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
+            snapshot.OutstandingQuicSends += relay->PendingQuicSendRetries.size();
+            for (const auto& retry : relay->PendingQuicSendRetries) {
+                if (retry != nullptr) {
+                    snapshot.OutstandingQuicSendBytes += retry->TotalBytes;
+                    relayPendingBytes += retry->TotalBytes;
+                }
+            }
             snapshot.MaxBufferedQuicSendBytes += CurrentMaxBufferedQuicSendBytes();
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
             for (const auto& view : relay->PendingTcpWrites) {
@@ -2369,6 +2662,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
             0,
             0,
             false);
+        FailRelayFatal(relay, "stream_peer_send_aborted", false);
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
@@ -2424,20 +2718,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
             0,
             0,
             false);
-        binding->Closing.store(true, std::memory_order_release);
-        binding->Relay.store(nullptr, std::memory_order_release);
-        if (stream != nullptr && stream->Context == binding) {
-            stream->Callback = MsQuicStream::NoOpCallback;
-            stream->Context = nullptr;
-        }
-        relay->Stream = nullptr;
-        relay->Closing = true;
-        TqLinuxRelayEvent shutdown{};
-        shutdown.Type = TqLinuxRelayEventType::Shutdown;
-        shutdown.RelayId = relayId;
-        if (!Enqueue(std::move(shutdown))) {
-            return QUIC_STATUS_OUT_OF_MEMORY;
-        }
+        FailRelayFatal(relay, "stream_peer_receive_aborted", false);
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;

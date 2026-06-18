@@ -3,7 +3,9 @@
 #include "compress.h"
 #include "relay_buffer.h"
 #include "linux_relay_event_queue.h"
+#include "platform_socket.h"
 #include "relay.h"
+#include "relay_error.h"
 #include "tuning.h"
 
 #include <msquic.hpp>
@@ -162,6 +164,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceiveViewSlicesGt16{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
+    uint64_t QuicReceiveViewBackpressureQueued{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t TcpReadBufferAcquireFailures{0};
@@ -177,6 +180,8 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicSendBufferTooLargeFailures{0};
     uint64_t QuicSendOperationAllocFailures{0};
     uint64_t QuicSendApiFailures{0};
+    uint64_t QuicSendBackpressureEvents{0};
+    uint64_t QuicSendFatalErrors{0};
     uint64_t QuicReceiveViewFailures{0};
     uint64_t QuicReceiveViewAllocFailures{0};
     uint64_t QuicReceiveViewNullBufferFailures{0};
@@ -188,10 +193,24 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceiveTcpBufferAcquireAllocFailures{0};
     uint64_t TcpWriteHardErrors{0};
     uint64_t LastTcpWriteErrno{0};
+    uint64_t TcpReadHardErrors{0};
+    uint64_t LastTcpReadErrno{0};
+    uint64_t FatalRelayResets{0};
     int64_t LastQuicSendStatus{0};
     uint64_t EventProducerThreadsObserved{0};
     bool MultipleEventProducerThreadsObserved{false};
 };
+
+#if defined(TQ_UNIT_TESTING)
+using TqLinuxRelayStreamSendForTest = QUIC_STATUS (*)(
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    QUIC_SEND_FLAGS flags,
+    void* context);
+
+void TqLinuxRelaySetStreamSendForTest(TqLinuxRelayStreamSendForTest sendFn);
+#endif
 
 class TqLinuxRelayWorker final {
 public:
@@ -234,7 +253,8 @@ private:
         QuicReceiveView,
         QuicReceiveDecompress,
         QuicReceiveTcpBufferAcquire,
-        TcpWriteHard
+        TcpWriteHard,
+        TcpReadHard
     };
 
     struct RelayState;
@@ -258,6 +278,7 @@ private:
         uint32_t receiveFlags,
         bool fin);
     void SetRelayStop(RelayState* relay, const char* trigger);
+    void FailRelayFatal(RelayState* relay, const char* trigger, bool abortStream);
     uint64_t CurrentMaxBufferedQuicSendBytes() const;
     uint64_t CurrentResumeBufferedQuicSendBytes() const;
     bool ShouldPauseTcpReadForQuicBacklog(const RelayState* relay) const;
@@ -274,6 +295,9 @@ private:
         RelayState* relay,
         std::vector<TqBufferView>& views,
         QUIC_SEND_FLAGS flags = QUIC_SEND_FLAG_NONE);
+    bool TrySubmitQuicSendOperation(RelayState* relay, TqLinuxRelaySendOperation* operation);
+    void RetryPendingQuicSends(RelayState* relay);
+    bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
     void CompleteQuicSend(void* context);
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
@@ -285,6 +309,7 @@ private:
         uint32_t bufferCount,
         bool fin);
     void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
+    void DrainCallbackPendingQuicReceives(RelayState* relay);
     void FlushDeferredQuicReceives(RelayState* relay);
     bool DrainCompressedQuicReceiveView(RelayState* relay, TqPendingQuicReceive& view);
     void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
@@ -387,6 +412,7 @@ private:
     std::atomic<uint64_t> QuicReceiveViewSlicesGt16{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
+    std::atomic<uint64_t> QuicReceiveViewBackpressureQueued{0};
     std::atomic<uint64_t> Errors{0};
     std::atomic<uint64_t> EventQueueFullErrors{0};
     std::atomic<uint64_t> TcpReadBufferAcquireFailures{0};
@@ -402,6 +428,8 @@ private:
     std::atomic<uint64_t> QuicSendBufferTooLargeFailures{0};
     std::atomic<uint64_t> QuicSendOperationAllocFailures{0};
     std::atomic<uint64_t> QuicSendApiFailures{0};
+    std::atomic<uint64_t> QuicSendBackpressureEvents{0};
+    std::atomic<uint64_t> QuicSendFatalErrors{0};
     std::atomic<uint64_t> QuicReceiveViewFailures{0};
     std::atomic<uint64_t> QuicReceiveViewAllocFailures{0};
     std::atomic<uint64_t> QuicReceiveViewNullBufferFailures{0};
@@ -413,6 +441,9 @@ private:
     std::atomic<uint64_t> QuicReceiveTcpBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> TcpWriteHardErrors{0};
     std::atomic<uint64_t> LastTcpWriteErrno{0};
+    std::atomic<uint64_t> TcpReadHardErrors{0};
+    std::atomic<uint64_t> LastTcpReadErrno{0};
+    std::atomic<uint64_t> FatalRelayResets{0};
     std::atomic<int64_t> LastQuicSendStatus{0};
     mutable std::mutex RetiredBindingLock;
     std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;
