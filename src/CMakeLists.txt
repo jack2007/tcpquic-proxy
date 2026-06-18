@@ -406,6 +406,16 @@ tcpquic_target_include_dirs(tcpquic_acl_test)
 set_property(TARGET tcpquic_acl_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_acl_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_acl_filter_test
+    unittest/acl_filter_test.cpp
+    acl/acl.cpp
+    acl/acl_filter.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_acl_filter_test)
+set_property(TARGET tcpquic_acl_filter_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_acl_filter_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_config_router_test
     unittest/config_router_test.cpp
     unittest/trace_proxy_stub.cpp
@@ -652,6 +662,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_control_test
     tcpquic_speed_test_test
     tcpquic_acl_test
+    tcpquic_acl_filter_test
     tcpquic_config_router_test
     tcpquic_proxy_auth_test
     tcpquic_compress_test
