@@ -134,6 +134,9 @@ if(WIN32)
         ingress/client_ingress_reactor.cpp
         ingress/client_ingress_state.cpp
         tunnel/client_tunnel_open.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
@@ -150,9 +153,9 @@ if(WIN32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog)
+target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(tcpquic-proxy PRIVATE ${TCPQUIC_CARES_TARGET} Threads::Threads)
+    target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
 tcpquic_link_mimalloc(tcpquic-proxy)
@@ -304,6 +307,26 @@ if(WIN32)
     target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE ws2_32)
 endif()
 
+set(TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES
+    unittest/server_dial_reactor_test.cpp
+    tunnel/server_dial_reactor.cpp
+    tunnel/ares_dns_resolver.cpp
+    acl/acl.cpp
+    acl/acl_filter.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+if(WIN32)
+    list(APPEND TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES runtime/windows_reactor.cpp)
+else()
+    list(APPEND TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES runtime/linux_reactor.cpp)
+endif()
+add_executable(tcpquic_server_dial_reactor_test ${TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES})
+tcpquic_target_include_dirs(tcpquic_server_dial_reactor_test)
+target_link_libraries(tcpquic_server_dial_reactor_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+target_compile_definitions(tcpquic_server_dial_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+set_property(TARGET tcpquic_server_dial_reactor_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_server_dial_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 set(TCPQUIC_LINUX_TEST_TARGETS)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_relay_worker_queue_test
@@ -346,22 +369,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(tcpquic_linux_reactor_test PRIVATE Threads::Threads)
     set_property(TARGET tcpquic_linux_reactor_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-
-    add_executable(tcpquic_server_dial_reactor_test
-        unittest/server_dial_reactor_test.cpp
-        tunnel/server_dial_reactor.cpp
-        tunnel/ares_dns_resolver.cpp
-        runtime/linux_reactor.cpp
-        acl/acl.cpp
-        acl/acl_filter.cpp
-        ${TCPQUIC_PLATFORM_SOURCES}
-    )
-    tcpquic_target_include_dirs(tcpquic_server_dial_reactor_test)
-    target_link_libraries(tcpquic_server_dial_reactor_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
-    target_compile_definitions(tcpquic_server_dial_reactor_test PRIVATE TQ_UNIT_TESTING=1)
-    set_property(TARGET tcpquic_server_dial_reactor_test PROPERTY FOLDER "tools")
-    set_property(TARGET tcpquic_server_dial_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-
     add_executable(tcpquic_server_dial_reactor_worker_test
         unittest/server_dial_reactor_worker_test.cpp
         tunnel/server_dial_reactor.cpp
@@ -416,7 +423,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
         tcpquic_linux_reactor_test
-        tcpquic_server_dial_reactor_test
         tcpquic_server_dial_reactor_worker_test
         tcpquic_client_ingress_reactor_test
         tcpquic_relay_backend_selection_test
@@ -890,6 +896,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_production_linkage_guard_test
     tcpquic_platform_socket_test
 )
+list(APPEND TCPQUIC_TEST_TARGETS tcpquic_server_dial_reactor_test)
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_LINUX_TEST_TARGETS})
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_POSIX_TEST_TARGETS})
 list(APPEND TCPQUIC_TEST_TARGETS ${TCPQUIC_WINDOWS_TEST_TARGETS})

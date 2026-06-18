@@ -1,18 +1,22 @@
 #include "server_dial_reactor.h"
 
 #include "acl_filter.h"
-#include "linux_reactor.h"
+#include "socket_reactor.h"
 
-#include <cerrno>
+#if defined(_WIN32)
+#include "windows_reactor.h"
+#else
+#include "linux_reactor.h"
+#endif
+
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <utility>
 #include <unordered_map>
 #include <vector>
-
-#include <sys/socket.h>
 
 namespace {
 
@@ -58,12 +62,11 @@ bool ParseIpLiteral(const std::string& host, std::vector<sockaddr_storage>& out)
 }
 
 bool IsRefusedError(int error) {
-    return error == ECONNREFUSED;
+    return TqSocketConnectionRefused(error);
 }
 
 bool IsTimeoutLikeError(int error) {
-    return error == ETIMEDOUT || error == EHOSTUNREACH || error == ENETUNREACH ||
-        error == EAGAIN || error == EWOULDBLOCK;
+    return TqSocketTimeoutLike(error);
 }
 
 void SetSockaddrPort(sockaddr_storage& addr, uint16_t port) {
@@ -81,6 +84,14 @@ void CloseOwnedSocket(TqSocketHandle& fd) {
         TqCloseSocket(fd);
         fd = TqInvalidSocket;
     }
+}
+
+std::unique_ptr<ITqSocketReactor> MakeSocketReactor() {
+#if defined(_WIN32)
+    return std::make_unique<TqWindowsReactor>();
+#else
+    return std::make_unique<TqLinuxReactor>();
+#endif
 }
 
 } // namespace
@@ -102,7 +113,7 @@ struct TqServerDialReactor::Impl {
     };
 
     TqAcl Acl;
-    TqLinuxReactor Reactor;
+    std::unique_ptr<ITqSocketReactor> Reactor;
     TqAresDnsResolver DnsResolver;
 #ifdef TQ_UNIT_TESTING
     TestHooks Hooks;
@@ -117,12 +128,14 @@ struct TqServerDialReactor::Impl {
     std::unordered_map<uint64_t, std::unique_ptr<DialState>> Pending;
 
     explicit Impl(TqAcl acl)
-        : Acl(std::move(acl)) {
+        : Acl(std::move(acl))
+        , Reactor(MakeSocketReactor()) {
     }
 
 #ifdef TQ_UNIT_TESTING
     Impl(TqAcl acl, TestHooks hooks)
         : Acl(std::move(acl))
+        , Reactor(MakeSocketReactor())
         , Hooks(std::move(hooks)) {
     }
 #endif
@@ -132,17 +145,17 @@ struct TqServerDialReactor::Impl {
         if (Started) {
             return true;
         }
-        if (!Reactor.Start()) {
+        if (!Reactor->Start()) {
             return false;
         }
 #ifdef TQ_UNIT_TESTING
         if (!Hooks.Resolve && !DnsResolver.Start()) {
-            Reactor.Stop();
+            Reactor->Stop();
             return false;
         }
 #else
         if (!DnsResolver.Start()) {
-            Reactor.Stop();
+            Reactor->Stop();
             return false;
         }
 #endif
@@ -162,7 +175,7 @@ struct TqServerDialReactor::Impl {
         {
             std::lock_guard<std::mutex> guard(Lock);
             StopRequested.store(true, std::memory_order_release);
-            (void)Reactor.Wake();
+            (void)Reactor->Wake();
             if (Worker.joinable()) {
                 worker = std::move(Worker);
             }
@@ -191,7 +204,7 @@ struct TqServerDialReactor::Impl {
 #else
         DnsResolver.Stop();
 #endif
-        Reactor.Stop();
+        Reactor->Stop();
         Started = false;
     }
 
@@ -254,7 +267,7 @@ struct TqServerDialReactor::Impl {
 
         const int waitMs = NextWaitMs(timeoutMs);
         bool didWork = RunDnsOnce(0);
-        didWork = Reactor.RunOnce(0) || didWork;
+        didWork = Reactor->RunOnce(0) || didWork;
         didWork = RunDnsOnce(0) || didWork;
         didWork = ExpireAttempts() || didWork;
         if (!didWork && waitMs > 0) {
@@ -405,9 +418,9 @@ struct TqServerDialReactor::Impl {
 
             state.Fd = fd;
             state.Deadline =
-                std::chrono::steady_clock::now() + std::chrono::milliseconds(kConnectAttemptTimeoutMs);
-            if (!Reactor.Add(fd, TqReactorEvents::Write | TqReactorEvents::Error,
-                    [this, token](int readyFd, uint32_t events) {
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(ConnectAttemptTimeoutMs());
+            if (!Reactor->Add(fd, TqReactorEvents::Write | TqReactorEvents::Error,
+                    [this, token](TqSocketHandle readyFd, uint32_t events) {
                         OnConnectReady(token, readyFd, events);
                     })) {
                 state.Fd = TqInvalidSocket;
@@ -422,7 +435,7 @@ struct TqServerDialReactor::Impl {
         Complete(token, FinalConnectError(state));
     }
 
-    void OnConnectReady(uint64_t token, int readyFd, uint32_t) {
+    void OnConnectReady(uint64_t token, TqSocketHandle readyFd, uint32_t) {
         auto it = Pending.find(token);
         if (it == Pending.end()) {
             return;
@@ -436,7 +449,7 @@ struct TqServerDialReactor::Impl {
         const bool gotSocketError = GetSocketError(state.Fd, error);
 
         if (state.Registered) {
-            (void)Reactor.Remove(state.Fd);
+            (void)Reactor->Remove(state.Fd);
             state.Registered = false;
         }
 
@@ -560,13 +573,30 @@ struct TqServerDialReactor::Impl {
         return TqSetNonBlocking(fd);
     }
 
+    int ConnectAttemptTimeoutMs() const {
+#ifdef TQ_UNIT_TESTING
+        return Hooks.ConnectTimeoutMs;
+#else
+        return kConnectAttemptTimeoutMs;
+#endif
+    }
+
+    bool SetBlocking(TqSocketHandle fd) {
+#ifdef TQ_UNIT_TESTING
+        if (Hooks.SetBlocking) {
+            return Hooks.SetBlocking(fd);
+        }
+#endif
+        return TqSetSocketBlocking(fd);
+    }
+
     int Connect(TqSocketHandle fd, const sockaddr* addr, socklen_t addrLen) {
 #ifdef TQ_UNIT_TESTING
         if (Hooks.Connect) {
             return Hooks.Connect(fd, addr, addrLen);
         }
 #endif
-        return ::connect(fd, addr, addrLen);
+        return TqConnect(fd, addr, addrLen);
     }
 
     int LastSocketError(TqSocketHandle fd) {
@@ -586,8 +616,7 @@ struct TqServerDialReactor::Impl {
             return Hooks.GetSocketError(fd, &error) == 0;
         }
 #endif
-        socklen_t errorLen = sizeof(error);
-        return ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &errorLen) == 0;
+        return TqGetSocketError(fd, error);
     }
 
     void CompleteConnected(uint64_t token) {
@@ -597,9 +626,10 @@ struct TqServerDialReactor::Impl {
         }
         DialState& state = *it->second;
         if (state.Registered) {
-            (void)Reactor.Remove(state.Fd);
+            (void)Reactor->Remove(state.Fd);
             state.Registered = false;
         }
+        (void)SetBlocking(state.Fd);
 
         TqServerDialResult result;
         result.Done = true;
@@ -649,7 +679,7 @@ struct TqServerDialReactor::Impl {
 
     void CleanupConnect(DialState& state) {
         if (state.Registered && TqSocketValid(state.Fd)) {
-            (void)Reactor.Remove(state.Fd);
+            (void)Reactor->Remove(state.Fd);
             state.Registered = false;
         }
         CloseOwnedSocket(state.Fd);

@@ -44,6 +44,11 @@ bool TqSetNonBlocking(TqSocketHandle socket) {
     return ::ioctlsocket(socket, FIONBIO, &mode) == 0;
 }
 
+bool TqSetSocketBlocking(TqSocketHandle socket) {
+    u_long mode = 0;
+    return ::ioctlsocket(socket, FIONBIO, &mode) == 0;
+}
+
 int TqLastSocketError() {
     return ::WSAGetLastError();
 }
@@ -58,6 +63,25 @@ bool TqSocketInProgress(int error) {
 
 bool TqSocketInterrupted(int error) {
     return error == WSAEINTR;
+}
+
+bool TqSocketConnectionRefused(int error) {
+    return error == WSAECONNREFUSED;
+}
+
+bool TqSocketTimeoutLike(int error) {
+    return error == WSAETIMEDOUT || error == WSAEHOSTUNREACH ||
+        error == WSAENETUNREACH || error == WSAEWOULDBLOCK;
+}
+
+int TqConnect(TqSocketHandle socket, const sockaddr* address, socklen_t addressLength) {
+    return ::connect(socket, address, static_cast<int>(addressLength));
+}
+
+bool TqGetSocketError(TqSocketHandle socket, int& error) {
+    int length = sizeof(error);
+    return ::getsockopt(socket, SOL_SOCKET, SO_ERROR,
+        reinterpret_cast<char*>(&error), &length) == 0;
 }
 
 int TqSend(TqSocketHandle socket, const void* data, size_t length, TqSendFlags) {

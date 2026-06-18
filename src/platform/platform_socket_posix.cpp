@@ -36,6 +36,11 @@ bool TqSetNonBlocking(TqSocketHandle socket) {
     return flags >= 0 && ::fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+bool TqSetSocketBlocking(TqSocketHandle socket) {
+    const int flags = ::fcntl(socket, F_GETFL, 0);
+    return flags >= 0 && ::fcntl(socket, F_SETFL, flags & ~O_NONBLOCK) == 0;
+}
+
 int TqLastSocketError() {
     return errno;
 }
@@ -50,6 +55,24 @@ bool TqSocketInProgress(int error) {
 
 bool TqSocketInterrupted(int error) {
     return error == EINTR;
+}
+
+bool TqSocketConnectionRefused(int error) {
+    return error == ECONNREFUSED;
+}
+
+bool TqSocketTimeoutLike(int error) {
+    return error == ETIMEDOUT || error == EHOSTUNREACH || error == ENETUNREACH ||
+        error == EAGAIN || error == EWOULDBLOCK;
+}
+
+int TqConnect(TqSocketHandle socket, const sockaddr* address, socklen_t addressLength) {
+    return ::connect(socket, address, addressLength);
+}
+
+bool TqGetSocketError(TqSocketHandle socket, int& error) {
+    socklen_t length = sizeof(error);
+    return ::getsockopt(socket, SOL_SOCKET, SO_ERROR, &error, &length) == 0;
 }
 
 int TqSend(TqSocketHandle socket, const void* data, size_t length, TqSendFlags flags) {

@@ -35,9 +35,11 @@ public:
         std::function<bool(int)> RunDnsOnce;
         std::function<TqSocketHandle(int, int, int)> CreateSocket;
         std::function<bool(TqSocketHandle)> SetNonBlocking;
+        std::function<bool(TqSocketHandle)> SetBlocking;
         std::function<int(TqSocketHandle, const sockaddr*, socklen_t)> Connect;
         std::function<int(TqSocketHandle)> GetLastSocketError;
         std::function<int(TqSocketHandle, int*)> GetSocketError;
+        int ConnectTimeoutMs{10000};
     };
 #endif
 
