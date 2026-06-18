@@ -6,6 +6,7 @@
 #if defined(__linux__)
 #include "client_ingress_reactor.h"
 #include "client_tunnel_open.h"
+#include "server_dial_reactor.h"
 #endif
 #include "http_connect_server.h"
 #include "router_runtime.h"
@@ -843,6 +844,25 @@ int RunServer(const TqConfig& cfg) {
     auto speed = std::make_shared<TqServerSpeedTestController>();
     metrics->Listen = cfg.QuicListen;
     const auto started = std::chrono::steady_clock::now();
+
+#if defined(__linux__)
+    TqServerDialReactor serverDial(acl);
+    if (!serverDial.Start()) {
+        std::lock_guard<std::mutex> guard(metrics->Lock);
+        metrics->LastError = "failed to start server dial reactor";
+        return 1;
+    }
+    struct ServerDialGuard {
+        TqServerDialReactor* Reactor{nullptr};
+        ~ServerDialGuard() {
+            TqSetServerDialReactor(nullptr);
+            if (Reactor != nullptr) {
+                Reactor->Stop();
+            }
+        }
+    } serverDialGuard{&serverDial};
+    TqSetServerDialReactor(&serverDial);
+#endif
 
     QuicServerSession quic;
     quic.SetConnectionHandler([metrics](MsQuicConnection*) {

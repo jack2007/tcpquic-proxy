@@ -22,6 +22,7 @@ struct TqServerDialRequest {
     std::string Host;
     uint16_t Port{0};
     uint64_t TraceTunnelId{0};
+    bool BypassAclForAuthorizedLoopback{false};
     TqServerDialComplete Complete;
 };
 

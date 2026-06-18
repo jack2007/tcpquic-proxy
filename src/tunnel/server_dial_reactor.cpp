@@ -4,7 +4,10 @@
 #include "linux_reactor.h"
 
 #include <cerrno>
+#include <atomic>
 #include <chrono>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +66,16 @@ bool IsTimeoutLikeError(int error) {
         error == EAGAIN || error == EWOULDBLOCK;
 }
 
+void SetSockaddrPort(sockaddr_storage& addr, uint16_t port) {
+    if (addr.ss_family == AF_INET) {
+        reinterpret_cast<sockaddr_in*>(&addr)->sin_port = htons(port);
+        return;
+    }
+    if (addr.ss_family == AF_INET6) {
+        reinterpret_cast<sockaddr_in6*>(&addr)->sin6_port = htons(port);
+    }
+}
+
 void CloseOwnedSocket(TqSocketHandle& fd) {
     if (TqSocketValid(fd)) {
         TqCloseSocket(fd);
@@ -94,6 +107,11 @@ struct TqServerDialReactor::Impl {
 #ifdef TQ_UNIT_TESTING
     TestHooks Hooks;
 #endif
+    std::mutex Lock;
+#ifndef TQ_UNIT_TESTING
+    std::thread Worker;
+    std::atomic<bool> StopRequested{false};
+#endif
     bool Started{false};
     uint64_t NextToken{1};
     std::unordered_map<uint64_t, std::unique_ptr<DialState>> Pending;
@@ -110,6 +128,7 @@ struct TqServerDialReactor::Impl {
 #endif
 
     bool Start() {
+        std::lock_guard<std::mutex> guard(Lock);
         if (Started) {
             return true;
         }
@@ -128,10 +147,39 @@ struct TqServerDialReactor::Impl {
         }
 #endif
         Started = true;
+#ifndef TQ_UNIT_TESTING
+        StopRequested.store(false, std::memory_order_release);
+        Worker = std::thread([this]() {
+            RunLoop();
+        });
+#endif
         return true;
     }
 
     void Stop() {
+#ifndef TQ_UNIT_TESTING
+        std::thread worker;
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            StopRequested.store(true, std::memory_order_release);
+            (void)Reactor.Wake();
+            if (Worker.joinable()) {
+                worker = std::move(Worker);
+            }
+        }
+        if (worker.joinable()) {
+            if (worker.get_id() == std::this_thread::get_id()) {
+                worker.detach();
+            } else {
+                worker.join();
+            }
+        }
+#endif
+        std::lock_guard<std::mutex> guard(Lock);
+        StopUnlocked();
+    }
+
+    void StopUnlocked() {
         for (auto& entry : Pending) {
             CleanupState(*entry.second, true);
         }
@@ -148,6 +196,7 @@ struct TqServerDialReactor::Impl {
     }
 
     uint64_t Submit(TqServerDialRequest request) {
+        std::lock_guard<std::mutex> guard(Lock);
         if (!Started || request.Host.empty() || request.Port == 0 || !request.Complete) {
             return 0;
         }
@@ -184,6 +233,7 @@ struct TqServerDialReactor::Impl {
     }
 
     void Cancel(uint64_t token) {
+        std::lock_guard<std::mutex> guard(Lock);
         auto it = Pending.find(token);
         if (it == Pending.end()) {
             return;
@@ -193,6 +243,11 @@ struct TqServerDialReactor::Impl {
     }
 
     bool RunOnce(int timeoutMs) {
+        std::lock_guard<std::mutex> guard(Lock);
+        return RunOnceUnlocked(timeoutMs);
+    }
+
+    bool RunOnceUnlocked(int timeoutMs) {
         if (!Started) {
             return false;
         }
@@ -204,6 +259,20 @@ struct TqServerDialReactor::Impl {
         didWork = ExpireAttempts() || didWork;
         return didWork;
     }
+
+#ifndef TQ_UNIT_TESTING
+    void RunLoop() {
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> guard(Lock);
+                if (StopRequested.load(std::memory_order_acquire)) {
+                    return;
+                }
+            }
+            (void)RunOnce(50);
+        }
+    }
+#endif
 
     uint64_t NextAvailableToken() {
         while (NextToken == 0 || Pending.find(NextToken) != Pending.end()) {
@@ -270,7 +339,12 @@ struct TqServerDialReactor::Impl {
         }
 
         std::vector<sockaddr_storage> filtered;
-        if (!TqAclFilterResolvedAddresses(Acl, addresses, it->second->Request.Port, filtered)) {
+        if (it->second->Request.BypassAclForAuthorizedLoopback) {
+            filtered = addresses;
+            for (auto& addr : filtered) {
+                SetSockaddrPort(addr, it->second->Request.Port);
+            }
+        } else if (!TqAclFilterResolvedAddresses(Acl, addresses, it->second->Request.Port, filtered)) {
             Complete(token, TqOpenError::AclDenied);
             return;
         }

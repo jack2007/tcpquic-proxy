@@ -14,6 +14,7 @@ struct MsQuicConnection;
 struct MsQuicStream;
 struct TqClientTunnelOpenHandle;
 class TqEphemeralTargetAuthorizer;
+class TqServerDialReactor;
 class TqServerSpeedTestController;
 
 struct TunnelRequest {
@@ -46,6 +47,8 @@ TqTunnelStartResult TqStartClientTunnelReceiveSink(
     const TunnelRequest& req,
     const TqConfig& cfg,
     std::atomic<uint64_t>* receiveBytes);
+
+void TqSetServerDialReactor(TqServerDialReactor* reactor);
 
 void TqHandleServerPeerStream(
     MsQuicConnection* conn,
