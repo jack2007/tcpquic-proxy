@@ -93,7 +93,14 @@ void LogInfo(const char* fmt, ...) {
     char buffer[2048];
     va_list args;
     va_start(args, fmt);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
     std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
     va_end(args);
     std::lock_guard<std::mutex> guard(g_logMu);
     g_logger->info("{}", buffer);
