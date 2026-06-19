@@ -3,6 +3,9 @@
 #if defined(__linux__)
 #include "linux_relay_worker.h"
 #endif
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#endif
 #if defined(_WIN32)
 #include "windows_relay_worker.h"
 #endif
@@ -68,6 +71,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpReadClosedRelays = snapshot.TcpReadClosedRelays;
     metrics.TcpWriteShutdownQueuedRelays = snapshot.TcpWriteShutdownQueuedRelays;
     metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
+    metrics.OutstandingQuicSendBytes = snapshot.OutstandingQuicSendBytes;
     metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
     metrics.PendingTcpWriteBytes = snapshot.PendingTcpWriteBytes;
     metrics.MaxWorkerPendingBytes = snapshot.MaxWorkerPendingBytes;
@@ -87,7 +91,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.HotRelayTcpWriteArmed = snapshot.HotRelayTcpWriteArmed;
     metrics.HotRelayLocalAddress = snapshot.HotRelayLocalAddress;
     metrics.HotRelayPeerAddress = snapshot.HotRelayPeerAddress;
+    metrics.TcpReadBatches = snapshot.TcpReadBatches;
     metrics.TcpReadBytes = snapshot.TcpReadBytes;
+    metrics.TcpWriteBatches = snapshot.TcpWriteBatches;
     metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
     metrics.MaxTcpReadIovUsed = snapshot.MaxTcpReadIovUsed;
     metrics.MaxTcpWriteIovUsed = snapshot.MaxTcpWriteIovUsed;
@@ -175,6 +181,32 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LastTcpReadErrno = snapshot.LastTcpReadErrno;
     metrics.FatalRelayResets = snapshot.FatalRelayResets;
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
+#elif defined(__APPLE__)
+    const auto snapshot = TqDarwinRelayRuntime::Instance().Snapshot();
+    metrics.Backend = "worker";
+    metrics.Wakeups = snapshot.Wakeups;
+    metrics.EventsProcessed = snapshot.EventsProcessed;
+    metrics.PendingEvents = snapshot.PendingEvents;
+    metrics.PendingBytes = snapshot.PendingBytes;
+    metrics.ActiveRelays = snapshot.ActiveRelays;
+    metrics.CurrentPendingQuicReceiveBytes = snapshot.CurrentPendingQuicReceiveBytes;
+    metrics.TcpReadArmedRelays = snapshot.TcpReadArmedRelays;
+    metrics.TcpWriteArmedRelays = snapshot.TcpWriteArmedRelays;
+    metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
+    metrics.OutstandingQuicSendBytes = snapshot.OutstandingQuicSendBytes;
+    metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
+    metrics.PendingTcpWriteBytes = snapshot.PendingTcpWriteBytes;
+    metrics.TcpReadBatches = snapshot.TcpReadBatches;
+    metrics.TcpReadBytes = snapshot.TcpReadBytes;
+    metrics.TcpWriteBatches = snapshot.TcpWriteBatches;
+    metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
+    metrics.DeferredReceiveCompletes = snapshot.DeferredReceiveCompletes;
+    metrics.QuicReceiveViewCount = snapshot.QuicReceiveViewCount;
+    metrics.QuicReceiveViewBytes = snapshot.QuicReceiveViewBytes;
+    metrics.QuicReceivePausedCount = snapshot.QuicReceivePausedCount;
+    metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
+    metrics.Errors = snapshot.Errors;
+    metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     metrics.Backend = "worker";
@@ -230,6 +262,7 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_tcp_write_shutdown_queued_relays\":"
         << metrics.TcpWriteShutdownQueuedRelays;
     out << ",\"linux_relay_outstanding_quic_sends\":" << metrics.OutstandingQuicSends;
+    out << ",\"linux_relay_outstanding_quic_send_bytes\":" << metrics.OutstandingQuicSendBytes;
     out << ",\"linux_relay_pending_tcp_write_queue\":" << metrics.PendingTcpWriteQueue;
     out << ",\"linux_relay_pending_tcp_write_bytes\":" << metrics.PendingTcpWriteBytes;
     out << ",\"linux_relay_max_worker_pending_bytes\":" << metrics.MaxWorkerPendingBytes;
@@ -261,7 +294,9 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     TqAppendJsonString(out, "linux_relay_hot_relay_local", metrics.HotRelayLocalAddress);
     out << ',';
     TqAppendJsonString(out, "linux_relay_hot_relay_peer", metrics.HotRelayPeerAddress);
+    out << ",\"linux_relay_tcp_read_batches\":" << metrics.TcpReadBatches;
     out << ",\"linux_relay_tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"linux_relay_tcp_write_batches\":" << metrics.TcpWriteBatches;
     out << ",\"linux_relay_tcp_write_bytes\":" << metrics.TcpWriteBytes;
     out << ",\"linux_relay_max_tcp_read_iov_used\":" << metrics.MaxTcpReadIovUsed;
     out << ",\"linux_relay_max_tcp_write_iov_used\":" << metrics.MaxTcpWriteIovUsed;

@@ -129,6 +129,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_PROXY_SOURCES
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+    )
+endif()
+
 if(WIN32)
     list(APPEND TCPQUIC_PROXY_SOURCES
         ingress/client_ingress_reactor.cpp
@@ -434,6 +442,49 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tcpquic_client_ingress_reactor_test
         tcpquic_relay_backend_selection_test
     )
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_executable(tcpquic_darwin_relay_worker_queue_test
+        unittest/darwin_relay_worker_queue_test.cpp
+        tunnel/darwin_relay_worker.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_darwin_relay_worker_queue_test)
+    target_compile_definitions(tcpquic_darwin_relay_worker_queue_test PRIVATE TCPQUIC_TESTING=1)
+    target_link_libraries(tcpquic_darwin_relay_worker_queue_test PRIVATE Threads::Threads inc warnings msquic logging base_link libzstd spdlog::spdlog)
+    tcpquic_link_mimalloc(tcpquic_darwin_relay_worker_queue_test)
+    set_property(TARGET tcpquic_darwin_relay_worker_queue_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_darwin_relay_worker_queue_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_darwin_relay_worker_io_test
+        unittest/darwin_relay_worker_io_test.cpp
+        tunnel/darwin_relay_worker.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_darwin_relay_worker_io_test)
+    target_compile_definitions(tcpquic_darwin_relay_worker_io_test PRIVATE TCPQUIC_TESTING=1)
+    target_link_libraries(tcpquic_darwin_relay_worker_io_test PRIVATE Threads::Threads libzstd spdlog::spdlog msquic logging base_link inc warnings)
+    set_property(TARGET tcpquic_darwin_relay_worker_io_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_darwin_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_darwin_relay_metrics_test
+        unittest/darwin_relay_metrics_test.cpp
+        runtime/relay_metrics.cpp
+        tunnel/darwin_relay_worker.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_darwin_relay_metrics_test)
+    target_compile_definitions(tcpquic_darwin_relay_metrics_test PRIVATE TCPQUIC_TESTING=1)
+    target_link_libraries(tcpquic_darwin_relay_metrics_test PRIVATE Threads::Threads libzstd spdlog::spdlog msquic logging base_link inc warnings)
+    set_property(TARGET tcpquic_darwin_relay_metrics_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_darwin_relay_metrics_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 endif()
 
 add_executable(tcpquic_thread_pool_test

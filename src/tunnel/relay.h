@@ -10,11 +10,13 @@
 struct MsQuicStream;
 class TqLinuxRelayWorker;
 class TqWindowsRelayWorker;
+class TqDarwinRelayWorker;
 
 enum class TqRelayBackendType {
     None,
     LinuxWorker,
     WindowsWorker,
+    DarwinWorker,
 };
 
 struct TqRelayHandle {
@@ -24,6 +26,8 @@ struct TqRelayHandle {
     uint64_t LinuxRelayId{0};
     TqWindowsRelayWorker* WindowsWorker{nullptr};
     uint64_t WindowsRelayId{0};
+    TqDarwinRelayWorker* DarwinWorker{nullptr};
+    uint64_t DarwinRelayId{0};
 };
 
 bool TqRelayStart(
