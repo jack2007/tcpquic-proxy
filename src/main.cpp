@@ -42,9 +42,6 @@ public:
         peerCfg.SocksListen = peer.SocksListen;
         peerCfg.HttpListen = peer.HttpListen;
         peerCfg.QuicConnections = peer.QuicConnections == 0 ? BaseConfig.QuicConnections : peer.QuicConnections;
-        peerCfg.QuicReconnectIntervalMs = peer.QuicReconnectIntervalMs == 0
-            ? BaseConfig.QuicReconnectIntervalMs
-            : peer.QuicReconnectIntervalMs;
         peerCfg.Compress = peer.Compress.empty() ? BaseConfig.Compress : peer.Compress;
 
         auto runtime = std::make_shared<PeerRuntime>();
@@ -581,9 +578,6 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
     out.SocksListen = selected->SocksListen.empty() ? cfg.SocksListen : selected->SocksListen;
     out.HttpListen = selected->HttpListen.empty() ? cfg.HttpListen : selected->HttpListen;
     out.QuicConnections = selected->QuicConnections == 0 ? cfg.QuicConnections : selected->QuicConnections;
-    out.QuicReconnectIntervalMs = selected->QuicReconnectIntervalMs == 0
-        ? cfg.QuicReconnectIntervalMs
-        : selected->QuicReconnectIntervalMs;
     out.Compress = selected->Compress.empty() ? cfg.Compress : selected->Compress;
     return true;
 }

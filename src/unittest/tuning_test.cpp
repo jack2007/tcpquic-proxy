@@ -251,6 +251,32 @@ int main() {
         std::string err;
         char arg0[] = "tcpquic-proxy";
         char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--reconnect-interval-ms";
+        char arg5[] = "3000";
+        char arg6[] = "--cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+            arg8, arg9, arg10, arg11};
+        if (TqParseArgs(12, argv, cfg, err)) {
+            return 3;
+        }
+        if (err.find("--reconnect-interval-ms") == std::string::npos) {
+            return 4;
+        }
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
         char arg2[] = "--enable-encrypt";
         char arg3[] = "--peer";
         char arg4[] = "127.0.0.1:4433";

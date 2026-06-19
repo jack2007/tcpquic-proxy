@@ -306,8 +306,6 @@ private:
                     cfg.QuicConnectionStreamCount > TqMaxQuicConnectionStreamCount) {
                     return Error("invalid proto.connection_stream_count");
                 }
-            } else if (key == "reconnect_interval_ms") {
-                if (!ParseReconnectInterval(cfg.QuicReconnectIntervalMs)) return Error("invalid proto.reconnect_interval_ms");
             } else if (key == "keepalive_ms") {
                 if (!ParseUint32InRange(
                         TqMinQuicKeepAliveIntervalMs,
@@ -504,10 +502,6 @@ private:
         return true;
     }
 
-    bool ParseReconnectInterval(uint32_t& out) {
-        return ParseUint32(out) && out >= 1000 && out <= 60000;
-    }
-
     bool ParseRuntimePeers(std::vector<TqPeerConfig>& peers) {
         peers.clear();
         if (!Consume('[')) {
@@ -534,7 +528,6 @@ private:
             return true;
         }
         bool protoConnectionsSpecified = false;
-        bool protoReconnectIntervalSpecified = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) {
@@ -551,9 +544,6 @@ private:
             } else if (key == "proto_connections") {
                 protoConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid peer.proto_connections");
-            } else if (key == "proto_reconnect_interval_ms") {
-                protoReconnectIntervalSpecified = true;
-                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid peer.proto_reconnect_interval_ms");
             } else if (key == "compress") {
                 if (!ParseString(peer.Compress)) return Error("invalid peer.compress");
             } else if (key == "enabled") {
@@ -564,10 +554,6 @@ private:
         } while (Consume(','));
         if (protoConnectionsSpecified && peer.QuicConnections == 0) {
             return Error("peer.proto_connections out of range");
-        }
-        if (protoReconnectIntervalSpecified &&
-            (peer.QuicReconnectIntervalMs < 1000 || peer.QuicReconnectIntervalMs > 60000)) {
-            return Error("peer.proto_reconnect_interval_ms out of range");
         }
         return Consume('}') || Error("malformed peer object");
     }
@@ -598,7 +584,6 @@ private:
             return true;
         }
         bool quicConnectionsSpecified = false;
-        bool quicReconnectIntervalSpecified = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) {
@@ -616,8 +601,7 @@ private:
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
             } else if (key == "quic_reconnect_interval_ms") {
-                quicReconnectIntervalSpecified = true;
-                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid quic_reconnect_interval_ms");
+                return Error("unknown peer key: quic_reconnect_interval_ms");
             } else if (key == "compress") {
                 if (!ParseString(peer.Compress)) return Error("invalid compress");
             } else if (key == "enabled") {
@@ -628,9 +612,6 @@ private:
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) {
             return Error("quic_connections out of range");
-        }
-        if (quicReconnectIntervalSpecified && peer.QuicReconnectIntervalMs == 0) {
-            return Error("quic_reconnect_interval_ms out of range");
         }
         return Consume('}') || Error("malformed peer object");
     }
@@ -943,8 +924,6 @@ void TqPrintUsage(FILE* out) {
         "  --connections <n>            Connection count (default 1)\n"
         "  --connection-stream-count <n>\n"
         "                              Max bidirectional streams per connection (default 1024)\n"
-        "  --reconnect-interval-ms <n>\n"
-        "                              Client reconnect interval in ms (default 3000, 1000..60000)\n"
         "  --keepalive-ms <n>          Keepalive interval in ms (default 5000, 1000..15000)\n"
         "  --handshake-threads <n>      SOCKS/HTTP handshake workers (default 8, 0=auto)\n"
         "  --download-test <sec>        Built-in end-to-end download speed test\n"
@@ -1149,19 +1128,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseQuicConnectionStreamCountValue(value, cfg.QuicConnectionStreamCount)) {
                 err = "invalid value for --connection-stream-count (must be 1..65535)";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--reconnect-interval-ms", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--reconnect-interval-ms", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.QuicReconnectIntervalMs) ||
-                cfg.QuicReconnectIntervalMs < 1000 ||
-                cfg.QuicReconnectIntervalMs > 60000) {
-                err = "invalid value for --reconnect-interval-ms (must be 1000..60000)";
                 return false;
             }
         } else if (GetOptionValue(arg, "--keepalive-ms", value)) {
@@ -1536,11 +1502,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         }
     }
     if (!cfg.Router.Peers.empty()) {
-        for (auto& peer : cfg.Router.Peers) {
-            if (peer.QuicReconnectIntervalMs == 0) {
-                peer.QuicReconnectIntervalMs = cfg.QuicReconnectIntervalMs;
-            }
-        }
         if (!TqValidateRouterConfig(cfg.Router, err)) {
             return false;
         }
@@ -1632,11 +1593,6 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
         if (!peer.HttpListen.empty() && !IsHostPort(peer.HttpListen)) { err = "invalid http_listen for " + peer.PeerId; return false; }
         if (!peer.HttpListen.empty() && !listens.insert(peer.HttpListen).second) { err = "duplicate listen: " + peer.HttpListen; return false; }
         if (peer.QuicConnections > 128) { err = "quic_connections out of range for " + peer.PeerId; return false; }
-        if (peer.QuicReconnectIntervalMs != 0 &&
-            (peer.QuicReconnectIntervalMs < 1000 || peer.QuicReconnectIntervalMs > 60000)) {
-            err = "quic_reconnect_interval_ms out of range for " + peer.PeerId;
-            return false;
-        }
         if (!IsValidCompress(peer.Compress)) { err = "invalid compress for " + peer.PeerId; return false; }
     }
     return true;

@@ -52,9 +52,6 @@ void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     if (peer.QuicConnections != 0) {
         out << ",\"quic_connections\":" << peer.QuicConnections;
     }
-    if (peer.QuicReconnectIntervalMs != 0) {
-        out << ",\"quic_reconnect_interval_ms\":" << peer.QuicReconnectIntervalMs;
-    }
     out << ',';
     AppendJsonString(out, "compress", peer.Compress);
     out << ",\"enabled\":" << (peer.Enabled ? "true" : "false");
@@ -150,7 +147,6 @@ private:
         if (!Consume('{')) return Error("peer must be an object");
         if (Consume('}')) return true;
         bool quicConnectionsSpecified = false;
-        bool quicReconnectIntervalSpecified = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) return Error("malformed peer object");
@@ -166,8 +162,7 @@ private:
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
             } else if (key == "quic_reconnect_interval_ms") {
-                quicReconnectIntervalSpecified = true;
-                if (!ParseUint32(peer.QuicReconnectIntervalMs)) return Error("invalid quic_reconnect_interval_ms");
+                return Error("unknown peer key: quic_reconnect_interval_ms");
             } else if (key == "compress") {
                 if (!ParseStringField(peer.Compress, "invalid compress")) return false;
             } else if (key == "enabled") {
@@ -177,7 +172,6 @@ private:
             }
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
-        if (quicReconnectIntervalSpecified && peer.QuicReconnectIntervalMs == 0) return Error("quic_reconnect_interval_ms out of range");
         return Consume('}') || Error("malformed peer object");
     }
 
@@ -336,7 +330,6 @@ bool SameBridgeActivePeer(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen == b.SocksListen &&
         a.HttpListen == b.HttpListen &&
         a.QuicConnections == b.QuicConnections &&
-        a.QuicReconnectIntervalMs == b.QuicReconnectIntervalMs &&
         a.Compress == b.Compress;
 }
 
@@ -345,7 +338,6 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen != b.SocksListen ||
         a.HttpListen != b.HttpListen ||
         a.QuicConnections != b.QuicConnections ||
-        a.QuicReconnectIntervalMs != b.QuicReconnectIntervalMs ||
         a.Compress != b.Compress;
 }
 

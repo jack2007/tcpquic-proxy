@@ -24,7 +24,6 @@ struct TqPeerConfig {
     std::string SocksListen;
     std::string HttpListen;
     uint32_t QuicConnections{0};
-    uint32_t QuicReconnectIntervalMs{0};
     std::string Compress;
     bool Enabled{true};
 };
@@ -55,7 +54,6 @@ struct TqConfig {
     std::string QuicCa;
     uint32_t QuicConnections = 1;
     uint32_t QuicConnectionStreamCount = 1024;
-    uint32_t QuicReconnectIntervalMs{3000};
     uint32_t QuicKeepAliveIntervalMs{5000};
     uint32_t WarmupMb{0};
     std::string WarmupTarget;

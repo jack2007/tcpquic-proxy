@@ -1405,16 +1405,15 @@ static int TestTunnelRegistryAbortsOnlyMatchingConnection() {
 
 static int TestQuicClientSessionReconnectApiSurface() {
     using Handler = QuicClientSession::ConnectionStateHandler;
-    static_assert(std::is_same<Handler, std::function<void(uint32_t)>>::value,
-        "connection-state callback reports connected slot count");
+    using Scheduler = QuicClientSession::DelayedTaskScheduler;
     static_assert(std::is_same<decltype(std::declval<const QuicClientSession&>().ConnectedConnectionCount()), uint32_t>::value,
-        "connected count is publicly readable");
+        "ConnectedConnectionCount must remain available");
     static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().EnsureAnyConnected()), bool>::value,
-        "eager connect API has a default timeout");
+        "EnsureAnyConnected default overload must remain available");
     static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().EnsureAnyConnected(std::chrono::milliseconds(1))), bool>::value,
-        "eager connect API accepts an explicit timeout");
-
+        "EnsureAnyConnected timeout overload must remain available");
     (void)static_cast<void (QuicClientSession::*)(Handler)>(&QuicClientSession::SetConnectionStateHandler);
+    (void)static_cast<void (QuicClientSession::*)(Scheduler)>(&QuicClientSession::SetDelayedTaskScheduler);
     return 0;
 }
 
