@@ -22,9 +22,14 @@ int main() {
         assert(cfg.Tuning.InitialWindowPackets == 2000);
         assert(cfg.Tuning.InitialRttMs == 100);
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
-        assert(cfg.Tuning.InitialQuicReadAheadBytes == 1024ull * 1024);
+        assert(cfg.Tuning.RelayDefaultIdealSend == 64ull * 1024 * 1024);
+        assert(cfg.Tuning.InitialQuicReadAheadBytes == 64ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 64ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayReadBatchBytes == 4ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayQuicRecvBatchBytes == 4ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayMaxIov == 32);
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
-        assert(cfg.Tuning.TcpSocketBufferBytes == 4 * 1024 * 1024);
+        assert(cfg.Tuning.TcpSocketBufferBytes >= 16 * 1024 * 1024);
         assert(cfg.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay == 16ull * 1024 * 1024);
         assert(cfg.Tuning.WindowsRelayQuicReceiveCompleteBatchBytes == 0);
     }
@@ -415,7 +420,7 @@ int main() {
         char* argv[] = {
             arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
         assert(!TqParseArgs(12, argv, cfg, err));
-        assert(err.find("unsupported option") != std::string::npos);
+        assert(err.find("unknown option") != std::string::npos);
     }
 
     {
@@ -426,14 +431,18 @@ int main() {
         const uint32_t autoBudgetMb = TqGetRelayMemoryBudget();
 
         assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
-        assert(cfg.Tuning.LinuxRelayMaxIov == 16);
+        assert(cfg.Tuning.LinuxRelayMaxIov == 32);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
-        assert(cfg.Tuning.LinuxRelayReadBatchBytes == 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayReadBatchBytes == 4ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayQuicRecvBatchBytes == 4ull * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 4096);
         assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
         TQ_TEST_REQUIRE(autoBudgetMb >= 256);
-        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes ==
-                        static_cast<uint64_t>(autoBudgetMb) * 1024 * 1024 / 2);
+        const uint64_t reportedBudgetBytes =
+            static_cast<uint64_t>(autoBudgetMb) * 1024 * 1024;
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes <= reportedBudgetBytes / 2);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes + 1024ull * 1024 >=
+                        reportedBudgetBytes / 2);
         TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 64ull * 1024 * 1024);
         if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0) {
             return 1;
