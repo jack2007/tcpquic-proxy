@@ -5,6 +5,8 @@
 #include "socket_reactor.h"
 #if defined(_WIN32)
 #include "windows_reactor.h"
+#elif defined(__APPLE__)
+#include "darwin_reactor.h"
 #else
 #include "linux_reactor.h"
 #endif
@@ -23,6 +25,8 @@
 
 #if defined(_WIN32)
 using TqClientIngressPlatformReactor = TqWindowsReactor;
+#elif defined(__APPLE__)
+using TqClientIngressPlatformReactor = TqDarwinReactor;
 #else
 using TqClientIngressPlatformReactor = TqLinuxReactor;
 #endif

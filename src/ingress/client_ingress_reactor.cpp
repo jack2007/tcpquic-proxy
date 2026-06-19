@@ -44,6 +44,16 @@ TqSocketHandle TqAcceptClient(TqSocketHandle listenFd) {
         TqCloseFd(clientFd);
     }
     return clientFd;
+#elif defined(__APPLE__)
+    TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+    if (TqSocketValid(clientFd)) {
+        const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
+        if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
+            ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
+            TqCloseFd(clientFd);
+        }
+    }
+    return clientFd;
 #else
     TqSocketHandle clientFd = ::accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (!TqSocketValid(clientFd) && errno == ENOSYS) {

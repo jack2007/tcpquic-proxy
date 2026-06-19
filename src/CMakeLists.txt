@@ -460,6 +460,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set_property(TARGET tcpquic_darwin_reactor_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_darwin_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+    add_executable(tcpquic_client_ingress_reactor_test
+        unittest/client_ingress_reactor_test.cpp
+        unittest/trace_proxy_stub.cpp
+        ingress/client_ingress_reactor.cpp
+        runtime/listen_socket.cpp
+        ingress/client_ingress_state.cpp
+        ingress/socks5_server.cpp
+        ingress/http_connect_server.cpp
+        ingress/proxy_auth.cpp
+        protocol/control_protocol.cpp
+        ${TCPQUIC_SERVER_TEST_SOURCES}
+        runtime/darwin_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_client_ingress_reactor_test)
+    target_link_libraries(tcpquic_client_ingress_reactor_test PRIVATE Threads::Threads)
+    target_compile_definitions(tcpquic_client_ingress_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+    target_compile_features(tcpquic_client_ingress_reactor_test PRIVATE cxx_std_17)
+    set_property(TARGET tcpquic_client_ingress_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_client_ingress_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_darwin_relay_worker_queue_test
         unittest/darwin_relay_worker_queue_test.cpp
         tunnel/darwin_relay_worker.cpp

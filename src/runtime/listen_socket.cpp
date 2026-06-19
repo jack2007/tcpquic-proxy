@@ -138,6 +138,7 @@ TqSocketHandle TqOpenPreparedListenSocket(const addrinfo* ai) {
     }
     return fd.Release();
 #else
+#if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
     TqScopedSocket fd(::socket(
         ai->ai_family,
         ai->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
@@ -150,8 +151,9 @@ TqSocketHandle TqOpenPreparedListenSocket(const addrinfo* ai) {
     if (socketError != EINVAL && socketError != EPROTONOSUPPORT) {
         return TqInvalidSocket;
     }
+#endif
 
-    fd.Reset(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
+    TqScopedSocket fd(::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol));
     if (!TqSocketValid(fd.Get()) || !TqPrepareListenSocket(fd.Get())) {
         return TqInvalidSocket;
     }

@@ -81,6 +81,11 @@ int TqSend(TqSocketHandle socket, const void* data, size_t length, TqSendFlags f
     if (flags == TqSendFlags::NoSignal) {
         nativeFlags |= MSG_NOSIGNAL;
     }
+#elif defined(SO_NOSIGPIPE)
+    if (flags == TqSendFlags::NoSignal) {
+        int enabled = 1;
+        (void)::setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+    }
 #else
     (void)flags;
 #endif
