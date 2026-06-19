@@ -13,7 +13,9 @@
 #include "client_tunnel_open.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -22,6 +24,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #if defined(_WIN32)
 using TqClientIngressPlatformReactor = TqWindowsReactor;
@@ -62,6 +65,7 @@ public:
     void Stop();
     bool AddPeer(const TqClientIngressPeer& peer);
     bool RemovePeer(const std::string& peerId);
+    bool EnqueueDelayed(std::chrono::milliseconds delay, std::function<void()> task);
     size_t PeerCountForTest() const;
 
 #if defined(TQ_UNIT_TESTING)
@@ -92,6 +96,12 @@ private:
     struct ListenEntry {
         std::string PeerId;
         ListenProto Proto{ListenProto::Socks5};
+    };
+
+    struct DelayedTask {
+        std::chrono::steady_clock::time_point Due;
+        uint64_t Order{0};
+        std::function<void()> Task;
     };
 
     enum class ClientPhase {
@@ -131,6 +141,8 @@ private:
     bool EnqueueSync(std::function<bool()> task);
     bool EnqueueAsync(std::function<void()> task);
     void ProcessPendingTasks();
+    void ProcessDueDelayedTasks();
+    int NextRunTimeoutMsLocked() const;
     void AcceptLoop(TqSocketHandle listenFd);
     void HandleClientEvents(TqSocketHandle clientFd, uint32_t events);
     void HandleClientRead(TqSocketHandle clientFd);
@@ -174,6 +186,9 @@ private:
     std::shared_ptr<CompletionToken> CompletionTokenPtr{std::make_shared<CompletionToken>()};
     std::thread Worker;
     std::deque<std::function<void()>> PendingTasks;
+    std::vector<DelayedTask> DelayedTasks;
+    uint64_t NextDelayedTaskOrder{1};
+    size_t ActiveDelayedTasks{0};
     std::unordered_map<std::string, PeerEntry> Peers;
     std::unordered_map<TqSocketHandle, ListenEntry> Listens;
     std::unordered_map<TqSocketHandle, ClientEntry> Clients;

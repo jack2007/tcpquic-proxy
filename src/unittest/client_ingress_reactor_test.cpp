@@ -894,6 +894,73 @@ int TestConcurrentStartStopDoesNotCrashOrDeadlock() {
     return 0;
 }
 
+int TestDelayedTaskRunsAfterDelay() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 920;
+    }
+
+    std::atomic<int> calls{0};
+    const auto start = std::chrono::steady_clock::now();
+    if (!reactor.EnqueueDelayed(std::chrono::milliseconds(100), [&]() {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            if (elapsed >= std::chrono::milliseconds(80)) {
+                calls.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                calls.fetch_add(100, std::memory_order_relaxed);
+            }
+        })) {
+        reactor.Stop();
+        return 921;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    if (calls.load(std::memory_order_relaxed) != 0) {
+        reactor.Stop();
+        return 922;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (calls.load(std::memory_order_relaxed) == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    const int observed = calls.load(std::memory_order_relaxed);
+    reactor.Stop();
+    return observed == 1 ? 0 : 923;
+}
+
+int TestDelayedTaskRejectedAfterStop() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 930;
+    }
+    reactor.Stop();
+    if (reactor.EnqueueDelayed(std::chrono::milliseconds(1), []() {})) {
+        return 931;
+    }
+    return 0;
+}
+
+int TestDelayedTaskDroppedOnStop() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 940;
+    }
+
+    std::atomic<int> calls{0};
+    if (!reactor.EnqueueDelayed(std::chrono::milliseconds(200), [&]() {
+            calls.fetch_add(1, std::memory_order_relaxed);
+        })) {
+        reactor.Stop();
+        return 941;
+    }
+    reactor.Stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    return calls.load(std::memory_order_relaxed) == 0 ? 0 : 942;
+}
+
 } // namespace
 
 int main() {
@@ -923,6 +990,12 @@ int main() {
     result = TestCompletionAfterStopRejectsOnce();
     if (result != 0) return result;
     result = TestConcurrentStartStopDoesNotCrashOrDeadlock();
+    if (result != 0) return result;
+    result = TestDelayedTaskRunsAfterDelay();
+    if (result != 0) return result;
+    result = TestDelayedTaskRejectedAfterStop();
+    if (result != 0) return result;
+    result = TestDelayedTaskDroppedOnStop();
     if (result != 0) return result;
     return 0;
 }

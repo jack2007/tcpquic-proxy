@@ -5,7 +5,9 @@
 #include "scoped_socket.h"
 #include "socks5_server.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <vector>
@@ -200,7 +202,6 @@ void TqClientIngressReactor::Stop() {
             return;
         }
         State = LifecycleState::Stopping;
-        Running.store(false, std::memory_order_release);
         oldToken = std::move(CompletionTokenPtr);
         {
             std::lock_guard<std::mutex> tokenLock(oldToken->Mutex);
@@ -208,6 +209,7 @@ void TqClientIngressReactor::Stop() {
         }
         CompletionTokenPtr = std::make_shared<CompletionToken>();
         CompletionTokenPtr->Reactor = this;
+        Running.store(false, std::memory_order_release);
         (void)Reactor.Wake();
     }
 
@@ -215,6 +217,12 @@ void TqClientIngressReactor::Stop() {
         Worker.join();
     }
     ProcessPendingTasks();
+    {
+        std::unique_lock<std::mutex> lifecycleLock(LifecycleMutex);
+        LifecycleCv.wait(lifecycleLock, [this]() {
+            return ActiveDelayedTasks == 0;
+        });
+    }
 
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
@@ -222,6 +230,7 @@ void TqClientIngressReactor::Stop() {
             std::lock_guard<std::mutex> lock(Mutex);
             CloseAllLocked();
             PendingTasks.clear();
+            DelayedTasks.clear();
         }
         Reactor.Stop();
         State = LifecycleState::Stopped;
@@ -354,13 +363,43 @@ std::string TqClientIngressReactor::HttpListenAddressForTest(const std::string& 
 #endif
 
 void TqClientIngressReactor::Run() {
-    for (;;) {
+    while (Running.load(std::memory_order_acquire)) {
         ProcessPendingTasks();
         if (!Running.load(std::memory_order_acquire)) {
             break;
         }
-        (void)Reactor.RunOnce(50);
+        ProcessDueDelayedTasks();
+        int timeoutMs = 50;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            timeoutMs = NextRunTimeoutMsLocked();
+        }
+        (void)Reactor.RunOnce(timeoutMs);
     }
+}
+
+bool TqClientIngressReactor::EnqueueDelayed(
+    std::chrono::milliseconds delay,
+    std::function<void()> task) {
+    if (!task) {
+        return false;
+    }
+    if (delay < std::chrono::milliseconds(0)) {
+        delay = std::chrono::milliseconds(0);
+    }
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    if (State != LifecycleState::Running || !Running.load(std::memory_order_acquire)) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        DelayedTasks.push_back(DelayedTask{
+            std::chrono::steady_clock::now() + delay,
+            NextDelayedTaskOrder++,
+            std::move(task)});
+    }
+    (void)Reactor.Wake();
+    return true;
 }
 
 bool TqClientIngressReactor::EnqueueSync(std::function<bool()> task) {
@@ -405,6 +444,76 @@ void TqClientIngressReactor::ProcessPendingTasks() {
     for (auto& task : tasks) {
         task();
     }
+}
+
+void TqClientIngressReactor::ProcessDueDelayedTasks() {
+    std::vector<std::function<void()>> tasks;
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto out = DelayedTasks.begin();
+        for (auto it = DelayedTasks.begin(); it != DelayedTasks.end(); ++it) {
+            if (it->Due <= now) {
+                tasks.push_back(std::move(it->Task));
+            } else {
+                if (out != it) {
+                    *out = std::move(*it);
+                }
+                ++out;
+            }
+        }
+        DelayedTasks.erase(out, DelayedTasks.end());
+    }
+
+    for (auto& task : tasks) {
+        if (task) {
+            {
+                std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+                if (State != LifecycleState::Running ||
+                    !Running.load(std::memory_order_acquire)) {
+                    return;
+                }
+                ++ActiveDelayedTasks;
+            }
+            task();
+            {
+                std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+                if (ActiveDelayedTasks > 0) {
+                    --ActiveDelayedTasks;
+                }
+                if (State == LifecycleState::Stopping && ActiveDelayedTasks == 0) {
+                    LifecycleCv.notify_all();
+                }
+            }
+        }
+    }
+}
+
+int TqClientIngressReactor::NextRunTimeoutMsLocked() const {
+    constexpr int kMaxTimeoutMs = 50;
+    if (DelayedTasks.empty()) {
+        return kMaxTimeoutMs;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    auto earliest = DelayedTasks.front().Due;
+    auto earliestOrder = DelayedTasks.front().Order;
+    for (const auto& task : DelayedTasks) {
+        if (task.Due < earliest ||
+            (task.Due == earliest && task.Order < earliestOrder)) {
+            earliest = task.Due;
+            earliestOrder = task.Order;
+        }
+    }
+    if (earliest <= now) {
+        return 0;
+    }
+
+    const auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(earliest - now);
+    if (delay.count() <= 0) {
+        return 0;
+    }
+    return static_cast<int>(std::min<int64_t>(kMaxTimeoutMs, delay.count()));
 }
 
 void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
