@@ -131,9 +131,16 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND TCPQUIC_PROXY_SOURCES
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
+        tunnel/client_tunnel_open.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
     )
 endif()
 
@@ -162,7 +169,7 @@ endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET})
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
