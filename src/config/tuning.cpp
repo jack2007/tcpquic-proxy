@@ -748,6 +748,10 @@ void TqPrintRelayBackend(FILE* out, const TqTuningConfig& tuning) {
     std::fprintf(out,
         "tcpquic-proxy relay backend: windows-iocp (%u workers)\n",
         std::max(1u, tuning.LinuxRelayWorkerCount));
+#elif defined(__APPLE__)
+    std::fprintf(out,
+        "tcpquic-proxy relay backend: darwin-kqueue (%u workers)\n",
+        std::max(1u, tuning.LinuxRelayWorkerCount));
 #else
     std::fprintf(out, "tcpquic-proxy relay backend: unsupported\n");
 #endif
