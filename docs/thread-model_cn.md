@@ -131,6 +131,8 @@ server dial reactor 还支持 speed-test 使用的 ephemeral authorizer：正常
 
 - `src/tunnel/linux_relay_worker.cpp`
 - `src/tunnel/windows_relay_worker.cpp`
+- `src/tunnel/darwin_relay_worker.cpp`
+- `src/tunnel/darwin_relay_worker.h`
 - `src/tunnel/relay.cpp`
 
 ## 其它应用线程
