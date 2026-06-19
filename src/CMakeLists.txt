@@ -581,6 +581,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/linux_relay_worker.cpp
     )
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/darwin_reactor.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+    )
+endif()
 if(WIN32)
     target_sources(tcpquic_speed_test_test PRIVATE
         tunnel/server_dial_reactor.cpp
@@ -594,7 +605,7 @@ if(WIN32)
 endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
 target_link_libraries(tcpquic_speed_test_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link spdlog::spdlog)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     target_link_libraries(tcpquic_speed_test_test PRIVATE ${TCPQUIC_CARES_TARGET})
 endif()
 if(BUILD_SHARED_LIBS)
