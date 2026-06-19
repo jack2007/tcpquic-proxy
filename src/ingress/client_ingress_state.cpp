@@ -166,7 +166,9 @@ TqClientIngressResult TqClientIngressState::FeedSocks5() {
         const bool authEnabled = Auth && Auth->Enabled();
         if (!authEnabled) {
             if (!hasNoAuth) {
-                WriteBuffer.assign("\x05\xFF", 2);
+                WriteBuffer.clear();
+                WriteBuffer.push_back(static_cast<char>(TqSocks5Version));
+                WriteBuffer.push_back(static_cast<char>(TqSocks5NoAcceptable));
                 CloseAfterWrite = true;
                 ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
                 return TqClientIngressResult::NeedWrite;
@@ -178,7 +180,9 @@ TqClientIngressResult TqClientIngressState::FeedSocks5() {
         }
 
         if (!hasUserPass) {
-            WriteBuffer.assign("\x05\xFF", 2);
+            WriteBuffer.clear();
+            WriteBuffer.push_back(static_cast<char>(TqSocks5Version));
+            WriteBuffer.push_back(static_cast<char>(TqSocks5NoAcceptable));
             CloseAfterWrite = true;
             ReadBuffer.erase(ReadBuffer.begin(), ReadBuffer.begin() + static_cast<std::ptrdiff_t>(greetingLen));
             return TqClientIngressResult::NeedWrite;
