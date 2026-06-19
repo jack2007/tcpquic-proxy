@@ -446,6 +446,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_executable(tcpquic_darwin_reactor_test
+        unittest/darwin_reactor_test.cpp
+        runtime/darwin_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_darwin_reactor_test)
+    target_link_libraries(tcpquic_darwin_reactor_test PRIVATE Threads::Threads)
+    set_property(TARGET tcpquic_darwin_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_darwin_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_darwin_relay_worker_queue_test
         unittest/darwin_relay_worker_queue_test.cpp
         tunnel/darwin_relay_worker.cpp
