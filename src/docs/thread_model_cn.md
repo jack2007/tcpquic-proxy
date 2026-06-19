@@ -8,15 +8,16 @@
 
 - MsQuic registration profile 由 `--quic-profile` 选择，默认 `max-throughput`，也支持 `low-latency`。
 - MsQuic 自身创建 datapath worker、QUIC worker 和 registration cleanup/close 相关线程；应用 stream callback 运行在 MsQuic QUIC worker 上。
-- client 模式可以是 single-peer，也可以通过 `--client-config` 进入 multi-peer router runtime。每个 active peer 有自己的 `QuicClientSession`、handshake `TqThreadPool`、SOCKS5/HTTP listener 对象。
-- client listener 只在对应 peer 至少有一个 connected QUIC connection 时打开；所有连接断开时 listener 会关闭，重连成功后再打开。
-- client 本地 SOCKS5 / HTTP CONNECT 的握手和 OPEN 阶段由固定大小 `TqThreadPool` 执行，不再为每个 accepted TCP 连接无限制 detach handler。
-- client `QuicClientSession` 启动后会创建 reconnect thread，按 `--quic-reconnect-interval-ms` 周期尝试补齐断开的 QUIC connection slot。
+- client 模式可以是 single-peer，也可以通过 `--client-config` 进入 multi-peer router runtime。每个 active peer 有自己的 `QuicClientSession`，本地 SOCKS5 / HTTP CONNECT 入口由共享的 `TqClientIngressReactor` 管理。
+- client ingress listen 只在对应 peer 至少有一个 connected QUIC connection 时打开；所有连接断开或从未连接成功时，该 peer 的 listener 保持关闭。
+- client 本地 SOCKS5 / HTTP CONNECT 的 listen、accept、握手状态机和 OPEN 完成回投由 `TqClientIngressReactor` 执行，不再为每个 peer 创建 listener 线程和握手线程池。
+- client `QuicClientSession` 不创建独立重连线程。异步断开由 MsQuic connection callback 在 `SHUTDOWN_COMPLETE` 后重建对应 slot；同步 `ConnectionOpen` / `ConnectionStart` 失败由注入的 `DelayedTaskScheduler` 投递到 `TqClientIngressReactor` 延迟任务队列重试。
 - server 模式没有 SOCKS5 / HTTP CONNECT listener；入站 QUIC stream 先经过 dispatcher，可识别普通 `OPEN` 和内置 speed-test 控制 stream。
-- server 普通 OPEN 不在 MsQuic callback 内直接 DNS/TCP connect，而是创建短生命周期 dial worker 线程完成 ACL/DNS/connect，再启动 relay。
+- server 普通 OPEN 不在 MsQuic callback 内直接 DNS/TCP connect，而是提交给进程级 `TqServerDialReactor`，由该 reactor 线程完成 ACL、c-ares DNS 和 non-blocking TCP connect。
 - Linux 生产 relay 由固定数量 `TqLinuxRelayWorker` 分片处理全部 relay TCP fd：`epoll` + `eventfd` + `readv` + `writev`，没有 per-tunnel TCP relay 线程。
 - Linux QUIC->TCP receive callback 统一返回 `QUIC_STATUS_PENDING`。callback 只建立借用 MsQuic receive buffer 的 pending view 并入队；TCP 写出、zstd 解压和 `StreamReceiveComplete` 都在 owner relay worker 上推进。
-- Windows relay 当前走 `TqWindowsRelayWorker` / IOCP：每个 worker 一个 IOCP thread，receive callback 也使用 pending view；zstd 解压在 IOCP worker 路径中处理。Windows 相关计划仍是 active plan，最终验证需要在 Windows 机器上完成。
+- Windows relay 当前走 `TqWindowsRelayWorker` / IOCP：每个 worker 一个 IOCP thread，receive callback 也使用 pending view；zstd 解压在 IOCP worker 路径中处理。
+- Linux / Windows / macOS 使用同一套 client reconnect、client ingress gating 和 server dial reactor 机制；平台差异只在底层 reactor/relay 后端，功能完成后三个平台分别验证即可。
 - 隧道清理由进程级 `TqTunnelReaper` 单线程统一回收，不再为每条隧道创建 cleanup watcher。
 - 旧 `TqBlockingDemoRelay` 和 `TqTcpWriteQueue` 已删除，不参与生产或测试链接。
 
@@ -41,27 +42,24 @@ TqToMsQuicProfile(cfg.QuicProfile)
 | `RegistrationCloseWorker` | 每 registration 约 1 个 | MsQuic | 异步关闭 registration |
 | `RegistrationCleanupWorker` | 全局 1 个 | MsQuic | 清理已关闭 registration |
 
-`tcpquic-proxy` 没有 secnetperf 那种工具级 WorkerPool；应用层主要线程来自 listener、handshake pool、relay worker、admin、trace、speed-test 和 reconnect。
+`tcpquic-proxy` 没有 secnetperf 那种工具级 WorkerPool；应用层主要线程来自 client ingress reactor、server dial reactor、relay worker、admin、trace、speed-test 和 tunnel reaper。
 
 ### 2.2 tcpquic-proxy 应用线程
 
 | 线程 | client | server | 创建点 | 作用 |
 |------|--------|--------|--------|------|
 | 主线程 | 有 | 有 | `main()` | 初始化 socket、配置、tuning、trace、reaper，然后进入 client/server run loop |
-| client reconnect thread | 有 | 无 | `QuicClientSession::StartReconnectLoop()` | 周期调用 `EnsureConnected(100ms)`，补齐断开的 connection slot |
-| SOCKS5 listener thread | 有 | 无 | `TqSocks5Server::Start()` | `accept()` SOCKS5 TCP 连接，提交到 handshake pool |
-| HTTP CONNECT listener thread | 有 | 无 | `TqHttpConnectServer::Start()` | `accept()` HTTP CONNECT TCP 连接，提交到 handshake pool |
-| handshake pool | 有 | 无 | `TqThreadPool::Start()` | 固定 worker 数，处理 SOCKS5/HTTP 解析、OPEN、启动 relay |
+| client ingress reactor | 有 | 无 | `TqClientIngressReactor::Start()` | 共享线程处理 SOCKS5/HTTP listen、accept、握手状态机、OPEN 完成回投和同步 start 失败 delayed retry |
 | admin accept thread | 可选 | 可选 | `TqAdminHttpServer::Start()` | `/health`、`/metrics`、multi-peer `/config` 等 admin HTTP |
 | admin client thread | 可选 | 可选 | `TqAdminHttpServer::Run()` | 每个 admin HTTP client 一个短生命周期 detached thread |
-| server dial worker | 无 | 有 | `TryHandleServerOpen()` | 每条普通 OPEN 一个短生命周期 detached thread，做 DNS/ACL/TCP connect |
-| speed-test accept/worker | speed-test client/server 时 | 有 | `TqServerSpeedTestController` / speed client runner | 内置上传/下载测试的临时 loopback TCP server 和 pump worker |
+| server dial reactor | 无 | 有 | `TqServerDialReactor::Start()` | 单线程处理普通 OPEN 的 ACL、c-ares DNS 和 non-blocking TCP connect |
+| speed-test accept/worker | speed-test client/server 时 | 有 | `TqServerSpeedTestController` / speed client runner | 内置上传/下载测试的临时 loopback TCP server 和 pump worker；client 数据连接通过 `cfg.HttpListen` 的 HTTP CONNECT ingress 路径 |
 | trace periodic thread | 可选 | 可选 | `TqTraceInit()` | `--trace` 开启后周期输出统计快照 |
 | tunnel reaper | 有 | 有 | `TqTunnelReaperGuard` | 全局单线程，每 100ms 检查 relay 是否停止并释放 tunnel context |
 | Linux relay worker | 有 | 有 | `TqLinuxRelayRuntime::Start()` | 固定 W 个 worker，epoll/readv/writev 处理全部 relay TCP fd |
 | Windows relay worker | 有 | 有 | `TqWindowsRelayRuntime::Start()` | 固定 W 个 worker，IOCP/WSARecv/WSASend 处理全部 relay TCP fd |
 
-`TqThreadPool(0)` 会按 `std::thread::hardware_concurrency()` 自动选择 worker 数，上限 64；默认配置仍以 `--handshake-threads` 的默认值为准。
+`--handshake-threads` 和 JSON `client.handshake_threads` 作为兼容配置保留，但当前跨平台 ingress reactor 路径不会创建 client 握手线程池。
 
 ## 3. Client 模式
 
@@ -70,52 +68,47 @@ TqToMsQuicProfile(cfg.QuicProfile)
 ```text
 main thread
   └─ RunSinglePeerClient(cfg)
+       ├─ TqSinglePeerClientRuntime::Start()
+       │    └─ TqClientIngressReactor::Start()
+       ├─ SetStartTunnel(lambda)
+       ├─ SetDelayedTaskScheduler(lambda -> ingress.EnqueueDelayed)
+       ├─ SetConnectionStateHandler(lambda)
        ├─ QuicClientSession::Start(quicCfg)
        │    ├─ MsQuicOpenVersion
        │    ├─ RegistrationOpen(profile)
        │    ├─ ConfigurationOpen/LoadCredential
-       │    └─ StartReconnectLoop()
-       ├─ speed-test? -> TqRunClientSpeedTest() 后退出
-       ├─ warmup? -> EnsureAnyConnected() + TqRunClientWarmup()
-       ├─ TqSinglePeerClientRuntime::Start()
-       │    └─ handshake Pool.Start()
-       ├─ SetStartTunnel(lambda)
-       ├─ SetConnectionStateHandler(lambda)
-       ├─ EnsureAnyConnected()
+       │    └─ StartAllSlots()
        ├─ EnableAcceptingAndApplyCurrentConnectionState()
        │    └─ connected_count > 0 时打开 SOCKS5/HTTP listener
+       ├─ speed-test? -> 通过 cfg.HttpListen 的 HTTP CONNECT ingress 建立数据连接，控制面使用 speed control stream
        ├─ admin? -> TqAdminHttpServer::Start()
        └─ 主线程 sleep 保持进程存活
 ```
 
-如果启动时没有任何 QUIC connection 连上，client 不直接失败；listener 先保持关闭，reconnect thread 连上后由 connection state handler 打开 listener。
+如果启动时没有任何 QUIC connection 连上，client 不直接失败；listener 先保持关闭。异步断开后 MsQuic callback 在 `SHUTDOWN_COMPLETE` 后立即重建 slot；同步 start 失败由 ingress reactor delayed task 重试。连接成功后 connection state handler 打开 listener。
 
 ### 3.2 multi-peer client
 
 `--client-config` 启用 `TqRouterRuntime` 和 `TqMultiPeerRuntimeAdapter`。每个 peer runtime 独立拥有：
 
 - `QuicClientSession`
-- `TqThreadPool`
-- `TqSocks5Server`
-- 可选 `TqHttpConnectServer`
-- per-peer listener mutex 和 tunnel start mutex
+- peer config 和 state handler
+- per-peer tunnel start mutex
+
+adapter 持有一个共享 `TqClientIngressReactor`。每个 peer 的 SOCKS5 / HTTP CONNECT listen fd 按 connected count 注册到这个共享 reactor。它不是每个 peer 或每条 connection 一个重连线程，也不是每个 peer 一个 listener 线程。
 
 admin `/config` 更新会由 router runtime 调用 adapter start/stop/drain peer。单个 peer 的 QUIC 断开只关闭该 peer 的 listener，不影响其它 peer。
 
 ### 3.3 本地 SOCKS5 / HTTP CONNECT
 
 ```text
-SOCKS5/HTTP listener thread
-  └─ accept()
-       └─ Pool.Submit(handler)
-
-handshake pool worker
-  ├─ 读取 SOCKS5 greeting/request 或 HTTP CONNECT header
+TqClientIngressReactor worker
+  ├─ accept() SOCKS5 / HTTP CONNECT client fd
+  ├─ non-blocking 读取 SOCKS5 greeting/request 或 HTTP CONNECT header
   ├─ TqTuneTcpForThroughput(clientFd)
-  ├─ runtime->Quic->EnsureAnyConnected()
   ├─ runtime->Quic->PickConnection()
-  ├─ TqStartClientTunnel(conn, req, clientFd, cfg)
-  ├─ 等待 OPEN response
+  ├─ TqStartClientTunnelAsync(conn, req, clientFd, cfg)
+  ├─ OPEN completion 由 EnqueueAsync() 回投本 reactor
   └─ 成功后返回 SOCKS5 reply 或 HTTP 200
 ```
 
@@ -136,7 +129,7 @@ quic_worker
 OPEN 成功后：
 
 ```text
-handshake pool worker
+TqClientIngressReactor worker
   └─ StartRelay()
        └─ TqRelayStart()
             ├─ Linux: TqLinuxRelayRuntime::PickWorker()
@@ -191,13 +184,13 @@ quic_worker
   └─ TqTunnelContext::OnReceive()
        └─ TryHandleServerOpen()
             ├─ 解析 OPEN request
-            ├─ ACL 初步校验
-            └─ std::thread(FinishServerOpenAfterDial).detach()
+            └─ TqServerDialReactor::Submit()
 
-dial worker
-  ├─ DNS / address iteration
-  ├─ TqDialTcp(nonblocking connect + poll/select)
-  ├─ TqTuneTcpForThroughput(targetFd)
+TqServerDialReactor worker
+  ├─ ACL / speed-test ephemeral authorizer
+  ├─ c-ares async DNS / literal address handling
+  ├─ non-blocking TCP connect + timeout
+  ├─ completion 回到 tunnel context
   ├─ SendOpenResponse
   └─ StartRelay()
 ```
@@ -327,9 +320,8 @@ Windows 相关计划仍是 active plan：源码已有统一 pending/zstd/metrics
 | relay registration | 1 | `TqRelayStart()` 注册到 Linux/Windows runtime，`TqRelayStop()` 注销 |
 | platform relay worker | W | 进程级 runtime 管理，多个隧道共享 |
 | tunnel reaper | 全局 1 | 每 100ms 扫描 stopped relay context |
-| client reconnect thread | 每 `QuicClientSession` 1 个 | session start 到 stop |
-| client listener thread | 每 active listener 1 个 | peer connected 时打开，所有 QUIC 断开时关闭 |
-| server dial worker | server 普通 OPEN 期间 0 或 1 | 拨号完成即退出 |
+| client ingress reactor | single-peer 1 个；multi-peer 每个 runtime adapter 1 个共享 reactor | runtime start 到 stop，peer connected 时注册 listen fd，全断开时移除 |
+| server dial reactor | 进程级 1 个 | server start 到 stop |
 
 正常关闭：
 
@@ -351,11 +343,8 @@ QUIC connection shutdown 时，`QuicClientSession` / server callback 会调用 `
 
 ```text
 N = 逻辑 CPU 数 / MsQuic worker 数量近似
-C = --quic-connections
 P = client-config 中 active peer 数
-H = 每 peer handshake pool worker 数
 W = relay worker 数
-D = server 正在拨号的 OPEN 数
 A = admin 并发 HTTP client 数
 S = speed-test 临时 worker 数
 ```
@@ -367,10 +356,7 @@ S = speed-test 临时 worker 数
 + N cxplat_worker
 + N quic_worker
 + MsQuic auxiliary threads
-+ 1 reconnect thread
-+ 1 SOCKS5 listener
-+ 0/1 HTTP CONNECT listener
-+ H handshake workers
++ 1 TqClientIngressReactor worker
 + 0/1 admin accept thread
 + A admin client threads
 + 1 tunnel reaper
@@ -387,12 +373,13 @@ multi-peer 大致为：
 
 ```text
 single process common threads
-+ P * (1 reconnect + H handshake workers + active listener threads)
++ 1 shared TqClientIngressReactor worker per client runtime adapter
++ P * QuicClientSession state, but no per-peer reconnect/listener/handshake threads
 + shared admin/router thread(s)
 + shared platform relay workers
 ```
 
-每个 peer 的 listener 会随 QUIC connected count 打开/关闭。
+每个 peer 的 listener fd 会随 QUIC connected count 注册/移除；fd 数量随 peer 变化，线程数量不随 peer 线性增长。
 
 ### 8.3 server
 
@@ -405,10 +392,12 @@ single process common threads
 + A admin client threads
 + 1 tunnel reaper
 + W platform relay workers
-+ D short-lived dial workers
++ 1 TqServerDialReactor worker
 + optional speed-test accept/worker threads
 + optional trace thread
 ```
+
+普通 OPEN 数量只增加 `TqServerDialReactor` 内部 pending state，不再增加短生命周期拨号线程。
 
 ## 9. 与 secnetperf 的差异
 
@@ -447,9 +436,9 @@ TCP->QUIC 和 zstd QUIC->TCP 都需要 worker-owned buffer。slot limit / pendin
 
 `QUIC_STATUS_PENDING` 意味着 MsQuic receive buffer ownership 暂留给应用。`StreamReceiveComplete` 越晚，QUIC receive flow-control 窗口越晚释放。当前策略是按真实处理进度 complete，不做提前 complete。
 
-### 10.4 server dial worker
+### 10.4 server dial reactor
 
-server 每个普通 OPEN 创建短生命周期 detached dial worker。高 OPEN rate 下，DNS/connect 慢路径仍可能造成瞬时线程数上升。
+server 普通 OPEN 通过 `TqServerDialReactor` 处理。高 OPEN rate 下，DNS/connect 慢路径会增加 reactor 内部 pending state 和 socket 数量，但不会线性增加应用线程数。
 
 ### 10.5 admin 与 speed-test
 
@@ -470,11 +459,8 @@ thread apply all bt
 |--------|------|
 | `CxPlatWorkerThread` | MsQuic datapath worker |
 | `QuicWorkerThread` | MsQuic QUIC worker / 应用 callback |
-| `QuicClientSession::RunReconnectLoop` | client reconnect thread |
-| `TqSocks5Server::Run` | SOCKS5 listener |
-| `TqHttpConnectServer::Run` | HTTP CONNECT listener |
-| `TqThreadPool::WorkerLoop` | client handshake worker |
-| `FinishServerOpenAfterDial` / `TqDialTcp` | server dial worker |
+| `TqClientIngressReactor::Run` | client ingress reactor，处理 SOCKS5/HTTP accept、握手、OPEN completion 和 delayed retry |
+| `TqServerDialReactor::Run` | server dial reactor，处理 ACL、c-ares DNS 和 non-blocking TCP connect |
 | `TqAdminHttpServer::Run` | admin accept thread |
 | `TqAdminHttpServer::HandleClient` | admin client thread |
 | `StatsThreadMain` / `DumpPeriodicStats` trace snapshot 栈 | trace periodic thread |
@@ -492,15 +478,16 @@ thread apply all bt
 | 文件 | 说明 |
 |------|------|
 | `src/main.cpp` | client/server 入口、single/multi-peer runtime、admin、trace、reaper guard |
-| `src/protocol/quic_session.cpp` | MsQuic API/registration/configuration、client reconnect、connection/stream callback |
-| `src/ingress/socks5_server.cpp` | SOCKS5 listener 和 handler submit |
-| `src/ingress/http_connect_server.cpp` | HTTP CONNECT listener 和 handler submit |
-| `src/runtime/thread_pool.cpp` | handshake 固定大小线程池 |
+| `src/protocol/quic_session.cpp` | MsQuic API/registration/configuration、callback-driven client reconnect、connection/stream callback |
+| `src/ingress/client_ingress_reactor.cpp` | client SOCKS5/HTTP listen、accept、handshake、OPEN completion 回投和 delayed retry |
+| `src/ingress/client_ingress_state.cpp` | SOCKS5 / HTTP CONNECT 握手状态机 |
 | `src/runtime/admin_http.cpp` | admin HTTP accept/client threads |
 | `src/runtime/router_runtime.cpp` | multi-peer config/admin runtime |
-| `src/runtime/speed_test.cpp` | 内置 upload/download speed-test 控制和 pump worker |
+| `src/runtime/speed_test.cpp` | 内置 upload/download speed-test 控制、HTTP CONNECT ingress data path 和 pump worker |
 | `src/runtime/trace.cpp` | 可选 trace 日志和周期 snapshot |
-| `src/tunnel/tcp_tunnel.cpp` | OPEN 状态机、server incoming stream dispatcher、server dial worker、tunnel registry/reaper 集成 |
+| `src/tunnel/tcp_tunnel.cpp` | OPEN 状态机、server incoming stream dispatcher、server dial reactor 提交、tunnel registry/reaper 集成 |
+| `src/tunnel/server_dial_reactor.cpp` | server 普通 OPEN 的 ACL、c-ares DNS、non-blocking TCP connect |
+| `src/tunnel/ares_dns_resolver.cpp` | c-ares async DNS resolver 封装 |
 | `src/tunnel/tunnel_registry.cpp` | connection -> tunnel abort registry |
 | `src/tunnel/tunnel_reaper.cpp` | 全局 tunnel context reaper |
 | `src/tunnel/relay.cpp` | 平台 relay runtime 选择和 active relay 计数 |
@@ -514,4 +501,4 @@ thread apply all bt
 
 ## 13. 一句话总结
 
-当前 `tcpquic-proxy` 的生产线程模型是：MsQuic 负责 QUIC/datapath worker，client 用 reconnect thread + listener thread + bounded handshake pool 管理本地入口，server 用短生命周期 dial worker 避免 callback 阻塞；relay 层由 Linux epoll worker 或 Windows IOCP worker 分片多路复用所有 TCP fd。QUIC receive callback 统一轻量 pending，实际 TCP 写出、zstd 解压和 `StreamReceiveComplete` 由 relay worker 按真实进度完成。
+当前 `tcpquic-proxy` 的生产线程模型是：MsQuic 负责 QUIC/datapath worker；client 用共享 `TqClientIngressReactor` 管理本地 SOCKS5 / HTTP CONNECT 入口、OPEN completion 和同步 start 失败 delayed retry，异步断开由 MsQuic callback 在 `SHUTDOWN_COMPLETE` 后重建 slot；server 用 `TqServerDialReactor` 处理普通 OPEN 的 ACL、DNS 和 TCP connect；relay 层由 Linux epoll worker、Windows IOCP worker 或 macOS kqueue worker 分片多路复用所有 TCP fd。QUIC receive callback 统一轻量 pending，实际 TCP 写出、zstd 解压和 `StreamReceiveComplete` 由 relay worker 按真实进度完成。

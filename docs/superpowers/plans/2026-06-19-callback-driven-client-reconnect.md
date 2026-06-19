@@ -1069,13 +1069,13 @@ In `src/runtime/speed_test.cpp`, remove the implementation of `TqRunClientSpeedT
 
 - [ ] **Step 3: Define ingress speedtest behavior**
 
-Choose HTTP CONNECT as the required ingress path for built-in client speedtest. Add a helper that opens a TCP connection to `cfg.HttpListen` and issues a CONNECT request for the speedtest target:
+Choose HTTP CONNECT as the required ingress data path for built-in client speedtest. The speedtest control plane still uses the existing speed control stream on a connected QUIC connection; data workers open TCP connections to `cfg.HttpListen` and issue CONNECT requests for the speedtest target:
 
 ```cpp
-bool TqRunIngressClientSpeedTest(const TqConfig& cfg);
+bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& cfg);
 ```
 
-This helper must fail fast if `cfg.HttpListen` is empty, uses an ephemeral port that cannot be reconnected by address, or is not listening. It must not access `QuicClientSession` directly.
+This helper must fail fast if `cfg.HttpListen` is empty, uses an ephemeral port that cannot be reconnected by address, is not loopback-connectable, or is not listening. It must not access `QuicClientSession` directly except that the caller supplies the already selected control connection.
 
 - [ ] **Step 4: Wire speedtest after ingress startup**
 
@@ -1087,7 +1087,8 @@ if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, true)) {
     quic.Stop();
     return 1;
 }
-const bool ok = TqRunIngressClientSpeedTest(cfg);
+MsQuicConnection* controlConn = quic.PickConnection();
+const bool ok = controlConn && TqRunIngressClientSpeedTest(*controlConn, cfg);
 runtime->DisableAccepting();
 quic.Stop();
 return ok ? 0 : 1;
@@ -1104,14 +1105,18 @@ bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds);
 MsQuicConnection* QuicClientSession::PickConnection();
 ```
 
-Add tests for `TqRunIngressClientSpeedTest` using a local fake HTTP CONNECT server:
+Add tests for the ingress HTTP CONNECT helper using a local fake HTTP CONNECT server:
 
 ```cpp
 static int TestIngressSpeedTestRequiresHttpListen() {
     TqConfig cfg;
     cfg.SpeedTestMode = TqSpeedTestMode::Upload;
     cfg.HttpListen.clear();
-    return TqRunIngressClientSpeedTest(cfg) ? 200 : 0;
+    TqSpeedReady ready{};
+    TqSocketHandle socket = TqInvalidSocket;
+    std::vector<uint8_t> leftover;
+    std::string err;
+    return TqOpenIngressSpeedTestConnection(cfg, ready, socket, leftover, err) ? 200 : 0;
 }
 ```
 
@@ -1178,7 +1183,7 @@ peer 的 SOCKS5 / HTTP CONNECT listen 端口只在该 peer 至少有一个 conne
 Remove warmup references. Change speedtest wording to:
 
 ```markdown
-内置 client speedtest 通过普通 HTTP CONNECT ingress 路径发起，不直接访问 `QuicClientSession`。因此 speedtest 与真实代理流量共享同一套 listen 开放规则、handshake、OPEN 和 relay 路径。
+内置 client speedtest 启动遵循普通 ingress gating。测速数据连接通过 `cfg.HttpListen` 的 HTTP CONNECT ingress 路径进入，控制面仍使用既有 speed control stream，因此 speedtest 数据面与真实代理流量共享同一套 listen 开放规则、handshake、OPEN 和 relay 路径。
 ```
 
 - [ ] **Step 5: Verify docs**
