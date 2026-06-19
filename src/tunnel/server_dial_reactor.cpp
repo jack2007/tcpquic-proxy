@@ -5,6 +5,8 @@
 
 #if defined(_WIN32)
 #include "windows_reactor.h"
+#elif defined(__APPLE__)
+#include "darwin_reactor.h"
 #else
 #include "linux_reactor.h"
 #endif
@@ -82,6 +84,8 @@ void SetSockaddrPort(sockaddr_storage& addr, uint16_t port) {
 std::unique_ptr<ITqSocketReactor> MakeSocketReactor() {
 #if defined(_WIN32)
     return std::make_unique<TqWindowsReactor>();
+#elif defined(__APPLE__)
+    return std::make_unique<TqDarwinReactor>();
 #else
     return std::make_unique<TqLinuxReactor>();
 #endif

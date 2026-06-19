@@ -2,6 +2,8 @@
 
 #if defined(_WIN32)
 #include "windows_reactor.h"
+#elif defined(__APPLE__)
+#include "darwin_reactor.h"
 #else
 #include "linux_reactor.h"
 #endif
@@ -22,6 +24,8 @@ namespace {
 
 #if defined(_WIN32)
 using TqAresReactor = TqWindowsReactor;
+#elif defined(__APPLE__)
+using TqAresReactor = TqDarwinReactor;
 #else
 using TqAresReactor = TqLinuxReactor;
 #endif
