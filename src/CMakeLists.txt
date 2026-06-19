@@ -131,9 +131,16 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND TCPQUIC_PROXY_SOURCES
+        ingress/client_ingress_reactor.cpp
+        ingress/client_ingress_state.cpp
+        tunnel/client_tunnel_open.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
     )
 endif()
 
@@ -162,7 +169,7 @@ endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET})
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
@@ -301,6 +308,8 @@ set(TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES
 )
 if(WIN32)
     list(APPEND TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES runtime/windows_reactor.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES runtime/darwin_reactor.cpp)
 else()
     list(APPEND TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES runtime/linux_reactor.cpp)
 endif()
@@ -325,6 +334,8 @@ set(TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES
 )
 if(WIN32)
     list(APPEND TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES runtime/windows_reactor.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES runtime/darwin_reactor.cpp)
 else()
     list(APPEND TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES runtime/linux_reactor.cpp)
 endif()
@@ -446,6 +457,37 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    add_executable(tcpquic_darwin_reactor_test
+        unittest/darwin_reactor_test.cpp
+        runtime/darwin_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_darwin_reactor_test)
+    target_link_libraries(tcpquic_darwin_reactor_test PRIVATE Threads::Threads)
+    set_property(TARGET tcpquic_darwin_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_darwin_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+    add_executable(tcpquic_client_ingress_reactor_test
+        unittest/client_ingress_reactor_test.cpp
+        unittest/trace_proxy_stub.cpp
+        ingress/client_ingress_reactor.cpp
+        runtime/listen_socket.cpp
+        ingress/client_ingress_state.cpp
+        ingress/socks5_server.cpp
+        ingress/http_connect_server.cpp
+        ingress/proxy_auth.cpp
+        protocol/control_protocol.cpp
+        ${TCPQUIC_SERVER_TEST_SOURCES}
+        runtime/darwin_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_client_ingress_reactor_test)
+    target_link_libraries(tcpquic_client_ingress_reactor_test PRIVATE Threads::Threads)
+    target_compile_definitions(tcpquic_client_ingress_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+    target_compile_features(tcpquic_client_ingress_reactor_test PRIVATE cxx_std_17)
+    set_property(TARGET tcpquic_client_ingress_reactor_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_client_ingress_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_darwin_relay_worker_queue_test
         unittest/darwin_relay_worker_queue_test.cpp
         tunnel/darwin_relay_worker.cpp
@@ -539,6 +581,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/linux_relay_worker.cpp
     )
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/darwin_reactor.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+    )
+endif()
 if(WIN32)
     target_sources(tcpquic_speed_test_test PRIVATE
         tunnel/server_dial_reactor.cpp
@@ -552,7 +605,7 @@ if(WIN32)
 endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
 target_link_libraries(tcpquic_speed_test_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link spdlog::spdlog)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     target_link_libraries(tcpquic_speed_test_test PRIVATE ${TCPQUIC_CARES_TARGET})
 endif()
 if(BUILD_SHARED_LIBS)

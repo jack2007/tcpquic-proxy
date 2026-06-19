@@ -831,11 +831,9 @@ class TqServerSpeedControlStreamContext final {
 public:
     TqServerSpeedControlStreamContext(
         TqServerSpeedTestController& controller,
-        MsQuicConnection* conn,
         MsQuicStream* stream,
         std::function<void()> onComplete) :
         Controller_(controller),
-        Conn_(conn),
         Stream_(stream),
         OnComplete_(std::move(onComplete)) {}
 
@@ -1041,7 +1039,6 @@ private:
     }
 
     TqServerSpeedTestController& Controller_;
-    MsQuicConnection* Conn_{nullptr};
     MsQuicStream* Stream_{nullptr};
     std::function<void()> OnComplete_;
     std::vector<uint8_t> BufferedRx_;
@@ -1557,9 +1554,9 @@ bool TqAttachServerSpeedControlStream(
         return false;
     }
 
+    (void)conn;
     auto* context = new (std::nothrow) TqServerSpeedControlStreamContext(
         controller,
-        conn,
         stream,
         std::move(onComplete));
     if (context == nullptr) {
