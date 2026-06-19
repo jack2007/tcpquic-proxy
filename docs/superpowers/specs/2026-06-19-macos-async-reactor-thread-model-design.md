@@ -57,26 +57,30 @@ macOS 当前缺口在控制面：
 底层机制：
 
 - `kqueue()` 创建控制面事件队列。
+- kqueue fd 设置 `FD_CLOEXEC`，并在 `Stop()` / 构造失败路径统一关闭。
 - `EVFILT_USER` 作为跨线程 wake event。
 - `EVFILT_READ` 映射到 `TqReactorEvents::Read`。
 - `EVFILT_WRITE` 映射到 `TqReactorEvents::Write`。
 - `EV_EOF` / `EV_ERROR` 映射到 `TqReactorEvents::Error`。
-- `Add()` / `Modify()` / `Remove()` 维护 fd 到 handler 的映射，并同步增删 kqueue filters。
-- `RunOnce(timeoutMs)` 调用 `kevent()`，将平台事件转换为抽象事件后派发 handler。
+- `Add()` / `Modify()` / `Remove()` 维护 fd 到 `{events, handler}` 的映射，并同步增删 kqueue filters。
+- `Add()` / `Modify()` 必须拒绝空事件、未知事件位、空 handler 和未启动 reactor 上的操作。
+- `RunOnce(timeoutMs)` 调用 `kevent()`，`EINTR` 时重试，将平台事件转换为抽象事件后按注册 interest mask 派发 handler。
+- `Wake()` 只唤醒阻塞中的 `RunOnce()`，不算一次业务 handler work；仅消费 wake event 时 `RunOnce()` 返回 `false`，保持 Linux/Windows reactor 契约一致。
 
 `TqDarwinReactor` 只服务控制面低吞吐 socket，包括 listen fd、accepted handshake fd、c-ares fd、pending connect fd。已经建立隧道后的 TCP/QUIC relay fd 继续交给 `TqDarwinRelayWorker` 数据面。
 
 ### 4.2 kqueue filter 管理
 
-kqueue 的 read/write 是独立 filter，因此 `Modify()` 不能只更新内存中的事件位，需要精确维护 filter：
+kqueue 的 read/write 是独立 filter，因此 `Modify()` 不能只更新内存中的事件位，需要精确维护 filter 和已注册事件掩码：
 
 - `Read` 开启：注册或保留 `EVFILT_READ`。
 - `Write` 开启：注册或保留 `EVFILT_WRITE`。
+- `Error` 开启但 `Read` 关闭：注册 `EVFILT_READ` 作为 EOF/error 观察 filter，但派发前用 interest mask 过滤普通 read readiness，避免 error-only 注册收到普通数据事件。
 - `Read` 关闭：删除 `EVFILT_READ`。
 - `Write` 关闭：删除 `EVFILT_WRITE`。
 - `Remove(fd)`：删除 read/write 两个 filter，并从 handler map 中移除 fd。
 
-派发前必须重新查 handler map；如果 fd 已被 `Remove()` 或 `Stop()` 清理，则忽略迟到事件。
+派发前必须重新查 handler map，并把转换后的事件与 `(registeredEvents | Error)` 相交；如果 fd 已被 `Remove()` 或 `Stop()` 清理，或相交结果为空，则忽略迟到事件。
 
 ### 4.3 server dial reactor 平台选择
 
@@ -153,10 +157,10 @@ Darwin 测试需要补齐：
    macOS 不应假定完全支持 Linux-style socket flags。若编译期或运行期不可用，需要使用 `socket()` + `fcntl(F_SETFL, O_NONBLOCK)` + `fcntl(F_SETFD, FD_CLOEXEC)` fallback。
 
 2. **`accept4()`**  
-   macOS 不提供 Linux `accept4()`。如果现有 ingress 代码依赖 `accept4()`，需要用 `accept()` + non-blocking/close-on-exec 设置替代。
+   macOS 不提供 Linux `accept4()`，现有 ingress 代码如果直接引用会编译失败，而不是只在运行期返回 `ENOSYS`。Darwin 分支必须使用 `accept()` + non-blocking/close-on-exec 设置替代。
 
 3. **`MSG_NOSIGNAL`**  
-   macOS 不支持 Linux `MSG_NOSIGNAL`。平台 send helper 应通过现有 `TqSendFlags::NoSignal` 抽象屏蔽差异。
+   macOS 不支持 Linux `MSG_NOSIGNAL`。平台 send helper 必须通过现有 `TqSendFlags::NoSignal` 抽象屏蔽差异，例如在 `MSG_NOSIGNAL` 不存在但 `SO_NOSIGPIPE` 可用时为 socket 设置 `SO_NOSIGPIPE`，避免 peer close 后普通 `send()` 触发 `SIGPIPE`。
 
 4. **kqueue EOF / error 语义**  
    kqueue 的 `EV_EOF`、`EV_ERROR` 和 read/write readiness 组合不完全等价于 epoll。测试应验证抽象语义，不应绑定过窄事件组合。
@@ -177,5 +181,8 @@ Darwin 测试需要补齐：
 - macOS server 普通 OPEN 不再按连接数创建 detached dial worker。
 - macOS DNS 由 c-ares async resolver + `TqDarwinReactor` 驱动。
 - `tcpquic_darwin_reactor_test`、`tcpquic_ares_dns_resolver_test`、`tcpquic_server_dial_reactor_test`、`tcpquic_client_ingress_reactor_test` 在 macOS 构建并通过。
+- `tcpquic_darwin_reactor_test` 覆盖 wake 不算 work、invalid event rejection、error-only interest、modify、remove、callback 内 self-remove / self-modify / stop。
+- macOS client ingress 构建不引用 `accept4()`，listen socket 不依赖未定义的 Linux-only socket flags。
+- macOS `TqSendFlags::NoSignal` 不会在 peer 已关闭时触发 `SIGPIPE`。
 - Linux/Windows reactor、ingress、dial 相关测试继续通过。
 - `docs/thread-model_cn.md` 更新为 Linux / Windows / macOS 三平台控制面统一 reactor 模型。

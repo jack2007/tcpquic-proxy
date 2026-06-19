@@ -33,8 +33,8 @@
   如果 macOS 编译暴露 `SOCK_NONBLOCK` / `SOCK_CLOEXEC` 不兼容，补 POSIX fallback。
 - `src/ingress/client_ingress_reactor.cpp`  
   如果 macOS 编译暴露 `accept4()` 等 Linux-only 依赖，改为跨平台 accept fallback。
-- `src/platform/platform_socket*.cpp`  
-  如有必要，补齐 macOS socket error / no-signal send 语义。
+- `src/platform/platform_socket_posix.cpp`
+  补齐 macOS `TqSendFlags::NoSignal` 语义，避免普通 `send()` 在 peer 已关闭时触发 `SIGPIPE`。
 - `docs/thread-model_cn.md`  
   更新 macOS 控制面线程模型。
 - `docs/superpowers/specs/2026-06-19-macos-async-reactor-thread-model-design.md`  
@@ -85,7 +85,12 @@ private:
     bool DeleteFilter(TqSocketHandle fd, int16_t filter);
 
     int KqueueFd{-1};
-    std::unordered_map<TqSocketHandle, Handler> Handlers;
+    struct Entry {
+        uint32_t Events{0};
+        Handler Callback;
+    };
+
+    std::unordered_map<TqSocketHandle, Entry> Handlers;
 #else
     bool Started{false};
 #endif
@@ -103,15 +108,30 @@ Create `src/runtime/darwin_reactor.cpp`:
 
 #include <sys/event.h>
 #include <sys/time.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
+#include <utility>
 #include <vector>
 
 namespace {
 constexpr uintptr_t kWakeIdent = 1;
 constexpr int kMaxEvents = 64;
+constexpr uint32_t kValidEvents = TqReactorEvents::Read |
+    TqReactorEvents::Write | TqReactorEvents::Error;
+
+bool HasRequestedEvents(uint32_t events) {
+    return events != 0 && (events & ~kValidEvents) == 0;
+}
+
+void CloseFd(int& fd) {
+    if (fd >= 0) {
+        (void)::close(fd);
+        fd = -1;
+    }
+}
 
 void SetEvent(struct kevent& event, uintptr_t ident, int16_t filter, uint16_t flags, uint32_t fflags) {
     EV_SET(&event, ident, filter, flags, fflags, 0, nullptr);
@@ -146,23 +166,23 @@ bool TqDarwinReactor::Start() {
     if (KqueueFd < 0) {
         return false;
     }
+    if (::fcntl(KqueueFd, F_SETFD, FD_CLOEXEC) != 0) {
+        CloseFd(KqueueFd);
+        return false;
+    }
 
     struct kevent change;
     SetEvent(change, kWakeIdent, EVFILT_USER, EV_ADD | EV_CLEAR, 0);
     if (::kevent(KqueueFd, &change, 1, nullptr, 0, nullptr) != 0) {
-        ::close(KqueueFd);
-        KqueueFd = -1;
+        CloseFd(KqueueFd);
         return false;
     }
     return true;
 }
 
 void TqDarwinReactor::Stop() {
-    if (KqueueFd >= 0) {
-        ::close(KqueueFd);
-        KqueueFd = -1;
-    }
     Handlers.clear();
+    CloseFd(KqueueFd);
 }
 
 bool TqDarwinReactor::DeleteFilter(TqSocketHandle fd, int16_t filter) {
@@ -185,7 +205,9 @@ bool TqDarwinReactor::ApplyFilters(TqSocketHandle fd, uint32_t events, bool addM
     std::vector<struct kevent> changes;
     changes.reserve(2);
 
-    if ((events & TqReactorEvents::Read) != 0) {
+    const bool wantsReadFilter =
+        (events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0;
+    if (wantsReadFilter) {
         struct kevent change;
         SetEvent(change, static_cast<uintptr_t>(fd), EVFILT_READ, EV_ADD | EV_ENABLE | EV_CLEAR, 0);
         changes.push_back(change);
@@ -208,24 +230,36 @@ bool TqDarwinReactor::ApplyFilters(TqSocketHandle fd, uint32_t events, bool addM
 }
 
 bool TqDarwinReactor::Add(TqSocketHandle fd, uint32_t events, Handler handler) {
-    if (!TqSocketValid(fd) || !handler || events == 0 || Handlers.find(fd) != Handlers.end()) {
+    if (KqueueFd < 0 || !TqSocketValid(fd) || !HasRequestedEvents(events) ||
+        !handler || Handlers.find(fd) != Handlers.end()) {
         return false;
     }
     if (!ApplyFilters(fd, events, true)) {
         return false;
     }
-    Handlers.emplace(fd, std::move(handler));
+    Handlers.emplace(fd, Entry{events, std::move(handler)});
     return true;
 }
 
 bool TqDarwinReactor::Modify(TqSocketHandle fd, uint32_t events) {
-    if (!TqSocketValid(fd) || events == 0 || Handlers.find(fd) == Handlers.end()) {
+    if (KqueueFd < 0 || !TqSocketValid(fd) || !HasRequestedEvents(events)) {
         return false;
     }
-    return ApplyFilters(fd, events, false);
+    auto it = Handlers.find(fd);
+    if (it == Handlers.end()) {
+        return false;
+    }
+    if (!ApplyFilters(fd, events, false)) {
+        return false;
+    }
+    it->second.Events = events;
+    return true;
 }
 
 bool TqDarwinReactor::Remove(TqSocketHandle fd) {
+    if (KqueueFd < 0 || !TqSocketValid(fd)) {
+        return false;
+    }
     const bool existed = Handlers.erase(fd) > 0;
     (void)DeleteFilter(fd, EVFILT_READ);
     (void)DeleteFilter(fd, EVFILT_WRITE);
@@ -255,16 +289,22 @@ bool TqDarwinReactor::RunOnce(int timeoutMs) {
     }
 
     struct kevent events[kMaxEvents];
-    const int count = ::kevent(KqueueFd, nullptr, 0, events, kMaxEvents, timeoutPtr);
-    if (count < 0) {
-        return errno == EINTR;
+    int count = 0;
+    for (;;) {
+        count = ::kevent(KqueueFd, nullptr, 0, events, kMaxEvents, timeoutPtr);
+        if (count >= 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return false;
     }
 
     bool didWork = false;
     for (int i = 0; i < count; ++i) {
         const auto& event = events[i];
         if (event.filter == EVFILT_USER && event.ident == kWakeIdent) {
-            didWork = true;
             continue;
         }
 
@@ -274,11 +314,12 @@ bool TqDarwinReactor::RunOnce(int timeoutMs) {
             continue;
         }
 
-        const uint32_t reactorEvents = ToReactorEvents(event);
+        uint32_t reactorEvents = ToReactorEvents(event);
+        reactorEvents &= (it->second.Events | TqReactorEvents::Error);
         if (reactorEvents == 0) {
             continue;
         }
-        auto handler = it->second;
+        auto handler = it->second.Callback;
         handler(fd, reactorEvents);
         didWork = true;
     }
@@ -334,7 +375,7 @@ void TestWake() {
     TqDarwinReactor reactor;
     assert(reactor.Start());
     assert(reactor.Wake());
-    assert(reactor.RunOnce(100));
+    assert(!reactor.RunOnce(100));
     reactor.Stop();
 }
 
@@ -431,6 +472,74 @@ void TestRemoveSuppressesDispatch() {
     TqCloseSocket(pair[1]);
 }
 
+void TestInvalidOperationsAndErrorOnly() {
+    constexpr uint32_t unknownEventBit = 0x80000000u;
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    MakeSocketPair(pair);
+
+    TqDarwinReactor reactor;
+    assert(reactor.Start());
+    assert(!reactor.Add(pair[0], 0, [](TqSocketHandle, uint32_t) {}));
+    assert(!reactor.Add(pair[0], TqReactorEvents::Read, TqDarwinReactor::Handler{}));
+    assert(!reactor.Add(pair[0], TqReactorEvents::Read | unknownEventBit,
+        [](TqSocketHandle, uint32_t) {}));
+    assert(!reactor.Modify(pair[0], TqReactorEvents::Read));
+    assert(!reactor.Remove(pair[0]));
+
+    bool errorOnlyRan = false;
+    assert(reactor.Add(pair[0], TqReactorEvents::Error,
+        [&](TqSocketHandle, uint32_t) {
+            errorOnlyRan = true;
+        }));
+    assert(reactor.Modify(pair[0], TqReactorEvents::Error));
+    assert(!reactor.Modify(pair[0], TqReactorEvents::Error | unknownEventBit));
+
+    const char byte = 'e';
+    assert(TqSend(pair[1], &byte, 1, TqSendFlags::None) == 1);
+    assert(!reactor.RunOnce(10));
+    assert(!errorOnlyRan);
+
+    reactor.Stop();
+    TqCloseSocket(pair[0]);
+    TqCloseSocket(pair[1]);
+}
+
+void TestCallbackSelfRemoveModifyStop() {
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    MakeSocketPair(pair);
+
+    TqDarwinReactor reactor;
+    assert(reactor.Start());
+    int readCalls = 0;
+    int writeCalls = 0;
+    assert(reactor.Add(pair[0], TqReactorEvents::Read, [&](TqSocketHandle fd, uint32_t events) {
+        if ((events & TqReactorEvents::Read) != 0) {
+            char byte = '\0';
+            (void)TqRecv(fd, &byte, 1, TqRecvFlags::None);
+            ++readCalls;
+            assert(reactor.Modify(fd, TqReactorEvents::Write));
+        }
+        if ((events & TqReactorEvents::Write) != 0) {
+            ++writeCalls;
+            assert(reactor.Remove(fd));
+            reactor.Stop();
+        }
+    }));
+
+    const char byte = 'm';
+    assert(TqSend(pair[1], &byte, 1, TqSendFlags::None) == 1);
+    assert(reactor.RunOnce(100));
+    assert(readCalls == 1);
+    assert(writeCalls == 0);
+    assert(reactor.RunOnce(100));
+    assert(writeCalls == 1);
+    assert(!reactor.Wake());
+    assert(!reactor.RunOnce(10));
+
+    TqCloseSocket(pair[0]);
+    TqCloseSocket(pair[1]);
+}
+
 } // namespace
 #endif
 
@@ -443,6 +552,8 @@ int main() {
     TestWriteReadiness();
     TestModifyReadToWrite();
     TestRemoveSuppressesDispatch();
+    TestInvalidOperationsAndErrorOnly();
+    TestCallbackSelfRemoveModifyStop();
 #endif
     return 0;
 }
@@ -603,8 +714,9 @@ git commit -m "feat(tunnel): use Darwin reactor for async DNS and dial"
 
 **Files:**
 - Modify: `src/CMakeLists.txt`
-- Possibly Modify: `src/ingress/client_ingress_reactor.cpp`
-- Possibly Modify: `src/runtime/listen_socket.cpp`
+- Modify: `src/ingress/client_ingress_reactor.cpp`
+- Modify: `src/runtime/listen_socket.cpp`
+- Modify: `src/platform/platform_socket_posix.cpp`
 
 - [ ] **Step 1: Add Darwin client ingress reactor test target**
 
@@ -638,11 +750,11 @@ set_property(TARGET tcpquic_client_ingress_reactor_test APPEND PROPERTY BUILD_RP
 cmake --build build --target tcpquic_client_ingress_reactor_test -j2
 ```
 
-Expected: build succeeds. If it fails on `accept4()`, `SOCK_NONBLOCK`, `SOCK_CLOEXEC`, or no-signal send differences, continue with Step 3.
+Expected: build succeeds after Step 3 is applied. On macOS, `accept4()`, `SOCK_NONBLOCK` / `SOCK_CLOEXEC`, and no-signal send behavior must be handled explicitly instead of waiting for Linux fallback code to compile.
 
-- [ ] **Step 3: Fix macOS POSIX socket differences if needed**
+- [ ] **Step 3: Fix macOS POSIX socket differences**
 
-If `src/runtime/listen_socket.cpp` fails because macOS does not expose Linux-style socket flags, change the non-Windows socket creation path to prefer atomic flags only when available and otherwise use `TqPrepareListenSocket()`:
+In `src/runtime/listen_socket.cpp`, change the non-Windows socket creation path to prefer atomic flags only when available and otherwise use `TqPrepareListenSocket()`:
 
 ```cpp
 #if defined(SOCK_NONBLOCK) && defined(SOCK_CLOEXEC)
@@ -667,7 +779,61 @@ If `src/runtime/listen_socket.cpp` fails because macOS does not expose Linux-sty
     return fd.Release();
 ```
 
-If ingress uses `accept4()`, replace the Darwin path with `accept()` followed by `TqSetNonBlocking()` and close-on-exec setup.
+In `src/ingress/client_ingress_reactor.cpp`, do not reference `accept4()` on Darwin. Use `accept()` followed by `TqSetNonBlocking()` and close-on-exec setup:
+
+```cpp
+#if defined(_WIN32)
+    TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+    if (TqSocketValid(clientFd) && !TqSetNonBlocking(clientFd)) {
+        TqCloseFd(clientFd);
+    }
+    return clientFd;
+#elif defined(__APPLE__)
+    TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
+    if (TqSocketValid(clientFd)) {
+        const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
+        if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
+            ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
+            TqCloseFd(clientFd);
+        }
+    }
+    return clientFd;
+#else
+    TqSocketHandle clientFd = ::accept4(listenFd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (!TqSocketValid(clientFd) && errno == ENOSYS) {
+        clientFd = ::accept(listenFd, nullptr, nullptr);
+        if (TqSocketValid(clientFd)) {
+            const int fdFlags = ::fcntl(clientFd, F_GETFD, 0);
+            if (!TqSetNonBlocking(clientFd) || fdFlags < 0 ||
+                ::fcntl(clientFd, F_SETFD, fdFlags | FD_CLOEXEC) != 0) {
+                TqCloseFd(clientFd);
+            }
+        }
+    }
+    return clientFd;
+#endif
+```
+
+In `src/platform/platform_socket_posix.cpp`, implement `TqSendFlags::NoSignal` on macOS with `SO_NOSIGPIPE` when `MSG_NOSIGNAL` is unavailable:
+
+```cpp
+int TqSend(TqSocketHandle socket, const void* data, size_t length, TqSendFlags flags) {
+    int nativeFlags = 0;
+#ifdef MSG_NOSIGNAL
+    if (flags == TqSendFlags::NoSignal) {
+        nativeFlags |= MSG_NOSIGNAL;
+    }
+#elif defined(SO_NOSIGPIPE)
+    if (flags == TqSendFlags::NoSignal) {
+        int enabled = 1;
+        (void)::setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+    }
+#else
+    (void)flags;
+#endif
+    return static_cast<int>(::send(socket, data, length, nativeFlags));
+}
+```
 
 - [ ] **Step 4: Run client ingress reactor test on macOS**
 
@@ -680,7 +846,7 @@ Expected: executable exits `0`.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/CMakeLists.txt src/runtime/listen_socket.cpp src/ingress/client_ingress_reactor.cpp
+git add src/CMakeLists.txt src/runtime/listen_socket.cpp src/ingress/client_ingress_reactor.cpp src/platform/platform_socket_posix.cpp
 git commit -m "test(ingress): enable client ingress reactor on Darwin"
 ```
 
