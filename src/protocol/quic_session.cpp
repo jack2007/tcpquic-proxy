@@ -398,6 +398,10 @@ static void TqClientDebugLog(const char* message, size_t slotIndex, const void* 
         status);
 }
 
+static bool TqConnectionStartAccepted(QUIC_STATUS status) {
+    return QUIC_SUCCEEDED(status) || status == QUIC_STATUS_PENDING;
+}
+
 QuicClientSession::~QuicClientSession() {
     Stop();
 }
@@ -705,6 +709,10 @@ void QuicClientSession::MarkReconnectStartedForTest(size_t slots) {
 void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
     ScheduleStartRetry(index);
 }
+
+bool QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS status) {
+    return TqConnectionStartAccepted(status);
+}
 #endif
 
 void QuicClientSession::AbortAllTunnels() {
@@ -808,8 +816,10 @@ bool QuicClientSession::StartSlot(size_t index) {
         state->OrphanedConnections.push_back(std::move(oldConnection));
     }
 
+    std::unique_ptr<MsQuicConnection> newConnection;
     MsQuicConnection* connectionToStart = nullptr;
     ClientConnContext* newContext = nullptr;
+    std::shared_ptr<ClientSessionGate> gate;
     bool scheduleRetry = false;
 
     if (TqRuntimeTuningEnabled(Config)) {
@@ -830,42 +840,52 @@ bool QuicClientSession::StartSlot(size_t index) {
         if (!state->Started || state->Stopping || index >= state->Slots.size()) {
             return false;
         }
+        gate = state->SessionGate;
+    }
 
-        auto& slot = state->Slots[index];
-        const auto gate = state->SessionGate;
-        newContext = new (std::nothrow) ClientConnContext{gate, state, index};
-        if (newContext == nullptr) {
-            scheduleRetry = true;
-        }
+    newContext = new (std::nothrow) ClientConnContext{gate, state, index};
+    if (newContext == nullptr) {
+        scheduleRetry = true;
+    }
 
-        if (!scheduleRetry) {
-            slot.Connection = std::make_unique<MsQuicConnection>(
+    if (!scheduleRetry) {
+        newConnection = std::make_unique<MsQuicConnection>(
                 *Registration,
                 CleanUpManual,
                 QuicClientSession::ConnectionCallback,
                 newContext);
-            if (!slot.Connection || !slot.Connection->IsValid()) {
-                std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
-                    slot.Connection ? slot.Connection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
-                delete newContext;
-                slot.Connection.reset();
-                scheduleRetry = true;
-            }
+        if (!newConnection || !newConnection->IsValid()) {
+            std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
+                newConnection ? newConnection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
+            delete newContext;
+            newContext = nullptr;
+            newConnection.reset();
+            scheduleRetry = true;
         }
+    }
+
+    if (!scheduleRetry && Config.QuicDisable1RttEncryption &&
+        !TqSetDisable1RttEncryption(newConnection.get(), "client")) {
+        delete newContext;
+        newContext = nullptr;
+        newConnection.reset();
+        scheduleRetry = true;
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
+            delete newContext;
+            return false;
+        }
+
+        auto& slot = state->Slots[index];
         if (!scheduleRetry) {
+            slot.Connection = std::move(newConnection);
             slot.Context = newContext;
             connectionToStart = slot.Connection.get();
-            if (Config.QuicDisable1RttEncryption &&
-                !TqSetDisable1RttEncryption(connectionToStart, "client")) {
-                slot.Context = nullptr;
-                delete newContext;
-                slot.Connection.reset();
-                connectionToStart = nullptr;
-                scheduleRetry = true;
-            } else {
-                TqClientDebugLog("connection-opened", index, connectionToStart,
-                    slot.Connection->GetInitStatus());
-            }
+            TqClientDebugLog("connection-opened", index, connectionToStart,
+                slot.Connection->GetInitStatus());
         }
     }
     if (scheduleRetry) {
@@ -891,10 +911,10 @@ bool QuicClientSession::StartSlot(size_t index) {
 
         auto& slot = state->Slots[index];
         if (slot.Connection.get() != connectionToStart || slot.Context != newContext) {
-            return QUIC_SUCCEEDED(startStatus);
+            return TqConnectionStartAccepted(startStatus);
         }
 
-        if (QUIC_FAILED(startStatus)) {
+        if (!TqConnectionStartAccepted(startStatus)) {
             std::fprintf(stderr, "ConnectionStart failed, 0x%x\n", startStatus);
             slot.Context = nullptr;
             delete newContext;

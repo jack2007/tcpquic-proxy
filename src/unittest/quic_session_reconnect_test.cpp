@@ -134,10 +134,24 @@ static int TestRejectedSchedulerAllowsLaterRetry() {
     return 0;
 }
 
+static int TestConnectionStartPendingIsAccepted() {
+    if (!QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_SUCCESS)) {
+        return 50;
+    }
+    if (!QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_PENDING)) {
+        return 51;
+    }
+    if (QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_ABORTED)) {
+        return 52;
+    }
+    return 0;
+}
+
 int main() {
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
+    if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     return 0;
 }

@@ -57,6 +57,7 @@ public:
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
     void ScheduleStartRetryForTest(size_t index);
+    static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
 #endif
 
 private:

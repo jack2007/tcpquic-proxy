@@ -89,13 +89,12 @@ public:
             return runtime->Ingress->EnqueueDelayed(delay, std::move(task));
         });
         runtime->Quic->SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
-            (void)connectedCount;
             auto runtime = weakRuntime.lock();
             if (!runtime) {
                 return;
             }
             std::string listenerErr;
-            if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
+            if (!runtime->ApplyConnectionState(connectedCount, listenerErr, false)) {
                 std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
                     runtime->PeerId.c_str(), listenerErr.c_str());
             }
@@ -226,6 +225,11 @@ private:
             return ApplyCurrentConnectionStateLocked(err, requireConnected);
         }
 
+        bool ApplyConnectionState(uint32_t connectedCount, std::string& err, bool requireConnected) {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
+        }
+
         bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
             std::lock_guard<std::mutex> guard(ListenerMutex);
             AcceptingEnabled = true;
@@ -238,7 +242,19 @@ private:
         }
 
         bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
+            if (!AcceptingEnabled) {
+                CloseListenersLocked();
+                if (requireConnected) {
+                    err = "listener accepting is disabled";
+                    return false;
+                }
+                return true;
+            }
             const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+            return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
+        }
+
+        bool ApplyConnectionStateLocked(uint32_t connectedCount, std::string& err, bool requireConnected) {
             if (!AcceptingEnabled || connectedCount == 0) {
                 CloseListenersLocked();
                 if (requireConnected) {
@@ -380,6 +396,11 @@ struct TqSinglePeerClientRuntime {
         return ApplyCurrentConnectionStateLocked(err, requireConnected);
     }
 
+    bool ApplyConnectionState(uint32_t connectedCount, std::string& err, bool requireConnected) {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
+    }
+
     bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
         std::lock_guard<std::mutex> guard(ListenerMutex);
         AcceptingEnabled = true;
@@ -392,7 +413,19 @@ struct TqSinglePeerClientRuntime {
     }
 
     bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
+        if (!AcceptingEnabled) {
+            CloseListenersLocked();
+            if (requireConnected) {
+                err = "listener accepting is disabled";
+                return false;
+            }
+            return true;
+        }
         const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
+        return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
+    }
+
+    bool ApplyConnectionStateLocked(uint32_t connectedCount, std::string& err, bool requireConnected) {
         if (!AcceptingEnabled || connectedCount == 0) {
             CloseListenersLocked();
             if (requireConnected) {
@@ -499,13 +532,12 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return runtime->EnqueueDelayed(delay, std::move(task));
     });
     quic.SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
-        (void)connectedCount;
         auto runtime = weakRuntime.lock();
         if (!runtime) {
             return;
         }
         std::string listenerErr;
-        if (!runtime->ApplyCurrentConnectionState(listenerErr, false)) {
+        if (!runtime->ApplyConnectionState(connectedCount, listenerErr, false)) {
             std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
         }
     });

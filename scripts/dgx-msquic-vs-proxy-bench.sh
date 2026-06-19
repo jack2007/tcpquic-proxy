@@ -22,6 +22,10 @@ PERF_PORT="${PERF_PORT:-4434}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 DURATION_SEC="${DURATION_SEC:-30}"
 PROXY_EXTRA_ARGS="${PROXY_EXTRA_ARGS:-}"
+PROXY_CASES="${PROXY_CASES:-proxy-1x1:1:1:1 proxy-16x16:1:16:16 proxy-4x16:1:16:4}"
+RUN_SECNETPERF="${RUN_SECNETPERF:-1}"
+PROXY_START_WAIT_SEC="${PROXY_START_WAIT_SEC:-60}"
+PROXY_WAIT_ALL_CONNECTIONS="${PROXY_WAIT_ALL_CONNECTIONS:-1}"
 REPORT="${REPORT:-/tmp/dgx-msquic-vs-proxy-$(date +%Y%m%d-%H%M%S).md}"
 
 TMP="/tmp/dgx-msquic-proxy-$$"
@@ -200,9 +204,18 @@ start_proxy_stack() {
         ${args} \
         >/tmp/dgx-proxy-client.log 2>&1 &
     CLIENT_PID=$!
-    for _ in $(seq 1 50); do
+    local client_wait_ticks=$((PROXY_START_WAIT_SEC * 10 / 3))
+    [[ "$client_wait_ticks" -gt 0 ]] || client_wait_ticks=1
+    for _ in $(seq 1 "$client_wait_ticks"); do
         sleep 0.3
-        grep -q "HTTP CONNECT listening" /tmp/dgx-proxy-client.log 2>/dev/null && return 0
+        if grep -q "HTTP CONNECT listening" /tmp/dgx-proxy-client.log 2>/dev/null; then
+            if [[ "$PROXY_WAIT_ALL_CONNECTIONS" != "1" ]]; then
+                return 0
+            fi
+            local connected
+            connected=$(grep -c "QUIC client connected" /tmp/dgx-proxy-client.log 2>/dev/null || true)
+            [[ "$connected" -ge "$quic_conns" ]] && return 0
+        fi
     done
     return 1
 }
@@ -225,6 +238,12 @@ measure_proxy_parallel() {
             >"${speed_dir}/${i}.bps" 2>/dev/null &
     done
     wait
+    for i in $(seq 1 "$n"); do
+        local one_bps one_mbps
+        one_bps=$(cat "${speed_dir}/${i}.bps" 2>/dev/null || echo 0)
+        one_mbps=$(mbps_from_bps "$one_bps")
+        log "  proxy curl[${i}]: ${one_mbps} Mbps"
+    done
     python3 - "$speed_dir" <<'PY'
 import glob, os, sys
 d = sys.argv[1]
@@ -264,13 +283,20 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-[[ -x "$SECNETPERF" ]] || { log "missing $SECNETPERF — build with: cmake -B build -DQUIC_BUILD_PERF=ON && cmake --build build --target secnetperf"; exit 1; }
+if [[ "$RUN_SECNETPERF" == "1" ]]; then
+    [[ -x "$SECNETPERF" ]] || { log "missing $SECNETPERF — build with: cmake -B build -DQUIC_BUILD_PERF=ON && cmake --build build --target secnetperf"; exit 1; }
+fi
 [[ -x "$BIN" ]] || { log "missing $BIN"; exit 1; }
 
 mkdir -p "$TMP"
 ensure_routes
 clear_peer_netem
-deploy_msquic_perf
+if [[ "$RUN_SECNETPERF" == "1" ]]; then
+    deploy_msquic_perf
+else
+    ssh -o BatchMode=yes "$PEER" "mkdir -p ${REMOTE_DIR}"
+    rsync -az "${BIN}" "${PEER}:${REMOTE_BIN}"
+fi
 start_busybox_http
 ensure_payload
 generate_certs
@@ -300,35 +326,42 @@ echo "" >> "$REPORT"
 echo "| 工具 | 场景 | conns/streams 或 quic×curl | Mbps | Gbps | vs msquic 单连接 |" >> "$REPORT"
 echo "|------|------|---------------------------|------|------|------------------|" >> "$REPORT"
 
-run_secnetperf_server
-r1=$(run_secnetperf_client 1 0 "msquic-1conn")
-msquic_1_mbps=$(echo "$r1" | cut -d'|' -f5)
-IFS='|' read -r _ _ c _ m g _ <<< "$r1"
-echo "| secnetperf | 单连接下载 | conns=1 | ${m} | ${g} | 100% |" >> "$REPORT"
+msquic_1_mbps=0
+if [[ "$RUN_SECNETPERF" == "1" ]]; then
+    run_secnetperf_server
+    r1=$(run_secnetperf_client 1 0 "msquic-1conn")
+    msquic_1_mbps=$(echo "$r1" | cut -d'|' -f5)
+    IFS='|' read -r _ _ c _ m g _ <<< "$r1"
+    echo "| secnetperf | 单连接下载 | conns=1 | ${m} | ${g} | 100% |" >> "$REPORT"
 
-r2=$(run_secnetperf_client 16 0 "msquic-16conn")
-IFS='|' read -r _ _ c _ m g _ <<< "$r2"
-echo "| secnetperf | 16 连接下载 | conns=16 | ${m} | ${g} | — |" >> "$REPORT"
+    r2=$(run_secnetperf_client 16 0 "msquic-16conn")
+    IFS='|' read -r _ _ c _ m g _ <<< "$r2"
+    echo "| secnetperf | 16 连接下载 | conns=16 | ${m} | ${g} | — |" >> "$REPORT"
 
-run_secnetperf_server
-r3=$(run_secnetperf_client 1 16 "msquic-1conn-16stream")
-IFS='|' read -r _ _ c s m g _ <<< "$r3"
-echo "| secnetperf | 单连接 16 stream | conns=1 streams=16 | ${m} | ${g} | — |" >> "$REPORT"
+    run_secnetperf_server
+    r3=$(run_secnetperf_client 1 16 "msquic-1conn-16stream")
+    IFS='|' read -r _ _ c s m g _ <<< "$r3"
+    echo "| secnetperf | 单连接 16 stream | conns=1 streams=16 | ${m} | ${g} | — |" >> "$REPORT"
 
-remote_kill_all
+    remote_kill_all
+fi
 
-p1=$(run_proxy_case "proxy-1x1" 1 1 1)
-IFS='|' read -r _ _ qc pc m g _ <<< "$p1"
-pct=$(python3 -c "m=float('$m'); b=float('$msquic_1_mbps'); print(f'{m/b*100:.1f}%' if b>0 else 'n/a')")
-echo "| tcpquic-proxy | HTTP CONNECT 单流 | quic=1 curl=1 | ${m} | ${g} | ${pct} |" >> "$REPORT"
-
-p2=$(run_proxy_case "proxy-16x16" 1 16 16)
-IFS='|' read -r _ _ qc pc m g _ <<< "$p2"
-echo "| tcpquic-proxy | 多流 | quic=16 curl=16 | ${m} | ${g} | — |" >> "$REPORT"
-
-p3=$(run_proxy_case "proxy-4x16" 1 16 4)
-IFS='|' read -r _ _ qc pc m g _ <<< "$p3"
-echo "| tcpquic-proxy | 多流（最佳） | quic=16 curl=4 | ${m} | ${g} | — |" >> "$REPORT"
+for spec in $PROXY_CASES; do
+    IFS=':' read -r label initrtt quic_conns parallel <<< "$spec"
+    if [[ -z "$label" || -z "$initrtt" || -z "$quic_conns" || -z "$parallel" ]]; then
+        log "invalid PROXY_CASES entry: ${spec}; expected label:initrtt:quic_connections:parallel_curl"
+        exit 1
+    fi
+    p=$(run_proxy_case "$label" "$initrtt" "$quic_conns" "$parallel")
+    IFS='|' read -r _ _ qc pc m g _ <<< "$p"
+    pct="—"
+    scenario="多流"
+    if [[ "$quic_conns" == "1" && "$parallel" == "1" ]]; then
+        pct=$(python3 -c "m=float('$m'); b=float('$msquic_1_mbps'); print(f'{m/b*100:.1f}%' if b>0 else 'n/a')")
+        scenario="HTTP CONNECT 单流"
+    fi
+    echo "| tcpquic-proxy | ${scenario} | quic=${qc} curl=${pc} | ${m} | ${g} | ${pct} |" >> "$REPORT"
+done
 
 echo "" >> "$REPORT"
 echo "## 说明" >> "$REPORT"
