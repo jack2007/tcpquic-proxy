@@ -489,6 +489,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(WIN32)
     target_sources(tcpquic_speed_test_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/windows_reactor.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
@@ -496,7 +500,7 @@ if(WIN32)
 endif()
 tcpquic_target_include_dirs(tcpquic_speed_test_test)
 target_link_libraries(tcpquic_speed_test_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link spdlog::spdlog)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
     target_link_libraries(tcpquic_speed_test_test PRIVATE ${TCPQUIC_CARES_TARGET})
 endif()
 if(BUILD_SHARED_LIBS)
@@ -665,7 +669,6 @@ if(WIN32)
         acl/acl_filter.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
-        tunnel/windows_relay_worker.cpp
     )
 endif()
 add_executable(tcpquic_client_tunnel_open_test ${TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES})
