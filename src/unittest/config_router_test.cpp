@@ -375,6 +375,18 @@ int main() {
     }
     {
         std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "client":{"warmup_mb":1},
+            "peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
+        if (err.find("warmup") == std::string::npos) return 157;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
             "tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},
             "server":{
                 "proto_listen":"0.0.0.0:4433",

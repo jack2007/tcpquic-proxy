@@ -629,18 +629,17 @@ int main() {
         char arg1[] = "client";
         char arg2[] = "--warmup-mb";
         char arg3[] = "1";
-        char arg4[] = "--download-test";
-        char arg5[] = "10";
-        char arg6[] = "--peer";
-        char arg7[] = "127.0.0.1:4433";
-        char arg8[] = "--cert";
-        char arg9[] = "cert.pem";
-        char arg10[] = "--key";
-        char arg11[] = "key.pem";
-        char arg12[] = "--ca";
-        char arg13[] = "ca.pem";
-        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12, arg13};
-        assert(!TqParseArgs(14, argv, cfg, err));
+        char arg4[] = "--peer";
+        char arg5[] = "127.0.0.1:4433";
+        char arg6[] = "--cert";
+        char arg7[] = "cert.pem";
+        char arg8[] = "--key";
+        char arg9[] = "key.pem";
+        char arg10[] = "--ca";
+        char arg11[] = "ca.pem";
+        char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        assert(!TqParseArgs(12, argv, cfg, err));
+        assert(err.find("--warmup-mb") != std::string::npos || err.find("warmup") != std::string::npos);
     }
 
     return 0;

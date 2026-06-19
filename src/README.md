@@ -226,7 +226,7 @@ src/
 ├── platform/                 # POSIX/Windows socket 抽象与 Windows QUIC 凭据
 ├── ingress/                  # SOCKS5 / HTTP CONNECT 本地入口
 ├── tunnel/                   # TCP ↔ QUIC Stream 隧道与平台 relay worker
-├── runtime/                  # admin、metrics、router runtime、线程池、warmup
+├── runtime/                  # admin、metrics、router runtime、线程池
 ├── docs/                     # 与源码实现紧密相关的说明
 └── unittest/                 # 单元测试
 ```

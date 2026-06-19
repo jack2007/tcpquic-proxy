@@ -12,7 +12,6 @@
 #include "tcp_tunnel.h"
 #include "tuning.h"
 #include "tunnel_reaper.h"
-#include "warmup.h"
 #include "trace.h"
 
 #include <chrono>
@@ -523,17 +522,6 @@ int RunSinglePeerClient(const TqConfig& cfg) {
 
     if (!quic.Start(quicCfg)) {
         return 1;
-    }
-
-    if (cfg.WarmupMb > 0) {
-        if (!quic.EnsureAnyConnected()) {
-            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
-            return 1;
-        }
-        if (!TqRunClientWarmup(quic, cfg)) {
-            std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
-            return 1;
-        }
     }
 
     if (!quic.EnsureAnyConnected()) {

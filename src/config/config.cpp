@@ -462,13 +462,7 @@ private:
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) return Error("malformed client object");
-            if (key == "warmup_mb") {
-                if (!ParseUint32(cfg.WarmupMb)) return Error("invalid client.warmup_mb");
-            } else if (key == "warmup_target") {
-                if (!ParseString(cfg.WarmupTarget)) return Error("invalid client.warmup_target");
-            } else if (key == "warmup_path") {
-                if (!ParseString(cfg.WarmupPath)) return Error("invalid client.warmup_path");
-            } else if (key == "download_test") {
+            if (key == "download_test") {
                 if (!ParseSpeedTest(TqSpeedTestMode::Download, cfg, speedTestSpecified, "client.download_test")) return false;
             } else if (key == "download_sink_test") {
                 if (!ParseSpeedTest(TqSpeedTestMode::DownloadSink, cfg, speedTestSpecified, "client.download_sink_test")) return false;
@@ -1145,33 +1139,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --keepalive-ms (must be 1000..15000)";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--warmup-mb", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--warmup-mb", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.WarmupMb)) {
-                err = "invalid value for --warmup-mb";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--warmup-target", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--warmup-target", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            cfg.WarmupTarget = value;
-        } else if (GetOptionValue(arg, "--warmup-path", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--warmup-path", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            cfg.WarmupPath = value;
         } else if (GetOptionValue(arg, "--download-test", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--download-test", err);
@@ -1491,10 +1458,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             err = "speed-test options cannot be used with --client-config";
             return false;
         }
-        if (cfg.WarmupMb > 0) {
-            err = "speed-test options cannot be used with --warmup-mb";
-            return false;
-        }
     }
     if (!cfg.ClientConfigPath.empty()) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {
@@ -1518,9 +1481,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             return false;
         }
         if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
-            return false;
-        }
-        if (cfg.WarmupMb > 0 && !RequireNonEmpty(cfg.WarmupTarget, "--warmup-target", err)) {
             return false;
         }
         if (cfg.SpeedTestMode != TqSpeedTestMode::None && !cfg.Router.Peers.empty()) {
