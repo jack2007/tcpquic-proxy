@@ -146,12 +146,6 @@ private:
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);
     TqTraceLinuxRelayStreamState BuildRelayTraceState(const std::shared_ptr<RelayContext>& relay) const;
-    void TraceRelayReceiveEvent(
-        const std::shared_ptr<RelayContext>& relay,
-        uint32_t bufferCount,
-        uint64_t totalBufferLength,
-        uint32_t receiveFlags,
-        bool fin) const;
     void TraceRelayBackpressure(
         const std::shared_ptr<RelayContext>& relay,
         const char* action,
@@ -164,6 +158,7 @@ private:
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void RecordTcpHardErrorAndFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
     bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
+    bool IsQuicSendTeardownStatus(QUIC_STATUS status) const;
 
     void* Iocp_{nullptr};
     std::thread Thread_;

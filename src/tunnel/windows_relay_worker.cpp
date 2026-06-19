@@ -593,30 +593,6 @@ TqTraceLinuxRelayStreamState TqWindowsRelayWorker::BuildRelayTraceState(
     return state;
 }
 
-void TqWindowsRelayWorker::TraceRelayReceiveEvent(
-    const std::shared_ptr<RelayContext>& relay,
-    uint32_t bufferCount,
-    uint64_t totalBufferLength,
-    uint32_t receiveFlags,
-    bool fin) const {
-    if (!relay || !TqTraceEnabled()) {
-        return;
-    }
-    TqTraceRelayStreamEvent(
-        "windows",
-        0,
-        relay->Id,
-        "receive",
-        0,
-        0,
-        0,
-        totalBufferLength,
-        bufferCount,
-        receiveFlags,
-        fin,
-        BuildRelayTraceState(relay));
-}
-
 void TqWindowsRelayWorker::TraceRelayBackpressure(
     const std::shared_ptr<RelayContext>& relay,
     const char* action,
@@ -671,6 +647,12 @@ bool TqWindowsRelayWorker::IsQuicSendBackpressureStatus(QUIC_STATUS status) cons
     return status == QUIC_STATUS_OUT_OF_MEMORY || status == QUIC_STATUS_BUFFER_TOO_SMALL;
 }
 
+bool TqWindowsRelayWorker::IsQuicSendTeardownStatus(QUIC_STATUS status) const {
+    return status == QUIC_STATUS_ABORTED || status == QUIC_STATUS_INVALID_STATE ||
+        status == QUIC_STATUS_CONNECTION_IDLE || status == QUIC_STATUS_CONNECTION_TIMEOUT ||
+        status == QUIC_STATUS_USER_CANCELED;
+}
+
 bool TqWindowsRelayWorker::PostQuicSend(
     std::unique_ptr<IoOperation> op,
     QUIC_SEND_FLAGS flags,
@@ -717,6 +699,11 @@ bool TqWindowsRelayWorker::PostQuicSend(
             }
         }
         return true;
+    }
+    if (IsQuicSendTeardownStatus(status)) {
+        relay->CloseAfterDrained.store(true, std::memory_order_release);
+        (void)CloseRelayIfDrained(relay);
+        return false;
     }
     QuicSendFatalErrors_.fetch_add(1, std::memory_order_relaxed);
     FailRelayFatal(relay, "quic_send_failed");
@@ -1541,10 +1528,6 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
 
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
-        uint64_t totalBufferLength = 0;
-        for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
-            totalBufferLength += event->RECEIVE.Buffers[i].Length;
-        }
         if (!worker->QueueDeferredQuicReceive(
                 relay,
                 stream,
@@ -1554,12 +1537,6 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             worker->FailRelayFatal(relay, "quic_receive_queue_failed");
             return QUIC_STATUS_SUCCESS;
         }
-        worker->TraceRelayReceiveEvent(
-            relay,
-            event->RECEIVE.BufferCount,
-            totalBufferLength,
-            event->RECEIVE.Flags,
-            fin);
         return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
@@ -1573,10 +1550,6 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-        if (event->SHUTDOWN_COMPLETE.ConnectionShutdown) {
-            worker->FailRelayFatal(relay, "stream_connection_shutdown");
-            return QUIC_STATUS_SUCCESS;
-        }
         relay->CloseAfterDrained.store(true);
         TqTraceRelayStreamShutdown("windows", worker->BuildRelayTraceState(relay));
         (void)worker->CloseRelayIfDrained(relay);

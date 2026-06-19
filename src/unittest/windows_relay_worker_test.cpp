@@ -827,7 +827,7 @@ int main() {
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = TRUE;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
         const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets != 0) {
             receiveWorker.Stop();
             return 161;
         }
@@ -1115,7 +1115,7 @@ int main() {
         QUIC_API_TABLE fakeApi{};
         fakeApi.StreamSend = FakeStreamSend;
         MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
-        g_FakeStreamSendStatus = QUIC_STATUS_INVALID_STATE;
+        g_FakeStreamSendStatus = QUIC_STATUS_INTERNAL_ERROR;
         ResetFakeStreamSends();
 
         TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};

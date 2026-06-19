@@ -1149,11 +1149,13 @@ bool TqServerSpeedTestController::FinishSession(
         static_cast<unsigned long long>(session->ServerBytes.load(std::memory_order_relaxed)),
         session->AcceptedConnections.load(std::memory_order_relaxed),
         session->ClosedConnections.load(std::memory_order_relaxed));
-    if (session->Start.Direction == TqSpeedDirection::Upload && clientBytes > 0) {
-        const auto finishDeadline = TqClock::now() + std::chrono::milliseconds(500);
+    if (clientBytes > 0) {
+        const auto finishDeadline = TqClock::now() + std::chrono::seconds(2);
         while (TqClock::now() < finishDeadline) {
             const uint64_t serverBytes = session->ServerBytes.load(std::memory_order_relaxed);
-            if (serverBytes >= clientBytes || session->ClosedConnections.load(std::memory_order_relaxed) > 0) {
+            const uint32_t closed = session->ClosedConnections.load(std::memory_order_relaxed);
+            if (serverBytes >= clientBytes ||
+                (closed >= session->AcceptedConnections.load(std::memory_order_relaxed) && serverBytes > 0)) {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1485,7 +1487,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
                 static_cast<unsigned long long>(limitBytes));
             ok = false;
         } else if (start.Direction == TqSpeedDirection::Download) {
-            if (localBytes == 0 || result.ServerBytes < localBytes) {
+            if (localBytes == 0 || result.ServerBytes == 0) {
                 std::fprintf(stderr,
                     "tcpquic-proxy: invalid download byte counts "
                     "(local=%llu server=%llu)\n",
@@ -1500,6 +1502,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
                     static_cast<unsigned long long>(result.ServerBytes),
                     static_cast<unsigned long long>(diffBytes),
                     static_cast<unsigned long long>(limitBytes));
+                ok = false;
             }
         }
     }
