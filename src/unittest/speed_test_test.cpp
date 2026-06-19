@@ -2,37 +2,18 @@
 
 #include "config.h"
 #include "platform_socket.h"
-#include "quic_session.h"
 #include "trace.h"
 #include "tuning.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <future>
+#include <string>
 #include <thread>
 #include <vector>
-
-bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
-    return false;
-}
-
-MsQuicConnection* QuicClientSession::PickConnection() {
-    return nullptr;
-}
-
-MsQuicConnection* QuicClientSession::PickConnectionAt(size_t) {
-    return nullptr;
-}
-
-MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t) {
-    return nullptr;
-}
-
-uint32_t QuicClientSession::ConnectedConnectionCount() const {
-    return 0;
-}
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     (void)connection;
@@ -256,6 +237,72 @@ bool ConnectLoopback(uint16_t port, TqSocketHandle& outSocket) {
     return true;
 }
 
+bool CreateLoopbackListener(TqSocketHandle& outListener, uint16_t& outPort) {
+    outListener = TqInvalidSocket;
+    outPort = 0;
+    TqSocketHandle listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (!TqSocketValid(listener)) {
+        return false;
+    }
+
+    (void)TqSetReuseAddr(listener);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = 0;
+    if (!TqInetPton(AF_INET, "127.0.0.1", &addr.sin_addr)) {
+        TqCloseSocket(listener);
+        return false;
+    }
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(listener, 1) != 0) {
+        TqCloseSocket(listener);
+        return false;
+    }
+
+    socklen_t addrLen = sizeof(addr);
+    if (::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &addrLen) != 0) {
+        TqCloseSocket(listener);
+        return false;
+    }
+    outListener = listener;
+    outPort = ntohs(addr.sin_port);
+    return outPort != 0;
+}
+
+std::thread StartFakeHttpConnectServer(
+    TqSocketHandle listener,
+    std::string* requestOut,
+    std::atomic<bool>* acceptedOut,
+    std::string response) {
+    return std::thread([listener, requestOut, acceptedOut, response = std::move(response)]() {
+        sockaddr_in addr{};
+        socklen_t addrLen = sizeof(addr);
+        TqSocketHandle accepted = ::accept(
+            listener,
+            reinterpret_cast<sockaddr*>(&addr),
+            &addrLen);
+        if (!TqSocketValid(accepted)) {
+            return;
+        }
+        acceptedOut->store(true, std::memory_order_release);
+        std::array<uint8_t, 1024> buffer{};
+        for (;;) {
+            const int rc = TqRecv(accepted, buffer.data(), buffer.size(), TqRecvFlags::None);
+            if (rc <= 0) {
+                break;
+            }
+            requestOut->append(
+                reinterpret_cast<const char*>(buffer.data()),
+                static_cast<size_t>(rc));
+            if (requestOut->find("\r\n\r\n") != std::string::npos) {
+                break;
+            }
+        }
+        (void)TqSend(accepted, response.data(), response.size(), TqSendFlags::NoSignal);
+        TqCloseSocket(accepted);
+    });
+}
+
 int TestStartAndAuthorization() {
     TqServerSpeedTestController controller;
     TqSpeedStart start{};
@@ -464,21 +511,142 @@ int TestUploadFinishWithOpenClient() {
     return 0;
 }
 
-int TestSpeedClientSessionConfigAddsDedicatedControlConnection() {
+int TestIngressSpeedTestConnectionRejectsEmptyHttpListen() {
     TqConfig cfg{};
-    cfg.QuicConnections = 16;
-    cfg.QuicPeer = "127.0.0.1:4433";
-    cfg.Compress = "off";
+    cfg.HttpListen.clear();
 
-    const TqConfig speedCfg = TqMakeSpeedClientSessionConfig(cfg);
-    if (speedCfg.QuicConnections != 17) {
+    TqSpeedReady ready{};
+    ready.AddrType = TQ_ADDR_IPV4;
+    ready.Port = 12345;
+    ready.Addr = {127, 0, 0, 1};
+    TqSocketHandle socket = TqInvalidSocket;
+    std::vector<uint8_t> leftover;
+    std::string err;
+    if (TqOpenIngressSpeedTestConnection(cfg, ready, socket, leftover, err)) {
+        TqCloseSocket(socket);
         return 40;
     }
-    if (speedCfg.QuicPeer != cfg.QuicPeer) {
+    if (err.find("http listen") == std::string::npos) {
         return 41;
     }
-    if (speedCfg.Compress != cfg.Compress) {
+    return 0;
+}
+
+int TestIngressSpeedTestConnectionSendsConnectRequestAndFailsOnNon200() {
+    TqSocketHandle listener = TqInvalidSocket;
+    uint16_t listenPort = 0;
+    if (!CreateLoopbackListener(listener, listenPort)) {
         return 42;
+    }
+
+    std::string request;
+    std::atomic<bool> accepted{false};
+    std::thread server = StartFakeHttpConnectServer(
+        listener,
+        &request,
+        &accepted,
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+
+    TqConfig cfg{};
+    cfg.HttpListen = "127.0.0.1:" + std::to_string(listenPort);
+    cfg.Router.ProxyAuth.push_back(TqProxyAuthUser{"alice", "secret"});
+    TqSpeedReady ready{};
+    ready.AddrType = TQ_ADDR_IPV4;
+    ready.Port = 23456;
+    ready.Addr = {127, 0, 0, 1};
+
+    TqSocketHandle socket = TqInvalidSocket;
+    std::vector<uint8_t> leftover;
+    std::string err;
+    const bool ok = TqOpenIngressSpeedTestConnection(cfg, ready, socket, leftover, err);
+    if (TqSocketValid(socket)) {
+        TqCloseSocket(socket);
+    }
+    TqCloseSocket(listener);
+    if (server.joinable()) {
+        server.join();
+    }
+    if (ok) {
+        return 43;
+    }
+    if (!accepted.load(std::memory_order_acquire)) {
+        return 44;
+    }
+    if (request.find("CONNECT 127.0.0.1:23456 HTTP/1.1\r\n") == std::string::npos) {
+        return 45;
+    }
+    if (request.find("Host: 127.0.0.1:23456\r\n") == std::string::npos) {
+        return 46;
+    }
+    if (request.find("Proxy-Authorization: Basic YWxpY2U6c2VjcmV0\r\n") == std::string::npos) {
+        return 47;
+    }
+    if (err.find("HTTP CONNECT") == std::string::npos) {
+        return 48;
+    }
+    return 0;
+}
+
+int TestIngressSpeedTestConnectionPreservesSuccessLeftover() {
+    TqSocketHandle listener = TqInvalidSocket;
+    uint16_t listenPort = 0;
+    if (!CreateLoopbackListener(listener, listenPort)) {
+        return 49;
+    }
+
+    std::string request;
+    std::atomic<bool> accepted{false};
+    std::thread server = StartFakeHttpConnectServer(
+        listener,
+        &request,
+        &accepted,
+        "HTTP/1.1 200 Connection Established\r\n\r\npayload");
+
+    TqConfig cfg{};
+    cfg.HttpListen = "localhost:" + std::to_string(listenPort);
+    TqSpeedReady ready{};
+    ready.AddrType = TQ_ADDR_IPV4;
+    ready.Port = 23457;
+    ready.Addr = {127, 0, 0, 1};
+
+    TqSocketHandle socket = TqInvalidSocket;
+    std::vector<uint8_t> leftover;
+    std::string err;
+    const bool ok = TqOpenIngressSpeedTestConnection(cfg, ready, socket, leftover, err);
+    if (TqSocketValid(socket)) {
+        TqCloseSocket(socket);
+    }
+    TqCloseSocket(listener);
+    if (server.joinable()) {
+        server.join();
+    }
+    if (!ok) {
+        return 53;
+    }
+    const std::string payload(leftover.begin(), leftover.end());
+    if (payload != "payload") {
+        return 54;
+    }
+    return 0;
+}
+
+int TestIngressSpeedTestConnectionRejectsNonLoopbackListenHost() {
+    TqConfig cfg{};
+    cfg.HttpListen = "192.0.2.1:8080";
+    TqSpeedReady ready{};
+    ready.AddrType = TQ_ADDR_IPV4;
+    ready.Port = 23458;
+    ready.Addr = {127, 0, 0, 1};
+
+    TqSocketHandle socket = TqInvalidSocket;
+    std::vector<uint8_t> leftover;
+    std::string err;
+    if (TqOpenIngressSpeedTestConnection(cfg, ready, socket, leftover, err)) {
+        TqCloseSocket(socket);
+        return 55;
+    }
+    if (err.find("loopback") == std::string::npos) {
+        return 56;
     }
     return 0;
 }
@@ -563,7 +731,16 @@ int main() {
     if (const int rc = TestUploadFinishWithOpenClient(); rc != 0) {
         return rc;
     }
-    if (const int rc = TestSpeedClientSessionConfigAddsDedicatedControlConnection(); rc != 0) {
+    if (const int rc = TestIngressSpeedTestConnectionRejectsEmptyHttpListen(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestIngressSpeedTestConnectionSendsConnectRequestAndFailsOnNon200(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestIngressSpeedTestConnectionPreservesSuccessLeftover(); rc != 0) {
+        return rc;
+    }
+    if (const int rc = TestIngressSpeedTestConnectionRejectsNonLoopbackListenHost(); rc != 0) {
         return rc;
     }
     if (const int rc = TestSpeedLocalSocketUsesActiveThroughputBuffer(); rc != 0) {

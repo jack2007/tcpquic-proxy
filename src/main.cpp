@@ -456,17 +456,7 @@ struct TqSinglePeerClientRuntime {
 int RunSinglePeerClient(const TqConfig& cfg) {
     const auto started = std::chrono::steady_clock::now();
     QuicClientSession quic;
-    const TqConfig quicCfg = cfg.SpeedTestMode == TqSpeedTestMode::None
-        ? cfg
-        : TqMakeSpeedClientSessionConfig(cfg);
-    if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
-        if (!quic.Start(quicCfg)) {
-            return 1;
-        }
-        const bool ok = TqRunClientSpeedTest(quic, cfg);
-        quic.Stop();
-        return ok ? 0 : 1;
-    }
+    const TqConfig quicCfg = cfg;
 
     std::string err;
     auto runtime = std::make_shared<TqSinglePeerClientRuntime>(cfg, quic);
@@ -534,6 +524,34 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
         runtime->DisableAccepting();
         return 1;
+    }
+
+    if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        auto cleanupSpeedTest = [&]() {
+            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
+            quic.SetDelayedTaskScheduler(QuicClientSession::DelayedTaskScheduler{});
+            runtime->DisableAccepting();
+            quic.Stop();
+        };
+        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, true)) {
+            std::fprintf(stderr, "tcpquic-proxy: speedtest ingress unavailable: %s\n", err.c_str());
+            cleanupSpeedTest();
+            return 1;
+        }
+        if (!quic.EnsureAnyConnected(std::chrono::seconds(10))) {
+            std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");
+            cleanupSpeedTest();
+            return 1;
+        }
+        MsQuicConnection* controlConn = quic.PickConnection();
+        if (controlConn == nullptr) {
+            std::fprintf(stderr, "tcpquic-proxy: speed test has no connected QUIC control connection\n");
+            cleanupSpeedTest();
+            return 1;
+        }
+        const bool ok = TqRunIngressClientSpeedTest(*controlConn, cfg);
+        cleanupSpeedTest();
+        return ok ? 0 : 1;
     }
 
     std::fprintf(stderr, "tcpquic-proxy: QUIC peer %s (%u connections)\n",

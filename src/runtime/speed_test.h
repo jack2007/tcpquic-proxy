@@ -10,7 +10,6 @@
 #include "platform_socket.h"
 
 struct TqConfig;
-class QuicClientSession;
 struct MsQuicStream;
 struct MsQuicConnection;
 
@@ -35,8 +34,13 @@ private:
     Impl* Impl_;
 };
 
-bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg);
-TqConfig TqMakeSpeedClientSessionConfig(const TqConfig& cfg);
+bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& cfg);
+bool TqOpenIngressSpeedTestConnection(
+    const TqConfig& cfg,
+    const TqSpeedReady& ready,
+    TqSocketHandle& outSocket,
+    std::vector<uint8_t>& leftover,
+    std::string& err);
 void TqTuneSpeedTestLocalSocket(TqSocketHandle socket);
 uint64_t TqSpeedByteMismatchLimit(uint64_t highBytes);
 bool TqSpeedByteCountsCloseEnough(uint64_t localBytes, uint64_t serverBytes, uint64_t& diffOut, uint64_t& limitOut);

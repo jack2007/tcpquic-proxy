@@ -2,13 +2,12 @@
 
 #include "config.h"
 #include "platform_socket.h"
-#include "quic_session.h"
-#include "tcp_tunnel.h"
 #include "tuning.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -17,10 +16,17 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <ws2tcpip.h>
+#else
+#include <netdb.h>
+#endif
 
 #if !defined(_WIN32)
 #include <sys/time.h>
@@ -156,6 +162,196 @@ std::string TqReadyAddressToHost(const TqSpeedReady& ready) {
         return converted == nullptr ? std::string() : std::string(converted);
     }
     return {};
+}
+
+bool TqParseHostPort(const std::string& value, std::string& host, uint16_t& port) {
+    host.clear();
+    port = 0;
+    if (value.empty()) {
+        return false;
+    }
+
+    std::string portText;
+    if (value[0] == '[') {
+        const size_t close = value.find(']');
+        if (close == std::string::npos || close + 1 >= value.size() || value[close + 1] != ':') {
+            return false;
+        }
+        host = value.substr(1, close - 1);
+        portText = value.substr(close + 2);
+    } else {
+        const size_t colon = value.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size()) {
+            return false;
+        }
+        host = value.substr(0, colon);
+        portText = value.substr(colon + 1);
+        if (host.find(':') != std::string::npos) {
+            return false;
+        }
+    }
+
+    unsigned long parsed = 0;
+    for (char ch : portText) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+        parsed = (parsed * 10ul) + static_cast<unsigned long>(ch - '0');
+        if (parsed > 65535ul) {
+            return false;
+        }
+    }
+    if (host.empty() || parsed == 0) {
+        return false;
+    }
+    port = static_cast<uint16_t>(parsed);
+    return true;
+}
+
+std::string TqLowerAscii(std::string text) {
+    for (char& ch : text) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
+bool TqNormalizeIngressLoopbackHost(std::string& host) {
+    const std::string lower = TqLowerAscii(host);
+    if (lower == "localhost" || host == "127.0.0.1" || host == "::1") {
+        host = lower == "localhost" ? "localhost" : host;
+        return true;
+    }
+    if (host == "0.0.0.0") {
+        host = "127.0.0.1";
+        return true;
+    }
+    if (host == "::") {
+        host = "::1";
+        return true;
+    }
+    return false;
+}
+
+std::string TqBase64Encode(std::string_view input) {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+    for (size_t i = 0; i < input.size(); i += 3) {
+        const uint32_t b0 = static_cast<unsigned char>(input[i]);
+        const uint32_t b1 = i + 1 < input.size() ? static_cast<unsigned char>(input[i + 1]) : 0;
+        const uint32_t b2 = i + 2 < input.size() ? static_cast<unsigned char>(input[i + 2]) : 0;
+        const uint32_t triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push_back(kAlphabet[(triple >> 18) & 0x3f]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3f]);
+        out.push_back(i + 1 < input.size() ? kAlphabet[(triple >> 6) & 0x3f] : '=');
+        out.push_back(i + 2 < input.size() ? kAlphabet[triple & 0x3f] : '=');
+    }
+    return out;
+}
+
+bool TqSendAll(TqSocketHandle socket, const std::string& data) {
+    size_t sent = 0;
+    while (sent < data.size()) {
+        const int rc = TqSend(
+            socket,
+            data.data() + sent,
+            data.size() - sent,
+            TqSendFlags::NoSignal);
+        if (rc > 0) {
+            sent += static_cast<size_t>(rc);
+            continue;
+        }
+        if (rc == 0) {
+            return false;
+        }
+        const int error = TqLastSocketError();
+        if (TqSocketInterrupted(error)) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool TqConnectHostPort(const std::string& host, uint16_t port, TqSocketHandle& outSocket) {
+    outSocket = TqInvalidSocket;
+
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* results = nullptr;
+    const std::string portText = std::to_string(port);
+    const int status = ::getaddrinfo(host.c_str(), portText.c_str(), &hints, &results);
+    if (status != 0) {
+        return false;
+    }
+
+    for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
+        TqSocketHandle socket = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (!TqSocketValid(socket)) {
+            continue;
+        }
+        if (TqConnect(socket, ai->ai_addr, static_cast<socklen_t>(ai->ai_addrlen)) == 0) {
+            outSocket = socket;
+            ::freeaddrinfo(results);
+            return true;
+        }
+        TqCloseSocket(socket);
+    }
+
+    ::freeaddrinfo(results);
+    return false;
+}
+
+bool TqReadHttpConnectResponse(
+    TqSocketHandle socket,
+    std::string& response,
+    std::vector<uint8_t>& leftover) {
+    response.clear();
+    leftover.clear();
+    std::array<uint8_t, 1024> buffer{};
+    const auto deadline = TqClock::now() + std::chrono::seconds(5);
+    size_t headerEnd = std::string::npos;
+    while (headerEnd == std::string::npos && TqClock::now() < deadline) {
+        const int rc = TqRecv(socket, buffer.data(), buffer.size(), TqRecvFlags::None);
+        if (rc > 0) {
+            response.append(
+                reinterpret_cast<const char*>(buffer.data()),
+                static_cast<size_t>(rc));
+            headerEnd = response.find("\r\n\r\n");
+            if (response.size() > 64 * 1024) {
+                return false;
+            }
+            continue;
+        }
+        if (rc == 0) {
+            return false;
+        }
+        const int error = TqLastSocketError();
+        if (TqSocketInterrupted(error)) {
+            continue;
+        }
+        return false;
+    }
+    if (headerEnd == std::string::npos) {
+        return false;
+    }
+    const size_t bodyOffset = headerEnd + 4;
+    if (bodyOffset < response.size()) {
+        leftover.assign(response.begin() + static_cast<ptrdiff_t>(bodyOffset), response.end());
+        response.resize(bodyOffset);
+    }
+    return true;
+}
+
+bool TqHttpConnectSucceeded(const std::string& response) {
+    const size_t lineEnd = response.find("\r\n");
+    const std::string statusLine = response.substr(0, lineEnd);
+    return statusLine.rfind("HTTP/1.1 200", 0) == 0 ||
+        statusLine.rfind("HTTP/1.0 200", 0) == 0;
 }
 
 TqControlFrameState TqTryGetFrameSize(
@@ -766,7 +962,8 @@ private:
 
 struct TqPumpWorker {
     TqSocketHandle Socket{TqInvalidSocket};
-    uint64_t Bytes{0};
+    std::atomic<uint64_t> Bytes{0};
+    std::vector<uint8_t> InitialBytes;
     bool Failed{false};
     std::atomic<bool> Done{false};
     std::thread Thread;
@@ -783,7 +980,7 @@ void TqRunUploadPump(
     while (!stop->load(std::memory_order_relaxed) && TqClock::now() < deadline) {
         const int rc = TqSend(worker->Socket, buffer.data(), buffer.size(), TqSendFlags::NoSignal);
         if (rc > 0) {
-            worker->Bytes += static_cast<uint64_t>(rc);
+            worker->Bytes.fetch_add(static_cast<uint64_t>(rc), std::memory_order_relaxed);
             continue;
         }
         if (rc == 0) {
@@ -805,11 +1002,16 @@ void TqRunUploadPump(
 }
 
 void TqRunDownloadPump(TqPumpWorker* worker, std::atomic<bool>* stop) {
+    if (!worker->InitialBytes.empty()) {
+        worker->Bytes.fetch_add(worker->InitialBytes.size(), std::memory_order_relaxed);
+        worker->InitialBytes.clear();
+    }
+
     std::array<uint8_t, 64 * 1024> buffer{};
     for (;;) {
         const int rc = TqRecv(worker->Socket, buffer.data(), buffer.size(), TqRecvFlags::None);
         if (rc > 0) {
-            worker->Bytes += static_cast<uint64_t>(rc);
+            worker->Bytes.fetch_add(static_cast<uint64_t>(rc), std::memory_order_relaxed);
             continue;
         }
         if (rc == 0) {
@@ -1209,39 +1411,88 @@ bool TqServerSpeedTestController::IsAllowedEphemeralTarget(const std::string& ho
     return Impl_->SessionsByPort.find(port) != Impl_->SessionsByPort.end();
 }
 
-TqConfig TqMakeSpeedClientSessionConfig(const TqConfig& cfg) {
-    TqConfig speedCfg = cfg;
-    speedCfg.QuicConnections = cfg.QuicConnections + 1;
-    return speedCfg;
+bool TqOpenIngressSpeedTestConnection(
+    const TqConfig& cfg,
+    const TqSpeedReady& ready,
+    TqSocketHandle& outSocket,
+    std::vector<uint8_t>& leftover,
+    std::string& err) {
+    outSocket = TqInvalidSocket;
+    leftover.clear();
+    err.clear();
+
+    std::string listenHost;
+    uint16_t listenPort = 0;
+    if (cfg.HttpListen.empty()) {
+        err = "http listen is empty";
+        return false;
+    }
+    if (!TqParseHostPort(cfg.HttpListen, listenHost, listenPort)) {
+        err = "invalid http listen address: " + cfg.HttpListen;
+        return false;
+    }
+    if (!TqNormalizeIngressLoopbackHost(listenHost)) {
+        err = "speedtest HTTP CONNECT ingress must use loopback listen host";
+        return false;
+    }
+
+    const std::string targetHost = TqReadyAddressToHost(ready);
+    if (targetHost.empty() || ready.Port == 0) {
+        err = "invalid speed test target address";
+        return false;
+    }
+
+    TqSocketHandle socket = TqInvalidSocket;
+    if (!TqConnectHostPort(listenHost, listenPort, socket)) {
+        err = "failed to connect HTTP CONNECT ingress at " + cfg.HttpListen;
+        return false;
+    }
+    TqTuneSpeedTestLocalSocket(socket);
+    (void)TqSetSpeedSocketTimeout(socket, 5000);
+
+    std::string request;
+    request.reserve(256);
+    request += "CONNECT ";
+    request += targetHost;
+    request += ":";
+    request += std::to_string(ready.Port);
+    request += " HTTP/1.1\r\nHost: ";
+    request += targetHost;
+    request += ":";
+    request += std::to_string(ready.Port);
+    request += "\r\n";
+    if (!cfg.Router.ProxyAuth.empty()) {
+        const TqProxyAuthUser& auth = cfg.Router.ProxyAuth.front();
+        request += "Proxy-Authorization: Basic ";
+        request += TqBase64Encode(auth.Username + ":" + auth.Password);
+        request += "\r\n";
+    }
+    request += "\r\n";
+
+    if (!TqSendAll(socket, request)) {
+        TqCloseSocket(socket);
+        err = "failed to send HTTP CONNECT request";
+        return false;
+    }
+
+    std::string response;
+    if (!TqReadHttpConnectResponse(socket, response, leftover)) {
+        TqCloseSocket(socket);
+        err = "failed to read HTTP CONNECT response";
+        return false;
+    }
+    if (!TqHttpConnectSucceeded(response)) {
+        TqCloseSocket(socket);
+        err = "HTTP CONNECT failed: " + response.substr(0, response.find("\r\n"));
+        return false;
+    }
+
+    outSocket = socket;
+    return true;
 }
 
-bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
+bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& cfg) {
     const uint16_t parallel = static_cast<uint16_t>(std::max<uint32_t>(1, cfg.QuicConnections));
-    const uint32_t neededConnections = static_cast<uint32_t>(parallel) + 1u;
-    const auto connectDeadline = TqClock::now() + std::chrono::seconds(10);
-    while (!TqSpeedConnectWaitShouldStop(
-        quic.ConnectedConnectionCount(),
-        neededConnections,
-        TqClock::now() >= connectDeadline)) {
-        (void)quic.EnsureAnyConnected(std::chrono::milliseconds(100));
-        if (TqClock::now() < connectDeadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        } else {
-            break;
-        }
-    }
-    if (quic.ConnectedConnectionCount() < neededConnections) {
-        std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");
-        return false;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-
-    MsQuicConnection* controlConn = quic.PickConnectionAt(0);
-    if (controlConn == nullptr) {
-        std::fprintf(stderr, "tcpquic-proxy: speed test has no connected QUIC control connection\n");
-        return false;
-    }
-
     TqSpeedStart start{};
     start.SessionId = TqMakeSessionId();
     start.Direction = cfg.SpeedTestMode == TqSpeedTestMode::Upload
@@ -1251,7 +1502,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     start.Parallel = parallel;
 
     TqClientControlStream control;
-    if (!control.Open(*controlConn)) {
+    if (!control.Open(controlConn)) {
         std::fprintf(stderr, "tcpquic-proxy: failed to open speed control stream\n");
         return false;
     }
@@ -1266,24 +1517,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         return false;
     }
 
-    TunnelRequest req{};
-    req.AddrType = ready.AddrType;
-    req.Port = ready.Port;
-    req.CompressFlags = 0;
-    const std::string readyHost = TqReadyAddressToHost(ready);
-    if (readyHost.empty() || readyHost.size() >= sizeof(req.Host)) {
-        std::fprintf(stderr, "tcpquic-proxy: invalid speed test target address\n");
-        return false;
-    }
-    std::snprintf(req.Host, sizeof(req.Host), "%s", readyHost.c_str());
-
-    TqConfig tunnelCfg = cfg;
-    if (tunnelCfg.Compress == "auto") {
-        tunnelCfg.Compress = "off";
-    }
-
     std::vector<TqPumpWorker> workers(parallel);
-    std::vector<std::atomic<uint64_t>> sinkBytes(parallel);
     const bool receiveSink = cfg.SpeedTestMode == TqSpeedTestMode::DownloadSink;
     bool ok = false;
     const auto startedAt = TqClock::now();
@@ -1294,14 +1528,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     auto countWorkerBytes = [&workers]() {
         uint64_t total = 0;
         for (const auto& worker : workers) {
-            total += worker.Bytes;
-        }
-        return total;
-    };
-    auto countSinkBytes = [&sinkBytes]() {
-        uint64_t total = 0;
-        for (const auto& bytes : sinkBytes) {
-            total += bytes.load(std::memory_order_relaxed);
+            total += worker.Bytes.load(std::memory_order_relaxed);
         }
         return total;
     };
@@ -1319,60 +1546,30 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
     TqSpeedResult result{};
 
     for (uint16_t i = 0; i < parallel; ++i) {
-        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
-        if (!receiveSink && !TqSocketPair(pair)) {
-            std::fprintf(stderr, "tcpquic-proxy: failed to create speed test socket pair %u\n", i);
-            goto cleanup;
-        }
-        if (!receiveSink) {
-            TqTuneSpeedTestLocalSocket(pair[0]);
-            TqTuneSpeedTestLocalSocket(pair[1]);
-        }
-
-        if (!quic.EnsureAnyConnected()) {
-            std::fprintf(stderr, "tcpquic-proxy: speed test lost all QUIC connections\n");
-            TqCloseSocket(pair[0]);
-            TqCloseSocket(pair[1]);
-            goto cleanup;
-        }
-        MsQuicConnection* dataConn = quic.PickConnectionFrom(1);
-        if (dataConn == nullptr) {
-            std::fprintf(stderr, "tcpquic-proxy: failed to pick QUIC connection for speed tunnel\n");
-            TqCloseSocket(pair[0]);
-            TqCloseSocket(pair[1]);
-            goto cleanup;
-        }
-
-        const TqTunnelStartResult started = receiveSink
-            ? TqStartClientTunnelReceiveSink(dataConn, req, tunnelCfg, &sinkBytes[i])
-            : TqStartClientTunnel(dataConn, req, pair[0], tunnelCfg);
-        if (!started.Ok) {
+        std::string connectErr;
+        std::vector<uint8_t> leftover;
+        if (!TqOpenIngressSpeedTestConnection(cfg, ready, workers[i].Socket, leftover, connectErr)) {
             std::fprintf(stderr,
-                "tcpquic-proxy: failed to start speed tunnel %u (error=%u)\n",
+                "tcpquic-proxy: failed to open speed ingress tunnel %u: %s\n",
                 i,
-                static_cast<unsigned>(started.Error));
-            TqCloseSocket(pair[0]);
-            TqCloseSocket(pair[1]);
+                connectErr.c_str());
             goto cleanup;
         }
-
-        workers[i].Socket = pair[1];
+        if (start.Direction == TqSpeedDirection::Download) {
+            workers[i].InitialBytes = std::move(leftover);
+        }
     }
 
-    if (!receiveSink) {
-        for (auto& worker : workers) {
-            if (start.Direction == TqSpeedDirection::Upload) {
-                worker.Thread = std::thread(TqRunUploadPump, &worker, &stop, deadline);
-            } else {
-                worker.Thread = std::thread(TqRunDownloadPump, &worker, &stop);
-            }
+    for (auto& worker : workers) {
+        if (start.Direction == TqSpeedDirection::Upload) {
+            worker.Thread = std::thread(TqRunUploadPump, &worker, &stop, deadline);
+        } else {
+            worker.Thread = std::thread(TqRunDownloadPump, &worker, &stop);
         }
     }
 
     std::this_thread::sleep_until(deadline);
-    if (receiveSink) {
-        finishClientBytes = countSinkBytes();
-    } else if (start.Direction == TqSpeedDirection::Upload) {
+    if (start.Direction == TqSpeedDirection::Upload) {
         stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
@@ -1407,7 +1604,7 @@ bool TqRunClientSpeedTest(QuicClientSession& quic, const TqConfig& cfg) {
         goto cleanup;
     }
 
-    if (start.Direction == TqSpeedDirection::Download && !receiveSink) {
+    if (start.Direction == TqSpeedDirection::Download) {
         const auto drainDeadline = TqClock::now() + std::chrono::seconds(5);
         for (;;) {
             bool allDone = true;
