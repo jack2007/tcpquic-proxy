@@ -742,6 +742,22 @@ else()
 endif()
 set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
+add_executable(tcpquic_quic_session_reconnect_test
+    unittest/quic_session_reconnect_test.cpp
+    protocol/quic_session.cpp
+    config/tuning.cpp
+    unittest/trace_proxy_stub.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
+)
+tcpquic_target_include_dirs(tcpquic_quic_session_reconnect_test)
+target_link_libraries(tcpquic_quic_session_reconnect_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_quic_session_reconnect_test PRIVATE msquic_platform)
+endif()
+target_compile_definitions(tcpquic_quic_session_reconnect_test PRIVATE TQ_UNIT_TESTING=1)
+set_property(TARGET tcpquic_quic_session_reconnect_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_quic_session_reconnect_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 set(TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
     unittest/client_tunnel_open_test.cpp
     tunnel/client_tunnel_open.cpp
@@ -1017,6 +1033,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_proxy_auth_test
     tcpquic_compress_test
     tcpquic_tunnel_test
+    tcpquic_quic_session_reconnect_test
     tcpquic_client_tunnel_open_test
     tcpquic_http_connect_test
     tcpquic_socks5_test

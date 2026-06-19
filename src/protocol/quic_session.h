@@ -50,11 +50,21 @@ public:
     uint32_t ConnectionCount() const;
     uint32_t ConnectedConnectionCount() const;
 
+#if defined(TQ_UNIT_TESTING)
+    struct ReconnectTestHooks {
+        std::function<bool(size_t index)> StartSlotOverride;
+    };
+    void SetReconnectTestHooks(ReconnectTestHooks hooks);
+    void MarkReconnectStartedForTest(size_t slots);
+    void ScheduleStartRetryForTest(size_t index);
+#endif
+
 private:
     struct ClientSharedState;
     struct ClientSessionGate;
 
     struct ClientConnContext {
+        std::shared_ptr<ClientSessionGate> Gate;
         std::shared_ptr<ClientSharedState> State;
         size_t SlotIndex{0};
     };
@@ -63,8 +73,7 @@ private:
         ClientConnContext* Context{nullptr};
         std::unique_ptr<MsQuicConnection> Connection;
         bool Connected{false};
-        bool ReconnectNeeded{false};
-        std::chrono::steady_clock::time_point NextReconnectAt{};
+        bool RetryScheduled{false};
     };
 
     struct ConnectionStateNotification {
@@ -74,7 +83,9 @@ private:
 
     struct ClientSessionGate {
         std::mutex Lock;
+        std::condition_variable Drained;
         QuicClientSession* Session{nullptr};
+        size_t ActiveCalls{0};
     };
 
     static QUIC_STATUS QUIC_API ConnectionCallback(
@@ -95,11 +106,21 @@ private:
         DelayedTaskScheduler Scheduler;
         std::shared_ptr<ClientSessionGate> SessionGate;
         std::shared_ptr<MsQuicApi> Api;
+#if defined(TQ_UNIT_TESTING)
+        ReconnectTestHooks TestHooks;
+#endif
     };
 
     void Stop(bool clearHandlers);
     bool StartSlot(size_t index);
     void StartAllSlots();
+    void ScheduleStartRetry(size_t index);
+    void RestartSlotAfterShutdownComplete(
+        const std::shared_ptr<ClientSharedState>& state,
+        size_t slotIndex);
+    static QuicClientSession* AcquireLiveSession(
+        const std::shared_ptr<ClientSessionGate>& gate);
+    static void ReleaseLiveSession(const std::shared_ptr<ClientSessionGate>& gate);
     static uint32_t ConnectedCountLocked(const ClientSharedState& state);
     static void NotifyConnectionStateChanged(ConnectionStateNotification notification);
     static ConnectionStateNotification OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);

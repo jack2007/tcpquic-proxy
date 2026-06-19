@@ -384,6 +384,8 @@ static bool TqClientDebugEnabled() {
     return enabled;
 }
 
+static constexpr std::chrono::milliseconds TqClientStartRetryDelay{100};
+
 static void TqClientDebugLog(const char* message, size_t slotIndex, const void* connection, QUIC_STATUS status = QUIC_STATUS_SUCCESS) {
     if (!TqClientDebugEnabled()) {
         return;
@@ -507,8 +509,11 @@ void QuicClientSession::Stop(bool clearHandlers) {
         gate = state->SessionGate;
     }
     if (gate) {
-        std::lock_guard<std::mutex> guard(gate->Lock);
+        std::unique_lock<std::mutex> guard(gate->Lock);
         gate->Session = nullptr;
+        gate->Drained.wait(guard, [&gate]() {
+            return gate->ActiveCalls == 0;
+        });
     }
 
     {
@@ -527,8 +532,6 @@ void QuicClientSession::Stop(bool clearHandlers) {
             }
             slot.Context = nullptr;
             slot.Connected = false;
-            slot.ReconnectNeeded = false;
-            slot.NextReconnectAt = {};
         }
         state->Slots.clear();
     }
@@ -623,31 +626,22 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> guard(State->Lock);
     while (State->Started && !State->Stopping) {
         bool anyConnected = false;
-        auto nextWake = deadline;
-        const auto now = std::chrono::steady_clock::now();
+        if (ConnectedCountLocked(*State) > 0) {
+            return true;
+        }
         for (size_t i = 0; i < State->Slots.size(); ++i) {
-            if (ConnectedCountLocked(*State) > 0) {
-                return true;
-            }
             auto& slot = State->Slots[i];
             if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
                 anyConnected = true;
                 continue;
             }
-            if (slot.ReconnectNeeded || !slot.Connection) {
-                if (slot.ReconnectNeeded &&
-                    slot.NextReconnectAt != std::chrono::steady_clock::time_point{} &&
-                    now < slot.NextReconnectAt) {
-                    nextWake = std::min(nextWake, slot.NextReconnectAt);
-                    continue;
-                }
+            if (!slot.Connection) {
                 guard.unlock();
                 StartSlot(i);
                 guard.lock();
                 if (ConnectedCountLocked(*State) > 0) {
                     return true;
                 }
-                nextWake = std::min(nextWake, std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
                 break;
             }
         }
@@ -657,7 +651,9 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
         if (State->Slots.empty() || std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
-        State->StateChanged.wait_until(guard, nextWake);
+        State->StateChanged.wait_until(
+            guard,
+            std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(100)));
     }
     return false;
 }
@@ -680,6 +676,36 @@ void QuicClientSession::SetDelayedTaskScheduler(DelayedTaskScheduler scheduler) 
     std::lock_guard<std::mutex> guard(State->Lock);
     State->Scheduler = std::move(scheduler);
 }
+
+#if defined(TQ_UNIT_TESTING)
+void QuicClientSession::SetReconnectTestHooks(ReconnectTestHooks hooks) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    State->TestHooks = std::move(hooks);
+}
+
+void QuicClientSession::MarkReconnectStartedForTest(size_t slots) {
+    std::shared_ptr<ClientSessionGate> gate;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        State->Started = true;
+        State->Stopping = false;
+        State->Slots.clear();
+        State->Slots.resize(slots);
+        if (!State->SessionGate) {
+            State->SessionGate = std::make_shared<ClientSessionGate>();
+        }
+        gate = State->SessionGate;
+    }
+    if (gate) {
+        std::lock_guard<std::mutex> guard(gate->Lock);
+        gate->Session = this;
+    }
+}
+
+void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
+    ScheduleStartRetry(index);
+}
+#endif
 
 void QuicClientSession::AbortAllTunnels() {
     std::vector<MsQuicConnection*> connections;
@@ -704,6 +730,32 @@ void QuicClientSession::NotifyConnectionStateChanged(ConnectionStateNotification
     }
 }
 
+QuicClientSession* QuicClientSession::AcquireLiveSession(
+    const std::shared_ptr<ClientSessionGate>& gate) {
+    if (!gate) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> guard(gate->Lock);
+    if (gate->Session == nullptr) {
+        return nullptr;
+    }
+    ++gate->ActiveCalls;
+    return gate->Session;
+}
+
+void QuicClientSession::ReleaseLiveSession(const std::shared_ptr<ClientSessionGate>& gate) {
+    if (!gate) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(gate->Lock);
+    if (gate->ActiveCalls > 0) {
+        --gate->ActiveCalls;
+    }
+    if (gate->Session == nullptr && gate->ActiveCalls == 0) {
+        gate->Drained.notify_all();
+    }
+}
+
 void QuicClientSession::StartAllSlots() {
     const size_t count = Config.QuicConnections;
     for (size_t i = 0; i < count; ++i) {
@@ -718,12 +770,23 @@ void QuicClientSession::StartAllSlots() {
 }
 
 bool QuicClientSession::StartSlot(size_t index) {
+#if defined(TQ_UNIT_TESTING)
+    std::function<bool(size_t)> startSlotOverride;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        startSlotOverride = State->TestHooks.StartSlotOverride;
+    }
+    if (startSlotOverride) {
+        return startSlotOverride(index);
+    }
+#endif
+
     std::unique_ptr<MsQuicConnection> oldConnection;
     std::shared_ptr<ClientSharedState> state = State;
 
     {
         std::lock_guard<std::mutex> guard(state->Lock);
-        if (index >= state->Slots.size()) {
+        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
             return false;
         }
 
@@ -731,17 +794,10 @@ bool QuicClientSession::StartSlot(size_t index) {
         if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
             return true;
         }
-        const auto now = std::chrono::steady_clock::now();
-        if (slot.ReconnectNeeded &&
-            slot.NextReconnectAt != std::chrono::steady_clock::time_point{} &&
-            now < slot.NextReconnectAt) {
-            return false;
-        }
         oldConnection = std::move(slot.Connection);
         slot.Context = nullptr;
         slot.Connected = false;
-        slot.ReconnectNeeded = false;
-        slot.NextReconnectAt = {};
+        slot.RetryScheduled = false;
         TqClientDebugLog("slot-reset", index, oldConnection.get());
     }
 
@@ -754,6 +810,7 @@ bool QuicClientSession::StartSlot(size_t index) {
 
     MsQuicConnection* connectionToStart = nullptr;
     ClientConnContext* newContext = nullptr;
+    bool scheduleRetry = false;
 
     if (TqRuntimeTuningEnabled(Config)) {
         TqApplyRuntimeObservations(Config);
@@ -763,50 +820,57 @@ bool QuicClientSession::StartSlot(size_t index) {
 #endif
                 )) {
             std::fprintf(stderr, "Configuration refresh failed\n");
+            ScheduleStartRetry(index);
             return false;
         }
     }
 
     {
         std::lock_guard<std::mutex> guard(state->Lock);
-        if (index >= state->Slots.size()) {
+        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
             return false;
         }
 
         auto& slot = state->Slots[index];
-        newContext = new (std::nothrow) ClientConnContext{state, index};
+        const auto gate = state->SessionGate;
+        newContext = new (std::nothrow) ClientConnContext{gate, state, index};
         if (newContext == nullptr) {
-            return false;
+            scheduleRetry = true;
         }
 
-        slot.Connection = std::make_unique<MsQuicConnection>(
-            *Registration,
-            CleanUpManual,
-            QuicClientSession::ConnectionCallback,
-            newContext);
-        if (!slot.Connection || !slot.Connection->IsValid()) {
-            std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
-                slot.Connection ? slot.Connection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
-            delete newContext;
-            slot.Connection.reset();
-            slot.ReconnectNeeded = true;
-            slot.NextReconnectAt = {};
-            return false;
+        if (!scheduleRetry) {
+            slot.Connection = std::make_unique<MsQuicConnection>(
+                *Registration,
+                CleanUpManual,
+                QuicClientSession::ConnectionCallback,
+                newContext);
+            if (!slot.Connection || !slot.Connection->IsValid()) {
+                std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
+                    slot.Connection ? slot.Connection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
+                delete newContext;
+                slot.Connection.reset();
+                scheduleRetry = true;
+            }
         }
-
-        slot.Context = newContext;
-        connectionToStart = slot.Connection.get();
-        if (Config.QuicDisable1RttEncryption &&
-            !TqSetDisable1RttEncryption(connectionToStart, "client")) {
-            slot.Context = nullptr;
-            delete newContext;
-            slot.Connection.reset();
-            slot.ReconnectNeeded = true;
-            slot.NextReconnectAt = {};
-            return false;
+        if (!scheduleRetry) {
+            slot.Context = newContext;
+            connectionToStart = slot.Connection.get();
+            if (Config.QuicDisable1RttEncryption &&
+                !TqSetDisable1RttEncryption(connectionToStart, "client")) {
+                slot.Context = nullptr;
+                delete newContext;
+                slot.Connection.reset();
+                connectionToStart = nullptr;
+                scheduleRetry = true;
+            } else {
+                TqClientDebugLog("connection-opened", index, connectionToStart,
+                    slot.Connection->GetInitStatus());
+            }
         }
-        TqClientDebugLog("connection-opened", index, connectionToStart,
-            slot.Connection->GetInitStatus());
+    }
+    if (scheduleRetry) {
+        ScheduleStartRetry(index);
+        return false;
     }
 
     TqClientDebugLog("connection-start-before", index, connectionToStart);
@@ -821,7 +885,7 @@ bool QuicClientSession::StartSlot(size_t index) {
 
     {
         std::lock_guard<std::mutex> guard(state->Lock);
-        if (index >= state->Slots.size()) {
+        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
             return QUIC_SUCCEEDED(startStatus);
         }
 
@@ -835,13 +899,76 @@ bool QuicClientSession::StartSlot(size_t index) {
             slot.Context = nullptr;
             delete newContext;
             slot.Connection.reset();
-            slot.ReconnectNeeded = true;
-            slot.NextReconnectAt = {};
-            return false;
+            scheduleRetry = true;
         }
+    }
+    if (scheduleRetry) {
+        ScheduleStartRetry(index);
+        return false;
     }
 
     return true;
+}
+
+void QuicClientSession::ScheduleStartRetry(size_t index) {
+    DelayedTaskScheduler scheduler;
+    std::weak_ptr<ClientSharedState> weakState;
+    std::shared_ptr<ClientSessionGate> gate;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (!State->Started || State->Stopping || index >= State->Slots.size()) {
+            return;
+        }
+        if (State->Slots[index].RetryScheduled) {
+            return;
+        }
+        scheduler = State->Scheduler;
+        weakState = State;
+        gate = State->SessionGate;
+        if (scheduler && gate) {
+            State->Slots[index].RetryScheduled = true;
+        }
+    }
+    if (!scheduler || !gate) {
+        return;
+    }
+    if (!scheduler(TqClientStartRetryDelay, [weakState, gate, index]() {
+        auto state = weakState.lock();
+        if (!state) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(state->Lock);
+            if (!state->Started || state->Stopping || index >= state->Slots.size() ||
+                !state->Slots[index].RetryScheduled) {
+                return;
+            }
+            state->Slots[index].RetryScheduled = false;
+        }
+        QuicClientSession* session = AcquireLiveSession(gate);
+        if (session == nullptr) {
+            return;
+        }
+        (void)session->StartSlot(index);
+        ReleaseLiveSession(gate);
+    })) {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (index < State->Slots.size()) {
+            State->Slots[index].RetryScheduled = false;
+        }
+    }
+}
+
+void QuicClientSession::RestartSlotAfterShutdownComplete(
+    const std::shared_ptr<ClientSharedState>& state,
+    size_t slotIndex) {
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (!state->Started || state->Stopping || slotIndex >= state->Slots.size()) {
+            return;
+        }
+    }
+    (void)StartSlot(slotIndex);
 }
 
 QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnected(
@@ -857,8 +984,6 @@ QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnecte
     const bool wasConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (slot.Connection.get() == connection) {
         slot.Connected = true;
-        slot.ReconnectNeeded = false;
-        slot.NextReconnectAt = {};
     }
     const bool isConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (wasConnected != isConnected) {
@@ -881,8 +1006,6 @@ QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotDisconne
     const bool wasConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (slot.Connection.get() == connection) {
         slot.Connected = false;
-        slot.ReconnectNeeded = !state->Stopping;
-        slot.NextReconnectAt = {};
     }
     const bool isConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (wasConnected != isConnected) {
@@ -1002,6 +1125,9 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+    {
+        std::shared_ptr<QuicClientSession::ClientSessionGate> gate = slotContext->Gate;
+        std::unique_ptr<MsQuicConnection> completedSlotConnection;
         TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
         {
@@ -1028,18 +1154,32 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                 std::lock_guard<std::mutex> guard(state->Lock);
                 if (slotIndex < state->Slots.size() &&
                     state->Slots[slotIndex].Context == slotContext) {
-                    state->Slots[slotIndex].Context = nullptr;
+                    auto& slot = state->Slots[slotIndex];
+                    slot.Context = nullptr;
+                    slot.RetryScheduled = false;
+                    if (slot.Connection.get() == connection) {
+                        completedSlotConnection = std::move(slot.Connection);
+                    }
                 }
             }
             state->StateChanged.notify_all();
             QuicClientSession::NotifyConnectionStateChanged(std::move(notification));
         }
         connection->Close();
+        completedSlotConnection.reset();
         if (state) {
             QuicClientSession::DropOrphanedConnection(state, connection);
         }
         delete slotContext;
+        if (gate && state) {
+            QuicClientSession* session = QuicClientSession::AcquireLiveSession(gate);
+            if (session != nullptr) {
+                session->RestartSlotAfterShutdownComplete(state, slotIndex);
+                QuicClientSession::ReleaseLiveSession(gate);
+            }
+        }
         break;
+    }
     default:
         break;
     }
