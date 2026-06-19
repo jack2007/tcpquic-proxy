@@ -79,13 +79,6 @@ void SetSockaddrPort(sockaddr_storage& addr, uint16_t port) {
     }
 }
 
-void CloseOwnedSocket(TqSocketHandle& fd) {
-    if (TqSocketValid(fd)) {
-        TqCloseSocket(fd);
-        fd = TqInvalidSocket;
-    }
-}
-
 std::unique_ptr<ITqSocketReactor> MakeSocketReactor() {
 #if defined(_WIN32)
     return std::make_unique<TqWindowsReactor>();
@@ -296,6 +289,7 @@ struct TqServerDialReactor::Impl {
 
         const int waitMs = NextWaitMs(timeoutMs);
         bool didWork = RunDnsOnce(0);
+        didWork = ExpireAttempts() || didWork;
         didWork = Reactor->RunOnce(0) || didWork;
         didWork = RunDnsOnce(0) || didWork;
         didWork = ExpireAttempts() || didWork;

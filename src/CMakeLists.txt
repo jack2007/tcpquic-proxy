@@ -379,6 +379,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_reactor_test
         unittest/linux_reactor_test.cpp
         runtime/linux_reactor.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_linux_reactor_test)
     target_link_libraries(tcpquic_linux_reactor_test PRIVATE Threads::Threads)
