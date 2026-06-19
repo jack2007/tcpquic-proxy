@@ -4,7 +4,7 @@
 
 **Goal:** Remove per-peer client reconnect threads, drive QUIC reconnect from MsQuic callbacks, and use the shared client ingress reactor for fixed-delay retry after synchronous start failures.
 
-**Architecture:** `QuicClientSession` no longer owns a reconnect thread. Async disconnects restart the affected slot after `SHUTDOWN_COMPLETE`; synchronous start failures are scheduled through an injected delayed-task scheduler implemented by `TqClientIngressReactor`. Client ingress listen ports remain closed unless the corresponding peer has at least one connected QUIC connection; warmup is removed and speedtest uses the normal ingress path.
+**Architecture:** `QuicClientSession` no longer owns a reconnect thread. Async disconnects restart the affected slot after `SHUTDOWN_COMPLETE`; synchronous start failures are scheduled through an injected delayed-task scheduler implemented by `TqClientIngressReactor`. The scheduler must be injected before `QuicClientSession::Start()` so initial synchronous start failures are covered. Client ingress listen ports remain closed unless the corresponding peer has at least one connected QUIC connection; reconnect interval configuration and warmup are removed, and speedtest uses the normal ingress path.
 
 **Tech Stack:** C++17, MsQuic callback API, existing `TqClientIngressReactor`, CMake, assert-style unit tests.
 
@@ -14,29 +14,33 @@
 
 Modify:
 
-- `src/ingress/client_ingress_reactor.h`  
+- `src/ingress/client_ingress_reactor.h`
   Add delayed task queue API and private processing helpers.
-- `src/ingress/client_ingress_reactor.cpp`  
+- `src/ingress/client_ingress_reactor.cpp`
   Process due delayed tasks in the ingress worker loop and compute reactor wait timeout from the nearest due task.
-- `src/protocol/quic_session.h`  
+- `src/protocol/quic_session.h`
   Remove reconnect thread state and add `DelayedTaskScheduler`.
-- `src/protocol/quic_session.cpp`  
+- `src/protocol/quic_session.cpp`
   Remove reconnect loop, restart slots from `SHUTDOWN_COMPLETE`, schedule fixed-delay retries for synchronous start failures, and simplify `EnsureConnected()`.
-- `src/main.cpp`  
-  Wire `QuicClientSession` delayed scheduler to the relevant `TqClientIngressReactor`, delete warmup branch, and route speedtest through ingress-only startup.
-- `src/runtime/speed_test.*`  
+- `src/main.cpp`
+  Start ingress before QUIC, wire `QuicClientSession` delayed scheduler to the relevant `TqClientIngressReactor`, delete warmup branch, delete reconnect interval propagation, and route speedtest through ingress-only startup.
+- `src/config/config.h` / `src/config/config.cpp`
+  Remove reconnect interval and warmup configuration surfaces.
+- `src/runtime/speed_test.*`
   Remove direct `QuicClientSession` client speedtest entry point and add ingress-driven HTTP CONNECT speedtest helper code.
-- `src/runtime/warmup.*`  
+- `src/runtime/warmup.*`
   Delete warmup implementation after references are removed.
-- `src/CMakeLists.txt`  
-  Remove warmup sources/tests and update speedtest test sources.
-- `src/unittest/client_ingress_reactor_test.cpp`  
+- `src/CMakeLists.txt`
+  Add reconnect tests, remove warmup sources/tests, and update speedtest test sources.
+- `src/unittest/client_ingress_reactor_test.cpp`
   Add delayed task tests.
-- `src/unittest/client_tunnel_open_test.cpp` / `src/unittest/tcp_tunnel_test.cpp`  
+- `src/unittest/client_tunnel_open_test.cpp` / `src/unittest/tcp_tunnel_test.cpp`
   Update `QuicClientSession` API surface tests.
-- `src/unittest/speed_test_test.cpp`  
+- `src/unittest/speed_test_test.cpp`
   Remove direct `QuicClientSession` stubs for speedtest client path; add ingress-path expectations.
-- `docs/thread-model_cn.md`  
+- `src/unittest/config_router_test.cpp` / `src/unittest/tuning_test.cpp`
+  Remove reconnect interval and warmup parser expectations; add rejection coverage for removed options.
+- `docs/thread-model_cn.md`
   Remove client reconnect thread and warmup descriptions; document callback-driven reconnect.
 
 Create:
@@ -160,11 +164,12 @@ bool TqClientIngressReactor::EnqueueDelayed(
     if (delay < std::chrono::milliseconds(0)) {
         delay = std::chrono::milliseconds(0);
     }
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    if (State != LifecycleState::Running || !Running.load(std::memory_order_acquire)) {
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(Mutex);
-        if (!Running.load(std::memory_order_acquire)) {
-            return false;
-        }
         DelayedTasks.push_back(DelayedTask{
             std::chrono::steady_clock::now() + delay,
             NextDelayedTaskOrder++,
@@ -206,10 +211,12 @@ int TqClientIngressReactor::NextRunTimeoutMsLocked() const {
     }
     const auto now = std::chrono::steady_clock::now();
     auto earliest = DelayedTasks.front().Due;
+    auto earliestOrder = DelayedTasks.front().Order;
     for (const auto& task : DelayedTasks) {
         if (task.Due < earliest ||
-            (task.Due == earliest && task.Order < DelayedTasks.front().Order)) {
+            (task.Due == earliest && task.Order < earliestOrder)) {
             earliest = task.Due;
+            earliestOrder = task.Order;
         }
     }
     if (earliest <= now) {
@@ -247,6 +254,8 @@ PendingTasks.clear();
 DelayedTasks.clear();
 ```
 
+Do not call `ProcessDueDelayedTasks()` after `Running` becomes false; Stop must drop delayed retry tasks instead of running them during shutdown.
+
 - [ ] **Step 5: Run client ingress reactor test**
 
 ```bash
@@ -265,11 +274,16 @@ rtk git commit -m "feat(ingress): add delayed task scheduling"
 
 ---
 
-### Task 2: Remove Per-Session Reconnect Thread API
+### Task 2: Remove Per-Session Reconnect Thread API and Interval Config
 
 **Files:**
 - Modify: `src/protocol/quic_session.h`
 - Modify: `src/protocol/quic_session.cpp`
+- Modify: `src/config/config.h`
+- Modify: `src/config/config.cpp`
+- Modify: `src/main.cpp`
+- Modify: `src/unittest/config_router_test.cpp`
+- Modify: `src/unittest/tuning_test.cpp`
 - Modify: `src/unittest/tcp_tunnel_test.cpp`
 
 - [ ] **Step 1: Update API surface test first**
@@ -311,6 +325,12 @@ using DelayedTaskScheduler =
 void SetDelayedTaskScheduler(DelayedTaskScheduler scheduler);
 ```
 
+Before `ClientConnContext`, forward declare the gate:
+
+```cpp
+struct ClientSessionGate;
+```
+
 In `ClientSharedState`, remove:
 
 ```cpp
@@ -323,9 +343,19 @@ Add:
 
 ```cpp
 DelayedTaskScheduler Scheduler;
+std::shared_ptr<ClientSessionGate> SessionGate;
 ```
 
-Remove `ClientReconnectGate` and declarations for:
+Define `ClientSessionGate` before `ClientConnContext` or between `ClientConnContext` and `ClientSharedState`, and replace `ClientReconnectGate` with this lifecycle-only gate:
+
+```cpp
+struct ClientSessionGate {
+    std::mutex Lock;
+    QuicClientSession* Session{nullptr};
+};
+```
+
+Remove declarations for:
 
 ```cpp
 void StartReconnectLoop();
@@ -341,8 +371,8 @@ Add declarations:
 bool StartSlot(size_t index);
 void StartAllSlots();
 void ScheduleStartRetry(size_t index);
-static void RestartSlotAfterShutdownComplete(
-    std::shared_ptr<ClientSharedState> state,
+void RestartSlotAfterShutdownComplete(
+    const std::shared_ptr<ClientSharedState>& state,
     size_t slotIndex);
 ```
 
@@ -358,6 +388,8 @@ void QuicClientSession::SetDelayedTaskScheduler(DelayedTaskScheduler scheduler) 
     State->Scheduler = std::move(scheduler);
 }
 ```
+
+When `Start()` transitions the session into `Started`, create or refresh `state->SessionGate` and set `SessionGate->Session = this`. When `Stop(bool clearHandlers)` begins, lock the gate and set `SessionGate->Session = nullptr` before shutting down slots. This preserves the current reconnect-thread use-after-free protection without keeping the reconnect thread itself.
 
 In `Start()`, replace:
 
@@ -416,19 +448,45 @@ void QuicClientSession::StartAllSlots() {
 
 Replace all call sites of `StartSlotLocked` with `StartSlot`.
 
-- [ ] **Step 6: Build tunnel test**
+- [ ] **Step 6: Remove reconnect interval config surface**
 
-```bash
-rtk cmake --build build-regression --target tcpquic_tunnel_test -j4
+In `src/config/config.h`, remove:
+
+```cpp
+uint32_t QuicReconnectIntervalMs{0};
+uint32_t QuicReconnectIntervalMs{3000};
 ```
 
-Expected: target builds successfully.
+and the peer equivalent from `TqPeerConfig`.
 
-- [ ] **Step 7: Commit**
+In `src/config/config.cpp`, remove parsing, validation, inheritance, and help text for:
+
+- CLI `--quic-reconnect-interval-ms`
+- single-peer JSON `quic_reconnect_interval_ms`
+- router peer JSON `proto.reconnect_interval_ms`
+- router peer JSON `quic_reconnect_interval_ms`
+
+If the parser has a central unknown-key path, let these removed keys fail through that path. Otherwise add explicit rejection with an error message containing the removed key name.
+
+In `src/main.cpp`, remove assignments that copy reconnect interval values from base config into peer config.
+
+In `src/unittest/config_router_test.cpp` and `src/unittest/tuning_test.cpp`, remove positive assertions for reconnect interval parsing and add rejection cases for the removed CLI / JSON keys.
+
+- [ ] **Step 7: Build tunnel and config tests**
 
 ```bash
-rtk git add src/protocol/quic_session.h src/protocol/quic_session.cpp src/unittest/tcp_tunnel_test.cpp
-rtk git commit -m "refactor(quic): remove client reconnect thread state"
+rtk cmake --build build-regression --target tcpquic_tunnel_test tcpquic_config_router_test tcpquic_tuning_test tcpquic-proxy -j4
+rtk ./build-regression/bin/Release/tcpquic_config_router_test
+rtk ./build-regression/bin/Release/tcpquic_tuning_test
+```
+
+Expected: targets build successfully and config tests exit `0`.
+
+- [ ] **Step 8: Commit**
+
+```bash
+rtk git add src/protocol/quic_session.h src/protocol/quic_session.cpp src/config/config.h src/config/config.cpp src/main.cpp src/unittest/config_router_test.cpp src/unittest/tuning_test.cpp src/unittest/tcp_tunnel_test.cpp
+rtk git commit -m "refactor(quic): remove client reconnect thread and interval config"
 ```
 
 ---
@@ -476,37 +534,113 @@ void QuicClientSession::SetReconnectTestHooks(ReconnectTestHooks hooks) {
 #endif
 ```
 
+At the top of `StartSlot(size_t index)`, copy and run `TestHooks.StartSlotOverride` before touching MsQuic:
+
+```cpp
+#if defined(TQ_UNIT_TESTING)
+std::function<bool(size_t)> startSlotOverride;
+{
+    std::lock_guard<std::mutex> guard(State->Lock);
+    startSlotOverride = TestHooks.StartSlotOverride;
+}
+if (startSlotOverride) {
+    return startSlotOverride(index);
+}
+#endif
+```
+
+Also add test-only helpers that allow the reconnect unit test to exercise scheduling without constructing a real MsQuic connection:
+
+```cpp
+#if defined(TQ_UNIT_TESTING)
+void MarkReconnectStartedForTest(size_t slots);
+void ScheduleStartRetryForTest(size_t index);
+#endif
+```
+
+`MarkReconnectStartedForTest()` must resize `State->Slots`, set `Started=true`, `Stopping=false`, and ensure `State->SessionGate->Session == this`.
+`ScheduleStartRetryForTest()` only forwards to the private `ScheduleStartRetry(index)` helper.
+
 - [ ] **Step 2: Add failing fixed-delay retry test**
 
-Create `src/unittest/quic_session_reconnect_test.cpp`:
+Create `src/unittest/quic_session_reconnect_test.cpp` with a behavior test that exercises the scheduled retry path:
 
 ```cpp
 #include "quic_session.h"
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <thread>
 
-int main() {
+static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
+    std::atomic<int> startCalls{0};
+    std::function<void()> retryTask;
+
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks(QuicClientSession::ReconnectTestHooks{
+        [&](size_t index) {
+            if (index != 0) {
+                return false;
+            }
+            startCalls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }});
     session.SetDelayedTaskScheduler([&](std::chrono::milliseconds delay, std::function<void()> task) {
         if (delay != std::chrono::milliseconds(100)) {
             return false;
         }
-        ++scheduled;
-        std::thread([task = std::move(task)]() mutable {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            task();
-        }).detach();
+        scheduled.fetch_add(1, std::memory_order_relaxed);
+        retryTask = std::move(task);
         return true;
     });
-    (void)session;
-    return scheduled.load() == 0 ? 0 : 1;
+
+    session.ScheduleStartRetryForTest(0);
+    if (scheduled.load(std::memory_order_relaxed) != 1 || !retryTask) {
+        return 10;
+    }
+    retryTask();
+    if (startCalls.load(std::memory_order_relaxed) != 1) {
+        return 11;
+    }
+    session.Stop();
+    return 0;
+}
+
+static int TestDelayedRetryDropsAfterStop() {
+    QuicClientSession session;
+    std::atomic<int> startCalls{0};
+    std::function<void()> retryTask;
+
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks(QuicClientSession::ReconnectTestHooks{
+        [&](size_t) {
+            startCalls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }});
+    session.SetDelayedTaskScheduler([&](std::chrono::milliseconds, std::function<void()> task) {
+        retryTask = std::move(task);
+        return true;
+    });
+
+    session.ScheduleStartRetryForTest(0);
+    session.Stop();
+    if (retryTask) {
+        retryTask();
+    }
+    return startCalls.load(std::memory_order_relaxed) == 0 ? 0 : 20;
+}
+
+int main() {
+    if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
+    if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
+    return 0;
 }
 ```
 
-This compile-only test establishes the scheduler API before the behavior-specific restart assertions are introduced through the `TQ_UNIT_TESTING` hooks in this task.
+Expected before implementation: build fails because the test-only helpers and retry behavior do not exist. Expected after implementation: the delayed retry is scheduled at the fixed 100ms delay, invokes `StartSlot(0)`, and drops cleanly after `Stop()`.
 
 - [ ] **Step 3: Add CMake target**
 
@@ -542,6 +676,7 @@ constexpr auto TqClientStartRetryDelay = std::chrono::milliseconds(100);
 void QuicClientSession::ScheduleStartRetry(size_t index) {
     DelayedTaskScheduler scheduler;
     std::weak_ptr<ClientSharedState> weakState;
+    std::shared_ptr<ClientSessionGate> gate;
     {
         std::lock_guard<std::mutex> guard(State->Lock);
         if (!State->Started || State->Stopping) {
@@ -549,13 +684,19 @@ void QuicClientSession::ScheduleStartRetry(size_t index) {
         }
         scheduler = State->Scheduler;
         weakState = State;
+        gate = State->SessionGate;
     }
-    if (!scheduler) {
+    if (!scheduler || !gate) {
         return;
     }
-    (void)scheduler(TqClientStartRetryDelay, [this, weakState, index]() {
+    (void)scheduler(TqClientStartRetryDelay, [weakState, gate, index]() {
         auto state = weakState.lock();
         if (!state) {
+            return;
+        }
+        std::lock_guard<std::mutex> sessionGuard(gate->Lock);
+        QuicClientSession* session = gate->Session;
+        if (session == nullptr) {
             return;
         }
         {
@@ -564,20 +705,20 @@ void QuicClientSession::ScheduleStartRetry(size_t index) {
                 return;
             }
         }
-        (void)StartSlot(index);
+        (void)session->StartSlot(index);
     });
 }
 ```
 
 When `StartSlot(index)` hits a synchronous failure, call `ScheduleStartRetry(index)` before returning `false`.
 
-- [ ] **Step 5: Add session pointer to connection context**
+- [ ] **Step 5: Add session gate to connection context**
 
-In `src/protocol/quic_session.h`, change `ClientConnContext` to carry the owning session pointer:
+In `src/protocol/quic_session.h`, change `ClientConnContext` to carry the owning session gate:
 
 ```cpp
 struct ClientConnContext {
-    QuicClientSession* Session{nullptr};
+    std::shared_ptr<ClientSessionGate> Gate;
     std::shared_ptr<ClientSharedState> State;
     size_t SlotIndex{0};
 };
@@ -586,7 +727,7 @@ struct ClientConnContext {
 In `StartSlot(size_t index)`, set it when creating a new context:
 
 ```cpp
-newContext = new (std::nothrow) ClientConnContext{this, state, index};
+newContext = new (std::nothrow) ClientConnContext{state->SessionGate, state, index};
 ```
 
 In `src/protocol/quic_session.cpp`, implement the instance restart method:
@@ -605,12 +746,28 @@ void QuicClientSession::RestartSlotAfterShutdownComplete(
 }
 ```
 
-- [ ] **Step 6: Update shutdown callback**
-
-In `QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE`, save the owning session before old context cleanup and restart after deleting the old context:
+`Stop(bool clearHandlers)` must invalidate the gate before shutting down slots:
 
 ```cpp
-QuicClientSession* session = slotContext->Session;
+std::shared_ptr<ClientSessionGate> gate;
+{
+    std::lock_guard<std::mutex> guard(state->Lock);
+    gate = state->SessionGate;
+}
+if (gate) {
+    std::lock_guard<std::mutex> guard(gate->Lock);
+    gate->Session = nullptr;
+}
+```
+
+The restart path intentionally holds `gate->Lock` while calling `StartSlot()`. `StartSlot()` and `ScheduleStartRetry()` must not try to acquire `gate->Lock`; this keeps Stop/destructor serialized with delayed retry and callback restarts without introducing a second lifetime owner for `QuicClientSession`.
+
+- [ ] **Step 6: Update shutdown callback**
+
+In `QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE`, save the owning session gate before old context cleanup and restart after deleting the old context:
+
+```cpp
+std::shared_ptr<QuicClientSession::ClientSessionGate> gate = slotContext->Gate;
 
 TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
 (void)TqAbortConnectionTunnels(connection);
@@ -649,7 +806,12 @@ if (state) {
     QuicClientSession::DropOrphanedConnection(state, connection);
 }
 delete slotContext;
-if (session != nullptr && state) {
+if (gate && state) {
+    std::lock_guard<std::mutex> sessionGuard(gate->Lock);
+    QuicClientSession* session = gate->Session;
+    if (session == nullptr) {
+        break;
+    }
     session->RestartSlotAfterShutdownComplete(state, slotIndex);
 }
 ```
@@ -679,12 +841,27 @@ rtk git commit -m "feat(quic): restart client slots from callbacks"
 
 **Files:**
 - Modify: `src/main.cpp`
-- Modify: `src/unittest/client_ingress_reactor_test.cpp`
-- Modify: `src/unittest/router_runtime_test.cpp`
 
-- [ ] **Step 1: Wire single-peer scheduler**
+- [ ] **Step 1: Reorder single-peer startup and wire scheduler**
 
-In `RunSinglePeerClient`, after creating `runtime` and before relying on QUIC retry scheduling, set:
+In `RunSinglePeerClient`, create and start `TqSinglePeerClientRuntime` before `quic.Start(quicCfg)`. Then set `StartTunnel`, delayed scheduler, and connection state handler before starting QUIC:
+
+```cpp
+QuicClientSession quic;
+const TqConfig quicCfg = cfg.SpeedTestMode == TqSpeedTestMode::None
+    ? cfg
+    : TqMakeSpeedClientSessionConfig(cfg);
+
+std::string err;
+auto runtime = std::make_shared<TqSinglePeerClientRuntime>(cfg, quic);
+if (!runtime->Start(err)) {
+    std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
+    return 1;
+}
+std::weak_ptr<TqSinglePeerClientRuntime> weakRuntime = runtime;
+```
+
+After `weakRuntime` exists and before `quic.Start(quicCfg)`, set:
 
 ```cpp
 quic.SetDelayedTaskScheduler([weakRuntime](std::chrono::milliseconds delay, std::function<void()> task) {
@@ -704,9 +881,20 @@ bool EnqueueDelayed(std::chrono::milliseconds delay, std::function<void()> task)
 }
 ```
 
-- [ ] **Step 2: Wire multi-peer scheduler**
+Keep the connection state handler registration before `quic.Start(quicCfg)` as well, so a fast `CONNECTED` callback observes a complete runtime, and the subsequent `EnableAcceptingAndApplyCurrentConnectionState(...)` call can open ingress.
 
-In the multi-peer `PeerRuntime` setup path, after `runtime->Ingress = Ingress.get();`, set:
+Then call:
+
+```cpp
+if (!quic.Start(quicCfg)) {
+    runtime->DisableAccepting();
+    return 1;
+}
+```
+
+- [ ] **Step 2: Reorder multi-peer startup and wire scheduler**
+
+In `TqMultiPeerRuntimeAdapter::StartPeer`, call `EnsureIngressStarted(err)` and set `runtime->Ingress = Ingress.get()` before `runtime->Quic->Start(peerCfg)`. After `runtime->Ingress` and `weakRuntime` exist, set:
 
 ```cpp
 runtime->Quic->SetDelayedTaskScheduler([weakRuntime](std::chrono::milliseconds delay, std::function<void()> task) {
@@ -717,6 +905,8 @@ runtime->Quic->SetDelayedTaskScheduler([weakRuntime](std::chrono::milliseconds d
     return runtime->Ingress->EnqueueDelayed(delay, std::move(task));
 });
 ```
+
+Also install `StartTunnel` and the connection state handler before `runtime->Quic->Start(peerCfg)`. This ordering ensures both initial synchronous start failures and fast connection state callbacks have their runtime dependencies available.
 
 - [ ] **Step 3: Verify peer listen gating remains connected-count based**
 
@@ -746,7 +936,7 @@ Expected: both executables exit `0`.
 - [ ] **Step 5: Commit**
 
 ```bash
-rtk git add src/main.cpp src/unittest/client_ingress_reactor_test.cpp src/unittest/router_runtime_test.cpp
+rtk git add src/main.cpp
 rtk git commit -m "feat(client): schedule reconnect retry on ingress reactor"
 ```
 
@@ -762,6 +952,7 @@ rtk git commit -m "feat(client): schedule reconnect retry on ingress reactor"
 - Modify: `src/config/config.h`
 - Modify: `src/config/config.cpp`
 - Modify: `src/unittest/config_router_test.cpp`
+- Modify: `src/unittest/tuning_test.cpp`
 - Modify: `docs/thread-model_cn.md`
 
 - [ ] **Step 1: Remove warmup runtime branch**
@@ -805,7 +996,7 @@ In `src/CMakeLists.txt`, remove `runtime/warmup.cpp` from all source lists.
 
 - [ ] **Step 4: Update config tests**
 
-In `src/unittest/config_router_test.cpp`, remove assertions that expect warmup CLI or JSON parsing. Add a rejection test for the removed CLI option:
+In `src/unittest/config_router_test.cpp` and `src/unittest/tuning_test.cpp`, remove assertions that expect warmup CLI or JSON parsing. Add a rejection test for the removed CLI option:
 
 ```cpp
 {
@@ -813,7 +1004,7 @@ In `src/unittest/config_router_test.cpp`, remove assertions that expect warmup C
     std::string err;
     const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444",
         "--warmup-mb", "1", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
-    if (ParseArgs(10, const_cast<char**>(args), cfg, err)) return 170;
+    if (ParseArgs(12, const_cast<char**>(args), cfg, err)) return 170;
     if (err.find("warmup") == std::string::npos) return 171;
 }
 ```
@@ -823,8 +1014,9 @@ Assert the parser returns failure and the error text contains `--warmup-mb`.
 - [ ] **Step 5: Build config and proxy targets**
 
 ```bash
-rtk cmake --build build-regression --target tcpquic-proxy tcpquic_config_router_test -j4
+rtk cmake --build build-regression --target tcpquic-proxy tcpquic_config_router_test tcpquic_tuning_test -j4
 rtk ./build-regression/bin/Release/tcpquic_config_router_test
+rtk ./build-regression/bin/Release/tcpquic_tuning_test
 ```
 
 Expected: build succeeds and config test exits `0`.
@@ -832,7 +1024,7 @@ Expected: build succeeds and config test exits `0`.
 - [ ] **Step 6: Commit**
 
 ```bash
-rtk git add src/main.cpp src/CMakeLists.txt src/config/config.h src/config/config.cpp src/unittest/config_router_test.cpp docs/thread-model_cn.md
+rtk git add src/main.cpp src/CMakeLists.txt src/config/config.h src/config/config.cpp src/unittest/config_router_test.cpp src/unittest/tuning_test.cpp docs/thread-model_cn.md
 rtk git commit -m "refactor(client): remove warmup mode"
 ```
 
@@ -883,20 +1075,25 @@ Choose HTTP CONNECT as the required ingress path for built-in client speedtest. 
 bool TqRunIngressClientSpeedTest(const TqConfig& cfg);
 ```
 
-This helper must fail fast if `cfg.HttpListen` is empty or not listening. It must not access `QuicClientSession` directly.
+This helper must fail fast if `cfg.HttpListen` is empty, uses an ephemeral port that cannot be reconnected by address, or is not listening. It must not access `QuicClientSession` directly.
 
 - [ ] **Step 4: Wire speedtest after ingress startup**
 
-After `runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)` succeeds, if `cfg.SpeedTestMode != None`, run:
+After the normal runtime and QUIC startup path, if `cfg.SpeedTestMode != None`, require ingress to be open and then run:
 
 ```cpp
+if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, true)) {
+    std::fprintf(stderr, "tcpquic-proxy: speedtest ingress unavailable: %s\n", err.c_str());
+    quic.Stop();
+    return 1;
+}
 const bool ok = TqRunIngressClientSpeedTest(cfg);
 runtime->DisableAccepting();
 quic.Stop();
 return ok ? 0 : 1;
 ```
 
-Because listen ports are only open when QUIC is connected, this guarantees speedtest uses the same ingress gating as real client traffic.
+Because listen ports are only open when QUIC is connected, this guarantees speedtest uses the same ingress gating as real client traffic and fails clearly when QUIC is not connected.
 
 - [ ] **Step 5: Update speedtest tests**
 
@@ -987,11 +1184,11 @@ Remove warmup references. Change speedtest wording to:
 - [ ] **Step 5: Verify docs**
 
 ```bash
-rtk proxy git diff --check
-rtk rg -n "reconnect thread|warmup|Warmup|TqRunClientWarmup|TqRunClientSpeedTest" docs/thread-model_cn.md src
+rtk git diff --check
+rtk rg -n "reconnect thread|quic_reconnect_interval|QuicReconnectIntervalMs|warmup|Warmup|TqRunClientWarmup|TqRunClientSpeedTest" docs/thread-model_cn.md src
 ```
 
-Expected: no reconnect thread or warmup references remain in production docs/source. `TqRunClientSpeedTest` should not appear.
+Expected: no reconnect thread, reconnect interval, or warmup references remain in production docs/source. `TqRunClientSpeedTest` should not appear.
 
 - [ ] **Step 6: Commit**
 
@@ -1022,6 +1219,7 @@ rtk cmake --build build-regression --target \
   tcpquic_quic_session_reconnect_test \
   tcpquic_router_runtime_test \
   tcpquic_config_router_test \
+  tcpquic_tuning_test \
   -j4
 ```
 
@@ -1040,6 +1238,7 @@ rtk ./build-regression/bin/Release/tcpquic_speed_test_test
 rtk ./build-regression/bin/Release/tcpquic_quic_session_reconnect_test
 rtk ./build-regression/bin/Release/tcpquic_router_runtime_test
 rtk ./build-regression/bin/Release/tcpquic_config_router_test
+rtk ./build-regression/bin/Release/tcpquic_tuning_test
 ```
 
 Expected: all executables exit `0`.
@@ -1091,6 +1290,6 @@ Expected: branch contains the planned commits and no unintended tracked modifica
 
 ## Self-Review
 
-- Spec coverage: Tasks cover delayed scheduler, reconnect thread removal, callback restart, ingress scheduler wiring, warmup deletion, speedtest ingress routing, docs, and regression.
+- Spec coverage: Tasks cover delayed scheduler, reconnect thread and reconnect interval removal, callback restart, ingress scheduler wiring, warmup deletion, speedtest ingress routing, docs, and regression.
 - Marker scan: No incomplete-work markers are present. Steps include exact files, commands, and expected outcomes.
 - Type consistency: The plan consistently uses `DelayedTaskScheduler`, `SetDelayedTaskScheduler`, `EnqueueDelayed`, `StartSlot`, and `StartAllSlots`.

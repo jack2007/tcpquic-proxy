@@ -1,7 +1,7 @@
 # Callback-Driven Client Reconnect 设计方案
 
-> 日期：2026-06-19  
-> 状态：设计完成 / 待实现  
+> 日期：2026-06-19
+> 状态：设计完成 / 待实现
 > 参考：`docs/thread-model_cn.md`、`src/protocol/quic_session.cpp`、`src/ingress/client_ingress_reactor.cpp`、`docs/superpowers/specs/2026-06-18-thread-model-cares-design.md`。
 
 ## 1. 背景
@@ -26,9 +26,10 @@
 2. QUIC 异步断开后，由 MsQuic callback 驱动对应 slot 立即重建。
 3. `ConnectionOpen` / `ConnectionStart` 同步失败时不无限立即重试，而是由 client ingress reactor 的 delayed task 定时触发 retry。
 4. 不把重连定时器放在 MsQuic callback 线程里等待。
-5. 删除 warmup 功能。
-6. speedtest 走普通 client ingress 流程，不再绕过 SOCKS5 / HTTP CONNECT ingress 直接使用 `QuicClientSession`。
-7. 没有成功 QUIC connection 的 peer 不开放 SOCKS5 / HTTP CONNECT listen 端口。
+5. 删除 `quic_reconnect_interval_ms` / `proto.reconnect_interval_ms` / peer reconnect interval 配置语义，固定 retry delay 只作为防 tight loop 的内部常量。
+6. 删除 warmup 功能。
+7. speedtest 走普通 client ingress 流程，不再绕过 SOCKS5 / HTTP CONNECT ingress 直接使用 `QuicClientSession`。
+8. 没有成功 QUIC connection 的 peer 不开放 SOCKS5 / HTTP CONNECT listen 端口。
 
 ## 3. 非目标
 
@@ -44,10 +45,10 @@
 
 新模型把重连拆成两个触发源：
 
-1. **异步 QUIC 断开**  
+1. **异步 QUIC 断开**
    MsQuic callback 收到 `QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE` 后，清理旧 connection context，并立即重建同一 slot。
 
-2. **同步 start 失败**  
+2. **同步 start 失败**
    `ConnectionOpen` 或 `ConnectionStart` 在调用栈内同步失败时，不在同一调用栈里无限重试。`QuicClientSession` 调用注入的 delayed scheduler，把 retry 任务投递给 `TqClientIngressReactor`。常规 client 下该 delayed task 由唯一 ingress reactor 线程执行。
 
 这样常规 multi-peer client 的 reconnect 后台线程数从 `P` 降为 `0`；低频定时 retry 复用已有的 ingress reactor 线程。
@@ -89,6 +90,7 @@
 - 如果 session 配置了 delayed scheduler，则投递一个固定延迟 retry。
 - 固定延迟建议为 `100ms`，只为防止 CPU tight loop，不表达退避策略。
 - 如果没有 delayed scheduler，`EnsureAnyConnected()` 仍可同步尝试一次补齐，主要服务非 ingress 测试或过渡路径。
+- 固定延迟不读取 `TqConfig::QuicReconnectIntervalMs`；该配置表面随 reconnect thread 一起删除，避免保留无效配置。
 
 ### 4.4 Delayed scheduler 注入
 
@@ -107,6 +109,19 @@ void SetDelayedTaskScheduler(DelayedTaskScheduler scheduler);
 - multi-peer：绑定到共享 `TqClientIngressReactor`。
 
 `QuicClientSession` 内部只调用 scheduler，不 include ingress header。
+
+常规 runtime 必须先启动 ingress reactor、注入 scheduler 和 connection state handler，再调用 `QuicClientSession::Start()`。这样初始 `ConnectionOpen` / `ConnectionStart` 同步失败也能进入 delayed retry；如果先 `Start()` 后注入 scheduler，启动阶段的同步失败会退化成只能等待外部触发。
+
+Delayed retry task 和 `SHUTDOWN_COMPLETE` callback 都不得直接持有裸 `this` 作为跨线程生命周期依据。`QuicClientSession` 需要保留一个轻量 `ClientSessionGate`：
+
+```cpp
+struct ClientSessionGate {
+    std::mutex Lock;
+    QuicClientSession* Session{nullptr};
+};
+```
+
+`ClientConnContext` 和 delayed retry lambda 捕获 `std::shared_ptr<ClientSessionGate>`。执行 restart 前锁 gate，确认 `Session` 仍有效，并在持有 gate lock 期间调用 `StartSlot()`；`Stop()` / 析构路径先锁 gate 把 `Session` 置空，再关闭 slot 和清空 scheduler。`StartSlot()` / `ScheduleStartRetry()` 自身不能反向获取 gate lock，避免锁递归和锁顺序反转。这个 gate 不提供所有权，只用于把迟到 retry / callback 与 Stop/destructor 串行化。
 
 ### 4.5 Ingress reactor delayed task
 
@@ -163,7 +178,18 @@ peer ingress 的状态只由 QUIC connected count 决定：
 
 删除 warmup 后，client 启动只有 ingress runtime 和 QUIC state handler 控制端口开放。
 
-### 4.8 Speedtest 走 ingress
+### 4.8 删除 reconnect interval 配置
+
+删除以下配置输入和内部字段：
+
+- CLI：`--quic-reconnect-interval-ms`。
+- single-peer JSON：`quic_reconnect_interval_ms`。
+- router peer JSON：`proto.reconnect_interval_ms` / `quic_reconnect_interval_ms`。
+- `TqConfig::QuicReconnectIntervalMs` 和 `TqPeerConfig::QuicReconnectIntervalMs`。
+
+固定 retry delay 是实现常量，不对外暴露，不作为性能调参项。旧配置如果继续出现在 CLI / JSON 中，parser 应返回明确错误，避免用户误以为它仍控制重连节奏。
+
+### 4.9 Speedtest 走 ingress
 
 speedtest 不再直接调用 `TqRunClientSpeedTest(quic, cfg)` 绕过 ingress。新的约束：
 
@@ -179,6 +205,8 @@ speedtest 不再直接调用 `TqRunClientSpeedTest(quic, cfg)` 绕过 ingress。
 
 `QuicClientSession::Start(cfg)`：
 
+前置条件：常规 runtime 已经启动 ingress reactor、注入 delayed scheduler 和 connection state handler。
+
 1. 初始化 MsQuic API / registration / configuration。
 2. 初始化 `Config.QuicConnections` 个 slots。
 3. 不创建 reconnect thread。
@@ -190,7 +218,7 @@ speedtest 不再直接调用 `TqRunClientSpeedTest(quic, cfg)` 绕过 ingress。
 `QuicClientSession::Stop()`：
 
 1. 设置 `Stopping=true`。
-2. 清空 scheduler 或标记 generation invalid。
+2. 将 `ClientSessionGate::Session` 置空，并清空 scheduler 或标记 generation invalid。
 3. shutdown 所有 slot connections。
 4. 等待 orphaned connections drain。
 5. 不 join reconnect thread，因为线程已删除。
@@ -218,6 +246,7 @@ speedtest 不再直接调用 `TqRunClientSpeedTest(quic, cfg)` 绕过 ingress。
 - delayed scheduler 不存在：记录状态，不启动后台 retry；后续 `EnsureAnyConnected()` 可尝试。
 - Stop 并发：所有 restart / delayed retry 执行前检查 `Stopping`。
 - 旧 callback 迟到：通过 slot context 和 connection pointer 匹配，旧 callback 不得覆盖新 connection slot。
+- 迟到 delayed task：通过 `ClientSessionGate` 判断 session 是否仍存活，gate 已失效则直接返回。
 
 ## 7. 线程模型变化
 
@@ -247,6 +276,7 @@ client reconnect 行为由：
 
 - multi-peer client 不再为每个 peer 创建 reconnect thread。
 - 删除 `ClientSharedState::ReconnectThread`、`StartReconnectLoop()`、`RunReconnectLoop()`。
+- 删除 `QuicReconnectIntervalMs` 配置字段、CLI / JSON 输入和相关测试期望。
 - QUIC 异步断开后，在 `SHUTDOWN_COMPLETE` 后立即启动 replacement connection。
 - 同步 `ConnectionStart` 失败不会 tight loop，会通过 ingress reactor delayed task 固定延迟 retry。
 - peer 没有 connected QUIC connection 时，SOCKS5 / HTTP CONNECT listen 端口不开放。
@@ -255,4 +285,3 @@ client reconnect 行为由：
 - warmup 功能和文档移除。
 - speedtest client 不再绕过 ingress 直接使用 `QuicClientSession`。
 - Linux / Windows / macOS client ingress、tunnel open、reactor、speedtest 相关测试通过。
-
