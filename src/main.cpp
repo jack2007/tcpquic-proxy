@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -44,19 +45,14 @@ public:
         peerCfg.QuicConnections = peer.QuicConnections == 0 ? BaseConfig.QuicConnections : peer.QuicConnections;
         peerCfg.Compress = peer.Compress.empty() ? BaseConfig.Compress : peer.Compress;
 
+        if (!EnsureIngressStarted(err)) {
+            return false;
+        }
+
         auto runtime = std::make_shared<PeerRuntime>();
         runtime->PeerId = peer.PeerId;
         runtime->Config = peerCfg;
         runtime->Quic = std::make_unique<QuicClientSession>();
-        if (!runtime->Quic->Start(peerCfg)) {
-            err = "failed to start QUIC client for " + peer.PeerId;
-            return false;
-        }
-
-        if (!EnsureIngressStarted(err)) {
-            runtime->Quic->Stop();
-            return false;
-        }
         runtime->Ingress = Ingress.get();
         std::weak_ptr<PeerRuntime> weakRuntime = runtime;
         runtime->StartTunnel = [weakRuntime, peerCfg](
@@ -84,6 +80,15 @@ public:
             return TqStartClientTunnelAsync(conn, req, fd, peerCfg, std::move(onComplete));
         };
 
+        runtime->Quic->SetDelayedTaskScheduler([weakRuntime](
+                                                   std::chrono::milliseconds delay,
+                                                   std::function<void()> task) {
+            auto runtime = weakRuntime.lock();
+            if (!runtime || runtime->Ingress == nullptr) {
+                return false;
+            }
+            return runtime->Ingress->EnqueueDelayed(delay, std::move(task));
+        });
         runtime->Quic->SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
             (void)connectedCount;
             auto runtime = weakRuntime.lock();
@@ -96,6 +101,12 @@ public:
                     runtime->PeerId.c_str(), listenerErr.c_str());
             }
         });
+
+        if (!runtime->Quic->Start(peerCfg)) {
+            err = "failed to start QUIC client for " + peer.PeerId;
+            runtime->StopAll();
+            return false;
+        }
 
         if (!runtime->Quic->EnsureAnyConnected()) {
             std::fprintf(stderr,
@@ -324,6 +335,10 @@ struct TqSinglePeerClientRuntime {
         StartTunnel = std::move(startTunnel);
     }
 
+    bool EnqueueDelayed(std::chrono::milliseconds delay, std::function<void()> task) {
+        return Ingress.EnqueueDelayed(delay, std::move(task));
+    }
+
     bool OpenListenersLocked(std::string& err) {
         if (ListenersOpen) {
             return true;
@@ -445,25 +460,13 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     const TqConfig quicCfg = cfg.SpeedTestMode == TqSpeedTestMode::None
         ? cfg
         : TqMakeSpeedClientSessionConfig(cfg);
-    if (!quic.Start(quicCfg)) {
-        return 1;
-    }
-
     if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        if (!quic.Start(quicCfg)) {
+            return 1;
+        }
         const bool ok = TqRunClientSpeedTest(quic, cfg);
         quic.Stop();
         return ok ? 0 : 1;
-    }
-
-    if (cfg.WarmupMb > 0) {
-        if (!quic.EnsureAnyConnected()) {
-            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
-            return 1;
-        }
-        if (!TqRunClientWarmup(quic, cfg)) {
-            std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
-            return 1;
-        }
     }
 
     std::string err;
@@ -497,6 +500,15 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return TqStartClientTunnelAsync(conn, req, fd, cfg, std::move(onComplete));
     });
 
+    quic.SetDelayedTaskScheduler([weakRuntime](
+                                     std::chrono::milliseconds delay,
+                                     std::function<void()> task) {
+        auto runtime = weakRuntime.lock();
+        if (!runtime) {
+            return false;
+        }
+        return runtime->EnqueueDelayed(delay, std::move(task));
+    });
     quic.SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
         (void)connectedCount;
         auto runtime = weakRuntime.lock();
@@ -508,6 +520,21 @@ int RunSinglePeerClient(const TqConfig& cfg) {
             std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
         }
     });
+
+    if (!quic.Start(quicCfg)) {
+        return 1;
+    }
+
+    if (cfg.WarmupMb > 0) {
+        if (!quic.EnsureAnyConnected()) {
+            std::fprintf(stderr, "tcpquic-proxy: failed to connect to QUIC peer for warmup\n");
+            return 1;
+        }
+        if (!TqRunClientWarmup(quic, cfg)) {
+            std::fprintf(stderr, "tcpquic-proxy: client warmup failed\n");
+            return 1;
+        }
+    }
 
     if (!quic.EnsureAnyConnected()) {
         std::fprintf(stderr,
