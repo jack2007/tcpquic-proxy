@@ -1,0 +1,14 @@
+tcpquic-proxy QUIC execution profile: max-throughput
+tcpquic-proxy tuning: srw=536870912 fcw=500000000 iw=2000 initrtt=100ms relay_io=1048576 ideal_send=67108864 inflight=64 tcp_buf=16777216 relay_pending=67108864 tick_budget=67108864 read_batch=4194304 read_chunk=131072 max_pending_buffer=536870912 tcp_write_max=0 tcp_write_burst=0 quic_complete_batch=0 initial_read_ahead=67108864 relay_workers=8
+tcpquic-proxy relay memory budget: 8192 MB (pool scales by active tunnels)
+tcpquic-proxy relay backend: linux-epoll (8 workers)
+tcpquic-proxy runtime tuning: enabled (RTT/throughput feed next QUIC connection)
+tcpquic-proxy runtime: rtt=3ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+tcpquic-proxy: QUIC client connected peer=169.254.59.196:4433 slot=1
+tcpquic-proxy: peer peer-a SOCKS5 listening on 127.0.0.1:18101
+tcpquic-proxy: peer peer-a HTTP CONNECT listening on 127.0.0.1:18181
+tcpquic-proxy: peer peer-a QUIC peer 169.254.59.196:4433 (1 connections)
+tcpquic-proxy: QUIC client connected peer=169.254.59.196:4433 slot=1
+tcpquic-proxy: peer peer-b SOCKS5 listening on 127.0.0.1:18102
+tcpquic-proxy: peer peer-b HTTP CONNECT listening on 127.0.0.1:18182
+tcpquic-proxy: peer peer-b QUIC peer 169.254.59.196:4433 (1 connections)
