@@ -1,7 +1,9 @@
 #include "client_peer_runtime.h"
 
+#include <condition_variable>
 #include <cstdio>
 #include <functional>
+#include <thread>
 #include <utility>
 
 TqClientPeerRuntime::TqClientPeerRuntime(std::string peerId, TqConfig config, TqClientIngressReactor* ingress)
@@ -242,4 +244,168 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
         }
     }
     return TqStartClientTunnelAsync(conn, req, fd, Config, std::move(onComplete));
+}
+
+TqClientRuntimeManager::TqClientRuntimeManager(TqConfig baseConfig)
+    : BaseConfig(std::move(baseConfig)) {}
+
+struct TqClientRuntimeManager::DrainSignal {
+    std::mutex Lock;
+    std::condition_variable Cv;
+    bool StopNow{false};
+};
+
+TqClientRuntimeManager::~TqClientRuntimeManager() {
+    StopAll();
+}
+
+bool TqClientRuntimeManager::StartPeer(const TqPeerConfig& peer, std::string& err) {
+    std::lock_guard<std::mutex> lifecycleGuard(LifecycleMutex);
+    if (!peer.Enabled) {
+        err = "peer is disabled: " + peer.PeerId;
+        return false;
+    }
+    if (!EnsureIngressStarted(err)) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (Peers.find(peer.PeerId) != Peers.end()) {
+            err = "peer already running: " + peer.PeerId;
+            return false;
+        }
+    }
+
+    TqConfig peerCfg = TqMakePeerRuntimeConfig(BaseConfig, peer);
+    auto runtime = std::make_shared<TqClientPeerRuntime>(peer.PeerId, peerCfg, Ingress.get());
+    if (!runtime->Start(err)) {
+        runtime->StopAll();
+        return false;
+    }
+    const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
+    std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
+        peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
+
+    std::lock_guard<std::mutex> guard(Lock);
+    Peers[peer.PeerId] = std::move(runtime);
+    return true;
+}
+
+void TqClientRuntimeManager::StopAccepting(const std::string& peerId) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (runtime) {
+        runtime->StopAccepting();
+    }
+}
+
+void TqClientRuntimeManager::StopAll() {
+    std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> peers;
+    std::vector<DrainHandle> draining;
+    {
+        std::lock_guard<std::mutex> lifecycleGuard(LifecycleMutex);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            peers = std::move(Peers);
+            Peers.clear();
+        }
+        draining = std::move(Draining);
+        Draining.clear();
+        for (const auto& handle : draining) {
+            {
+                std::lock_guard<std::mutex> signalGuard(handle.Signal->Lock);
+                handle.Signal->StopNow = true;
+            }
+            handle.Signal->Cv.notify_all();
+        }
+        for (const auto& item : peers) {
+            item.second->StopAll();
+        }
+        for (auto& handle : draining) {
+            if (handle.Worker.joinable()) {
+                handle.Worker.join();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> guard(IngressLock);
+            if (Ingress) {
+                Ingress->Stop();
+                Ingress.reset();
+            }
+        }
+    }
+}
+
+void TqClientRuntimeManager::AbortPeerTunnels(const std::string& peerId) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (runtime) {
+        runtime->AbortTunnels();
+    }
+}
+
+void TqClientRuntimeManager::DrainPeer(const std::string& peerId, uint32_t graceSeconds) {
+    std::lock_guard<std::mutex> lifecycleGuard(LifecycleMutex);
+    std::shared_ptr<TqClientPeerRuntime> runtime;
+    {
+        std::lock_guard<std::mutex> guard(Lock);
+        auto it = Peers.find(peerId);
+        if (it == Peers.end()) {
+            return;
+        }
+        runtime = std::move(it->second);
+        Peers.erase(it);
+    }
+
+    runtime->StopAccepting();
+    auto signal = std::make_shared<DrainSignal>();
+    DrainHandle handle;
+    handle.Runtime = std::move(runtime);
+    handle.Signal = signal;
+    std::shared_ptr<TqClientPeerRuntime> workerRuntime = handle.Runtime;
+    handle.Worker = std::thread([workerRuntime = std::move(workerRuntime), signal, graceSeconds]() {
+        std::unique_lock<std::mutex> guard(signal->Lock);
+        signal->Cv.wait_for(guard, std::chrono::seconds(graceSeconds), [&signal]() {
+            return signal->StopNow;
+        });
+        guard.unlock();
+        workerRuntime->StopAll();
+    });
+    Draining.push_back(std::move(handle));
+}
+
+bool TqClientRuntimeManager::SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        return false;
+    }
+    out = runtime->SnapshotPeerMetrics();
+    return true;
+}
+
+bool TqClientRuntimeManager::SnapshotClientMetrics(const std::string& peerId, TqClientMetrics& out) const {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        return false;
+    }
+    out = runtime->SnapshotClientMetrics();
+    return true;
+}
+
+bool TqClientRuntimeManager::EnsureIngressStarted(std::string& err) {
+    std::lock_guard<std::mutex> guard(IngressLock);
+    if (Ingress) {
+        return true;
+    }
+    auto reactor = std::make_unique<TqClientIngressReactor>();
+    if (!reactor->Start()) {
+        err = "failed to start client ingress reactor";
+        return false;
+    }
+    Ingress = std::move(reactor);
+    return true;
+}
+
+std::shared_ptr<TqClientPeerRuntime> TqClientRuntimeManager::Find(const std::string& peerId) const {
+    std::lock_guard<std::mutex> guard(Lock);
+    auto it = Peers.find(peerId);
+    return it == Peers.end() ? nullptr : it->second;
 }

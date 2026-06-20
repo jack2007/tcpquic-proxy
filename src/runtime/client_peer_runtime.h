@@ -12,7 +12,9 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <vector>
 
 inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     TqPeerConfig peer;
@@ -72,4 +74,37 @@ private:
     TqClientIngressReactor* Ingress{nullptr};
     bool AcceptingEnabled{false};
     bool ListenersOpen{false};
+};
+
+class TqClientRuntimeManager {
+public:
+    explicit TqClientRuntimeManager(TqConfig baseConfig);
+    ~TqClientRuntimeManager();
+
+    bool StartPeer(const TqPeerConfig& peer, std::string& err);
+    void StopAccepting(const std::string& peerId);
+    void StopAll();
+    void AbortPeerTunnels(const std::string& peerId);
+    void DrainPeer(const std::string& peerId, uint32_t graceSeconds);
+    bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const;
+    bool SnapshotClientMetrics(const std::string& peerId, TqClientMetrics& out) const;
+
+private:
+    struct DrainSignal;
+    struct DrainHandle {
+        std::shared_ptr<TqClientPeerRuntime> Runtime;
+        std::shared_ptr<DrainSignal> Signal;
+        std::thread Worker;
+    };
+
+    bool EnsureIngressStarted(std::string& err);
+    std::shared_ptr<TqClientPeerRuntime> Find(const std::string& peerId) const;
+
+    TqConfig BaseConfig;
+    mutable std::mutex LifecycleMutex;
+    mutable std::mutex Lock;
+    mutable std::mutex IngressLock;
+    std::unique_ptr<TqClientIngressReactor> Ingress;
+    std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> Peers;
+    std::vector<DrainHandle> Draining;
 };

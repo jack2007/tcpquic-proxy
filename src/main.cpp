@@ -33,96 +33,30 @@ struct TqTunnelReaperGuard {
 
 class TqMultiPeerRuntimeAdapter : public TqPeerRuntimeAdapter {
 public:
-    explicit TqMultiPeerRuntimeAdapter(const TqConfig& baseConfig) : BaseConfig(baseConfig) {}
+    explicit TqMultiPeerRuntimeAdapter(const TqConfig& baseConfig) : Manager(baseConfig) {}
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
-        if (!EnsureIngressStarted(err)) {
-            return false;
-        }
-
-        TqConfig peerCfg = TqMakePeerRuntimeConfig(BaseConfig, peer);
-        auto runtime = std::make_shared<TqClientPeerRuntime>(peer.PeerId, peerCfg, Ingress.get());
-        if (!runtime->Start(err)) {
-            runtime->StopAll();
-            return false;
-        }
-        const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
-        std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
-            peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
-
-        std::lock_guard<std::mutex> guard(Lock);
-        Peers[peer.PeerId] = std::move(runtime);
-        return true;
+        return Manager.StartPeer(peer, err);
     }
 
     void StopAccepting(const std::string& peerId) override {
-        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
-        if (runtime) {
-            runtime->StopAccepting();
-        }
+        Manager.StopAccepting(peerId);
     }
 
     void AbortPeerTunnels(const std::string& peerId) override {
-        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
-        if (runtime) {
-            runtime->AbortTunnels();
-        }
+        Manager.AbortPeerTunnels(peerId);
     }
 
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
-        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
-        if (!runtime) {
-            return false;
-        }
-        out = runtime->SnapshotPeerMetrics();
-        return true;
+        return Manager.SnapshotPeerMetrics(peerId, out);
     }
 
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds) override {
-        std::shared_ptr<TqClientPeerRuntime> runtime;
-        {
-            std::lock_guard<std::mutex> guard(Lock);
-            auto it = Peers.find(peerId);
-            if (it == Peers.end()) {
-                return;
-            }
-            runtime = std::move(it->second);
-            Peers.erase(it);
-        }
-
-        runtime->StopAccepting();
-        std::thread([runtime = std::move(runtime), graceSeconds]() {
-            std::this_thread::sleep_for(std::chrono::seconds(graceSeconds));
-            runtime->StopAll();
-        }).detach();
+        Manager.DrainPeer(peerId, graceSeconds);
     }
 
 private:
-    std::shared_ptr<TqClientPeerRuntime> Find(const std::string& peerId) {
-        std::lock_guard<std::mutex> guard(Lock);
-        auto it = Peers.find(peerId);
-        return it == Peers.end() ? nullptr : it->second;
-    }
-
-    TqConfig BaseConfig;
-    std::mutex Lock;
-    std::mutex IngressLock;
-    std::unique_ptr<TqClientIngressReactor> Ingress;
-    std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> Peers;
-
-    bool EnsureIngressStarted(std::string& err) {
-        std::lock_guard<std::mutex> guard(IngressLock);
-        if (Ingress) {
-            return true;
-        }
-        auto reactor = std::make_unique<TqClientIngressReactor>();
-        if (!reactor->Start()) {
-            err = "failed to start client ingress reactor";
-            return false;
-        }
-        Ingress = std::move(reactor);
-        return true;
-    }
+    TqClientRuntimeManager Manager;
 };
 
 
