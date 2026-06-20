@@ -170,12 +170,6 @@ bool CollectQuicStats(MsQuicConnection* connection, QUIC_STATISTICS_V2& stats) {
     return QUIC_SUCCEEDED(connection->GetStatistics(&stats));
 }
 
-uint16_t TqUdpPayloadFromMtu(uint32_t mtu, uint32_t ipHeaderBytes) {
-    constexpr uint32_t udpHeaderBytes = 8;
-    const uint32_t headers = ipHeaderBytes + udpHeaderBytes;
-    return mtu > headers ? static_cast<uint16_t>(mtu - headers) : 0;
-}
-
 } // namespace
 
 std::vector<std::string> TqFormatTraceQuicStatsLines(const QUIC_STATISTICS_V2& stats) {
@@ -219,12 +213,10 @@ std::vector<std::string> TqFormatTraceQuicStatsLines(const QUIC_STATISTICS_V2& s
     std::snprintf(
         line,
         sizeof(line),
-        "congestion_events=%u cwnd=%u mtu=%u udp_payload_ipv4=%u udp_payload_ipv6=%u",
+        "congestion_events=%u cwnd=%u mtu=%u",
         stats.SendCongestionCount,
         stats.SendCongestionWindow,
-        stats.SendPathMtu,
-        TqUdpPayloadFromMtu(stats.SendPathMtu, 20),
-        TqUdpPayloadFromMtu(stats.SendPathMtu, 40));
+        stats.SendPathMtu);
     lines.emplace_back(line);
     return lines;
 }
@@ -1008,18 +1000,6 @@ void TqTraceQuicConnected(
         localAddr.c_str(),
         peerAddr.c_str(),
         TqTraceGlobalSnapshot().c_str());
-    if (haveStats) {
-        LogInfo(
-            "event=quic_mtu role=%s conn=%u slot=%u local=%s peer=%s mtu=%u udp_payload_ipv4=%u udp_payload_ipv6=%u",
-            role,
-            connId,
-            slot,
-            localAddr.c_str(),
-            peerAddr.c_str(),
-            stats.SendPathMtu,
-            TqUdpPayloadFromMtu(stats.SendPathMtu, 20),
-            TqUdpPayloadFromMtu(stats.SendPathMtu, 40));
-    }
     if (!lines.empty()) {
         LogInfoMultiline("  quic_metrics:", lines);
     }
