@@ -943,6 +943,14 @@ if(WIN32)
     tcpquic_link_mimalloc(tcpquic_router_runtime_test)
 endif()
 
+add_executable(tcpquic_client_peer_runtime_test
+    unittest/client_peer_runtime_test.cpp
+)
+tcpquic_target_include_dirs(tcpquic_client_peer_runtime_test)
+target_compile_definitions(tcpquic_client_peer_runtime_test PRIVATE TQ_UNIT_TESTING=1)
+set_property(TARGET tcpquic_client_peer_runtime_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_client_peer_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_production_linkage_guard_test
     unittest/production_linkage_guard_test.cpp
 )
@@ -1039,6 +1047,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_client_ingress_state_test
     tcpquic_admin_http_test
     tcpquic_router_runtime_test
+    tcpquic_client_peer_runtime_test
     tcpquic_production_linkage_guard_test
     tcpquic_platform_socket_test
 )
