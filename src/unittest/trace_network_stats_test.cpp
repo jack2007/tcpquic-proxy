@@ -31,6 +31,23 @@ int main() {
     if (!foundPacketStats) {
         return 13;
     }
+    quicStats.SendPathMtu = 1500;
+    const std::vector<std::string> mtuQuicLines = TqFormatTraceQuicStatsLines(quicStats);
+    bool foundMtuStats = false;
+    for (const std::string& quicLine : mtuQuicLines) {
+        if (quicLine.find("congestion_events=") == std::string::npos) {
+            continue;
+        }
+        foundMtuStats = true;
+        if (quicLine.find("mtu=1500") == std::string::npos ||
+            quicLine.find("udp_payload_ipv4=1472") == std::string::npos ||
+            quicLine.find("udp_payload_ipv6=1452") == std::string::npos) {
+            return 16;
+        }
+    }
+    if (!foundMtuStats) {
+        return 17;
+    }
 
     QUIC_STATISTICS_V2 zeroPacketStats{};
     const std::vector<std::string> zeroQuicLines = TqFormatTraceQuicStatsLines(zeroPacketStats);
