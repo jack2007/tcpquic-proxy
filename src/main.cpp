@@ -2,27 +2,20 @@
 #include "admin_http.h"
 #include "platform_socket.h"
 #include "client_peer_runtime.h"
-#include "quic_session.h"
 #include "acl.h"
-#include "client_ingress_reactor.h"
-#include "client_tunnel_open.h"
 #include "server_dial_reactor.h"
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "speed_test.h"
-#include "tcp_tunnel.h"
 #include "tuning.h"
 #include "tunnel_reaper.h"
 #include "trace.h"
 
 #include <chrono>
 #include <cstdio>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <unordered_map>
-#include <utility>
 
 namespace {
 
@@ -64,283 +57,72 @@ struct TqTraceGuard {
     ~TqTraceGuard() { TqTraceShutdown(); }
 };
 
-struct TqSinglePeerClientRuntime {
-    TqSinglePeerClientRuntime(const TqConfig& config, QuicClientSession& quic)
-        : Config(config), Quic(&quic) {}
-
-    ~TqSinglePeerClientRuntime() {
-        DisableAccepting();
-        Ingress.Stop();
-    }
-
-    bool Start(std::string& err) {
-        if (!Ingress.Start()) {
-            err = "failed to start client ingress reactor";
-            return false;
-        }
-        return true;
-    }
-
-    void SetStartTunnel(TqClientIngressTunnelStartFn startTunnel) {
-        StartTunnel = std::move(startTunnel);
-    }
-
-    bool EnqueueDelayed(std::chrono::milliseconds delay, std::function<void()> task) {
-        return Ingress.EnqueueDelayed(delay, std::move(task));
-    }
-
-    bool OpenListenersLocked(std::string& err) {
-        if (ListenersOpen) {
-            return true;
-        }
-        if (!StartTunnel) {
-            err = "listener runtime is not initialized";
-            return false;
-        }
-
-        TqClientIngressPeer peer{};
-        peer.PeerId = "primary";
-        peer.SocksListen = Config.SocksListen;
-        peer.HttpListen = Config.HttpListen;
-        peer.Config = Config;
-        peer.StartTunnel = StartTunnel;
-        peer.AcceptTunnel = [](TqClientTunnelOpenHandle* handle) {
-            return TqAcceptClientTunnelOpen(handle);
-        };
-        peer.RejectTunnel = [](TqClientTunnelOpenHandle* handle) {
-            TqRejectClientTunnelOpen(handle);
-        };
-        peer.CancelTunnel = [](TqClientTunnelOpenHandle* handle) {
-            TqCancelClientTunnelOpen(handle);
-        };
-        if (!Ingress.AddPeer(peer)) {
-            err = "failed to add ingress reactor primary peer";
-            return false;
-        }
-
-        ListenersOpen = true;
-        std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
-        if (!Config.HttpListen.empty()) {
-            std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", Config.HttpListen.c_str());
-        }
-        return true;
-    }
-
-    bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
-        return ApplyCurrentConnectionStateLocked(err, requireConnected);
-    }
-
-    bool ApplyConnectionState(uint32_t connectedCount, std::string& err, bool requireConnected) {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
-        return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
-    }
-
-    bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
-        AcceptingEnabled = true;
-        const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
-        if (!applied) {
-            AcceptingEnabled = false;
-            CloseListenersLocked();
-        }
-        return applied;
-    }
-
-    bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
-        if (!AcceptingEnabled) {
-            CloseListenersLocked();
-            if (requireConnected) {
-                err = "listener accepting is disabled";
-                return false;
-            }
-            return true;
-        }
-        const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
-        return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
-    }
-
-    bool ApplyConnectionStateLocked(uint32_t connectedCount, std::string& err, bool requireConnected) {
-        if (!AcceptingEnabled || connectedCount == 0) {
-            CloseListenersLocked();
-            if (requireConnected) {
-                err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
-                return false;
-            }
-            return true;
-        }
-        return OpenListenersLocked(err);
-    }
-
-    void CloseListenersLocked() {
-        if (ListenersOpen) {
-            (void)Ingress.RemovePeer("primary");
-        }
-        ListenersOpen = false;
-    }
-
-    void CloseListeners() {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
-        CloseListenersLocked();
-    }
-
-    void DisableAccepting() {
-        std::lock_guard<std::mutex> guard(ListenerMutex);
-        AcceptingEnabled = false;
-        CloseListenersLocked();
-    }
-
-    TqClientMetrics SnapshotMetrics() const {
-        TqClientMetrics metrics;
-        metrics.QuicPeer = Config.QuicPeer;
-        metrics.SocksListen = Config.SocksListen;
-        metrics.HttpListen = Config.HttpListen;
-        metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
-        metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
-        return metrics;
-    }
-
-    std::string HandleAdmin(const TqHttpRequest& req, uint64_t uptimeSeconds) const {
-        const TqClientMetrics metrics = SnapshotMetrics();
-        if (req.Method == "GET" && req.Path == "/health") {
-            return TqJsonResponse(200, TqClientHealthJson(metrics, uptimeSeconds));
-        }
-        if (req.Method == "GET" && req.Path == "/metrics") {
-            return TqJsonResponse(200, TqClientMetricsJson(metrics, uptimeSeconds));
-        }
-        return TqJsonResponse(404, "{\"error\":\"not found\"}");
-    }
-
-    TqConfig Config;
-    QuicClientSession* Quic{nullptr};
-    TqClientIngressReactor Ingress;
-    TqClientIngressTunnelStartFn StartTunnel;
-    std::mutex TunnelStartMutex;
-    std::mutex ListenerMutex;
-    bool AcceptingEnabled{false};
-    bool ListenersOpen{false};
-};
-
 int RunSinglePeerClient(const TqConfig& cfg) {
     const auto started = std::chrono::steady_clock::now();
-    QuicClientSession quic;
-    const TqConfig quicCfg = cfg;
-
+    TqClientRuntimeManager manager(cfg, TqClientPeerLogMode::Primary);
     std::string err;
-    auto runtime = std::make_shared<TqSinglePeerClientRuntime>(cfg, quic);
-    if (!runtime->Start(err)) {
+    const TqPeerConfig primary = TqMakePrimaryPeerConfig(cfg);
+    if (!manager.StartPeer(primary, err)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
-        quic.Stop();
-        return 1;
-    }
-    std::weak_ptr<TqSinglePeerClientRuntime> weakRuntime = runtime;
-    runtime->SetStartTunnel([weakRuntime, cfg](
-                                const TunnelRequest& req,
-                                TqSocketHandle fd,
-                                TqClientTunnelOpenComplete onComplete) {
-        auto runtime = weakRuntime.lock();
-        if (!runtime || !runtime->Quic) {
-            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-        }
-        MsQuicConnection* conn = nullptr;
-        {
-            std::lock_guard<std::mutex> guard(runtime->TunnelStartMutex);
-            if (!runtime->Quic || !runtime->Quic->EnsureAnyConnected()) {
-                std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
-                return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-            }
-            conn = runtime->Quic->PickConnection();
-            if (conn == nullptr) {
-                return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-            }
-        }
-        return TqStartClientTunnelAsync(conn, req, fd, cfg, std::move(onComplete));
-    });
-
-    quic.SetDelayedTaskScheduler([weakRuntime](
-                                     std::chrono::milliseconds delay,
-                                     std::function<void()> task) {
-        auto runtime = weakRuntime.lock();
-        if (!runtime) {
-            return false;
-        }
-        return runtime->EnqueueDelayed(delay, std::move(task));
-    });
-    quic.SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
-        auto runtime = weakRuntime.lock();
-        if (!runtime) {
-            return;
-        }
-        std::string listenerErr;
-        if (!runtime->ApplyConnectionState(connectedCount, listenerErr, false)) {
-            std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
-        }
-    });
-
-    if (!quic.Start(quicCfg)) {
-        return 1;
-    }
-
-    if (!quic.EnsureAnyConnected()) {
-        std::fprintf(stderr,
-            "tcpquic-proxy: no connected QUIC peer at startup; listeners remain closed until reconnect\n");
-    }
-
-    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
-        std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
-        quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-        runtime->DisableAccepting();
         return 1;
     }
 
     if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
-        auto cleanupSpeedTest = [&]() {
-            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-            quic.SetDelayedTaskScheduler(QuicClientSession::DelayedTaskScheduler{});
-            runtime->DisableAccepting();
-            quic.Stop();
-        };
-        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, true)) {
-            std::fprintf(stderr, "tcpquic-proxy: speedtest ingress unavailable: %s\n", err.c_str());
-            cleanupSpeedTest();
-            return 1;
-        }
-        if (!quic.EnsureAnyConnected(std::chrono::seconds(10))) {
+        if (!manager.EnsureAnyConnected("primary", std::chrono::seconds(10))) {
             std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");
-            cleanupSpeedTest();
+            manager.StopAll();
             return 1;
         }
-        MsQuicConnection* controlConn = quic.PickConnection();
+        if (!manager.EnableAcceptingAndApplyCurrentConnectionState("primary", err, true)) {
+            std::fprintf(stderr, "tcpquic-proxy: speedtest ingress unavailable: %s\n", err.c_str());
+            manager.StopAll();
+            return 1;
+        }
+        MsQuicConnection* controlConn = manager.PickConnection("primary");
         if (controlConn == nullptr) {
             std::fprintf(stderr, "tcpquic-proxy: speed test has no connected QUIC control connection\n");
-            cleanupSpeedTest();
+            manager.StopAll();
             return 1;
         }
         const bool ok = TqRunIngressClientSpeedTest(*controlConn, cfg);
-        cleanupSpeedTest();
+        manager.StopAll();
         return ok ? 0 : 1;
     }
 
+    TqClientMetrics startupMetrics;
+    if (!manager.SnapshotClientMetrics("primary", startupMetrics)) {
+        std::fprintf(stderr, "tcpquic-proxy: client runtime unavailable\n");
+        manager.StopAll();
+        return 1;
+    }
     std::fprintf(stderr, "tcpquic-proxy: QUIC peer %s (%u connections)\n",
-        cfg.QuicPeer.c_str(), quic.ConnectionCount());
+        cfg.QuicPeer.c_str(), startupMetrics.ConnectionCount);
 
     std::unique_ptr<TqAdminHttpServer> admin;
     if (!cfg.AdminListen.empty()) {
         if (!TqValidateAdminListen(cfg.AdminListen, err)) {
             std::fprintf(stderr, "tcpquic-proxy: invalid admin listen: %s\n", err.c_str());
-            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-            runtime->DisableAccepting();
+            manager.StopAll();
             return 1;
         }
-        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [runtime, started](const TqHttpRequest& req) {
+        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [&manager, started](const TqHttpRequest& req) {
             const uint64_t uptimeSeconds = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
-            return runtime->HandleAdmin(req, uptimeSeconds);
+            TqClientMetrics metrics;
+            if (!manager.SnapshotClientMetrics("primary", metrics)) {
+                return TqJsonResponse(503, "{\"error\":\"client runtime unavailable\"}");
+            }
+            if (req.Method == "GET" && req.Path == "/health") {
+                return TqJsonResponse(200, TqClientHealthJson(metrics, uptimeSeconds));
+            }
+            if (req.Method == "GET" && req.Path == "/metrics") {
+                return TqJsonResponse(200, TqClientMetricsJson(metrics, uptimeSeconds));
+            }
+            return TqJsonResponse(404, "{\"error\":\"not found\"}");
         }));
         if (!admin->Start(err)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());
-            quic.SetConnectionStateHandler(QuicClientSession::ConnectionStateHandler{});
-            runtime->DisableAccepting();
+            manager.StopAll();
             return 1;
         }
         std::fprintf(stderr, "tcpquic-proxy: admin listening on %s\n", admin->ListenAddress().c_str());

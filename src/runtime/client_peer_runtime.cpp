@@ -6,8 +6,12 @@
 #include <thread>
 #include <utility>
 
-TqClientPeerRuntime::TqClientPeerRuntime(std::string peerId, TqConfig config, TqClientIngressReactor* ingress)
-    : PeerId(std::move(peerId)), Config(std::move(config)), Ingress(ingress) {}
+TqClientPeerRuntime::TqClientPeerRuntime(
+    std::string peerId,
+    TqConfig config,
+    TqClientIngressReactor* ingress,
+    TqClientPeerLogMode logMode)
+    : PeerId(std::move(peerId)), Config(std::move(config)), LogMode(logMode), Ingress(ingress) {}
 
 TqClientPeerRuntime::~TqClientPeerRuntime() {
     StopAll();
@@ -30,7 +34,7 @@ bool TqClientPeerRuntime::Start(std::string& err) {
         }
         std::string listenerErr;
         if (!self->ApplyConnectionState(connectedCount, listenerErr, false)) {
-            if (self->PeerId == "primary") {
+            if (self->LogMode == TqClientPeerLogMode::Primary) {
                 std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
             } else {
                 std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
@@ -43,7 +47,7 @@ bool TqClientPeerRuntime::Start(std::string& err) {
         return false;
     }
     if (!Quic->EnsureAnyConnected()) {
-        if (PeerId == "primary") {
+        if (LogMode == TqClientPeerLogMode::Primary) {
             std::fprintf(stderr,
                 "tcpquic-proxy: no connected QUIC peer at startup; listeners remain closed until reconnect\n");
         } else {
@@ -96,6 +100,16 @@ TqClientMetrics TqClientPeerRuntime::SnapshotClientMetrics() const {
     metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     return metrics;
+}
+
+MsQuicConnection* TqClientPeerRuntime::PickConnection() {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    return Quic ? Quic->PickConnection() : nullptr;
+}
+
+bool TqClientPeerRuntime::EnsureAnyConnected(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    return Quic ? Quic->EnsureAnyConnected(timeout) : false;
 }
 
 bool TqClientPeerRuntime::EnableAcceptingAndApplyCurrentConnectionState(
@@ -151,7 +165,7 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
     }
 
     ListenersOpen = true;
-    if (PeerId == "primary") {
+    if (LogMode == TqClientPeerLogMode::Primary) {
         std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
         if (!Config.HttpListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", Config.HttpListen.c_str());
@@ -229,12 +243,12 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
     {
         std::lock_guard<std::mutex> guard(TunnelStartMutex);
         if (!Quic || !Quic->EnsureAnyConnected()) {
-            if (PeerId == "primary") {
+            if (LogMode == TqClientPeerLogMode::Primary) {
                 std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
             } else {
                 std::fprintf(stderr,
                     "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n",
-                    Config.QuicPeer.c_str());
+                    PeerId.c_str());
             }
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
@@ -246,8 +260,8 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
     return TqStartClientTunnelAsync(conn, req, fd, Config, std::move(onComplete));
 }
 
-TqClientRuntimeManager::TqClientRuntimeManager(TqConfig baseConfig)
-    : BaseConfig(std::move(baseConfig)) {}
+TqClientRuntimeManager::TqClientRuntimeManager(TqConfig baseConfig, TqClientPeerLogMode logMode)
+    : BaseConfig(std::move(baseConfig)), LogMode(logMode) {}
 
 struct TqClientRuntimeManager::DrainSignal {
     std::mutex Lock;
@@ -277,14 +291,16 @@ bool TqClientRuntimeManager::StartPeer(const TqPeerConfig& peer, std::string& er
     }
 
     TqConfig peerCfg = TqMakePeerRuntimeConfig(BaseConfig, peer);
-    auto runtime = std::make_shared<TqClientPeerRuntime>(peer.PeerId, peerCfg, Ingress.get());
+    auto runtime = std::make_shared<TqClientPeerRuntime>(peer.PeerId, peerCfg, Ingress.get(), LogMode);
     if (!runtime->Start(err)) {
         runtime->StopAll();
         return false;
     }
-    const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
-    std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
-        peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
+    if (LogMode != TqClientPeerLogMode::Primary) {
+        const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
+        std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
+            peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
+    }
 
     std::lock_guard<std::mutex> guard(Lock);
     Peers[peer.PeerId] = std::move(runtime);
@@ -388,6 +404,26 @@ bool TqClientRuntimeManager::SnapshotClientMetrics(const std::string& peerId, Tq
     }
     out = runtime->SnapshotClientMetrics();
     return true;
+}
+
+MsQuicConnection* TqClientRuntimeManager::PickConnection(const std::string& peerId) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    return runtime ? runtime->PickConnection() : nullptr;
+}
+
+bool TqClientRuntimeManager::EnsureAnyConnected(
+    const std::string& peerId,
+    std::chrono::milliseconds timeout) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    return runtime ? runtime->EnsureAnyConnected(timeout) : false;
+}
+
+bool TqClientRuntimeManager::EnableAcceptingAndApplyCurrentConnectionState(
+    const std::string& peerId,
+    std::string& err,
+    bool requireConnected) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    return runtime ? runtime->EnableAcceptingAndApplyCurrentConnectionState(err, requireConnected) : false;
 }
 
 bool TqClientRuntimeManager::EnsureIngressStarted(std::string& err) {

@@ -40,9 +40,18 @@ inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeer
     return cfg;
 }
 
+enum class TqClientPeerLogMode {
+    Peer,
+    Primary,
+};
+
 class TqClientPeerRuntime : public std::enable_shared_from_this<TqClientPeerRuntime> {
 public:
-    TqClientPeerRuntime(std::string peerId, TqConfig config, TqClientIngressReactor* ingress);
+    TqClientPeerRuntime(
+        std::string peerId,
+        TqConfig config,
+        TqClientIngressReactor* ingress,
+        TqClientPeerLogMode logMode = TqClientPeerLogMode::Peer);
     ~TqClientPeerRuntime();
 
     bool Start(std::string& err);
@@ -51,6 +60,8 @@ public:
     void AbortTunnels();
     TqPeerMetrics SnapshotPeerMetrics() const;
     TqClientMetrics SnapshotClientMetrics() const;
+    MsQuicConnection* PickConnection();
+    bool EnsureAnyConnected(std::chrono::milliseconds timeout);
     bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected);
 
 private:
@@ -68,6 +79,7 @@ private:
 
     std::string PeerId;
     TqConfig Config;
+    TqClientPeerLogMode LogMode{TqClientPeerLogMode::Peer};
     mutable std::mutex TunnelStartMutex;
     mutable std::mutex ListenerMutex;
     std::unique_ptr<QuicClientSession> Quic;
@@ -78,7 +90,9 @@ private:
 
 class TqClientRuntimeManager {
 public:
-    explicit TqClientRuntimeManager(TqConfig baseConfig);
+    explicit TqClientRuntimeManager(
+        TqConfig baseConfig,
+        TqClientPeerLogMode logMode = TqClientPeerLogMode::Peer);
     ~TqClientRuntimeManager();
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err);
@@ -88,6 +102,12 @@ public:
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds);
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const;
     bool SnapshotClientMetrics(const std::string& peerId, TqClientMetrics& out) const;
+    MsQuicConnection* PickConnection(const std::string& peerId);
+    bool EnsureAnyConnected(const std::string& peerId, std::chrono::milliseconds timeout);
+    bool EnableAcceptingAndApplyCurrentConnectionState(
+        const std::string& peerId,
+        std::string& err,
+        bool requireConnected);
 
 private:
     struct DrainSignal;
@@ -101,6 +121,7 @@ private:
     std::shared_ptr<TqClientPeerRuntime> Find(const std::string& peerId) const;
 
     TqConfig BaseConfig;
+    TqClientPeerLogMode LogMode{TqClientPeerLogMode::Peer};
     mutable std::mutex LifecycleMutex;
     mutable std::mutex Lock;
     mutable std::mutex IngressLock;
