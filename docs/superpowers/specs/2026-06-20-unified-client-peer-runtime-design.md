@@ -92,7 +92,7 @@ router runtime 的配置状态机和 admin API 不迁移。
 
 每个 peer runtime 负责：
 
-- 构造 peer 专属 `TqConfig`。
+- 持有 manager 已经合成好的 peer 专属 `TqConfig`。
 - 创建并启动 `QuicClientSession`。
 - 在 `QuicClientSession` 上注入 delayed scheduler，调度到共享 ingress reactor。
 - 在 `QuicClientSession` 上注入 connection state handler。
@@ -110,6 +110,7 @@ manager 负责：
 - 持有 `std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>>`。
 - 根据 base config 和 `TqPeerConfig` 合成 peer config。
 - 管理 peer 生命周期。
+- 在析构或 `StopAll()` 时先停止所有 peer，再停止共享 ingress reactor。
 - 为 single-peer admin 提供 `TqClientMetrics` snapshot。
 - 为 router adapter 提供 `TqPeerMetrics` snapshot。
 
@@ -131,6 +132,7 @@ manager 负责：
 1. `StopAccepting()` 先关闭 ingress listen。
 2. `DrainPeer()` 从 map 移除 runtime，并按 grace seconds 延迟 `StopAll()`。
 3. `StopAll()` 清理 handler、停止 QUIC session、关闭 ingress listen。
+4. manager 析构时对剩余 peers 调用 `StopAll()`，随后停止共享 ingress reactor，避免 peer runtime 持有悬空 `Ingress` 指针。
 
 ### 4.6 Admin 兼容
 

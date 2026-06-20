@@ -15,11 +15,11 @@
 Create:
 
 - `src/runtime/client_peer_runtime.h`  
-  Declares `TqClientPeerRuntime`, `TqClientRuntimeManager`, and helper conversion functions.
+  Declares `TqClientPeerRuntime`, `TqClientRuntimeManager`, and inline config conversion helpers.
 - `src/runtime/client_peer_runtime.cpp`  
-  Implements shared peer lifecycle, ingress gating, StartTunnel, metrics snapshots, and primary peer config construction.
+  Implements shared peer lifecycle, ingress gating, StartTunnel, metrics snapshots, and manager lifecycle.
 - `src/unittest/client_peer_runtime_test.cpp`  
-  Focused tests for config overlay and listener state helper behavior.
+  Focused tests for config overlay helpers; runtime behavior is covered by router, ingress, tunnel, reconnect, speedtest, and DGX smoke tests.
 
 Modify:
 
@@ -36,7 +36,6 @@ Modify:
 
 **Files:**
 - Create: `src/runtime/client_peer_runtime.h`
-- Create: `src/runtime/client_peer_runtime.cpp`
 - Create: `src/unittest/client_peer_runtime_test.cpp`
 - Modify: `src/CMakeLists.txt`
 
@@ -123,7 +122,6 @@ Modify `src/CMakeLists.txt` to add this target near the other unit test executab
 ```cmake
 add_executable(tcpquic_client_peer_runtime_test
     unittest/client_peer_runtime_test.cpp
-    runtime/client_peer_runtime.cpp
 )
 tcpquic_target_include_dirs(tcpquic_client_peer_runtime_test)
 target_compile_definitions(tcpquic_client_peer_runtime_test PRIVATE TQ_UNIT_TESTING=1)
@@ -153,18 +151,7 @@ Create `src/runtime/client_peer_runtime.h`:
 
 class TqClientIngressReactor;
 
-TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg);
-TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeerConfig& peer);
-```
-
-- [ ] **Step 4: Add minimal implementation**
-
-Create `src/runtime/client_peer_runtime.cpp`:
-
-```cpp
-#include "client_peer_runtime.h"
-
-TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
+inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     TqPeerConfig peer;
     peer.PeerId = "primary";
     peer.Enabled = true;
@@ -176,7 +163,7 @@ TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     return peer;
 }
 
-TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeerConfig& peer) {
+inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeerConfig& peer) {
     TqConfig cfg = baseConfig;
     cfg.ClientConfigPath.clear();
     cfg.AdminListen.clear();
@@ -189,7 +176,7 @@ TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeerConfig&
 }
 ```
 
-- [ ] **Step 5: Run the test and commit**
+- [ ] **Step 4: Run the test and commit**
 
 Run:
 
@@ -203,7 +190,7 @@ Expected: exit 0.
 Commit:
 
 ```bash
-rtk git add src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/client_peer_runtime_test.cpp src/CMakeLists.txt
+rtk git add src/runtime/client_peer_runtime.h src/unittest/client_peer_runtime_test.cpp src/CMakeLists.txt
 rtk git commit -m "refactor(client): add shared peer runtime config helpers"
 ```
 
@@ -211,7 +198,7 @@ rtk git commit -m "refactor(client): add shared peer runtime config helpers"
 
 **Files:**
 - Modify: `src/runtime/client_peer_runtime.h`
-- Modify: `src/runtime/client_peer_runtime.cpp`
+- Create: `src/runtime/client_peer_runtime.cpp`
 - Modify: `src/main.cpp`
 - Modify: `src/CMakeLists.txt`
 
@@ -224,6 +211,7 @@ Extend `src/runtime/client_peer_runtime.h`:
 #include "client_ingress_reactor.h"
 #include "client_tunnel_open.h"
 #include "quic_session.h"
+#include "server_metrics.h"
 #include "tcp_tunnel.h"
 
 #include <chrono>
@@ -268,11 +256,79 @@ private:
 };
 ```
 
-- [ ] **Step 2: Move existing multi-peer logic**
+- [ ] **Step 2: Add runtime source to tcpquic-proxy**
 
-In `src/runtime/client_peer_runtime.cpp`, copy behavior from `TqMultiPeerRuntimeAdapter::PeerRuntime` in `src/main.cpp` into `TqClientPeerRuntime`.
+Modify `src/CMakeLists.txt` and add `runtime/client_peer_runtime.cpp` to `TCPQUIC_PROXY_SOURCES` near the other runtime sources:
 
-Keep these exact semantics:
+```cmake
+    runtime/client_peer_runtime.cpp
+```
+
+Keep `tcpquic_client_peer_runtime_test` source list unchanged. It intentionally tests only inline config helpers, so it does not link the full runtime dependency graph.
+
+- [ ] **Step 3: Move existing multi-peer logic**
+
+In `src/runtime/client_peer_runtime.cpp`, move behavior from `TqMultiPeerRuntimeAdapter::PeerRuntime` in `src/main.cpp` into `TqClientPeerRuntime` using the mapping below. Do not introduce new listener or reconnect semantics in this task.
+
+Use this mapping:
+
+| Old location | New location |
+|--------------|--------------|
+| `PeerRuntime::OpenListenersLocked` | `TqClientPeerRuntime::OpenListenersLocked` |
+| `PeerRuntime::ApplyCurrentConnectionState` | `TqClientPeerRuntime::ApplyCurrentConnectionState` |
+| `PeerRuntime::ApplyConnectionState` | `TqClientPeerRuntime::ApplyConnectionState` |
+| `PeerRuntime::CloseListenersLocked` | `TqClientPeerRuntime::CloseListenersLocked` |
+| `PeerRuntime::DisableAccepting` | `TqClientPeerRuntime::DisableAccepting` |
+| `PeerRuntime::StopAccepting` | `TqClientPeerRuntime::StopAccepting` |
+| `PeerRuntime::StopAll` | `TqClientPeerRuntime::StopAll` |
+| `StartPeer()` local `StartTunnel` lambda | `TqClientPeerRuntime::StartTunnel` |
+| `StartPeer()` scheduler / connection-state wiring | `TqClientPeerRuntime::Start` |
+
+`TqClientPeerRuntime::Start()` must perform this sequence:
+
+```cpp
+Quic = std::make_unique<QuicClientSession>();
+std::weak_ptr<TqClientPeerRuntime> weakSelf = shared_from_this();
+Quic->SetDelayedTaskScheduler([weakSelf](std::chrono::milliseconds delay, std::function<void()> task) {
+    auto self = weakSelf.lock();
+    if (!self || self->Ingress == nullptr) {
+        return false;
+    }
+    return self->Ingress->EnqueueDelayed(delay, std::move(task));
+});
+Quic->SetConnectionStateHandler([weakSelf](uint32_t connectedCount) {
+    auto self = weakSelf.lock();
+    if (!self) {
+        return;
+    }
+    std::string listenerErr;
+    if (!self->ApplyConnectionState(connectedCount, listenerErr, false)) {
+        if (self->PeerId == "primary") {
+            std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
+        } else {
+            std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n", self->PeerId.c_str(), listenerErr.c_str());
+        }
+    }
+});
+if (!Quic->Start(Config)) {
+    err = "failed to start QUIC client for " + PeerId;
+    return false;
+}
+if (!Quic->EnsureAnyConnected()) {
+    if (PeerId == "primary") {
+        std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer at startup; listeners remain closed until reconnect\n");
+    } else {
+        std::fprintf(stderr,
+            "tcpquic-proxy: peer %s has no connected QUIC connection; listeners remain closed until reconnect\n",
+            PeerId.c_str());
+    }
+}
+if (!EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
+    return false;
+}
+```
+
+Keep this exact connection-state gating semantic:
 
 ```cpp
 bool TqClientPeerRuntime::ApplyConnectionStateLocked(
@@ -305,11 +361,9 @@ tcpquic-proxy: peer <id> SOCKS5 listening on <addr>
 tcpquic-proxy: peer <id> HTTP CONNECT listening on <addr>
 ```
 
-- [ ] **Step 3: Replace multi-peer nested PeerRuntime**
+- [ ] **Step 4: Replace multi-peer nested PeerRuntime**
 
-In `src/main.cpp`, change `TqMultiPeerRuntimeAdapter` to store a manager temporarily or a direct map of `std::shared_ptr<TqClientPeerRuntime>`.
-
-For this task, keep the adapter map local and replace `PeerRuntime` references with `TqClientPeerRuntime`:
+In `src/main.cpp`, keep the adapter's existing shared ingress reactor and map, but replace nested `PeerRuntime` references with `TqClientPeerRuntime`:
 
 ```cpp
 std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> Peers;
@@ -326,7 +380,7 @@ if (!runtime->Start(err)) {
 }
 ```
 
-- [ ] **Step 4: Build and run router regression**
+- [ ] **Step 5: Build and run router regression**
 
 Run:
 
@@ -337,7 +391,7 @@ rtk ./build-regression/bin/Release/tcpquic_router_runtime_test
 
 Expected: exit 0.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 rtk git add src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/main.cpp src/CMakeLists.txt
@@ -363,6 +417,7 @@ public:
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err);
     void StopAccepting(const std::string& peerId);
+    void StopAll();
     void AbortPeerTunnels(const std::string& peerId);
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds);
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const;
@@ -412,7 +467,9 @@ bool TqClientRuntimeManager::StartPeer(const TqPeerConfig& peer, std::string& er
 }
 ```
 
-Implement `StopAccepting`, `AbortPeerTunnels`, `DrainPeer`, `SnapshotPeerMetrics`, and `SnapshotClientMetrics` by looking up the peer and forwarding to `TqClientPeerRuntime`.
+Implement `StopAccepting`, `StopAll`, `AbortPeerTunnels`, `DrainPeer`, `SnapshotPeerMetrics`, and `SnapshotClientMetrics` by looking up the peer and forwarding to `TqClientPeerRuntime`.
+
+`~TqClientRuntimeManager()` must call `StopAll()` before destroying `Ingress`.
 
 - [ ] **Step 3: Make multi-peer adapter a thin wrapper**
 
@@ -478,6 +535,8 @@ if (!manager.StartPeer(primary, err)) {
 }
 ```
 
+`RunSinglePeerClient` should keep using `const auto started = std::chrono::steady_clock::now();` for admin uptime.
+
 - [ ] **Step 2: Preserve speedtest control connection access**
 
 Add to `TqClientRuntimeManager`:
@@ -503,6 +562,8 @@ if (!manager.EnsureAnyConnected("primary", std::chrono::seconds(10))) {
 }
 MsQuicConnection* controlConn = manager.PickConnection("primary");
 ```
+
+After `TqRunIngressClientSpeedTest(*controlConn, cfg)` returns, call `manager.StopAll()` before returning from speedtest mode.
 
 - [ ] **Step 3: Preserve single-peer admin metrics**
 
@@ -549,7 +610,7 @@ rtk git commit -m "refactor(client): route single-peer through runtime manager"
 
 **Files:**
 - Modify: `src/main.cpp`
-- Modify: `docs/thread-model_cn.md` if it still describes separate single/multi runtime ownership.
+- Modify: `docs/thread-model_cn.md`
 
 - [ ] **Step 1: Check duplicate runtime code is gone**
 
@@ -566,7 +627,22 @@ Expected:
 - `TqMultiPeerRuntimeAdapter` remains only as a thin wrapper
 - `TqClientRuntimeManager` owns peer map
 
-- [ ] **Step 2: Run full relevant regression**
+- [ ] **Step 2: Update thread model wording**
+
+Modify `docs/thread-model_cn.md` lines that currently describe:
+
+```text
+single-peer client 的 runtime 持有一个 TqClientIngressReactor 成员
+multi-peer client 的 runtime adapter 持有一个共享 TqClientIngressReactor
+```
+
+Replace them with:
+
+```text
+Client runtime manager 持有一个共享 `TqClientIngressReactor`。single-peer 是一个固定 `primary` peer，multi-peer 是多个 router peers；两者都通过 `TqClientPeerRuntime` 注册 / 移除各自的 SOCKS5 / HTTP CONNECT listen fd。每个 peer 仍有自己的 `QuicClientSession`，但 listener lifecycle、delayed reconnect scheduler 和 tunnel start 编排共用同一套 peer runtime 代码。
+```
+
+- [ ] **Step 3: Run full relevant regression**
 
 Run:
 
@@ -584,7 +660,7 @@ rtk ./build-regression/bin/Release/tcpquic_config_router_test
 
 Expected: all commands exit 0.
 
-- [ ] **Step 3: Run DGX smoke**
+- [ ] **Step 4: Run DGX smoke**
 
 Run single-peer 1x1 smoke:
 
@@ -651,7 +727,7 @@ Expected: `timeout` returns 124 because the client stays running; `rg` finds bot
 docs/dgx-unified-client-peer-runtime-20260620/summary.md
 ```
 
-- [ ] **Step 4: Commit final docs and cleanup**
+- [ ] **Step 5: Commit final docs and cleanup**
 
 ```bash
 rtk git add src/main.cpp src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/client_peer_runtime_test.cpp src/CMakeLists.txt docs/dgx-unified-client-peer-runtime-20260620 docs/thread-model_cn.md
