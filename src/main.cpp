@@ -1,6 +1,7 @@
 #include "config.h"
 #include "admin_http.h"
 #include "platform_socket.h"
+#include "client_peer_runtime.h"
 #include "quic_session.h"
 #include "acl.h"
 #include "client_ingress_reactor.h"
@@ -35,88 +36,19 @@ public:
     explicit TqMultiPeerRuntimeAdapter(const TqConfig& baseConfig) : BaseConfig(baseConfig) {}
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
-        TqConfig peerCfg = BaseConfig;
-        peerCfg.ClientConfigPath.clear();
-        peerCfg.AdminListen.clear();
-        peerCfg.QuicPeer = peer.QuicPeer;
-        peerCfg.SocksListen = peer.SocksListen;
-        peerCfg.HttpListen = peer.HttpListen;
-        peerCfg.QuicConnections = peer.QuicConnections == 0 ? BaseConfig.QuicConnections : peer.QuicConnections;
-        peerCfg.Compress = peer.Compress.empty() ? BaseConfig.Compress : peer.Compress;
-
         if (!EnsureIngressStarted(err)) {
             return false;
         }
 
-        auto runtime = std::make_shared<PeerRuntime>();
-        runtime->PeerId = peer.PeerId;
-        runtime->Config = peerCfg;
-        runtime->Quic = std::make_unique<QuicClientSession>();
-        runtime->Ingress = Ingress.get();
-        std::weak_ptr<PeerRuntime> weakRuntime = runtime;
-        runtime->StartTunnel = [weakRuntime, peerCfg](
-                                   const TunnelRequest& req,
-                                   TqSocketHandle fd,
-                                   TqClientTunnelOpenComplete onComplete) {
-            auto runtime = weakRuntime.lock();
-            if (!runtime || !runtime->Quic) {
-                return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-            }
-            MsQuicConnection* conn = nullptr;
-            {
-                std::lock_guard<std::mutex> guard(runtime->TunnelStartMutex);
-                if (!runtime->Quic || !runtime->Quic->EnsureAnyConnected()) {
-                    std::fprintf(stderr,
-                        "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n",
-                        peerCfg.QuicPeer.c_str());
-                    return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-                }
-                conn = runtime->Quic->PickConnection();
-                if (conn == nullptr) {
-                    return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-                }
-            }
-            return TqStartClientTunnelAsync(conn, req, fd, peerCfg, std::move(onComplete));
-        };
-
-        runtime->Quic->SetDelayedTaskScheduler([weakRuntime](
-                                                   std::chrono::milliseconds delay,
-                                                   std::function<void()> task) {
-            auto runtime = weakRuntime.lock();
-            if (!runtime || runtime->Ingress == nullptr) {
-                return false;
-            }
-            return runtime->Ingress->EnqueueDelayed(delay, std::move(task));
-        });
-        runtime->Quic->SetConnectionStateHandler([weakRuntime](uint32_t connectedCount) {
-            auto runtime = weakRuntime.lock();
-            if (!runtime) {
-                return;
-            }
-            std::string listenerErr;
-            if (!runtime->ApplyConnectionState(connectedCount, listenerErr, false)) {
-                std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
-                    runtime->PeerId.c_str(), listenerErr.c_str());
-            }
-        });
-
-        if (!runtime->Quic->Start(peerCfg)) {
-            err = "failed to start QUIC client for " + peer.PeerId;
+        TqConfig peerCfg = TqMakePeerRuntimeConfig(BaseConfig, peer);
+        auto runtime = std::make_shared<TqClientPeerRuntime>(peer.PeerId, peerCfg, Ingress.get());
+        if (!runtime->Start(err)) {
             runtime->StopAll();
             return false;
         }
-
-        if (!runtime->Quic->EnsureAnyConnected()) {
-            std::fprintf(stderr,
-                "tcpquic-proxy: peer %s has no connected QUIC connection; listeners remain closed until reconnect\n",
-                peer.PeerId.c_str());
-        }
-        if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
-            runtime->StopAll();
-            return false;
-        }
+        const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
         std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
-            peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), runtime->Quic->ConnectionCount());
+            peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
 
         std::lock_guard<std::mutex> guard(Lock);
         Peers[peer.PeerId] = std::move(runtime);
@@ -124,32 +56,30 @@ public:
     }
 
     void StopAccepting(const std::string& peerId) override {
-        std::shared_ptr<PeerRuntime> runtime = Find(peerId);
+        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
         if (runtime) {
             runtime->StopAccepting();
         }
     }
 
     void AbortPeerTunnels(const std::string& peerId) override {
-        std::shared_ptr<PeerRuntime> runtime = Find(peerId);
-        if (runtime && runtime->Quic) {
-            runtime->Quic->AbortAllTunnels();
+        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+        if (runtime) {
+            runtime->AbortTunnels();
         }
     }
 
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) override {
-        std::shared_ptr<PeerRuntime> runtime = Find(peerId);
-        if (!runtime || !runtime->Quic) {
+        std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+        if (!runtime) {
             return false;
         }
-        out.ConnectionCount = runtime->Quic->ConnectionCount();
-        out.ConnectedConnections = runtime->Quic->ConnectedConnectionCount();
-        out.State = out.ConnectedConnections > 0 ? "healthy" : "connecting";
+        out = runtime->SnapshotPeerMetrics();
         return true;
     }
 
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds) override {
-        std::shared_ptr<PeerRuntime> runtime;
+        std::shared_ptr<TqClientPeerRuntime> runtime;
         {
             std::lock_guard<std::mutex> guard(Lock);
             auto it = Peers.find(peerId);
@@ -168,136 +98,7 @@ public:
     }
 
 private:
-    struct PeerRuntime {
-        std::string PeerId;
-        TqConfig Config;
-        std::mutex TunnelStartMutex;
-        std::mutex ListenerMutex;
-        std::unique_ptr<QuicClientSession> Quic;
-        TqClientIngressReactor* Ingress{nullptr};
-        TqClientIngressTunnelStartFn StartTunnel;
-        bool AcceptingEnabled{false};
-        bool ListenersOpen{false};
-
-        ~PeerRuntime() { StopAll(); }
-
-        bool OpenListenersLocked(std::string& err) {
-            if (ListenersOpen) {
-                return true;
-            }
-            if (Ingress == nullptr || !StartTunnel) {
-                err = "listener runtime is not initialized";
-                return false;
-            }
-
-            TqClientIngressPeer peer{};
-            peer.PeerId = PeerId;
-            peer.SocksListen = Config.SocksListen;
-            peer.HttpListen = Config.HttpListen;
-            peer.Config = Config;
-            peer.StartTunnel = StartTunnel;
-            peer.AcceptTunnel = [](TqClientTunnelOpenHandle* handle) {
-                return TqAcceptClientTunnelOpen(handle);
-            };
-            peer.RejectTunnel = [](TqClientTunnelOpenHandle* handle) {
-                TqRejectClientTunnelOpen(handle);
-            };
-            peer.CancelTunnel = [](TqClientTunnelOpenHandle* handle) {
-                TqCancelClientTunnelOpen(handle);
-            };
-            if (!Ingress->AddPeer(peer)) {
-                err = "failed to add ingress reactor peer " + PeerId;
-                return false;
-            }
-
-            ListenersOpen = true;
-            std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
-                PeerId.c_str(), Config.SocksListen.c_str());
-            if (!Config.HttpListen.empty()) {
-                std::fprintf(stderr, "tcpquic-proxy: peer %s HTTP CONNECT listening on %s\n",
-                    PeerId.c_str(), Config.HttpListen.c_str());
-            }
-            return true;
-        }
-
-        bool ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
-            return ApplyCurrentConnectionStateLocked(err, requireConnected);
-        }
-
-        bool ApplyConnectionState(uint32_t connectedCount, std::string& err, bool requireConnected) {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
-            return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
-        }
-
-        bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected) {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
-            AcceptingEnabled = true;
-            const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
-            if (!applied) {
-                AcceptingEnabled = false;
-                CloseListenersLocked();
-            }
-            return applied;
-        }
-
-        bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
-            if (!AcceptingEnabled) {
-                CloseListenersLocked();
-                if (requireConnected) {
-                    err = "listener accepting is disabled";
-                    return false;
-                }
-                return true;
-            }
-            const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
-            return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
-        }
-
-        bool ApplyConnectionStateLocked(uint32_t connectedCount, std::string& err, bool requireConnected) {
-            if (!AcceptingEnabled || connectedCount == 0) {
-                CloseListenersLocked();
-                if (requireConnected) {
-                    err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
-                    return false;
-                }
-                return true;
-            }
-            return OpenListenersLocked(err);
-        }
-
-        void CloseListenersLocked() {
-            if (ListenersOpen && Ingress != nullptr) {
-                (void)Ingress->RemovePeer(PeerId);
-            }
-            ListenersOpen = false;
-        }
-
-        void CloseListeners() {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
-            CloseListenersLocked();
-        }
-
-        void DisableAccepting() {
-            std::lock_guard<std::mutex> guard(ListenerMutex);
-            AcceptingEnabled = false;
-            CloseListenersLocked();
-        }
-
-        void StopAccepting() {
-            DisableAccepting();
-        }
-
-        void StopAll() {
-            DisableAccepting();
-            if (Quic) {
-                Quic->Stop();
-                Quic.reset();
-            }
-        }
-    };
-
-    std::shared_ptr<PeerRuntime> Find(const std::string& peerId) {
+    std::shared_ptr<TqClientPeerRuntime> Find(const std::string& peerId) {
         std::lock_guard<std::mutex> guard(Lock);
         auto it = Peers.find(peerId);
         return it == Peers.end() ? nullptr : it->second;
@@ -307,7 +108,7 @@ private:
     std::mutex Lock;
     std::mutex IngressLock;
     std::unique_ptr<TqClientIngressReactor> Ingress;
-    std::unordered_map<std::string, std::shared_ptr<PeerRuntime>> Peers;
+    std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> Peers;
 
     bool EnsureIngressStarted(std::string& err) {
         std::lock_guard<std::mutex> guard(IngressLock);

@@ -105,6 +105,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/listen_socket.cpp
     tunnel/tunnel_reaper.cpp
     runtime/admin_http.cpp
+    runtime/client_peer_runtime.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
