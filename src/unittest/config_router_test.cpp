@@ -68,6 +68,7 @@ int main() {
         if (usage.find("--reconnect-interval-ms") != std::string::npos) return 131;
         if (usage.find("--keepalive-ms <n>") == std::string::npos) return 154;
         if (usage.find("default 5000, 1000..15000") == std::string::npos) return 155;
+        if (usage.find("--diag-stats                 Low-overhead periodic stderr stats") == std::string::npos) return 169;
         if (usage.find("--compress <mode>            auto|zstd|off (default off)") == std::string::npos) return 133;
         if (usage.find("--quic-") != std::string::npos) return 134;
         if (usage.find("QUIC") != std::string::npos) return 135;
@@ -325,6 +326,18 @@ int main() {
         if (cfg.QuicKeepAliveIntervalMs != 5000) return 157;
     }
     {
+        const char* args[] = {
+            "tcpquic-proxy", "client", "--peer", "127.0.0.1:14444",
+            "--diag-stats", "--diag-stats-interval", "5",
+            "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 170;
+        if (!cfg.DiagStats) return 171;
+        if (cfg.Trace) return 172;
+        if (cfg.DiagStatsIntervalSec != 5) return 173;
+    }
+    {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--keepalive-ms", "1000", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
         TqConfig cfg;
         std::string err;
@@ -477,7 +490,7 @@ int main() {
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
         if (cfg.Tuning.RelayMaxInFlightSends != 1024) return 157;
         if (cfg.Tuning.TcpSocketBufferBytes != 64 * 1024 * 1024) return 158;
-        if (cfg.Tuning.LinuxRelayPerTunnelPendingBytes != 512ull * 1024 * 1024) return 159;
+        if (cfg.Tuning.LinuxRelayPerTunnelPendingBytes < TqValidationRelaySendBufferCapBytes) return 159;
         if (cfg.Tuning.InitialQuicReadAheadBytes != 512ull * 1024 * 1024) return 160;
     }
     {

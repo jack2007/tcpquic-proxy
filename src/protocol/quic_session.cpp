@@ -1049,7 +1049,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
-        if (TqTraceEnabled()) {
+        if (TqTraceEnabled() || TqDiagStatsEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,
                 TqTraceNetworkStats{
@@ -1058,7 +1058,27 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                     event->NETWORK_STATISTICS.IdealBytes,
                     event->NETWORK_STATISTICS.SmoothedRTT,
                     event->NETWORK_STATISTICS.CongestionWindow,
-                    event->NETWORK_STATISTICS.Bandwidth});
+                    event->NETWORK_STATISTICS.Bandwidth,
+                    event->NETWORK_STATISTICS.BytesInFlightMax,
+                    event->NETWORK_STATISTICS.BbrState,
+                    event->NETWORK_STATISTICS.BbrRecoveryState,
+                    event->NETWORK_STATISTICS.BbrRecoveryWindow,
+                    event->NETWORK_STATISTICS.BbrPacingGain,
+                    event->NETWORK_STATISTICS.BbrCwndGain,
+                    event->NETWORK_STATISTICS.BbrMinRtt,
+                    event->NETWORK_STATISTICS.BbrSendQuantum,
+                    event->NETWORK_STATISTICS.BbrAppLimited != FALSE,
+                    event->NETWORK_STATISTICS.SendFlushCount,
+                    event->NETWORK_STATISTICS.SendFlushPacingDelayedCount,
+                    event->NETWORK_STATISTICS.SendFlushCcBlockedCount,
+                    event->NETWORK_STATISTICS.SendFlushSchedulingCount,
+                    event->NETWORK_STATISTICS.SendFlushAmplificationBlockedCount,
+                    event->NETWORK_STATISTICS.SendFlushNoWorkCount,
+                    event->NETWORK_STATISTICS.SendFlushLastAllowance,
+                    event->NETWORK_STATISTICS.SendFlushLastPathAllowance,
+                    event->NETWORK_STATISTICS.SendFlushLastResult,
+                    event->NETWORK_STATISTICS.SendFlushLastDatagrams,
+                    event->NETWORK_STATISTICS.OutFlowBlockedReasons});
         }
         break;
     case QUIC_CONNECTION_EVENT_CONNECTED:
@@ -1080,7 +1100,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
             state->StateChanged.notify_all();
             QuicClientSession::NotifyConnectionStateChanged(std::move(notification));
         }
-        if (TqTraceEnabled()) {
+        if (TqTraceEnabled() || TqDiagStatsEnabled()) {
             TqRegisterClientTraceConnection(connection, slotIndex);
             TqTraceQuicConnected(
                 connection,
@@ -1353,7 +1373,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
-        if (TqTraceEnabled()) {
+        if (TqTraceEnabled() || TqDiagStatsEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,
                 TqTraceNetworkStats{
@@ -1362,7 +1382,27 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
                     event->NETWORK_STATISTICS.IdealBytes,
                     event->NETWORK_STATISTICS.SmoothedRTT,
                     event->NETWORK_STATISTICS.CongestionWindow,
-                    event->NETWORK_STATISTICS.Bandwidth});
+                    event->NETWORK_STATISTICS.Bandwidth,
+                    event->NETWORK_STATISTICS.BytesInFlightMax,
+                    event->NETWORK_STATISTICS.BbrState,
+                    event->NETWORK_STATISTICS.BbrRecoveryState,
+                    event->NETWORK_STATISTICS.BbrRecoveryWindow,
+                    event->NETWORK_STATISTICS.BbrPacingGain,
+                    event->NETWORK_STATISTICS.BbrCwndGain,
+                    event->NETWORK_STATISTICS.BbrMinRtt,
+                    event->NETWORK_STATISTICS.BbrSendQuantum,
+                    event->NETWORK_STATISTICS.BbrAppLimited != FALSE,
+                    event->NETWORK_STATISTICS.SendFlushCount,
+                    event->NETWORK_STATISTICS.SendFlushPacingDelayedCount,
+                    event->NETWORK_STATISTICS.SendFlushCcBlockedCount,
+                    event->NETWORK_STATISTICS.SendFlushSchedulingCount,
+                    event->NETWORK_STATISTICS.SendFlushAmplificationBlockedCount,
+                    event->NETWORK_STATISTICS.SendFlushNoWorkCount,
+                    event->NETWORK_STATISTICS.SendFlushLastAllowance,
+                    event->NETWORK_STATISTICS.SendFlushLastPathAllowance,
+                    event->NETWORK_STATISTICS.SendFlushLastResult,
+                    event->NETWORK_STATISTICS.SendFlushLastDatagrams,
+                    event->NETWORK_STATISTICS.OutFlowBlockedReasons});
         }
         break;
     case QUIC_CONNECTION_EVENT_CONNECTED:

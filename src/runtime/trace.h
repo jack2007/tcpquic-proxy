@@ -20,6 +20,26 @@ struct TqTraceNetworkStats {
     uint64_t SmoothedRttUs{0};
     uint32_t CongestionWindow{0};
     uint64_t BandwidthBytesPerSecond{0};
+    uint32_t BytesInFlightMax{0};
+    uint32_t BbrState{0};
+    uint32_t BbrRecoveryState{0};
+    uint32_t BbrRecoveryWindow{0};
+    uint32_t BbrPacingGain{0};
+    uint32_t BbrCwndGain{0};
+    uint64_t BbrMinRttUs{0};
+    uint64_t BbrSendQuantum{0};
+    bool BbrAppLimited{false};
+    uint64_t SendFlushCount{0};
+    uint64_t SendFlushPacingDelayedCount{0};
+    uint64_t SendFlushCcBlockedCount{0};
+    uint64_t SendFlushSchedulingCount{0};
+    uint64_t SendFlushAmplificationBlockedCount{0};
+    uint64_t SendFlushNoWorkCount{0};
+    uint32_t SendFlushLastAllowance{0};
+    uint32_t SendFlushLastPathAllowance{0};
+    uint32_t SendFlushLastResult{0};
+    uint32_t SendFlushLastDatagrams{0};
+    uint32_t OutFlowBlockedReasons{0};
 };
 
 struct TqTraceLinuxRelayStreamState {
@@ -44,6 +64,9 @@ struct TqTraceLinuxRelayStreamState {
 bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec);
 void TqTraceShutdown();
 bool TqTraceEnabled();
+bool TqDiagStatsInit(uint32_t statsIntervalSec);
+void TqDiagStatsShutdown();
+bool TqDiagStatsEnabled();
 
 std::string TqTraceGlobalSnapshot();
 

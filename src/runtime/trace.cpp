@@ -27,11 +27,15 @@ namespace fs = std::filesystem;
 namespace {
 
 std::atomic<bool> g_traceEnabled{false};
+std::atomic<bool> g_diagStatsEnabled{false};
 std::shared_ptr<spdlog::logger> g_logger;
 std::mutex g_logMu;
 std::thread g_statsThread;
 std::atomic<bool> g_statsStop{false};
 uint32_t g_statsIntervalSec{0};
+std::thread g_diagStatsThread;
+std::atomic<bool> g_diagStatsStop{false};
+uint32_t g_diagStatsIntervalSec{0};
 
 struct TqMsgCounters {
     std::atomic<uint64_t> openTx{0};
@@ -85,6 +89,9 @@ std::mutex g_stateMu;
 std::unordered_map<uint64_t, TqTunnelTraceState> g_tunnels;
 std::unordered_map<uint32_t, TqQuicConnTraceState> g_quicConnsById;
 std::atomic<uint64_t> g_nextTunnelId{1};
+std::mutex g_diagStatsMu;
+bool g_diagHasNetStats{false};
+TqTraceNetworkStats g_diagNetStats;
 
 void LogInfo(const char* fmt, ...) {
     if (!g_traceEnabled.load(std::memory_order_relaxed) || !g_logger) {
@@ -310,6 +317,43 @@ void DumpPeriodicStats() {
     }
 }
 
+void DumpDiagStats() {
+    TqTraceNetworkStats netStats;
+    bool hasNetStats = false;
+    {
+        std::lock_guard<std::mutex> guard(g_diagStatsMu);
+        hasNetStats = g_diagHasNetStats;
+        netStats = g_diagNetStats;
+    }
+
+    const TqRelayMetricsSnapshot relayMetrics = TqSnapshotRelayMetrics();
+    std::fprintf(
+        stderr,
+        "tcpquic-proxy diag_stats: %s",
+        TqFormatRelayMetricsSnapshotLine(relayMetrics).c_str());
+    if (hasNetStats) {
+        std::fprintf(stderr, " %s", TqFormatTraceNetworkStatsLine(netStats).c_str());
+    } else {
+        std::fprintf(stderr, " net_stats: unavailable");
+    }
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+}
+
+void DiagStatsThreadMain() {
+    while (!g_diagStatsStop.load(std::memory_order_relaxed)) {
+        for (uint32_t i = 0; i < g_diagStatsIntervalSec; ++i) {
+            if (g_diagStatsStop.load(std::memory_order_relaxed)) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        if (!g_diagStatsStop.load(std::memory_order_relaxed)) {
+            DumpDiagStats();
+        }
+    }
+}
+
 void StatsThreadMain() {
     while (!g_statsStop.load(std::memory_order_relaxed)) {
         const uint32_t interval = g_statsIntervalSec;
@@ -478,6 +522,35 @@ void TqTraceShutdown() {
 
 bool TqTraceEnabled() {
     return g_traceEnabled.load(std::memory_order_relaxed);
+}
+
+bool TqDiagStatsInit(uint32_t statsIntervalSec) {
+    if (statsIntervalSec == 0) {
+        statsIntervalSec = 5;
+    }
+    TqDiagStatsShutdown();
+    {
+        std::lock_guard<std::mutex> guard(g_diagStatsMu);
+        g_diagHasNetStats = false;
+        g_diagNetStats = TqTraceNetworkStats{};
+    }
+    g_diagStatsIntervalSec = statsIntervalSec;
+    g_diagStatsStop.store(false, std::memory_order_relaxed);
+    g_diagStatsEnabled.store(true, std::memory_order_release);
+    g_diagStatsThread = std::thread(DiagStatsThreadMain);
+    return true;
+}
+
+void TqDiagStatsShutdown() {
+    g_diagStatsEnabled.store(false, std::memory_order_release);
+    g_diagStatsStop.store(true, std::memory_order_relaxed);
+    if (g_diagStatsThread.joinable()) {
+        g_diagStatsThread.join();
+    }
+}
+
+bool TqDiagStatsEnabled() {
+    return g_diagStatsEnabled.load(std::memory_order_relaxed);
 }
 
 std::string FormatTraceLinuxRelayStateLine(
@@ -675,7 +748,10 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         "hot_pending_quic_receive_bytes=%llu hot_tcp_read_armed=%d hot_tcp_write_armed=%d "
         "deferred_receive_complete_bytes=%llu max_pending_quic_receive_bytes=%llu "
         "quic_receive_paused=%llu quic_receive_resumed=%llu quic_send_backpressure=%llu "
-        "fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu",
+        "fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu "
+        "event_queue_full_errors=%llu tcp_read_buffer_acquire_failures=%llu "
+        "tcp_to_quic_buffer_acquire_failures=%llu quic_send_failures=%llu "
+        "quic_send_api_failures=%llu quic_send_fatal_errors=%llu last_quic_send_status=%lld",
         metrics.Backend != nullptr ? metrics.Backend : "?",
         static_cast<unsigned long long>(metrics.PendingBytes),
         static_cast<unsigned long long>(metrics.ActiveRelays),
@@ -708,7 +784,14 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         static_cast<unsigned long long>(metrics.FatalRelayResets),
         static_cast<unsigned long long>(metrics.TcpHardErrors),
         static_cast<unsigned long long>(metrics.GracefulRelayDrains),
-        static_cast<unsigned long long>(metrics.Errors));
+        static_cast<unsigned long long>(metrics.Errors),
+        static_cast<unsigned long long>(metrics.EventQueueFullErrors),
+        static_cast<unsigned long long>(metrics.TcpReadBufferAcquireFailures),
+        static_cast<unsigned long long>(metrics.TcpToQuicBufferAcquireFailures),
+        static_cast<unsigned long long>(metrics.QuicSendFailures),
+        static_cast<unsigned long long>(metrics.QuicSendApiFailures),
+        static_cast<unsigned long long>(metrics.QuicSendFatalErrors),
+        static_cast<long long>(metrics.LastQuicSendStatus));
     return buffer;
 }
 
@@ -941,20 +1024,40 @@ extern "C" void TqTraceLinuxRelayIdealSendBufferEvent(
 }
 
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
-    char buffer[512];
+    char buffer[1280];
     const double bandwidthMbps =
         static_cast<double>(stats.BandwidthBytesPerSecond) * 8.0 / 1000000.0;
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u posted=%llu ideal=%llu srtt=%.3fms cwnd=%u",
+        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u bytes_in_flight_max=%u posted=%llu ideal=%llu srtt=%.3fms cwnd=%u bbr_state=%u bbr_recovery_state=%u recovery_window=%u pacing_gain=%u cwnd_gain=%u bbr_min_rtt=%.3fms send_quantum=%llu app_limited=%u flush_count=%llu flush_pacing_delayed=%llu flush_cc_blocked=%llu flush_scheduling=%llu flush_amp_blocked=%llu flush_no_work=%llu flush_last_allowance=%u flush_last_path_allowance=%u flush_last_result=%u flush_last_datagrams=%u out_flow_blocked=0x%x",
         static_cast<unsigned long long>(stats.BandwidthBytesPerSecond),
         bandwidthMbps,
         stats.BytesInFlight,
+        stats.BytesInFlightMax,
         static_cast<unsigned long long>(stats.PostedBytes),
         static_cast<unsigned long long>(stats.IdealBytes),
         static_cast<double>(stats.SmoothedRttUs) / 1000.0,
-        stats.CongestionWindow);
+        stats.CongestionWindow,
+        stats.BbrState,
+        stats.BbrRecoveryState,
+        stats.BbrRecoveryWindow,
+        stats.BbrPacingGain,
+        stats.BbrCwndGain,
+        static_cast<double>(stats.BbrMinRttUs) / 1000.0,
+        static_cast<unsigned long long>(stats.BbrSendQuantum),
+        stats.BbrAppLimited ? 1u : 0u,
+        static_cast<unsigned long long>(stats.SendFlushCount),
+        static_cast<unsigned long long>(stats.SendFlushPacingDelayedCount),
+        static_cast<unsigned long long>(stats.SendFlushCcBlockedCount),
+        static_cast<unsigned long long>(stats.SendFlushSchedulingCount),
+        static_cast<unsigned long long>(stats.SendFlushAmplificationBlockedCount),
+        static_cast<unsigned long long>(stats.SendFlushNoWorkCount),
+        stats.SendFlushLastAllowance,
+        stats.SendFlushLastPathAllowance,
+        stats.SendFlushLastResult,
+        stats.SendFlushLastDatagrams,
+        stats.OutFlowBlockedReasons);
     return buffer;
 }
 
@@ -1141,14 +1244,22 @@ void TqTraceQuicDisconnected(
 }
 
 void TqTraceQuicNetworkStats(MsQuicConnection* connection, const TqTraceNetworkStats& stats) {
-    if (!TqTraceEnabled()) {
+    if (!TqTraceEnabled() && !TqDiagStatsEnabled()) {
         return;
     }
 
-    std::lock_guard<std::mutex> guard(g_stateMu);
-    if (auto* conn = FindQuicConnLocked(connection)) {
-        conn->hasNetStats = true;
-        conn->netStats = stats;
+    if (TqDiagStatsEnabled()) {
+        std::lock_guard<std::mutex> guard(g_diagStatsMu);
+        g_diagHasNetStats = true;
+        g_diagNetStats = stats;
+    }
+
+    if (TqTraceEnabled()) {
+        std::lock_guard<std::mutex> guard(g_stateMu);
+        if (auto* conn = FindQuicConnLocked(connection)) {
+            conn->hasNetStats = true;
+            conn->netStats = stats;
+        }
     }
 }
 

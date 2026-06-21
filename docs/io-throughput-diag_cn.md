@@ -1,0 +1,590 @@
+# tcpquic-proxy IO 吞吐诊断记录
+
+日期：2026-06-21
+
+## 背景
+
+测试目标是分析 2*DGX、1 条 QUIC connection、每条连接 1 个 stream、HTTP CONNECT download 压测时，在 netem 高时延和丢包场景下 tcpquic-proxy IO 吞吐低于 secnetperf 的原因。
+
+关键测试条件：
+
+- 数据方向：download，server 侧从 TCP 源读取并通过 QUIC 发送，client 侧从 QUIC 接收并写回 curl。
+- netem：发送端 egress，`limit 5000000`。
+- 重点场景：`100ms + 5% loss`、`200ms + 5% loss`。
+- QUIC 参数：BBR、`srw=2GiB`、`fcw=2GiB`。
+- 当前探索分支：`proxy-ideal-send-buffer-20260621`。
+
+## 已完成的关键修改
+
+### relay backpressure
+
+已将 TCP read 背压从原来的 `relay-inflight-bytes` / `initial-quic-read-ahead` 计算，调整为以 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE.ByteCount` 为主要依据：
+
+- pause TCP read：`OutstandingQuicSendBytes >= IdealSendBufferBytes`
+- resume TCP read：`OutstandingQuicSendBytes < IdealSendBufferBytes`
+- `RelayMaxInFlightSends` 不再参与 TCP read 背压判断。
+- `relay_pending` 的 QUIC receive pause/resume 逻辑调整为：
+  - `>= relay_pending` 停止 MsQuic receive
+  - `< relay_pending` 恢复 MsQuic receive
+
+### 窗口和 cap
+
+当前主要验证组合：
+
+- `StreamRecvWindowDefault = 2GiB`
+- `ConnFlowControlWindow = 2GiB`
+- `QUIC_MAX_IDEAL_SEND_BUFFER_SIZE = 2GiB`
+- relay send buffer cap = `4GiB`
+- 默认初始 read-ahead = `128MiB`
+
+### 低开销诊断
+
+新增 `--diag-stats`：
+
+- 不启用 spdlog trace 文件。
+- 每隔 `--diag-stats-interval` 秒向 stderr 输出一行聚合状态。
+- 输出包括 relay 侧：
+  - `outstanding_quic_send_bytes`
+  - `ideal_send_threshold_bytes`
+  - `tcp_read_disabled_relays`
+  - `pending_bytes`
+  - `event_queue_full_errors`
+  - `quic_send_failures`
+  - `quic_send_api_failures`
+  - `quic_send_fatal_errors`
+  - `last_quic_send_status`
+- 输出包括 QUIC net stats 最新样本：
+  - `bbr_bw_mbps`
+  - `bytes_in_flight`
+  - `bytes_in_flight_max`
+  - `posted`
+  - `ideal`
+  - `srtt`
+  - `cwnd`
+  - `bbr_state`
+  - `bbr_recovery_state`
+  - `recovery_window`
+  - `app_limited`
+
+最初 client 侧可以拿到 net stats，但 server 侧没有拿到 `NETWORK_STATISTICS` 样本。原因已定位并修复：server connection callback 的 `QUIC_CONNECTION_EVENT_NETWORK_STATISTICS` 分支仍然只判断 `TqTraceEnabled()`，没有纳入 `TqDiagStatsEnabled()`，导致 `--diag-stats` 开启时 server 侧收到事件也不会保存样本。
+
+## 测试结果摘要
+
+### 1GiB/2GiB 与 2GiB/4GiB cap 对比
+
+`200ms + 5% loss, limit 5000000, initrtt=200ms`
+
+| 组合 | trace | 吞吐 |
+| --- | --- | --- |
+| corecap=1GiB, relaycap=2GiB | no trace | 5066.46 Mbps |
+| corecap=1GiB, relaycap=2GiB | no trace rerun | 4960.03 Mbps |
+| corecap=2GiB, relaycap=4GiB | no trace | 7285.96 Mbps |
+| corecap=2GiB, relaycap=4GiB | no trace rerun | 5641.88 Mbps |
+| corecap=2GiB, relaycap=4GiB | no trace natural latest | 5271.98 Mbps |
+
+说明：
+
+- 2GiB/4GiB 在部分轮次明显优于 1GiB/2GiB，但存在较大波动。
+- 不能只用 cap 解释所有吞吐差异。
+- trace 文件日志会显著降低吞吐，不能把 trace 下数据直接当作真实性能。
+
+### 100ms 场景
+
+`100ms + 5% loss, limit 5000000`
+
+| 组合 | trace | 吞吐 |
+| --- | --- | --- |
+| corecap=1GiB, relaycap=2GiB | no trace | 7094.88 Mbps |
+| corecap=2GiB, relaycap=4GiB | no trace | 8657.88 Mbps |
+| corecap=2GiB, relaycap=4GiB | no trace rerun | 5524.25 Mbps |
+
+说明：
+
+- 早期曾跑到接近 secnetperf 的 8.6Gbps。
+- 后续复测波动较大，因此需要依赖低开销运行时状态判断瓶颈，而不是只看单次吞吐。
+
+### 200ms 自然 ideal/postbuf 诊断
+
+`200ms + 5% loss, limit 5000000, corecap=2GiB, relaycap=4GiB, initial_read_ahead=128MiB`
+
+| 模式 | 吞吐 | 结果目录 |
+| --- | --- | --- |
+| no trace | 5271.98 Mbps | `docs/dgx-proxy-corecap2g-relaycap4g-notrace-natural-200ms-20260621-191409` |
+| diag-stats | 5681.89 Mbps | `docs/dgx-proxy-diagstats-corecap2g-relaycap4g-200ms-errors-20260621-190720` |
+
+发送端 relay 侧观察：
+
+- `outstanding_quic_send_bytes` 基本贴着 `ideal_send_threshold_bytes`。
+- ideal 从约 `290MiB` 增长到 `653MiB`，再到约 `980MiB`。
+- `tcp_read_disabled_relays=1` 时，说明 TCP read 被 ideal/postbuf 背压暂停。
+- `event_queue_full_errors=0`
+- `quic_send_failures=0`
+- `quic_send_api_failures=0`
+- `quic_send_fatal_errors=0`
+
+结论：
+
+- 应用层并不是产生不了数据。
+- relay 内部也没有明显 send API 失败。
+- 当前直接限制是 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE` 驱动的 postbuf 阈值停在约 `980MiB`。
+
+### 强制提高 initial read-ahead 到 1.47GiB
+
+为了验证“980MiB 是否太小”，将 `--initial-quic-read-ahead` 设置为 `1470987163`，即 MsQuic ideal 计算的下一个 1.5x 台阶。
+
+`200ms + 5% loss, limit 5000000`
+
+| 额外修改 | 吞吐 | 结果目录 |
+| --- | --- | --- |
+| default event queue | 4264.14 Mbps | `docs/dgx-proxy-diagstats-readahead1470m-200ms-20260621-190922` |
+| event queue capacity 提高到 65536 | 3627.59 Mbps | `docs/dgx-proxy-diagstats-readahead1470m-queue65536-200ms-20260621-191159` |
+
+观察：
+
+- `outstanding_quic_send_bytes` 确实被抬高到约 `1.47GiB`。
+- 默认 event queue 下出现 `event_queue_full_errors=268`。
+- 将 event queue capacity 提高到 65536 后，`event_queue_full_errors=0`，但吞吐进一步下降。
+- client 侧 RTT 观察上升到 300ms 左右。
+
+结论：
+
+- event queue full 是强行提高 postbuf 后引入的新副作用，不是自然 980MiB 场景的主要瓶颈。
+- 单纯把 postbuf 从 980MiB 抬到 1.47GiB 不会提高吞吐，反而会增加排队和 RTT，降低吞吐。
+- “继续扩大发送队列”不是当前有效方向。
+
+## server 侧 BBR net stats 修复后观察
+
+修复点：
+
+- `src/protocol/quic_session.cpp`
+- server callback 中 `QUIC_CONNECTION_EVENT_NETWORK_STATISTICS` 的条件改为：
+  - `TqTraceEnabled() || TqDiagStatsEnabled()`
+
+复测场景：
+
+- `200ms + 5% loss, limit 5000000`
+- `corecap=2GiB, relaycap=4GiB`
+- `initial_read_ahead=128MiB`
+- `--diag-stats --diag-stats-interval 5`
+
+结果：
+
+- 吞吐：`4053.10 Mbps`
+- 结果目录：`docs/dgx-proxy-diagstats-server-bbr-200ms-20260621-205502`
+
+server 侧关键样本：
+
+| posted/relay outstanding | stream ideal | BBR bw | bytes_in_flight | srtt | cwnd | bbr_state | recovery_state | app_limited |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 293202047 | 290565366 | 7630.50 Mbps | 82980679 | 231.221ms | 503872935 | 2 | 2 | 0 |
+| 436138167 | 435848049 | 10456.88 Mbps | 101302999 | 211.258ms | 626882230 | 2 | 2 | 0 |
+| 654596196 | 653772073 | 6569.44 Mbps | 126075328 | 261.646ms | 419861007 | 2 | 2 | 0 |
+| 654559498 | 653772073 | 11256.34 Mbps | 267306696 | 247.444ms | 635225398 | 2 | 2 | 0 |
+| 656556742 | 653772073 | 10016.50 Mbps | 0 | 223.049ms | 5888 | 3 | 2 | 1 |
+| 654208763 | 653772073 | 9755.75 Mbps | 73835377 | 329.326ms | 610588869 | 2 | 2 | 0 |
+
+状态含义：
+
+- `bbr_state=2`：`BBR_STATE_PROBE_BW`
+- `bbr_state=3`：`BBR_STATE_PROBE_RTT`
+- `bbr_recovery_state=2`：`RECOVERY_STATE_GROWTH`
+
+新的直接证据：
+
+- 发送端 BBR 带宽估计并不低，多个样本在 `6.5Gbps ~ 11.2Gbps`。
+- 发送端应用/relay 已经把 posted/outstanding 填到 ideal 附近。
+- 实际 `bytes_in_flight` 明显低于 posted/ideal，最高样本约 `267MiB`。
+- 出现过一次 `PROBE_RTT`，`cwnd=5888`，`app_limited=1`。
+- `srtt` 可上升到 `329ms`，明显高于 netem 基础 RTT。
+
+因此，当前问题不能简单归因为“BBR 带宽估计低”或“应用没有填满发送队列”。更准确的描述是：
+
+- 应用层已经把 MsQuic send buffer/postbuf 填满。
+- BBR 的估计带宽较高，但实际在途数据没有持续跟到 posted/ideal。
+- `IDEAL_SEND_BUFFER_SIZE` 增长依赖 MsQuic 的 `BytesInFlightMax`，而不是直接依赖 BBR bandwidth estimate。
+- 在当前样本中 `bytes_in_flight` 没有持续突破下一个 ideal 台阶，因此 stream ideal 停在 `653MiB` 附近。
+
+## 增加 BytesInFlightMax 后的直接证据
+
+为了确认 `IDEAL_SEND_BUFFER_SIZE` 为什么停在 `980MiB`，已给 MsQuic `QUIC_CONNECTION_EVENT_NETWORK_STATISTICS` 增加 `BytesInFlightMax` 字段，并在 tcpquic-proxy 的 `--diag-stats` 中输出 `bytes_in_flight_max`。
+
+复测场景：
+
+- `200ms + 5% loss, limit 5000000`
+- `corecap=2GiB, relaycap=4GiB`
+- 原始 BBR ProbeRTT 行为
+- 结果目录：`docs/dgx-proxy-diagstats-bifmax-200ms-20260621-205915`
+- 吞吐：`5415.44 Mbps`
+- netem qdisc dropped：`11346`
+
+server 侧关键样本：
+
+| outstanding/postbuf | ideal | bytes_in_flight_max | bytes_in_flight | BBR bw | srtt | cwnd | event_queue_full |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 980832929 | 980658109 | 694638343 | 134328832 | 10664.41 Mbps | 305.336ms | 786370398 | 0 |
+| 980697913 | 980658109 | 694638343 | 9520896 | 14905.27 Mbps | 590.559ms | 849154017 | 0 |
+| 981152310 | 980658109 | 694638343 | 204148736 | 11705.98 Mbps | 248.556ms | 694830726 | 0 |
+| 984086300 | 980658109 | 731937280 | 140232579 | 16902.52 Mbps | 201.303ms | 956488733 | 1071 |
+| 981068807 | 980658109 | 731937280 | 224493108 | 13847.44 Mbps | 224.896ms | 786940487 | 1071 |
+| 904155700 | 980658109 | 731937280 | 91452416 | 14446.14 Mbps | 285.529ms | 826471634 | 1071 |
+
+结论：
+
+- `ideal=980658109` 与 `bytes_in_flight_max=694638343/731937280` 匹配 MsQuic `QuicGetNextIdealBytes(BytesInFlightMax)` 的增长路径。
+- 要让 ideal 从 `980MiB` 跨到下一个约 `1.47GiB` 台阶，`BytesInFlightMax` 必须先超过当前 `980MiB` 台阶；本轮最高只到约 `732MiB`。
+- 因此 `980MiB` 停住的直接原因不是 corecap 或 relaycap 已到上限，而是 MsQuic 观察到的历史最大在途数据没有继续增长。
+- BBR bandwidth estimate 可达到 `10Gbps ~ 16Gbps`，但实际 `bytes_in_flight` 经常只有几十到两百 MiB，并没有持续接近 `cwnd` 或 `ideal`。
+- 本轮后半段出现 `event_queue_full_errors=1071`，但它发生在 ideal 已经停在 `980MiB` 之后；后续单独扩大 event queue 的反证显示它不是根因。
+
+## event queue capacity 反证
+
+为了排除 event queue full 对自然场景的影响，临时把 event queue capacity 提高到 `65536` 后复测。
+
+复测场景：
+
+- `200ms + 5% loss, limit 5000000`
+- 结果目录：`docs/dgx-proxy-diagstats-queue65536-natural-200ms-20260621-210133`
+- 吞吐：`4290.21 Mbps`
+- netem qdisc dropped：`11346`
+
+观察：
+
+- `event_queue_full_errors=0`
+- ideal 主要停在 `653772073`
+- `bytes_in_flight_max` 最高约 `598989540`
+- 出现一次 `bbr_state=3`，即 `PROBE_RTT`，当时 `bytes_in_flight=0`、`cwnd=5888`、`app_limited=1`
+
+结论：
+
+- 扩大 event queue 可以消除 event queue full 计数，但吞吐没有改善。
+- event queue full 是高 postbuf 或高突发条件下的副作用，不是当前 200ms+5% 场景吞吐低的主因。
+- 该临时修改已回退，不进入正式代码。
+
+## ProbeRTT 验证
+
+为了判断 ProbeRTT 是否是吞吐下降的直接原因，临时把 MsQuic BBR 的 MinRTT 过期时间从 `10s` 改为 `60s`，让 30 秒测试窗口内尽量不进入 ProbeRTT。
+
+复测场景：
+
+- `200ms + 5% loss, limit 5000000`
+- 结果目录：`docs/dgx-proxy-diagstats-bbr-probertt60-200ms-20260621-210358`
+- 吞吐：`4440.53 Mbps`
+- netem qdisc dropped：`11280`
+
+server 侧关键样本：
+
+| outstanding/postbuf | ideal | bytes_in_flight_max | bytes_in_flight | BBR bw | srtt | cwnd | bbr_state |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 656323932 | 653772073 | 548803039 | 235939705 | 11570.36 Mbps | 461.774ms | 713150777 | 2 |
+| 981014217 | 980658109 | 752419328 | 192979878 | 16668.45 Mbps | 269.316ms | 1025291626 | 2 |
+| 981066266 | 980658109 | 752419328 | 145468928 | 10887.45 Mbps | 277.779ms | 611111765 | 2 |
+| 980773005 | 980658109 | 752419328 | 435609462 | 11133.08 Mbps | 233.146ms | 661139528 | 2 |
+| 984328909 | 980658109 | 800526592 | 1748736 | 13750.06 Mbps | 495.955ms | 409505066 | 2 |
+
+结论：
+
+- 采样中没有再看到 `bbr_state=3`，说明该实验基本屏蔽了 ProbeRTT。
+- 吞吐没有提升，`BytesInFlightMax` 仍然没有超过 `980MiB`，ideal 仍停在 `980MiB`。
+- ProbeRTT 会造成瞬时 cwnd 降到极低并引入抖动，但它不是当前吞吐低的单独根因。
+- 该临时修改已回退，保留原始 MsQuic BBR 行为。
+
+## MsQuic send flush 调度上限诊断
+
+为了继续定位“postbuf 已满，但 `bytes_in_flight` 没有持续跟上”的原因，给 MsQuic 的 `QUIC_CONNECTION_EVENT_NETWORK_STATISTICS` 增加了 send flush 诊断字段，并通过 tcpquic-proxy `--diag-stats` 输出：
+
+- `flush_count`
+- `flush_pacing_delayed`
+- `flush_cc_blocked`
+- `flush_scheduling`
+- `flush_amp_blocked`
+- `flush_no_work`
+- `flush_last_allowance`
+- `flush_last_path_allowance`
+- `flush_last_result`
+- `flush_last_datagrams`
+- `out_flow_blocked`
+
+这些字段用于区分：
+
+- 是否被 pacing timer 延迟；
+- 是否被 congestion control/cwnd/recovery 硬限制；
+- 是否被 anti-amplification 限制；
+- 是否只是没有待发送数据；
+- 是否每次 flush 都打满 `QUIC_MAX_DATAGRAMS_PER_SEND` 后被 scheduling 限制重新排队。
+
+### `QUIC_MAX_DATAGRAMS_PER_SEND` 的逻辑意义
+
+`QUIC_MAX_DATAGRAMS_PER_SEND` 是 MsQuic core 里的编译期宏，定义在 `third_party/msquic/src/core/quicdef.h`。它不是 QUIC 协议里的 flow window，也不是 BBR/cwnd 参数，而是 MsQuic send path 的批量/调度粒度参数。
+
+可以近似理解为：一次 `QuicSendFlush()` 最多连续构造并提交多少个 UDP datagram。它不是网络层一次 syscall 精确发送多少个 UDP 包的绝对值，因为 MsQuic 还会受 USO buffer、当前 packet builder 状态、pacing、cwnd、anti-amplification、可发送 stream 数据等因素影响；实际观测值可能略高于宏值。例如设置为 `240` 时，测试中 `flush_last_datagrams` 约为 `244`。
+
+关键路径：
+
+- `QuicSendFlush()` 从 connection/stream send queue 中取数据；
+- `QuicPacketBuilder` 构造 QUIC packet 和 UDP datagram；
+- `Builder.TotalCountDatagrams` 记录当前 flush 已经创建的 datagram 数；
+- 当 `Builder.TotalCountDatagrams >= QUIC_MAX_DATAGRAMS_PER_SEND` 时，本次 flush 会停止，剩余数据需要依赖后续 send flush 重新调度后继续发送。
+
+因此，这个参数的直接含义不是“发送窗口大小”，而是“每次被调度起来后，发送路径最多连续推进多少个 UDP datagram”。它影响的是调度批量，而不是允许未确认数据总量。未确认数据总量仍然受 postbuf、stream/connection flow control、congestion control、pacing 和 send buffer 等因素共同影响。
+
+40 和 240 在高 BDP 场景下差异明显，原因是每次 flush 结束后，后续数据不是在同一个简单 `for` 循环里无成本继续发送，而是要重新经过 MsQuic 的连接操作队列、worker 调度、packet builder 初始化/清理、状态检查、send path 再进入等流程。
+
+按 MTU 约 `1470B` 粗略估算：
+
+- `40` 个 datagram 约 `58.8KiB`
+- `240` 个 datagram 约 `352.8KiB`
+
+如果目标吞吐是 `10Gbps`，发送速率约 `1.25GB/s`：
+
+- `40` 个 datagram 的数据量只够约 `47us`
+- `240` 个 datagram 的数据量约 `282us`
+
+在 100Gbps 网卡、100ms/200ms RTT、5% loss、BBR、高 postbuf 的场景里，发送端需要持续把大量新数据推入网络，才能维持足够的 `bytes_in_flight`。如果每次 flush 只推进几十 KiB，就会产生极高的 flush 调度频率。调度、锁、状态检查、worker queue、packet builder 反复初始化/清理这些开销和间隙会变成实际吞吐瓶颈。
+
+本轮诊断数据正好验证了这一点：
+
+- batch=40 时，`flush_count=340638`，`flush_scheduling=339236`，`flush_last_datagrams=44`，吞吐 `3546.69 Mbps`。
+- batch=240 时，`flush_count` 降到约 `21727`，`flush_last_datagrams=244`，200ms+5% 吞吐提升到 `7269.02/8227.46 Mbps`，100ms+5% 提升到 `9580.54 Mbps`。
+
+所以当前问题不是“应用层没有数据”，也不是“大部分时间 BBR/cwnd 不让发”，而是默认 batch=40 使得 send flush 刚发送一点数据就因为 batch 上限停下来，然后反复重新调度。把 batch 提高到 240 后，一次 flush 可以连续推进更多数据，调度次数大幅降低，`bytes_in_flight` 更容易持续抬升。
+
+这个值也不能无限增大。batch=480 的反证显示吞吐反而下降，RTT 多次膨胀到 `370ms ~ 441ms`。可能原因包括：
+
+- 单次突发太大，造成更明显的队列排队和 RTT 膨胀；
+- pacing 粒度变粗，短时间 burst 更明显；
+- packet builder 的 `TotalCountDatagrams` 计数路径和 USO batching 行为被改变；
+- 单次 flush 占用 worker 时间过长，影响 ACK、loss recovery、timer 等其他连接事件处理。
+
+因此，`QUIC_MAX_DATAGRAMS_PER_SEND` 需要找一个批量和排队之间的平衡点。当前 2*DGX、1x1 download、100ms/200ms+5% loss 场景里，默认 `40` 明显太小，`240` 是目前测到的较好候选值。
+
+### MsQuic pacing 与 qdisc 的关系
+
+MsQuic 的 pacing 功能是内置在 MsQuic 用户态协议栈内部的，不是 Linux qdisc/netem 里的功能。
+
+在发送路径中，`QuicSendFlush()` 会调用 `QuicPacketBuilderHasAllowance(&Builder)` 判断当前 packet builder 是否还有发送 allowance。如果 allowance 不足，但 congestion control 认为连接后续仍然可以发送，MsQuic 会：
+
+- 给 connection 添加 `QUIC_FLOW_BLOCKED_PACING`；
+- 设置 `QUIC_CONN_TIMER_PACING`；
+- 本次 flush 返回 `QUIC_SEND_DELAYED_PACING`；
+- 等 MsQuic 自己的 pacing timer 到期后，再重新调度下一次 send flush。
+
+也就是说，MsQuic pacing 决定的是“用户态 QUIC 协议栈什么时候继续构造并提交 UDP datagram”。
+
+Linux qdisc/netem 是另一层机制。qdisc 处理的是已经从应用/协议栈交给内核的 UDP 包，决定这些包什么时候真正从内核队列发往网卡，或者按 netem 配置注入 delay/loss/limit/rate。当前测试中的 `netem delay/loss/limit` 属于 qdisc 层网络仿真，不是 MsQuic pacing。
+
+两者关系可以理解为：
+
+- MsQuic pacing：包进入内核前，在用户态控制 QUIC packet/UDP datagram 的构造和提交节奏；
+- qdisc/netem：包进入内核后，在内核网络队列中控制排队、延迟、丢包、限速等行为。
+
+因此，`QUIC_MAX_DATAGRAMS_PER_SEND` 增大后是否产生更大 burst，首先受 MsQuic 内部 pacing allowance 约束；如果 MsQuic 已经把一批 UDP datagram 提交给内核，后续还会继续受 qdisc/netem 的排队、延迟和丢包影响。
+
+本轮测试中 `flush_pacing_delayed` 只有个位数，说明默认 batch=40 的主要瓶颈不是 MsQuic pacing timer 频繁阻塞，而是单次 flush datagram batch 太小导致大量 `flush_scheduling`。但 batch 继续增大到 480 后 RTT 膨胀，说明即使 MsQuic 内部 pacing 没有表现为大量 delayed 计数，过大的单次提交批量仍可能在 qdisc/网卡队列侧形成更明显的排队。
+
+### 原始 batch=40 诊断
+
+复测场景：
+
+- `200ms + 5% loss, limit 5000000`
+- `QUIC_MAX_DATAGRAMS_PER_SEND=40`
+- 结果目录：`docs/dgx-proxy-diagstats-sendflush-200ms-20260621-212809`
+- 吞吐：`3546.69 Mbps`
+- curl exit：`28`
+- netem qdisc dropped：`11502`
+
+server 侧末尾关键样本：
+
+| ideal | bytes_in_flight_max | bytes_in_flight | cwnd | BBR bw | flush_count | flush_scheduling | flush_pacing_delayed | flush_cc_blocked | flush_last_datagrams |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 653772073 | 572467734 | 22801280 | 34851072 | 8987.68 Mbps | 340638 | 339236 | 3 | 216 | 44 |
+
+结论：
+
+- `flush_scheduling` 几乎等于 `flush_count`，说明绝大多数 flush 都是打满单次发送 batch 后重新排队。
+- `flush_pacing_delayed=3`，不是 pacing timer 频繁阻塞。
+- `flush_cc_blocked=216`，相对 `flush_count=340638` 很小，说明大部分时候不是 cwnd/recovery 直接返回不能发。
+- `flush_last_datagrams=44` 与 `QUIC_MAX_DATAGRAMS_PER_SEND=40` 同量级，直接指向 MsQuic 单次 flush datagram batch 上限。
+
+### batch=160 单变量验证
+
+将 `QUIC_MAX_DATAGRAMS_PER_SEND` 从 `40` 临时提高到 `160` 后复测。
+
+结果：
+
+- 结果目录：`docs/dgx-proxy-diagstats-sendflush-batch160-200ms-20260621-213033`
+- 吞吐：`4082.98 Mbps`
+- curl exit：`28`
+- netem qdisc dropped：`11280`
+
+server 侧末尾关键样本：
+
+| ideal | bytes_in_flight_max | bytes_in_flight | cwnd | BBR bw | flush_count | flush_scheduling | flush_pacing_delayed | flush_cc_blocked | flush_last_datagrams |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 980658109 | 885508096 | 4404224 | 843119194 | 14311.67 Mbps | 101458 | 100404 | 3 | 351 | 176 |
+
+结论：
+
+- 单次 flush datagrams 从约 `44` 提高到约 `176`。
+- `flush_count` 从 `340638` 降到 `101458`。
+- 吞吐从 `3546.69 Mbps` 提高到 `4082.98 Mbps`。
+- `BytesInFlightMax` 从约 `572MiB` 提高到约 `885MiB`，ideal 能升到 `980MiB`。
+- 但仍有大量 `flush_scheduling`，说明 batch=160 仍可能偏小。
+
+### batch=240 单变量验证
+
+考虑 `QUIC_PACKET_BUILDER.TotalCountDatagrams` 当前是 `uint8_t`，先将 `QUIC_MAX_DATAGRAMS_PER_SEND` 提高到 `240`，避免超过 255。
+
+复测结果：
+
+| 场景 | 吞吐 | curl exit | netem dropped | 结果目录 |
+| --- | --- | --- | --- | --- |
+| 200ms+5% batch=240 run1 | 7269.02 Mbps | 0 | 11280 | `docs/dgx-proxy-diagstats-sendflush-batch240-200ms-20260621-213243` |
+| 200ms+5% batch=240 run2 | 8227.46 Mbps | 0 | 11498 | `docs/dgx-proxy-diagstats-sendflush-batch240-repeat-200ms-20260621-213439` |
+| 100ms+5% batch=240 | 9580.54 Mbps | 0 | 11412 | `docs/dgx-proxy-diagstats-sendflush-batch240-u8-100ms-20260621-214842` |
+
+run2 server 侧关键样本：
+
+| ideal | bytes_in_flight_max | bytes_in_flight | cwnd | BBR bw | flush_count | flush_scheduling | flush_pacing_delayed | flush_cc_blocked | flush_last_datagrams |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 980658109 | 823201755 | 150980960 | 1167238420 | 18668.16 Mbps | 3207 | 2377 | 5 | 30 | 244 |
+| 980658109 | 823201755 | 297155584 | 1077881218 | 20427.79 Mbps | 9735 | 8711 | 5 | 33 | 244 |
+| 980658109 | 823201755 | 447156800 | 999889856 | 24030.88 Mbps | 16319 | 15267 | 5 | 61 | 244 |
+
+结论：
+
+- batch=240 后，单次 flush datagrams 提高到约 `244`。
+- `flush_count` 从 batch=40 的 `340638` 降到约 `21727`，数量级下降。
+- 200ms+5% 场景吞吐从 `3.5Gbps ~ 5.6Gbps` 区间提升到 `7.3Gbps ~ 8.2Gbps`，并且 curl 正常完成。
+- `flush_pacing_delayed` 仍然只有个位数，说明主要提升不是来自绕过 pacing。
+- `flush_cc_blocked` 仍远小于 `flush_scheduling`，说明主要瓶颈不是 BBR 判断不能发，而是 MsQuic 单次 flush 调度批量太小导致频繁重新调度。
+- 100ms+5% 场景也从早期波动较大的 `5.5Gbps ~ 8.6Gbps` 提升到 `9.58Gbps`，说明 batch=240 不是只对 200ms 场景有效。
+- 当前 100ms/200ms+5% 的直接性能瓶颈已基本定位为 `QUIC_MAX_DATAGRAMS_PER_SEND` 太小，导致高 BDP/高 postbuf 场景下 send flush 调度开销过高，实际在途数据难以持续抬升。
+
+### batch=200 和 batch=160 补充验证
+
+补充结果：
+
+| 场景 | 吞吐 | curl exit | netem dropped | 结果目录 |
+| --- | --- | --- | --- | --- |
+| 100ms+5% batch=160 | 7246.99 Mbps | 0 | 11478 | `docs/dgx-proxy-diagstats-sendflush-batch160-100ms-20260621-214159` |
+| 200ms+5% batch=160 | 4082.98 Mbps | 28 | 11280 | `docs/dgx-proxy-diagstats-sendflush-batch160-200ms-20260621-213033` |
+| 200ms+5% batch=200 | 5421.46 Mbps | 28 | 11280 | `docs/dgx-proxy-diagstats-sendflush-batch200-200ms-20260621-214328` |
+
+说明：
+
+- batch=160 相比默认 40 有提升，但 200ms 场景仍然 timeout。
+- batch=200 继续提升到 `5421.46 Mbps`，但仍低于 batch=240，且仍 timeout。
+- 目前已测值中，`240` 是最优候选点；`160/200` 可以证明吞吐提升与 batch 增大有明确相关性，但还没达到稳定完成 30 秒/20GB 下载的程度。
+
+### batch=220/250/260 邻近验证
+
+为了继续精确收敛 `QUIC_MAX_DATAGRAMS_PER_SEND` 的候选值，在保持其他参数不变的情况下，补充测试了 `220/250/260`。
+
+固定条件：
+
+- `200ms + 5% loss`
+- `limit 5000000`
+- 2*DGX 1x1 download
+- `--diag-stats --diag-stats-interval 5`
+- `QUIC_PACKET_BUILDER.TotalCountDatagrams` 保持原有 `uint8_t`
+
+结果：
+
+| batch | 吞吐 | curl exit | netem dropped | 关键观察 | 结果目录 |
+| --- | --- | --- | --- | --- | --- |
+| 220 | 7478.73 Mbps | 0 | 11424 | `flush_last_datagrams=220`，`flush_scheduling=94479`，`flush_pacing_delayed=6` | `docs/dgx-proxy-diagstats-sendflush-batch220-200ms-20260621-continue` |
+| 250 | 4969.42 Mbps | 28 | 11280 | `flush_last_datagrams=252`，`srtt` 最高观察到 `468.063ms` | `docs/dgx-proxy-diagstats-sendflush-batch250-200ms-20260621-continue` |
+| 260 | 2747.90 Mbps | 28 | 11214 | `flush_scheduling=0`，`srtt` 最后膨胀到 `1592.685ms`，`event_queue_full_errors=1287` | `docs/dgx-proxy-diagstats-sendflush-batch260-200ms-20260621-continue` |
+
+结论：
+
+- `220` 可以正常完成，吞吐 `7478.73 Mbps`，低于 batch=240 的最好复测 `8227.46 Mbps`，但高于 batch=160/200。
+- `250` 已经开始明显退化，虽然仍能构造约 `252` 个 datagram，但吞吐下降到 `4969.42 Mbps`，且 curl timeout。
+- `260` 退化更严重，吞吐只有 `2747.90 Mbps`；虽然 `flush_scheduling=0` 表示已经不再被 batch scheduling 限制，但 RTT 和 event queue 副作用显著。
+- 这组邻近测试说明：性能提升不是简单随 batch 单调增加。batch 从 40 提高到 240 可以降低调度开销；继续提高到 250/260 后，过大突发、排队、事件队列压力或计数边界副作用开始主导。
+- 在当前 `uint8_t TotalCountDatagrams` 约束下，`240` 比 `250/260` 更稳妥，也比 `220` 更快；当前最优候选仍是固定 `240`。
+
+### batch=480 反证
+
+为了确认 batch=240 是否还偏小，将 `QUIC_PACKET_BUILDER.TotalCountDatagrams` 改为 `uint16_t`，并把 `QUIC_MAX_DATAGRAMS_PER_SEND` 提高到 `480` 后复测。
+
+结果：
+
+- 结果目录：`docs/dgx-proxy-diagstats-sendflush-batch480-200ms-20260621-213732`
+- 吞吐：`4150.07 Mbps`
+- curl exit：`28`
+- netem qdisc dropped：`11214`
+
+server 侧关键样本：
+
+| ideal | bytes_in_flight_max | bytes_in_flight | cwnd | BBR bw | srtt | flush_count | flush_scheduling | flush_pacing_delayed | flush_cc_blocked | flush_last_datagrams |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 980658109 | 900633296 | 537121024 | 881188085 | 14783.81 Mbps | 371.941ms | 20985 | 18142 | 11 | 235 | 484 |
+| 980658109 | 900633296 | 89703680 | 767408412 | 13217.07 Mbps | 441.199ms | 26826 | 23954 | 11 | 242 | 484 |
+| 980658109 | 900633296 | 156234668 | 822844372 | 13753.06 Mbps | 374.587ms | 40662 | 37695 | 14 | 254 | 484 |
+
+结论：
+
+- batch=480 可以把单次 flush datagrams 提高到约 `484`，但吞吐反而下降到 `4150.07 Mbps`。
+- RTT 多次膨胀到 `370ms ~ 441ms`，明显高于 batch=240 的高吞吐复测。
+- `flush_scheduling` 仍然很多，说明继续扩大 batch 并没有消除调度限制，反而可能造成更大的突发和排队。
+- 当前更合理的候选值是 batch=240，而不是继续无约束增大。
+
+### uint16 和 dynamic batch 反证
+
+在 batch=480 实验中曾把 `QUIC_PACKET_BUILDER.TotalCountDatagrams` 从 `uint8_t` 改为 `uint16_t`。随后把常量回到 `240`，但保留 `uint16_t` 复测 100ms+5%：
+
+| 场景 | 吞吐 | curl exit | netem dropped | 结果目录 |
+| --- | --- | --- | --- | --- |
+| 100ms+5% batch=240 + `uint16_t` | 4673.76 Mbps | 28 | 11412 | `docs/dgx-proxy-diagstats-sendflush-batch240-100ms-20260621-214010` |
+
+该轮 `flush_last_datagrams` 变为约 `264`，`srtt` 多次抬高到 `150ms ~ 228ms`，吞吐明显低于 `batch=240 + uint8_t` 的 `9580.54 Mbps`。这说明只把计数类型放宽，也会改变实际突发行为，并且可能引入更严重排队。
+
+也尝试过 RTT-based dynamic batch：
+
+- 低 RTT 使用 `160`
+- `srtt >= 150ms` 使用 `240`
+
+复测结果：
+
+| 场景 | 吞吐 | curl exit | netem dropped | 结果目录 |
+| --- | --- | --- | --- | --- |
+| 200ms+5% dynamic batch | 3132.17 Mbps | 28 | 11498 | `docs/dgx-proxy-diagstats-sendflush-dynamic-200ms-20260621-214603` |
+
+dynamic batch 结果低于默认 batch=40 的部分复测，也低于 batch=160/200/240。该方案已回退。
+
+当前代码状态：
+
+- `QUIC_MAX_DATAGRAMS_PER_SEND=240`
+- `QUIC_PACKET_BUILDER.TotalCountDatagrams` 保持 MsQuic 原有的 `uint8_t`
+- 未保留 RTT-based dynamic batch
+
+注意：batch=240 下观测到 `flush_last_datagrams` 约 `244`，距离 `uint8_t` 上限 255 仍有余量，但余量不大。后续如果还要把常量继续上调，必须同步审查 `TotalCountDatagrams` 以及 packet builder 中附加 datagram 的计数路径，避免 8-bit 溢出或更大突发导致 RTT 膨胀。
+
+## 当前核心判断
+
+目前可以排除或降低优先级的方向：
+
+- TCP 源端产生数据不足：不成立。发送端 relay 可以持续把 outstanding 填到 ideal。
+- relay 内部 QuicSend API 失败：自然场景未观察到。
+- event queue capacity：自然场景未触发；强行 1.47GiB 才触发，扩大后吞吐仍下降。
+- 单纯继续扩大 postbuf：已验证会降低吞吐。
+- ProbeRTT 单独解释：不成立。屏蔽 30 秒测试窗口内的 ProbeRTT 后吞吐未提高。
+- pacing timer 单独解释：不成立。send flush 诊断中 `flush_pacing_delayed` 只有个位数。
+- BBR/cwnd/recovery 直接阻塞单独解释：优先级下降。`flush_cc_blocked` 远小于 `flush_scheduling`。
+
+当前最重要的问题已经从“server 侧拿不到 BBR stats”推进为“为什么 BBR 估计带宽较高时，实际 `bytes_in_flight` 和 `BytesInFlightMax` 没有持续跟上 posted/ideal”。下一步需要判断 `~653MiB/~980MiB` ideal 阈值停住到底是：
+
+- 已确认一个直接原因：MsQuic `QUIC_MAX_DATAGRAMS_PER_SEND=40` 单次 flush batch 太小，导致大量 scheduling limited。
+- batch=160/200/240 呈现逐步改善，batch=240 后 200ms+5% 达到 `7.27Gbps/8.23Gbps`，100ms+5% 达到 `9.58Gbps`。
+- 邻近值验证中，batch=220 可正常完成但低于 batch=240；batch=250/260 已经明显退化，说明最优区间在 220 到 250 之间，当前已测最优点是 240。
+- batch=480、`uint16_t` 放宽、RTT-based dynamic batch 都出现吞吐下降，说明继续无约束扩大 batch 会引入更大突发、排队和 RTT 膨胀。
+- 当前候选值是固定 batch=240，并保持原有 `uint8_t` 计数类型。
+
+## 下一步计划
+
+1. 在固定 batch=240 的基础上做重复性验证，确认 100ms/200ms+5% 的吞吐稳定区间。
+2. 如需继续精确锁定最优值，可在 `230/235/245` 附近测试，不建议直接扩大到 `250+` 或 `480+`。
+3. batch 扩大后继续观察 `srtt`、`event_queue_full_errors`、`flush_last_datagrams` 和 `bytes_in_flight_max`，重点避免吞吐提升来自短期突发但伴随 RTT 膨胀。
+4. 若 batch=240 稳定后仍未达到 secnetperf 上限，再回到 BBR recovery/RTT 膨胀路径，检查 `bytes_in_flight_max` 为什么仍未稳定跨过 `980MiB`。
+5. 继续保持 `--diag-stats` 低开销采样，避免 spdlog trace 对吞吐造成显著干扰。

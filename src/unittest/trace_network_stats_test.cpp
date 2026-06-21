@@ -54,7 +54,27 @@ int main() {
         9012,
         70000,
         64000,
-        10000000});
+        10000000,
+        2222,
+        2,
+        2,
+        4096,
+        320,
+        512,
+        200000,
+        65536,
+        false,
+        10,
+        3,
+        2,
+        1,
+        4,
+        5,
+        65536,
+        131072,
+        6,
+        7,
+        8});
 
     if (line.find("net_stats:") == std::string::npos) {
         return 1;
@@ -71,6 +91,22 @@ int main() {
         line.find("srtt=70.000ms") == std::string::npos ||
         line.find("cwnd=64000") == std::string::npos) {
         return 4;
+    }
+    if (line.find("bytes_in_flight_max=2222") == std::string::npos) {
+        return 16;
+    }
+    if (line.find("flush_count=10") == std::string::npos ||
+        line.find("flush_pacing_delayed=3") == std::string::npos ||
+        line.find("flush_cc_blocked=2") == std::string::npos ||
+        line.find("flush_scheduling=1") == std::string::npos ||
+        line.find("flush_amp_blocked=4") == std::string::npos ||
+        line.find("flush_no_work=5") == std::string::npos ||
+        line.find("flush_last_allowance=65536") == std::string::npos ||
+        line.find("flush_last_path_allowance=131072") == std::string::npos ||
+        line.find("flush_last_result=6") == std::string::npos ||
+        line.find("flush_last_datagrams=7") == std::string::npos ||
+        line.find("out_flow_blocked=0x8") == std::string::npos) {
+        return 17;
     }
 
     const std::string relayLine = TqFormatTraceLinuxRelayStreamShutdownLine(

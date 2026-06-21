@@ -23,6 +23,13 @@ void TqTraceShutdown() {
 
 bool TqTraceEnabled() { return false; }
 
+bool TqDiagStatsInit(uint32_t) { return true; }
+
+void TqDiagStatsShutdown() {
+}
+
+bool TqDiagStatsEnabled() { return false; }
+
 std::string TqTraceGlobalSnapshot() { return {}; }
 
 void TqTraceQuicConnecting(const char*, uint32_t, const char*) {

@@ -84,6 +84,8 @@ struct TqConfig {
     bool Trace{false};
     uint32_t TraceIntervalSec{10};
     bool TraceConnectOnStart{false};
+    bool DiagStats{false};
+    uint32_t DiagStatsIntervalSec{5};
 };
 
 void TqPrintUsage(FILE* out);

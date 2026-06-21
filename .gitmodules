@@ -1,6 +1,6 @@
 [submodule "third_party/msquic"]
 	path = third_party/msquic
-	url = https://github.com/microsoft/msquic.git
+	url = https://github.com/jack2007/msquic.git
 [submodule "third_party/lz4"]
 	path = third_party/lz4
 	url = https://github.com/lz4/lz4.git

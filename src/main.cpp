@@ -54,7 +54,10 @@ private:
 
 
 struct TqTraceGuard {
-    ~TqTraceGuard() { TqTraceShutdown(); }
+    ~TqTraceGuard() {
+        TqDiagStatsShutdown();
+        TqTraceShutdown();
+    }
 };
 
 int RunSinglePeerClient(const TqConfig& cfg) {
@@ -337,6 +340,13 @@ int main(int argc, char** argv) {
             std::fprintf(stderr,
                 "tcpquic-proxy: trace enabled (interval=%us, log under <exe>/log/)\n",
                 cfg.TraceIntervalSec);
+        }
+    }
+    if (cfg.DiagStats) {
+        if (TqDiagStatsInit(cfg.DiagStatsIntervalSec)) {
+            std::fprintf(stderr,
+                "tcpquic-proxy: diag stats enabled (interval=%us, stderr)\n",
+                cfg.DiagStatsIntervalSec);
         }
     }
 

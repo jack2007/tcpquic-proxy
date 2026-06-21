@@ -953,7 +953,9 @@ void TqPrintUsage(FILE* out) {
         "Diagnostics:\n"
         "  --trace                      Event + periodic debug trace (spdlog file log)\n"
         "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
-        "  --trace-connect-on-start     Client: connect at startup (debug)\n");
+        "  --trace-connect-on-start     Client: connect at startup (debug)\n"
+        "  --diag-stats                 Low-overhead periodic stderr stats\n"
+        "  --diag-stats-interval <sec>  Periodic stderr stats interval (default 5)\n");
 }
 
 void TqFinalizeConfig(TqConfig& cfg) {
@@ -1435,6 +1437,20 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         } else if (std::strcmp(arg, "--trace-connect-on-start") == 0) {
             cfg.Trace = true;
             cfg.TraceConnectOnStart = true;
+        } else if (std::strcmp(arg, "--diag-stats") == 0) {
+            cfg.DiagStats = true;
+        } else if (GetOptionValue(arg, "--diag-stats-interval", value)) {
+            cfg.DiagStats = true;
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--diag-stats-interval", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.DiagStatsIntervalSec) || cfg.DiagStatsIntervalSec == 0) {
+                err = "invalid value for --diag-stats-interval";
+                return false;
+            }
         } else {
             err = std::string("unknown option: ") + arg;
             return false;
