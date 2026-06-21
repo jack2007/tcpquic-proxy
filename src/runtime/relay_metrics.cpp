@@ -72,6 +72,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpWriteShutdownQueuedRelays = snapshot.TcpWriteShutdownQueuedRelays;
     metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
     metrics.OutstandingQuicSendBytes = snapshot.OutstandingQuicSendBytes;
+    metrics.MaxBufferedQuicSendBytes = snapshot.MaxBufferedQuicSendBytes;
     metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
     metrics.PendingTcpWriteBytes = snapshot.PendingTcpWriteBytes;
     metrics.MaxWorkerPendingBytes = snapshot.MaxWorkerPendingBytes;
@@ -85,6 +86,11 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.HotRelayPendingQuicReceiveBytes = snapshot.HotRelayPendingQuicReceiveBytes;
     metrics.HotRelayPendingQuicReceiveQueue = snapshot.HotRelayPendingQuicReceiveQueue;
     metrics.HotRelayTcpWriteBytes = snapshot.HotRelayTcpWriteBytes;
+    metrics.HotRelayTcpReadBytes = snapshot.HotRelayTcpReadBytes;
+    metrics.HotRelayOutstandingQuicSends = snapshot.HotRelayOutstandingQuicSends;
+    metrics.HotRelayOutstandingQuicSendBytes = snapshot.HotRelayOutstandingQuicSendBytes;
+    metrics.HotRelayPendingQuicSendRetries = snapshot.HotRelayPendingQuicSendRetries;
+    metrics.HotRelayIdealSendBytes = snapshot.HotRelayIdealSendBytes;
     metrics.HotRelayTcpWriteEagainCount = snapshot.HotRelayTcpWriteEagainCount;
     metrics.HotRelayEpollOutEvents = snapshot.HotRelayEpollOutEvents;
     metrics.HotRelayTcpReadArmed = snapshot.HotRelayTcpReadArmed;
@@ -93,6 +99,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.HotRelayPeerAddress = snapshot.HotRelayPeerAddress;
     metrics.TcpReadBatches = snapshot.TcpReadBatches;
     metrics.TcpReadBytes = snapshot.TcpReadBytes;
+    metrics.QuicSendOperations = snapshot.QuicSendOperations;
     metrics.TcpWriteBatches = snapshot.TcpWriteBatches;
     metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
     metrics.MaxTcpReadIovUsed = snapshot.MaxTcpReadIovUsed;
@@ -263,6 +270,8 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.TcpWriteShutdownQueuedRelays;
     out << ",\"linux_relay_outstanding_quic_sends\":" << metrics.OutstandingQuicSends;
     out << ",\"linux_relay_outstanding_quic_send_bytes\":" << metrics.OutstandingQuicSendBytes;
+    out << ",\"linux_relay_max_buffered_quic_send_bytes\":"
+        << metrics.MaxBufferedQuicSendBytes;
     out << ",\"linux_relay_pending_tcp_write_queue\":" << metrics.PendingTcpWriteQueue;
     out << ",\"linux_relay_pending_tcp_write_bytes\":" << metrics.PendingTcpWriteBytes;
     out << ",\"linux_relay_max_worker_pending_bytes\":" << metrics.MaxWorkerPendingBytes;
@@ -282,6 +291,16 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.HotRelayPendingQuicReceiveQueue;
     out << ",\"linux_relay_hot_relay_tcp_write_bytes\":"
         << metrics.HotRelayTcpWriteBytes;
+    out << ",\"linux_relay_hot_relay_tcp_read_bytes\":"
+        << metrics.HotRelayTcpReadBytes;
+    out << ",\"linux_relay_hot_relay_outstanding_quic_sends\":"
+        << metrics.HotRelayOutstandingQuicSends;
+    out << ",\"linux_relay_hot_relay_outstanding_quic_send_bytes\":"
+        << metrics.HotRelayOutstandingQuicSendBytes;
+    out << ",\"linux_relay_hot_relay_pending_quic_send_retries\":"
+        << metrics.HotRelayPendingQuicSendRetries;
+    out << ",\"linux_relay_hot_relay_ideal_send_bytes\":"
+        << metrics.HotRelayIdealSendBytes;
     out << ",\"linux_relay_hot_relay_tcp_write_eagain_count\":"
         << metrics.HotRelayTcpWriteEagainCount;
     out << ",\"linux_relay_hot_relay_epollout_events\":"
@@ -296,6 +315,7 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     TqAppendJsonString(out, "linux_relay_hot_relay_peer", metrics.HotRelayPeerAddress);
     out << ",\"linux_relay_tcp_read_batches\":" << metrics.TcpReadBatches;
     out << ",\"linux_relay_tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"linux_relay_quic_send_operations\":" << metrics.QuicSendOperations;
     out << ",\"linux_relay_tcp_write_batches\":" << metrics.TcpWriteBatches;
     out << ",\"linux_relay_tcp_write_bytes\":" << metrics.TcpWriteBytes;
     out << ",\"linux_relay_max_tcp_read_iov_used\":" << metrics.MaxTcpReadIovUsed;

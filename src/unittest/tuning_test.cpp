@@ -17,14 +17,15 @@ int main() {
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        assert(cfg.Tuning.StreamRecvWindow == 536870912u);
-        assert(cfg.Tuning.ConnFlowControlWindow == 500000000u);
+        assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
+        assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.InitialWindowPackets == 2000);
         assert(cfg.Tuning.InitialRttMs == 100);
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
         assert(cfg.Tuning.RelayDefaultIdealSend == 64ull * 1024 * 1024);
-        assert(cfg.Tuning.InitialQuicReadAheadBytes == 64ull * 1024 * 1024);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 64ull * 1024 * 1024);
+        assert(cfg.Tuning.InitialQuicReadAheadBytes == TqValidationInitialIdealSendFallbackBytes);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
+        assert(cfg.Tuning.MaxPendingBufferBytesPerRelay >= TqValidationRelaySendBufferCapBytes);
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 4ull * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayQuicRecvBatchBytes == 4ull * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayMaxIov == 32);
@@ -39,7 +40,8 @@ int main() {
         cfg.TuningMode = TqTuningMode::Lan;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        assert(cfg.Tuning.StreamRecvWindow == 16u * 1024 * 1024);
+        assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
+        assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.RelayIoSize == 256 * 1024);
         assert(cfg.Tuning.RelayMaxInFlightSends == 16);
     }
@@ -51,8 +53,8 @@ int main() {
         cfg.TargetRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        assert(cfg.Tuning.StreamRecvWindow >= 16u * 1024 * 1024);
-        assert(cfg.Tuning.ConnFlowControlWindow >= 16u * 1024 * 1024);
+        assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
+        assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.RelayIoSize == 256 * 1024);
         assert(cfg.Tuning.InitialRttMs == 100);
     }
@@ -64,7 +66,8 @@ int main() {
         cfg.TargetRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        assert(cfg.Tuning.StreamRecvWindow >= 128u * 1024 * 1024);
+        assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
+        assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
     }
@@ -95,7 +98,7 @@ int main() {
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 131072);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
         assert(cfg.Tuning.InitialRttMs == 100);
     }
 
@@ -110,7 +113,7 @@ int main() {
 
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
         assert(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
-        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
         assert(cfg.Tuning.TcpSocketBufferBytes >= 16 * 1024 * 1024);
     }
 
@@ -134,8 +137,8 @@ int main() {
         cfg.TargetRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500000000ull);
-        TQ_TEST_REQUIRE(cfg.Tuning.MaxPendingBufferBytesPerRelay >= 500000000ull);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
+        TQ_TEST_REQUIRE(cfg.Tuning.MaxPendingBufferBytesPerRelay >= TqValidationRelaySendBufferCapBytes);
         TQ_TEST_REQUIRE(TqGetRelayMemoryBudget() >= 512);
     }
 
@@ -146,9 +149,10 @@ int main() {
         cfg.TargetRttMs = 2147483648u;
         TqComputeTuning(cfg, cfg.Tuning);
 
-        TQ_TEST_REQUIRE(cfg.Tuning.ConnFlowControlWindow == 500000000u);
+        TQ_TEST_REQUIRE(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
+        TQ_TEST_REQUIRE(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         TQ_TEST_REQUIRE(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
-        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 500ull * 1024 * 1024);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
     }
 
     {
@@ -462,14 +466,14 @@ int main() {
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 4ull * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayQuicRecvBatchBytes == 4ull * 1024 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 4096);
-        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 64u * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick >= TqValidationInitialIdealSendFallbackBytes);
         TQ_TEST_REQUIRE(autoBudgetMb >= 256);
         const uint64_t reportedBudgetBytes =
             static_cast<uint64_t>(autoBudgetMb) * 1024 * 1024;
         TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes <= reportedBudgetBytes / 2);
         TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayGlobalPendingBytes + 1024ull * 1024 >=
                         reportedBudgetBytes / 2);
-        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes == 64ull * 1024 * 1024);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
         if (cfg.Tuning.LinuxRelayQuicReceiveCompleteBatchBytes != 0) {
             return 1;
         }

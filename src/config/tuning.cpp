@@ -362,9 +362,6 @@ const char* TqModeFromRatioPermille(uint32_t ratioPermille) {
 }
 
 void MergeDowngradeTuning(TqTuningConfig& current, const TqTuningConfig& measured) {
-    current.StreamRecvWindow = std::min(current.StreamRecvWindow, measured.StreamRecvWindow);
-    current.ConnFlowControlWindow =
-        std::min(current.ConnFlowControlWindow, measured.ConnFlowControlWindow);
     current.InitialWindowPackets =
         std::min(current.InitialWindowPackets, measured.InitialWindowPackets);
     current.RelayDefaultIdealSend =
@@ -425,6 +422,16 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
     TqApplyLinuxRelayDefaults(out, cfg.TuningMode, budgetBytes);
     ApplyHighBdpPipelineScaling(out);
     ApplyCustomOverrides(cfg, out);
+    out.StreamRecvWindow = TqValidationFlowWindowBytes;
+    out.ConnFlowControlWindow = TqValidationFlowWindowBytes;
+    out.InitialQuicReadAheadBytes =
+        std::max<uint64_t>(out.InitialQuicReadAheadBytes, TqValidationInitialIdealSendFallbackBytes);
+    out.MaxPendingBufferBytesPerRelay =
+        std::max<uint64_t>(out.MaxPendingBufferBytesPerRelay, TqValidationRelaySendBufferCapBytes);
+    out.LinuxRelayPerTunnelPendingBytes =
+        std::max<uint64_t>(out.LinuxRelayPerTunnelPendingBytes, TqValidationRelaySendBufferCapBytes);
+    out.LinuxRelayWorkerByteBudgetPerTick =
+        std::max<uint64_t>(out.LinuxRelayWorkerByteBudgetPerTick, TqValidationInitialIdealSendFallbackBytes);
 }
 
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb) {
@@ -592,6 +599,8 @@ void TqApplyRuntimeObservations(TqConfig& cfg) {
         TqComputeTuning(measuredCfg, measured);
         MergeDowngradeTuning(cfg.Tuning, measured);
     }
+    cfg.Tuning.StreamRecvWindow = TqValidationFlowWindowBytes;
+    cfg.Tuning.ConnFlowControlWindow = TqValidationFlowWindowBytes;
 }
 
 TqRuntimeObservations TqGetRuntimeObservations() {
@@ -702,7 +711,7 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         "relay_pending=%llu tick_budget=%llu read_batch=%llu "
         "read_chunk=%zu max_pending_buffer=%llu "
         "tcp_write_max=%llu tcp_write_burst=%llu quic_complete_batch=%llu "
-        "initial_read_ahead=%llu relay_workers=%u",
+        "initial_read_ahead=%llu relay_workers=%u ideal_backpressure=stream_event",
         tuning.StreamRecvWindow,
         tuning.ConnFlowControlWindow,
         tuning.InitialWindowPackets,

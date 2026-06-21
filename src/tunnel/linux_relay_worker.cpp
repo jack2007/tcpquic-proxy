@@ -111,6 +111,11 @@ extern "C" void TqTraceLinuxRelayBackpressureEvent(
     uint64_t pauseThreshold,
     uint64_t resumeThreshold,
     uint64_t readAheadBytes) __attribute__((weak));
+extern "C" void TqTraceLinuxRelayIdealSendBufferEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t idealSendBytes,
+    uint64_t outstandingQuicSendBytes) __attribute__((weak));
 #endif
 
 namespace {
@@ -265,6 +270,8 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool QuicSendFinCompleted{false};
     uint64_t OutstandingQuicSends{0};
     uint64_t OutstandingQuicSendBytes{0};
+    uint64_t IdealSendBufferBytes{TqValidationInitialIdealSendFallbackBytes};
+    bool HasIdealSendBufferEvent{false};
     std::deque<std::unique_ptr<TqLinuxRelaySendOperation>> PendingQuicSendRetries;
     uint64_t TcpReadBytes{0};
     std::deque<TqBufferView> PendingTcpWrites;
@@ -294,6 +301,9 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
           SinkQuicReceives(registration.SinkQuicReceives),
           SinkQuicReceiveBytes(registration.SinkQuicReceiveBytes) {
         MaxPendingBufferBytes = config.MaxPendingBufferBytes;
+        IdealSendBufferBytes = config.MaxBufferedQuicSendBytes != 0
+            ? config.MaxBufferedQuicSendBytes
+            : TqValidationInitialIdealSendFallbackBytes;
     }
 };
 
@@ -714,11 +724,43 @@ uint64_t TqLinuxRelayWorker::CurrentResumeBufferedQuicSendBytes() const {
     return pauseThreshold / 2;
 }
 
+uint64_t TqLinuxRelayWorker::CurrentRelayIdealSendBytes(const RelayState* relay) const {
+    if (relay == nullptr || relay->IdealSendBufferBytes == 0) {
+        return TqValidationInitialIdealSendFallbackBytes;
+    }
+    return relay->IdealSendBufferBytes;
+}
+
+void TqLinuxRelayWorker::HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount) {
+    if (byteCount == 0) {
+        return;
+    }
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    relay->IdealSendBufferBytes = std::max(relay->IdealSendBufferBytes, byteCount);
+    relay->HasIdealSendBufferEvent = true;
+#if defined(__GNUC__)
+    if (TqTraceLinuxRelayIdealSendBufferEvent != nullptr) {
+        TqTraceLinuxRelayIdealSendBufferEvent(
+            Config.WorkerIndex,
+            relay->Id,
+            relay->IdealSendBufferBytes,
+            relay->OutstandingQuicSendBytes);
+    }
+#endif
+    if (!relay->TcpReadClosed && ShouldResumeTcpReadForQuicBacklog(relay.get())) {
+        SetTcpReadBackpressure(relay.get(), false, "ideal_send_buffer");
+        ArmTcpReadable(relay.get(), true);
+    }
+}
+
 bool TqLinuxRelayWorker::ShouldPauseTcpReadForQuicBacklog(const RelayState* relay) const {
     if (relay == nullptr) {
         return false;
     }
-    const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+    const uint64_t pauseThreshold = CurrentRelayIdealSendBytes(relay);
     return pauseThreshold != 0 && relay->OutstandingQuicSendBytes >= pauseThreshold;
 }
 
@@ -726,11 +768,11 @@ bool TqLinuxRelayWorker::ShouldResumeTcpReadForQuicBacklog(const RelayState* rel
     if (relay == nullptr) {
         return false;
     }
-    const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+    const uint64_t pauseThreshold = CurrentRelayIdealSendBytes(relay);
     if (pauseThreshold == 0) {
         return true;
     }
-    return relay->OutstandingQuicSendBytes <= CurrentResumeBufferedQuicSendBytes();
+    return relay->OutstandingQuicSendBytes < pauseThreshold;
 }
 
 void TqLinuxRelayWorker::SetTcpReadBackpressure(
@@ -743,7 +785,7 @@ void TqLinuxRelayWorker::SetTcpReadBackpressure(
     relay->TcpReadPausedByQuicBacklog = paused;
 #if defined(__GNUC__)
     if (TqTraceLinuxRelayBackpressureEvent != nullptr) {
-        const uint64_t pauseThreshold = CurrentMaxBufferedQuicSendBytes();
+        const uint64_t pauseThreshold = CurrentRelayIdealSendBytes(relay);
         TqTraceLinuxRelayBackpressureEvent(
             Config.WorkerIndex,
             relay->Id,
@@ -751,7 +793,7 @@ void TqLinuxRelayWorker::SetTcpReadBackpressure(
             reason,
             relay->OutstandingQuicSendBytes,
             pauseThreshold,
-            pauseThreshold / 2,
+            pauseThreshold,
             pauseThreshold);
     }
 #else
@@ -797,6 +839,9 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             break;
         case TqLinuxRelayEventType::QuicSendComplete:
             CompleteQuicSend(reinterpret_cast<void*>(event.Value));
+            break;
+        case TqLinuxRelayEventType::QuicIdealSendBuffer:
+            HandleQuicIdealSendBuffer(event.RelayId, event.Value);
             break;
         case TqLinuxRelayEventType::TcpWritable: {
             auto relay = FindRelayById(event.RelayId);
@@ -1081,11 +1126,6 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             if (!BuildTcpToQuicViews(relay, views, sendViews) ||
                 !SubmitTcpBatchToQuic(relay, sendViews)) {
                 SetRelayStop(relay, "tcp_to_quic_submit_failed");
-                break;
-            }
-            if (Config.MaxInFlightQuicSends != 0 &&
-                relay->OutstandingQuicSends >= Config.MaxInFlightQuicSends) {
-                ArmTcpReadable(relay, false);
                 break;
             }
             if (ShouldPauseTcpReadForQuicBacklog(relay)) {
@@ -1492,10 +1532,7 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
             relay->QuicSendFinCompleted = true;
         }
         FlushDeferredQuicReceives(relay.get());
-        if (!relay->TcpReadClosed &&
-            (Config.MaxInFlightQuicSends == 0 ||
-             relay->OutstandingQuicSends < Config.MaxInFlightQuicSends) &&
-            ShouldResumeTcpReadForQuicBacklog(relay.get())) {
+        if (!relay->TcpReadClosed && ShouldResumeTcpReadForQuicBacklog(relay.get())) {
             SetTcpReadBackpressure(relay.get(), false, "quic_send_backlog");
             ArmTcpReadable(relay.get(), true);
         }
@@ -1674,7 +1711,7 @@ uint64_t TqLinuxRelayWorker::MaxPendingQuicReceiveBytesPerRelay() const {
 }
 
 uint64_t TqLinuxRelayWorker::LowPendingQuicReceiveBytesPerRelay() const {
-    return MaxPendingQuicReceiveBytesPerRelay() / 2;
+    return MaxPendingQuicReceiveBytesPerRelay();
 }
 
 void TqLinuxRelayWorker::SetQuicReceiveEnabled(RelayState* relay, bool enabled) {
@@ -1705,7 +1742,7 @@ void TqLinuxRelayWorker::MaybeResumeQuicReceive(RelayState* relay) {
     if (relay == nullptr || !relay->QuicReceivePaused) {
         return;
     }
-    if (relay->PendingQuicReceiveBytes <= LowPendingQuicReceiveBytesPerRelay()) {
+    if (relay->PendingQuicReceiveBytes < LowPendingQuicReceiveBytesPerRelay()) {
         relay->QuicReceivePaused = false;
         SetQuicReceiveEnabled(relay, true);
     }
@@ -2527,7 +2564,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
                     relayPendingBytes += retry->TotalBytes;
                 }
             }
-            snapshot.MaxBufferedQuicSendBytes += CurrentMaxBufferedQuicSendBytes();
+            snapshot.MaxBufferedQuicSendBytes += CurrentRelayIdealSendBytes(relay.get());
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
             for (const auto& view : relay->PendingTcpWrites) {
                 relayPendingBytes += view.Len;
@@ -2557,6 +2594,11 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
                 snapshot.HotRelayPendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
                 snapshot.HotRelayPendingQuicReceiveQueue = relay->PendingQuicReceives.size();
                 snapshot.HotRelayTcpWriteBytes = relay->TcpWriteBytes;
+                snapshot.HotRelayTcpReadBytes = relay->TcpReadBytes;
+                snapshot.HotRelayOutstandingQuicSends = relay->OutstandingQuicSends;
+                snapshot.HotRelayOutstandingQuicSendBytes = relay->OutstandingQuicSendBytes;
+                snapshot.HotRelayPendingQuicSendRetries = relay->PendingQuicSendRetries.size();
+                snapshot.HotRelayIdealSendBytes = CurrentRelayIdealSendBytes(relay.get());
                 snapshot.HotRelayTcpWriteEagainCount = relay->TcpWriteEagainCount;
                 snapshot.HotRelayEpollOutEvents = relay->EpollOutEvents;
                 snapshot.HotRelayTcpReadArmed = relay->TcpReadArmed;
@@ -2642,6 +2684,16 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
     const uint64_t relayId = relay->Id;
+    if (event->Type == QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE) {
+        TqLinuxRelayEvent queued{};
+        queued.Type = TqLinuxRelayEventType::QuicIdealSendBuffer;
+        queued.RelayId = relayId;
+        queued.Value = event->IDEAL_SEND_BUFFER_SIZE.ByteCount;
+        if (!Enqueue(std::move(queued))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
@@ -2820,6 +2872,8 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpReadClosedRelays += snapshot.TcpReadClosedRelays;
         total.TcpWriteShutdownQueuedRelays += snapshot.TcpWriteShutdownQueuedRelays;
         total.OutstandingQuicSends += snapshot.OutstandingQuicSends;
+        total.OutstandingQuicSendBytes += snapshot.OutstandingQuicSendBytes;
+        total.MaxBufferedQuicSendBytes += snapshot.MaxBufferedQuicSendBytes;
         total.PendingTcpWriteQueue += snapshot.PendingTcpWriteQueue;
         total.PendingTcpWriteBytes += snapshot.PendingTcpWriteBytes;
         total.MaxWorkerPendingBytes = std::max(total.MaxWorkerPendingBytes, snapshot.MaxWorkerPendingBytes);
@@ -2838,6 +2892,11 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
             total.HotRelayPendingQuicReceiveBytes = snapshot.HotRelayPendingQuicReceiveBytes;
             total.HotRelayPendingQuicReceiveQueue = snapshot.HotRelayPendingQuicReceiveQueue;
             total.HotRelayTcpWriteBytes = snapshot.HotRelayTcpWriteBytes;
+            total.HotRelayTcpReadBytes = snapshot.HotRelayTcpReadBytes;
+            total.HotRelayOutstandingQuicSends = snapshot.HotRelayOutstandingQuicSends;
+            total.HotRelayOutstandingQuicSendBytes = snapshot.HotRelayOutstandingQuicSendBytes;
+            total.HotRelayPendingQuicSendRetries = snapshot.HotRelayPendingQuicSendRetries;
+            total.HotRelayIdealSendBytes = snapshot.HotRelayIdealSendBytes;
             total.HotRelayTcpWriteEagainCount = snapshot.HotRelayTcpWriteEagainCount;
             total.HotRelayEpollOutEvents = snapshot.HotRelayEpollOutEvents;
             total.HotRelayTcpReadArmed = snapshot.HotRelayTcpReadArmed;

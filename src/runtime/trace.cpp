@@ -661,17 +661,45 @@ void TqTraceRelayFatalError(
 }
 
 std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metrics) {
-    char buffer[768];
+    char buffer[2048];
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "backend=%s pending_bytes=%llu active_relays=%llu relay_buffer_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu deferred_receive_complete_bytes=%llu max_pending_quic_receive_bytes=%llu quic_receive_paused=%llu quic_receive_resumed=%llu quic_send_backpressure=%llu fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu",
+        "backend=%s pending_bytes=%llu active_relays=%llu active_quic_send_relays=%llu "
+        "relay_buffer_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu "
+        "quic_send_ops=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu "
+        "ideal_send_threshold_bytes=%llu tcp_read_disabled_relays=%llu pending_tcp_write_bytes=%llu "
+        "hot_relay=%llu hot_worker=%u hot_tcp_read_bytes=%llu hot_tcp_write_bytes=%llu "
+        "hot_outstanding_quic_sends=%llu hot_outstanding_quic_send_bytes=%llu "
+        "hot_pending_quic_send_retries=%llu hot_ideal_send_bytes=%llu "
+        "hot_pending_quic_receive_bytes=%llu hot_tcp_read_armed=%d hot_tcp_write_armed=%d "
+        "deferred_receive_complete_bytes=%llu max_pending_quic_receive_bytes=%llu "
+        "quic_receive_paused=%llu quic_receive_resumed=%llu quic_send_backpressure=%llu "
+        "fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu",
         metrics.Backend != nullptr ? metrics.Backend : "?",
         static_cast<unsigned long long>(metrics.PendingBytes),
         static_cast<unsigned long long>(metrics.ActiveRelays),
+        static_cast<unsigned long long>(metrics.ActiveQuicSendRelays),
         static_cast<unsigned long long>(metrics.RelayBufferBytesInUse),
         static_cast<unsigned long long>(metrics.TcpReadBytes),
         static_cast<unsigned long long>(metrics.TcpWriteBytes),
+        static_cast<unsigned long long>(metrics.QuicSendOperations),
+        static_cast<unsigned long long>(metrics.OutstandingQuicSends),
+        static_cast<unsigned long long>(metrics.OutstandingQuicSendBytes),
+        static_cast<unsigned long long>(metrics.MaxBufferedQuicSendBytes),
+        static_cast<unsigned long long>(metrics.TcpReadDisabledRelays),
+        static_cast<unsigned long long>(metrics.PendingTcpWriteBytes),
+        static_cast<unsigned long long>(metrics.HotRelayId),
+        metrics.HotRelayWorkerIndex,
+        static_cast<unsigned long long>(metrics.HotRelayTcpReadBytes),
+        static_cast<unsigned long long>(metrics.HotRelayTcpWriteBytes),
+        static_cast<unsigned long long>(metrics.HotRelayOutstandingQuicSends),
+        static_cast<unsigned long long>(metrics.HotRelayOutstandingQuicSendBytes),
+        static_cast<unsigned long long>(metrics.HotRelayPendingQuicSendRetries),
+        static_cast<unsigned long long>(metrics.HotRelayIdealSendBytes),
+        static_cast<unsigned long long>(metrics.HotRelayPendingQuicReceiveBytes),
+        metrics.HotRelayTcpReadArmed ? 1 : 0,
+        metrics.HotRelayTcpWriteArmed ? 1 : 0,
         static_cast<unsigned long long>(metrics.DeferredReceiveCompleteBytes),
         static_cast<unsigned long long>(metrics.MaxPendingQuicReceiveBytes),
         static_cast<unsigned long long>(metrics.QuicReceivePausedCount),
@@ -894,6 +922,22 @@ extern "C" void TqTraceLinuxRelayBackpressureEvent(
         static_cast<unsigned long long>(pauseThreshold),
         static_cast<unsigned long long>(resumeThreshold),
         static_cast<unsigned long long>(readAheadBytes));
+}
+
+extern "C" void TqTraceLinuxRelayIdealSendBufferEvent(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    uint64_t idealSendBytes,
+    uint64_t outstandingQuicSendBytes) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    LogInfo(
+        "event=relay_ideal_send_buffer worker=%u relay=%llu ideal_send_bytes=%llu outstanding_quic_send_bytes=%llu",
+        workerIndex,
+        static_cast<unsigned long long>(relayId),
+        static_cast<unsigned long long>(idealSendBytes),
+        static_cast<unsigned long long>(outstandingQuicSendBytes));
 }
 
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {

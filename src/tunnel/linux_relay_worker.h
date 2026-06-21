@@ -103,6 +103,11 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t HotRelayPendingQuicReceiveBytes{0};
     uint64_t HotRelayPendingQuicReceiveQueue{0};
     uint64_t HotRelayTcpWriteBytes{0};
+    uint64_t HotRelayTcpReadBytes{0};
+    uint64_t HotRelayOutstandingQuicSends{0};
+    uint64_t HotRelayOutstandingQuicSendBytes{0};
+    uint64_t HotRelayPendingQuicSendRetries{0};
+    uint64_t HotRelayIdealSendBytes{0};
     uint64_t HotRelayTcpWriteEagainCount{0};
     uint64_t HotRelayEpollOutEvents{0};
     bool HotRelayTcpReadArmed{false};
@@ -281,6 +286,8 @@ private:
     void FailRelayFatal(RelayState* relay, const char* trigger, bool abortStream);
     uint64_t CurrentMaxBufferedQuicSendBytes() const;
     uint64_t CurrentResumeBufferedQuicSendBytes() const;
+    uint64_t CurrentRelayIdealSendBytes(const RelayState* relay) const;
+    void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
     bool ShouldPauseTcpReadForQuicBacklog(const RelayState* relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const RelayState* relay) const;
     void SetTcpReadBackpressure(RelayState* relay, bool paused, const char* reason);

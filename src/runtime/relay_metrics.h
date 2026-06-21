@@ -25,6 +25,7 @@ struct TqRelayMetricsSnapshot {
     uint64_t TcpWriteShutdownQueuedRelays{0};
     uint64_t OutstandingQuicSends{0};
     uint64_t OutstandingQuicSendBytes{0};
+    uint64_t MaxBufferedQuicSendBytes{0};
     uint64_t PendingTcpWriteQueue{0};
     uint64_t PendingTcpWriteBytes{0};
     uint64_t MaxWorkerPendingBytes{0};
@@ -38,6 +39,11 @@ struct TqRelayMetricsSnapshot {
     uint64_t HotRelayPendingQuicReceiveBytes{0};
     uint64_t HotRelayPendingQuicReceiveQueue{0};
     uint64_t HotRelayTcpWriteBytes{0};
+    uint64_t HotRelayTcpReadBytes{0};
+    uint64_t HotRelayOutstandingQuicSends{0};
+    uint64_t HotRelayOutstandingQuicSendBytes{0};
+    uint64_t HotRelayPendingQuicSendRetries{0};
+    uint64_t HotRelayIdealSendBytes{0};
     uint64_t HotRelayTcpWriteEagainCount{0};
     uint64_t HotRelayEpollOutEvents{0};
     bool HotRelayTcpReadArmed{false};
@@ -46,6 +52,7 @@ struct TqRelayMetricsSnapshot {
     std::string HotRelayPeerAddress;
     uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
+    uint64_t QuicSendOperations{0};
     uint64_t TcpWriteBatches{0};
     uint64_t TcpWriteBytes{0};
     uint64_t MaxTcpReadIovUsed{0};

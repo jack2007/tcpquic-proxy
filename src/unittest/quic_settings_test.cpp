@@ -27,6 +27,14 @@ int main() {
         clientSettings.KeepAliveIntervalMs != cfg.QuicKeepAliveIntervalMs) {
         return 16;
     }
+    if (clientSettings.IsSet.StreamRecvWindowDefault != TRUE ||
+        clientSettings.StreamRecvWindowDefault != 0x80000000u) {
+        return 19;
+    }
+    if (clientSettings.IsSet.ConnFlowControlWindow != TRUE ||
+        clientSettings.ConnFlowControlWindow != 0x80000000u) {
+        return 20;
+    }
 
     const MsQuicSettings serverSettings = TqMakeMsQuicSettings(cfg, true);
     if (serverSettings.IsSet.StreamMultiReceiveEnabled != TRUE ||
@@ -47,6 +55,14 @@ int main() {
     if (serverSettings.IsSet.KeepAliveIntervalMs != TRUE ||
         serverSettings.KeepAliveIntervalMs != cfg.QuicKeepAliveIntervalMs) {
         return 17;
+    }
+    if (serverSettings.IsSet.StreamRecvWindowDefault != TRUE ||
+        serverSettings.StreamRecvWindowDefault != 0x80000000u) {
+        return 21;
+    }
+    if (serverSettings.IsSet.ConnFlowControlWindow != TRUE ||
+        serverSettings.ConnFlowControlWindow != 0x80000000u) {
+        return 22;
     }
 
     cfg.QuicKeepAliveIntervalMs = 15000;

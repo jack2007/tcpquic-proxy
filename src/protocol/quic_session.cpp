@@ -123,8 +123,8 @@ MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     settings.SetKeepAlive(cfg.QuicKeepAliveIntervalMs);
     settings.SetIdleTimeoutMs(TqIdleTimeoutMs);
     settings.SetPeerBidiStreamCount(static_cast<uint16_t>(cfg.QuicConnectionStreamCount));
-    settings.SetStreamRecvWindowDefault(cfg.Tuning.StreamRecvWindow);
-    settings.SetConnFlowControlWindow(cfg.Tuning.ConnFlowControlWindow);
+    settings.SetStreamRecvWindowDefault(TqValidationFlowWindowBytes);
+    settings.SetConnFlowControlWindow(TqValidationFlowWindowBytes);
     settings.InitialWindowPackets = cfg.Tuning.InitialWindowPackets;
     settings.IsSet.InitialWindowPackets = TRUE;
     settings.SetInitialRttMs(cfg.Tuning.InitialRttMs);
@@ -1049,9 +1049,6 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
-        TqRelayUpdateQuicReadAheadFromNetworkStats(
-            event->NETWORK_STATISTICS.Bandwidth,
-            event->NETWORK_STATISTICS.SmoothedRTT);
         if (TqTraceEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,
@@ -1356,9 +1353,6 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
 
     switch (event->Type) {
     case QUIC_CONNECTION_EVENT_NETWORK_STATISTICS:
-        TqRelayUpdateQuicReadAheadFromNetworkStats(
-            event->NETWORK_STATISTICS.Bandwidth,
-            event->NETWORK_STATISTICS.SmoothedRTT);
         if (TqTraceEnabled()) {
             TqTraceQuicNetworkStats(
                 connection,
