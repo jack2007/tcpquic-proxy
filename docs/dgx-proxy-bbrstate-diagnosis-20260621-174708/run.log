@@ -1,0 +1,28 @@
+[tcpquic-dgx-bench] peer egress interface toward 169.254.250.230: enp1s0f0np0
+[tcpquic-dgx-bench] peer netem: delay 200ms loss 5% limit 5000000
+[tcpquic-dgx-bench] netem qdisc dropped=11280 (limit=5000000)
+[tcpquic-dgx-bench] mode=tunnel_off iterations=1 payload_kind=repeat payload=20000MB duration=30s quic-connections=1
+[tcpquic-dgx-bench] local client failed (compress=off)
+  --initrtt-ms <n>             Override initial RTT
+  --tuning <mode>              auto|lan|wan|custom (default wan)
+  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP
+  --target-rtt-ms <n>          Target RTT for auto/custom BDP
+  --max-memory-mb <n>          Cap relay pool memory across tunnels
+  --relay-io-size <bytes>      Override relay IO size
+  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes
+  --initial-quic-read-ahead <bytes>
+                              Initial/minimum read-ahead bytes (default 1048576)
+  --linux-relay-read-chunk-size <bytes>
+                              Linux relay TCP read chunk size
+  --linux-relay-tcp-write-max-bytes <bytes>
+                              Cap each Linux relay TCP sendmsg
+  --linux-relay-tcp-write-burst-bytes <bytes>
+                              Cap bytes per Linux relay TCP write flush
+
+Diagnostics:
+  --trace                      Event + periodic debug trace (spdlog file log)
+  --trace-interval <sec>       Periodic stats interval when --trace (default 10)
+  --trace-connect-on-start     Client: connect at startup (debug)
+[tcpquic-dgx-bench]   run 1/1: 0.00 Mbps (curl exit 7)
+tunnel_off,0,0.00,7
+[tcpquic-dgx-bench] done

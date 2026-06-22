@@ -1,0 +1,57 @@
+Error: unknown option: 
+Usage: tcpquic-proxy client|server [options]
+
+Client and Server:
+  --config <path>              Runtime JSON config file
+                              (preferred; see docs/config_guide.md)
+  --cert <path>                TLS certificate PEM path
+  --key <path>                 TLS private key PEM path
+  --ca <path>                  CA certificate PEM path
+  --admin-listen <addr>        Admin HTTP listen address for /health and /metrics
+  --compress <mode>            auto|zstd|off (default off)
+  --compress-level <n>         Compression level (default 1)
+
+Client specific:
+  --socks-listen <addr>        SOCKS5 listen address (default 127.0.0.1:1080)
+  --http-listen <addr>         HTTP CONNECT listen address (default 127.0.0.1:8080)
+  --client-config <path>       Legacy router client config JSON
+  --peer <addr>                Legacy single-peer address
+  --connections <n>            Connection count (default 1)
+  --connection-stream-count <n>
+                              Max bidirectional streams per connection (default 1024)
+  --keepalive-ms <n>          Keepalive interval in ms (default 5000, 1000..15000)
+  --handshake-threads <n>      SOCKS/HTTP handshake workers (default 8, 0=auto)
+  --download-test <sec>        Built-in end-to-end download speed test
+  --upload-test <sec>          Built-in end-to-end upload speed test
+
+Server specific:
+  --listen <addr>              Listen address
+  --allow-targets <list>       Allowed CIDR list, comma-separated (default 0.0.0.0/0)
+  --deny-targets <list>        Denied CIDR list, comma-separated
+
+Protocol and relay tuning:
+  --profile <mode>             max-throughput|low-latency (default max-throughput)
+  --enable-encrypt            Enable packet encryption
+  --fcw <bytes>                Override connection flow window
+  --srw <bytes>                Override stream recv window
+  --iw <packets>               Override initial window packets
+  --initrtt-ms <n>             Override initial RTT
+  --tuning <mode>              auto|lan|wan|custom (default wan)
+  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP
+  --target-rtt-ms <n>          Target RTT for auto/custom BDP
+  --max-memory-mb <n>          Cap relay pool memory across tunnels
+  --relay-io-size <bytes>      Override relay IO size
+  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes
+  --initial-quic-read-ahead <bytes>
+                              Initial/minimum read-ahead bytes (default 1048576)
+  --linux-relay-read-chunk-size <bytes>
+                              Linux relay TCP read chunk size
+  --linux-relay-tcp-write-max-bytes <bytes>
+                              Cap each Linux relay TCP sendmsg
+  --linux-relay-tcp-write-burst-bytes <bytes>
+                              Cap bytes per Linux relay TCP write flush
+
+Diagnostics:
+  --trace                      Event + periodic debug trace (spdlog file log)
+  --trace-interval <sec>       Periodic stats interval when --trace (default 10)
+  --trace-connect-on-start     Client: connect at startup (debug)

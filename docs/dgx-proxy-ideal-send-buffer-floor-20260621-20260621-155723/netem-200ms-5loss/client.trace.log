@@ -1,0 +1,77 @@
+[2026-06-21 15:58:10.904] [info] event=trace_started role=client log=/home/jack/src/tcpquic-proxy/.worktrees/proxy-ideal-send-buffer-20260621/build-plan/bin/Release/log/client.log interval=5s
+[2026-06-21 15:58:10.936] [info] event=quic_connecting role=client slot=1 peer=169.254.59.196:4433 global: quic_conns=0 streams=0 relays=0 socks=0 http=0 target_tcp=0 open_ok=0 open_fail=0 open_tx=0 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:10.944] [info] tcpquic-proxy runtime: rtt=3ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
+[2026-06-21 15:58:10.944] [info] tcpquic-proxy: QUIC client connected peer=169.254.59.196:4433 slot=1
+[2026-06-21 15:58:10.944] [info] event=quic_connected role=client conn=1 slot=1 local=169.254.250.230:53093 peer=169.254.59.196:4433 global: quic_conns=1 streams=0 relays=0 socks=0 http=0 target_tcp=0 open_ok=0 open_fail=0 open_tx=0 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:10.944] [info]   quic_metrics:
+[2026-06-21 15:58:10.944] [info]   rtt: cur=3.470ms min=3.470ms max=3.470ms var=1.735ms
+[2026-06-21 15:58:10.944] [info]   bytes: tx=1220 rx=2385 stream_tx=0 stream_rx=0
+[2026-06-21 15:58:10.944] [info]   pkts: tx=1 rx=3 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:10.944] [info]   congestion_events=0 cwnd=4801220 mtu=1248
+[2026-06-21 15:58:13.786] [info] event=stream_started role=client conn=1 tunnel=1 target=169.254.59.196:16001 compress=off global: quic_conns=1 streams=1 relays=0 socks=0 http=0 target_tcp=0 open_ok=0 open_fail=0 open_tx=0 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:14.044] [info] event=open_result tunnel=1 ok=1 error=ok conn_id_field=1 global: quic_conns=1 streams=1 relays=0 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:14.047] [info] event=relay_started tunnel=1 global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:15.908] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:15.909] [info] event=stats_relay backend=worker pending_bytes=0 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=65629 deferred_receive_complete_bytes=65629 max_pending_quic_receive_bytes=21877 quic_receive_paused=0 quic_receive_resumed=0 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:15.909] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:15.909] [info]   quic_metrics:
+[2026-06-21 15:58:15.909] [info]   rtt: cur=69.645ms min=3.470ms max=204.213ms var=100.199ms
+[2026-06-21 15:58:15.909] [info]   bytes: tx=12205 rx=80775 stream_tx=151 stream_rx=65656
+[2026-06-21 15:58:15.909] [info]   pkts: tx=28 rx=63 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:15.909] [info]   congestion_events=0 cwnd=5888 mtu=1500
+[2026-06-21 15:58:15.909] [info]   net_stats: bbr_bw_bytes_per_sec=51821 bbr_bw_mbps=0.41 bytes_in_flight=2052 posted=0 ideal=131072 srtt=69.645ms cwnd=5888
+[2026-06-21 15:58:20.913] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:20.913] [info] event=stats_relay backend=worker pending_bytes=0 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=406910 deferred_receive_complete_bytes=406910 max_pending_quic_receive_bytes=26257 quic_receive_paused=0 quic_receive_resumed=0 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:20.915] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:20.915] [info]   quic_metrics:
+[2026-06-21 15:58:20.915] [info]   rtt: cur=69.645ms min=3.470ms max=204.213ms var=100.199ms
+[2026-06-21 15:58:20.915] [info]   bytes: tx=12705 rx=425223 stream_tx=151 stream_rx=406937
+[2026-06-21 15:58:20.915] [info]   pkts: tx=53 rx=297 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:20.915] [info]   congestion_events=0 cwnd=5888 mtu=1500
+[2026-06-21 15:58:20.915] [info]   net_stats: bbr_bw_bytes_per_sec=98 bbr_bw_mbps=0.00 bytes_in_flight=2052 posted=0 ideal=131072 srtt=69.645ms cwnd=5888
+[2026-06-21 15:58:25.918] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:25.918] [info] event=stats_relay backend=worker pending_bytes=0 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=68627284 deferred_receive_complete_bytes=68627284 max_pending_quic_receive_bytes=27961063 quic_receive_paused=0 quic_receive_resumed=0 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:25.919] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:25.919] [info]   quic_metrics:
+[2026-06-21 15:58:25.919] [info]   rtt: cur=143.147ms min=3.470ms max=204.517ms var=90.087ms
+[2026-06-21 15:58:25.919] [info]   bytes: tx=16376 rx=72950940 stream_tx=151 stream_rx=72290900
+[2026-06-21 15:58:25.919] [info]   pkts: tx=143 rx=49578 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:25.919] [info]   congestion_events=0 cwnd=6222 mtu=1500
+[2026-06-21 15:58:25.919] [info]   net_stats: bbr_bw_bytes_per_sec=4953 bbr_bw_mbps=0.04 bytes_in_flight=2052 posted=0 ideal=131072 srtt=143.147ms cwnd=6222
+[2026-06-21 15:58:30.921] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:30.921] [info] event=stats_relay backend=worker pending_bytes=0 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=326218874 deferred_receive_complete_bytes=326218874 max_pending_quic_receive_bytes=90958563 quic_receive_paused=2 quic_receive_resumed=2 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:30.922] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:30.922] [info]   quic_metrics:
+[2026-06-21 15:58:30.922] [info]   rtt: cur=162.525ms min=3.470ms max=204.517ms var=67.127ms
+[2026-06-21 15:58:30.922] [info]   bytes: tx=70052 rx=360571756 stream_tx=151 stream_rx=357367066
+[2026-06-21 15:58:30.922] [info]   pkts: tx=861 rx=245031 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:30.922] [info]   congestion_events=0 cwnd=7287 mtu=1500
+[2026-06-21 15:58:30.922] [info]   net_stats: bbr_bw_bytes_per_sec=90590 bbr_bw_mbps=0.72 bytes_in_flight=2052 posted=0 ideal=131072 srtt=162.525ms cwnd=7287
+[2026-06-21 15:58:35.925] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:35.925] [info] event=stats_relay backend=worker pending_bytes=0 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=861157307 deferred_receive_complete_bytes=861157307 max_pending_quic_receive_bytes=90958563 quic_receive_paused=2 quic_receive_resumed=2 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:35.926] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:35.926] [info]   quic_metrics:
+[2026-06-21 15:58:35.926] [info]   rtt: cur=194.437ms min=3.470ms max=204.517ms var=13.227ms
+[2026-06-21 15:58:35.926] [info]   bytes: tx=429802 rx=1047629511 stream_tx=151 stream_rx=1038343996
+[2026-06-21 15:58:35.926] [info]   pkts: tx=3935 rx=711897 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:35.926] [info]   congestion_events=0 cwnd=10706 mtu=1500
+[2026-06-21 15:58:35.926] [info]   net_stats: bbr_bw_bytes_per_sec=365999 bbr_bw_mbps=2.93 bytes_in_flight=2258 posted=0 ideal=131072 srtt=194.437ms cwnd=10706
+[2026-06-21 15:58:40.929] [info] event=stats_tick global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:40.933] [info] event=stats_relay backend=worker pending_bytes=14090898 active_relays=1 relay_buffer_bytes=0 tcp_read_bytes=106 tcp_write_bytes=1424360089 deferred_receive_complete_bytes=1424360089 max_pending_quic_receive_bytes=90958563 quic_receive_paused=3 quic_receive_resumed=3 quic_send_backpressure=0 fatal_relay_resets=0 tcp_hard_errors=0 graceful_drains=0 errors=0
+[2026-06-21 15:58:40.933] [info] event=stats_quic conn=1 role=client slot=1 peer=169.254.59.196:4433 local=169.254.250.230:53093 streams_opened=1 app_open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:40.933] [info]   quic_metrics:
+[2026-06-21 15:58:40.933] [info]   rtt: cur=198.816ms min=3.470ms max=206.125ms var=6.184ms
+[2026-06-21 15:58:40.933] [info]   bytes: tx=619526 rx=1586185449 stream_tx=151 stream_rx=1570980477
+[2026-06-21 15:58:40.933] [info]   pkts: tx=5911 rx=1077915 lost=0 loss_rate=0.00% spurious_lost=0 reordered=0 decrypt_fail=0
+[2026-06-21 15:58:40.933] [info]   congestion_events=0 cwnd=5888 mtu=1500
+[2026-06-21 15:58:40.933] [info]   net_stats: bbr_bw_bytes_per_sec=344167 bbr_bw_mbps=2.75 bytes_in_flight=2052 posted=0 ideal=131072 srtt=198.816ms cwnd=5888
+[2026-06-21 15:58:43.372] [info] event=linux_relay_stream_event worker=0 relay=1 outstanding_quic_sends=0 outstanding_quic_send_bytes=0 pending_tcp_write_queue=0 pending_tcp_write_bytes=0 pending_quic_receive_bytes=317190 tcp_read_bytes=106 tcp_write_bytes=1689197626 tcp_write_errno=0 tcp_read_closed=0 tcp_write_closed=0 quic_send_fin_submitted=0 quic_send_fin_completed=0 tcp_write_shutdown_queued=0 stream_detached=0 stream_event=receive_fin error_code=0 status=0x0 absolute_offset=18446744073709551615 total_buffer_length=0 buffer_count=0 receive_flags=0x2 fin=1
+[2026-06-21 15:58:43.548] [info] event=relay_fatal backend=linux reason=tcp_write_hard_error relay_id=1 socket=93 pending_quic_receive_bytes=1449 pending_quic_receive_queue=0 pending_quic_sends=1 inflight_quic_sends=1 inflight_tcp_sends=0
+[2026-06-21 15:58:43.548] [info] event=linux_relay_stop_condition worker=0 relay=1 outstanding_quic_sends=1 outstanding_quic_send_bytes=0 pending_tcp_write_queue=0 pending_tcp_write_bytes=0 pending_quic_receive_bytes=1449 tcp_read_bytes=106 tcp_write_bytes=1690795216 tcp_write_errno=32 tcp_read_closed=1 tcp_write_closed=1 quic_send_fin_submitted=1 quic_send_fin_completed=0 tcp_write_shutdown_queued=0 stream_detached=0 trigger=tcp_write_hard_error
+[2026-06-21 15:58:43.548] [info] event=relay_fatal backend=linux reason=tcp_write_hard_error relay_id=1 socket=93 pending_quic_receive_bytes=2111211 pending_quic_receive_queue=0 pending_quic_sends=1 inflight_quic_sends=1 inflight_tcp_sends=0
+[2026-06-21 15:58:43.548] [info] event=linux_relay_stop_condition worker=0 relay=1 outstanding_quic_sends=1 outstanding_quic_send_bytes=0 pending_tcp_write_queue=0 pending_tcp_write_bytes=0 pending_quic_receive_bytes=2111211 tcp_read_bytes=106 tcp_write_bytes=1690795216 tcp_write_errno=32 tcp_read_closed=1 tcp_write_closed=1 quic_send_fin_submitted=1 quic_send_fin_completed=0 tcp_write_shutdown_queued=0 stream_detached=0 trigger=tcp_write_hard_error
+[2026-06-21 15:58:43.576] [info] event=linux_relay_stop_condition worker=0 relay=1 outstanding_quic_sends=0 outstanding_quic_send_bytes=0 pending_tcp_write_queue=0 pending_tcp_write_bytes=0 pending_quic_receive_bytes=0 tcp_read_bytes=106 tcp_write_bytes=1690795216 tcp_write_errno=32 tcp_read_closed=1 tcp_write_closed=1 quic_send_fin_submitted=1 quic_send_fin_completed=1 tcp_write_shutdown_queued=0 stream_detached=0 trigger=quic_send_fin_completed
+[2026-06-21 15:58:43.608] [info] event=relay_stopping role=client tunnel=1 target=169.254.59.196:16001 backend=linux relay_id=1 reason=reaper global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:43.608] [info] event=linux_relay_unregister worker=0 relay=1 outstanding_quic_sends=0 outstanding_quic_send_bytes=0 pending_tcp_write_queue=0 pending_tcp_write_bytes=0 pending_quic_receive_bytes=0 tcp_read_bytes=106 tcp_write_bytes=1690795216 tcp_write_errno=32 tcp_read_closed=1 tcp_write_closed=1 quic_send_fin_submitted=1 quic_send_fin_completed=1 tcp_write_shutdown_queued=0 stream_detached=0
+[2026-06-21 15:58:43.608] [info] event=proxy_tcp_closed proto=http fd=93 global: quic_conns=1 streams=1 relays=1 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0
+[2026-06-21 15:58:43.608] [info] event=stream_closed role=client tunnel=1 target=169.254.59.196:16001 relay=1 duration=29.8s reason=ok global: quic_conns=1 streams=0 relays=0 socks=0 http=0 target_tcp=0 open_ok=1 open_fail=0 open_tx=1 open_rx=0 open_ok_tx=0 open_ok_rx=0 open_fail_tx=0 open_fail_rx=0

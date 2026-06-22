@@ -561,6 +561,98 @@ dynamic batch 结果低于默认 batch=40 的部分复测，也低于 batch=160/
 
 注意：batch=240 下观测到 `flush_last_datagrams` 约 `244`，距离 `uint8_t` 上限 255 仍有余量，但余量不大。后续如果还要把常量继续上调，必须同步审查 `TotalCountDatagrams` 以及 packet builder 中附加 datagram 的计数路径，避免 8-bit 溢出或更大突发导致 RTT 膨胀。
 
+## upload 方向验证
+
+前面的主要验证集中在 download 方向，即本机 curl 通过本机 tcpquic-proxy client，经 QUIC 到对端 tcpquic-proxy server，再从对端 HTTP/TCP 源读取数据返回本机。虽然 upload 和 download 都是 TCP-over-QUIC tunnel，但数据路径不同：
+
+- download：对端 TCP 源 -> 对端 proxy server -> QUIC -> 本机 proxy client -> 本机 curl
+- upload：对端 iperf3 client -> 对端 proxy client -> QUIC -> 本机 proxy server -> 本机 iperf3 server
+
+因此需要单独验证 upload 方向，确认 tcpquic-proxy client 侧作为 QUIC 发送端时，`QUIC_MAX_DATAGRAMS_PER_SEND=240` 和新的 backpressure/diag 逻辑是否同样有效。
+
+### upload 测试方法
+
+测试部署：
+
+- 本机启动 `iperf3 -s`，作为最终 TCP 测速服务器。
+- 本机启动 `tcpquic-proxy server`。
+- 对端 DGX 启动 `tcpquic-proxy client`。
+- 对端 DGX 启动 `iperf3 -c`。
+- netem 只加在对端 DGX egress 网卡 `enp1s0f0np0`，参数为 `delay/loss/limit 5000000`。
+
+对端 `iperf3 -c` 明确使用 iperf3 的 HTTP CONNECT 代理功能，不是直连。实际命令形式：
+
+```bash
+iperf3 -c 169.254.250.230 \
+  -B 169.254.59.196 \
+  -p <iperf_port> \
+  -t 30 \
+  --json \
+  --connect-timeout 5000 \
+  --proxy http://127.0.0.1:<http_port>
+```
+
+其中 `--proxy http://127.0.0.1:<http_port>` 指向对端 `tcpquic-proxy client` 的 HTTP CONNECT 监听端口。
+
+实际数据路径：
+
+```text
+对端 iperf3 -c
+  -> iperf3 内置 HTTP CONNECT proxy
+  -> 对端 tcpquic-proxy client
+  -> QUIC
+  -> 本机 tcpquic-proxy server
+  -> 本机 iperf3 -s
+```
+
+注意：反向部署后，本机成为 QUIC server。原有 DGX 测试证书主要用于“对端做 server”的方向，本机做 server 时证书 SAN 需要包含 `169.254.250.230`。本轮 upload 测试重新生成了测试证书，server 证书包含：
+
+- `IP:169.254.250.230`
+- `IP:169.254.59.196`
+- `DNS:localhost`
+
+修正证书后，对端 proxy client 能正常监听 HTTP CONNECT/SOCKS/admin，并且 admin `/health` 显示 `connected_connections=1`。
+
+### upload 测试结果
+
+固定条件：
+
+- 主线代码：`125b385`
+- MsQuic 子模块：`8e11fb0`
+- `QUIC_MAX_DATAGRAMS_PER_SEND=240`
+- 1 条 QUIC connection
+- 1 条 HTTP CONNECT / TCP stream
+- iperf3 测试时长：30s
+- netem limit：`5000000`
+- proxy 参数：`--diag-stats --diag-stats-interval 5`
+
+结果：
+
+| 场景 | iperf rc | iperf sum_sent | iperf sum_received | qdisc dropped | 结果目录 |
+| --- | --- | --- | --- | --- | --- |
+| 100ms + 5% loss | 0 | 11094.21 Mbps | 10840.62 Mbps | 46116 | `docs/dgx-mainline-upload-iperf3-100ms-5loss-fixedcert-20260622` |
+| 200ms + 5% loss | 0 | 7832.33 Mbps | 7578.67 Mbps | 33340 | `docs/dgx-mainline-upload-iperf3-200ms-5loss-fixedcert-20260622` |
+
+发送端是对端 `tcpquic-proxy client`。其 diag 关键样本：
+
+| 场景 | tcp_read_bytes | outstanding_quic_send_bytes | ideal_send_threshold_bytes | bytes_in_flight_max | BBR bw | srtt | cwnd | flush_last_datagrams | event_queue_full_errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 100ms + 5% loss | 41605479273 | 0 | 0 | 496382579 | 10728.64 Mbps | 101.493ms | 275209745 | 1 | 0 |
+| 200ms + 5% loss | 29372793508 | 0 | 0 | 874434867 | 22917.12 Mbps | 201.444ms | 150512384 | 1 | 0 |
+
+传输中间的活跃样本显示：
+
+- 100ms：`flush_last_datagrams=244`，`flush_scheduling` 持续增长，`event_queue_full_errors=0`
+- 200ms：`flush_last_datagrams=244`，`flush_scheduling` 持续增长，`event_queue_full_errors=0`
+
+结论：
+
+- upload 方向已验证使用 iperf3 的 HTTP CONNECT 代理功能，不是 iperf3 直连。
+- upload 100ms+5% 达到约 `11.09Gbps` 发送速率，200ms+5% 达到约 `7.83Gbps` 发送速率，均正常完成。
+- 对端 proxy client 作为 QUIC 发送端时，`flush_last_datagrams=244`，说明主线 `QUIC_MAX_DATAGRAMS_PER_SEND=240` 生效。
+- upload 测试没有观察到 `event_queue_full_errors`。
+- 与最近主线 download 复测相比，upload 方向本轮表现更稳定；但 qdisc dropped 计数高于 download curl 测试，口径不同，不能直接把 iperf3 upload 与 curl download 做完全等价比较。
+
 ## 当前核心判断
 
 目前可以排除或降低优先级的方向：
