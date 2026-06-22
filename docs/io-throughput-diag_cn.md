@@ -653,6 +653,136 @@ iperf3 -c 169.254.250.230 \
 - upload 测试没有观察到 `event_queue_full_errors`。
 - 与最近主线 download 复测相比，upload 方向本轮表现更稳定；但 qdisc dropped 计数高于 download curl 测试，口径不同，不能直接把 iperf3 upload 与 curl download 做完全等价比较。
 
+## 本次优化分析结论
+
+本次 IO 吞吐探索的核心结论是：先解除 relay/MsQuic send buffer 入队侧的限制，再通过低开销 diag 证明应用层已经能把数据填到 MsQuic ideal/postbuf 附近，最终定位到 MsQuic send flush 单次 datagram batch 太小。真正带来明确吞吐提升的调整如下。
+
+### 1. `QUIC_MAX_DATAGRAMS_PER_SEND: 40 -> 240`
+
+这是本轮收益最大、证据最直接的参数。
+
+`QUIC_MAX_DATAGRAMS_PER_SEND` 控制 MsQuic 一次 `QuicSendFlush()` 最多连续构造并提交多少个 UDP datagram。它不是发送窗口、flow control window 或 BBR/cwnd 参数，而是 MsQuic send path 的批量/调度粒度参数。
+
+默认 `40` 时，200ms+5% 场景观察到：
+
+- `flush_count=340638`
+- `flush_scheduling=339236`
+- `flush_last_datagrams=44`
+- 吞吐 `3546.69 Mbps`，curl timeout
+
+这说明绝大多数 flush 都不是被 pacing 或 BBR/cwnd 直接挡住，而是每次构造约 44 个 datagram 后就因为 batch 上限停止，然后反复重新调度。
+
+单变量和邻近值验证：
+
+| batch | 200ms+5% 结果 | 结论 |
+| --- | --- | --- |
+| 40 | 3546.69 Mbps，timeout | 默认值明显太小 |
+| 160 | 4082.98 Mbps，timeout | 有提升但仍不足 |
+| 200 | 5421.46 Mbps，timeout | 继续提升但仍不足 |
+| 220 | 7478.73 Mbps，完成 | 接近有效区间 |
+| 240 | 7269.02 / 8227.46 Mbps，完成 | 当前已测最优候选 |
+| 250 | 4969.42 Mbps，timeout | 开始退化 |
+| 260 | 2747.90 Mbps，timeout | 明显退化，RTT/队列副作用显著 |
+| 480 | 4150.07 Mbps，timeout | 过大 batch 反而降低吞吐 |
+
+因此，batch 不是越大越好。`40 -> 240` 的收益来自减少 send flush 重新调度次数，让一次 flush 能连续推进更多 UDP datagram；继续提高到 `250+` 后，过大突发、排队、RTT 膨胀、event queue 压力或计数边界副作用开始主导。
+
+当前建议值：
+
+- 固定 `QUIC_MAX_DATAGRAMS_PER_SEND=240`
+- 保持 `QUIC_PACKET_BUILDER.TotalCountDatagrams` 为 MsQuic 原有 `uint8_t`
+- 不采用 `250+`、`480` 或 RTT-based dynamic batch
+
+### 2. `QUIC_MAX_IDEAL_SEND_BUFFER_SIZE: 1GiB -> 2GiB`
+
+这个参数是必要的上限解除项，但不是单独决定最终吞吐的参数。
+
+它允许 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE.ByteCount` 继续向更高台阶增长，避免 MsQuic ideal send buffer cap 过早卡住。配合 relay 使用 ideal send buffer 做背压后，发送端可以维持更大的 MsQuic posted buffer。
+
+但测试也证明，单纯继续强行抬高 postbuf/read-ahead 不会自动提升吞吐：
+
+- 将 initial read-ahead 强行抬到约 `1.47GiB` 后，吞吐下降。
+- RTT 上升，出现新的排队副作用。
+- event queue full 只是高 postbuf/高突发下的副作用，不是自然场景的根因。
+
+因此，该参数的正确理解是“解除上限，让 MsQuic 能按实际在途数据增长 ideal”，而不是“越大吞吐越高”。
+
+### 3. relay backpressure 改为基于 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE.ByteCount`
+
+有效逻辑：
+
+- pause TCP read：`OutstandingQuicSendBytes >= IdealSendBufferBytes`
+- resume TCP read：`OutstandingQuicSendBytes < IdealSendBufferBytes`
+- 去掉旧的 `relay-inflight-bytes` / `initial-quic-read-ahead` 主导计算
+- 去掉 `RelayMaxInFlightSends` 对 TCP read 背压的限制
+
+这个调整解决的是“应用层是否能按 MsQuic 当前建议持续填充 send buffer”的问题。后续 diag 证明：
+
+- 发送端 relay 可以把 `outstanding_quic_send_bytes` 填到 `ideal_send_threshold_bytes` 附近。
+- 应用层不是产生不了数据。
+- relay 内部没有明显 `QuicSend` API 失败。
+
+这个改动本身不是最终最大吞吐提升来源，但它是定位根因的必要前置条件。没有这个调整，问题会停留在 relay 入队不足/背压过早触发，无法进一步证明瓶颈在 MsQuic send flush batch。
+
+### 4. relay receive resume 条件改为 `< relay_pending`
+
+之前逻辑：
+
+- `>= relay_pending` pause MsQuic receive
+- `< relay_pending / 2` resume MsQuic receive
+
+当前逻辑：
+
+- `>= relay_pending` pause MsQuic receive
+- `< relay_pending` resume MsQuic receive
+
+这个调整减少了过强 hysteresis，避免 receive 侧暂停后必须等待队列下降到一半才恢复。该调整后，100ms/200ms 丢包场景的吞吐表现更符合“若内部窗口/缓冲不是瓶颈，则相同丢包率下不同 RTT 不应导致过度悬殊”的预期。
+
+它是有效的稳定性/背压行为修正，但收益不如 `QUIC_MAX_DATAGRAMS_PER_SEND=240` 决定性。
+
+### 5. 窗口和 relay buffer cap 的有效组合
+
+当前有效组合：
+
+- connection flow window：`2GiB`
+- stream recv window：`2GiB`
+- ideal send buffer cap：`2GiB`
+- relay send buffer cap：`4GiB`
+
+这些参数的作用是避免 flow control、stream recv window、connection flow window、relay buffer cap 成为瓶颈。测试中 `corecap=1GiB/relaycap=2GiB` 到 `corecap=2GiB/relaycap=4GiB` 有过提升，但波动较大，不能把最终吞吐提升完全归因于它们。
+
+更准确的结论是：
+
+- 这些参数是“解除上限”的基础配置。
+- 最终把 100ms/200ms+5% 吞吐推上去的直接参数是 `QUIC_MAX_DATAGRAMS_PER_SEND=240`。
+- 如果窗口/cap 太小，会挡住发送队列增长；但窗口/cap 足够大以后，继续扩大不一定提升吞吐。
+
+### 未带来实际提升的方向
+
+以下方向经过验证后不作为最终优化路径：
+
+| 调整 | 结果 |
+| --- | --- |
+| 强行把 initial read-ahead/postbuf 提到约 `1.47GiB` | 吞吐下降，RTT 抬高 |
+| event queue capacity 提到 `65536` | 可消除 event queue full，但吞吐没有提升 |
+| BBR ProbeRTT 10s 改 60s | 没有提升，已回退 |
+| `TotalCountDatagrams` 改 `uint16_t` | 100ms 场景明显退化 |
+| RTT-based dynamic batch | 结果更差，已回退 |
+| batch=250/260/480 | 均退化，说明 batch 不是越大越好 |
+
+### 后续同类问题的分析方法建议
+
+后续遇到类似“窗口和缓冲看起来足够大，但丢包/高 RTT 下吞吐仍低”的问题，不建议直接继续扩大窗口。推荐按以下顺序排查：
+
+1. 先确认发送端应用层是否能持续填满 MsQuic ideal/postbuf：看 `outstanding_quic_send_bytes` 与 `ideal_send_threshold_bytes`。
+2. 确认是否存在 relay 内部失败：看 `event_queue_full_errors`、`quic_send_failures`、`quic_send_api_failures`、`quic_send_fatal_errors`。
+3. 确认 MsQuic 实际在途数据是否增长：看 `bytes_in_flight`、`bytes_in_flight_max`。
+4. 区分是 pacing/BBR 阻塞还是 send flush 调度粒度限制：看 `flush_pacing_delayed`、`flush_cc_blocked`、`flush_scheduling`、`flush_last_datagrams`。
+5. 如果 `flush_scheduling` 远高于 pacing/CC 阻塞，且 `flush_last_datagrams` 接近 batch 上限，应重点检查 send flush batch，而不是继续扩大 postbuf。
+6. 调大 batch 后必须同时观察 `srtt`、`event_queue_full_errors` 和 qdisc/队列行为，避免把短期突发误判为有效吞吐提升。
+
+本轮最终结论：**relay 背压跟随 MsQuic ideal send buffer、窗口/cap 放到不挡路以后，真正限制 2*DGX 1x1 高 RTT + 5% loss IO 吞吐的直接因素是 MsQuic 默认 `QUIC_MAX_DATAGRAMS_PER_SEND=40` 太小；当前已测最优候选为固定 `240`。**
+
 ## 当前核心判断
 
 目前可以排除或降低优先级的方向：
