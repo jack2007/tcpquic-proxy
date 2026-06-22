@@ -1,0 +1,36 @@
+1782098668.822059469
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 1255340 bytes 931 pkt (dropped 14, overlimits 0 requeues 0) 
+ backlog 617850b 13p requeues 0
+1782098673.754407984
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 773685358 bytes 511255 pkt (dropped 680, overlimits 0 requeues 7) 
+ backlog 61363305b 924p requeues 7
+1782098677.344179813
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 5250118192 bytes 3468351 pkt (dropped 4624, overlimits 0 requeues 12) 
+ backlog 557536586b 8372p requeues 12
+1782098681.492887639
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 11334894112 bytes 7487476 pkt (dropped 9138, overlimits 0 requeues 78) 
+ backlog 234555074b 3522p requeues 78
+1782098685.073968657
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 15666215630 bytes 10348401 pkt (dropped 12398, overlimits 0 requeues 93) 
+ backlog 0b 0p requeues 93
+1782098689.528092525
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 21267726317 bytes 14048318 pkt (dropped 17164, overlimits 0 requeues 142) 
+ backlog 413079898b 6202p requeues 142
+1782098693.111987454
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 26763337941 bytes 17678274 pkt (dropped 21846, overlimits 0 requeues 152) 
+ backlog 703051852b 10556p requeues 152
+1782098697.066576750
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 32051376198 bytes 21171104 pkt (dropped 25908, overlimits 0 requeues 158) 
+ backlog 525144664b 7886p requeues 158
+1782098700.908432499
+qdisc netem 80ad: root refcnt 425 limit 5000000 delay 200ms loss 5%
+ Sent 35613352901 bytes 23523914 pkt (dropped 28385, overlimits 0 requeues 168) 
+ backlog 990b 1p requeues 168

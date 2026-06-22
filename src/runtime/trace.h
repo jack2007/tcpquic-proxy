@@ -40,6 +40,11 @@ struct TqTraceNetworkStats {
     uint32_t SendFlushLastResult{0};
     uint32_t SendFlushLastDatagrams{0};
     uint32_t OutFlowBlockedReasons{0};
+    uint64_t LossDetectionEventCount{0};
+    uint64_t LossDetectionFackPacketCount{0};
+    uint64_t LossDetectionRackPacketCount{0};
+    uint64_t LostRetransmittableBytes{0};
+    uint32_t LastLostRetransmittableBytes{0};
 };
 
 struct TqTraceLinuxRelayStreamState {

@@ -74,7 +74,12 @@ int main() {
         131072,
         6,
         7,
-        8});
+        8,
+        9,
+        10,
+        11,
+        123456,
+        4096});
 
     if (line.find("net_stats:") == std::string::npos) {
         return 1;
@@ -105,7 +110,12 @@ int main() {
         line.find("flush_last_path_allowance=131072") == std::string::npos ||
         line.find("flush_last_result=6") == std::string::npos ||
         line.find("flush_last_datagrams=7") == std::string::npos ||
-        line.find("out_flow_blocked=0x8") == std::string::npos) {
+        line.find("out_flow_blocked=0x8") == std::string::npos ||
+        line.find("loss_events=9") == std::string::npos ||
+        line.find("loss_fack_packets=10") == std::string::npos ||
+        line.find("loss_rack_packets=11") == std::string::npos ||
+        line.find("lost_retransmittable_bytes=123456") == std::string::npos ||
+        line.find("loss_last_bytes=4096") == std::string::npos) {
         return 17;
     }
 

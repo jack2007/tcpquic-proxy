@@ -1078,7 +1078,12 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                     event->NETWORK_STATISTICS.SendFlushLastPathAllowance,
                     event->NETWORK_STATISTICS.SendFlushLastResult,
                     event->NETWORK_STATISTICS.SendFlushLastDatagrams,
-                    event->NETWORK_STATISTICS.OutFlowBlockedReasons});
+                    event->NETWORK_STATISTICS.OutFlowBlockedReasons,
+                    event->NETWORK_STATISTICS.LossDetectionEventCount,
+                    event->NETWORK_STATISTICS.LossDetectionFackPacketCount,
+                    event->NETWORK_STATISTICS.LossDetectionRackPacketCount,
+                    event->NETWORK_STATISTICS.LostRetransmittableBytes,
+                    event->NETWORK_STATISTICS.LastLostRetransmittableBytes});
         }
         break;
     case QUIC_CONNECTION_EVENT_CONNECTED:
@@ -1402,7 +1407,12 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
                     event->NETWORK_STATISTICS.SendFlushLastPathAllowance,
                     event->NETWORK_STATISTICS.SendFlushLastResult,
                     event->NETWORK_STATISTICS.SendFlushLastDatagrams,
-                    event->NETWORK_STATISTICS.OutFlowBlockedReasons});
+                    event->NETWORK_STATISTICS.OutFlowBlockedReasons,
+                    event->NETWORK_STATISTICS.LossDetectionEventCount,
+                    event->NETWORK_STATISTICS.LossDetectionFackPacketCount,
+                    event->NETWORK_STATISTICS.LossDetectionRackPacketCount,
+                    event->NETWORK_STATISTICS.LostRetransmittableBytes,
+                    event->NETWORK_STATISTICS.LastLostRetransmittableBytes});
         }
         break;
     case QUIC_CONNECTION_EVENT_CONNECTED:

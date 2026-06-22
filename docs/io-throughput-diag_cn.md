@@ -803,10 +803,470 @@ iperf3 -c 169.254.250.230 \
 - batch=480、`uint16_t` 放宽、RTT-based dynamic batch 都出现吞吐下降，说明继续无约束扩大 batch 会引入更大突发、排队和 RTT 膨胀。
 - 当前候选值是固定 batch=240，并保持原有 `uint8_t` 计数类型。
 
+## 2026-06-22 主线重复验证和未决问题
+
+用户确认后，`230/235/245` 邻近值验证任务关闭。后续固定采用 `QUIC_MAX_DATAGRAMS_PER_SEND=240`，不再继续在邻近点消耗测试时间。已有 `220/240/250/260/480` 数据足够说明：`240` 是当前主线已测的最优候选点，继续增大 batch 会带来 RTT 膨胀、队列堆积或 event queue 副作用。
+
+### 200ms+5% download 五轮重复验证
+
+固定主线 batch=240，使用 curl download 方式重新跑 2*DGX 1x1、`200ms + 5% loss`、`limit 5000000`、`--diag-stats-interval 1`，结果目录：
+
+```text
+docs/dgx-mainline-download-200ms-5loss-repeat5-diag1s-20260622
+```
+
+五轮结果：
+
+| 轮次 | 吞吐 | curl exit |
+|---:|---:|---:|
+| 1 | 5043.03 Mbps | 28 |
+| 2 | 6975.04 Mbps | 0 |
+| 3 | 3972.34 Mbps | 28 |
+| 4 | 5075.07 Mbps | 28 |
+| 5 | 4866.89 Mbps | 28 |
+
+该组平均约 `5186.47 Mbps`。这说明 batch=240 虽然已经带来明确提升，但 `200ms + 5% loss` download 仍存在明显波动，部分轮次无法在 30s 窗口内完成 20GB 载荷。
+
+该组 qdisc 采样中，多次观察到远端发送端 netem backlog 堆到数百 MB、数千到上万 packet，例如约 `438MB/6581p`、`635MB/9530p`、`799MB/11991p`。最后一轮 server diag 观测到：
+
+- `srtt` 约 `201.481ms ~ 572.603ms`，平均约 `300.586ms`。
+- `bbr_bw_mbps` 最高约 `21007.57 Mbps`，平均约 `13095.55 Mbps`。
+- `cwnd` 最高约 `1196619440`。
+- `bytes_in_flight` 最高约 `694183424`。
+- `bytes_in_flight_max` 最高约 `862449216`。
+- `ideal_send_threshold_bytes` 约 `980658109`。
+- `event_queue_full_errors=0`。
+- `flush_pacing_delayed=7`、`flush_cc_blocked=73`，没有显示 pacing/CC 直接阻塞占主导。
+
+这个现象把未决问题收敛为：200ms 场景下 BBR 估计带宽并不低，应用层 post/ideal 也不小，但实际 `bytes_in_flight_max` 没有稳定跨过约 `980MiB` 的 ideal/postbuf 区间，同时 qdisc backlog 和 `srtt` 会明显膨胀。后续需要解释的是这组膨胀和波动的触发条件，而不是继续扩大 relay/postbuf。
+
+### iperf3 reverse download 对照
+
+为了避免 curl download 工具链影响判断，又用 iperf3 的 HTTP CONNECT proxy 功能跑同方向 download。拓扑为：
+
+```text
+远端 iperf3 -s
+  -> 远端 tcpquic-proxy server
+  -> QUIC download
+  -> 本机 tcpquic-proxy client
+  -> 本机 iperf3 -c --proxy http://127.0.0.1:<port> --reverse
+```
+
+该拓扑保持 QUIC 数据方向为远端发送、本机接收，与 download 一致。测试结果：
+
+| 场景 | iperf3 rc | sent | received | 结果目录 |
+|---|---:|---:|---:|---|
+| 100ms + 5% loss | 0 | 10981.19 Mbps | 10828.88 Mbps | `docs/dgx-mainline-download-iperf3-reverse-100ms-5loss-rerun-20260622` |
+| 200ms + 5% loss | 0 | 6488.54 Mbps | 6260.09 Mbps | `docs/dgx-mainline-download-iperf3-reverse-200ms-5loss-rerun-20260622` |
+
+100ms 场景 server diag：
+
+- `srtt` 约 `100.72ms ~ 144.82ms`，平均约 `104.12ms`。
+- `bbr_bw_mbps` 最高约 `28922.12 Mbps`，平均约 `17093.35 Mbps`。
+- `bytes_in_flight_max` 最高约 `465912105`。
+- `ideal_send_threshold_bytes` 最高约 `1307544146`。
+- qdisc backlog 最高约 `362.76MB/5712p`。
+
+200ms 场景 server diag：
+
+- `srtt` 约 `200.75ms ~ 651.73ms`，平均约 `236.91ms`。
+- `bbr_bw_mbps` 最高约 `26965.42 Mbps`，平均约 `11943.69 Mbps`。
+- `bytes_in_flight_max` 最高约 `837250048`。
+- `ideal_send_threshold_bytes` 最高约 `1961316218`。
+- qdisc backlog 最高约 `670.48MB/10556p`。
+
+这组 iperf3 reverse 结果支持两个判断：
+
+- 100ms 与 200ms 的差异不是 curl 独有现象；换成 iperf3 proxy reverse 后，200ms 仍显著低于 100ms。
+- 200ms 场景的典型特征仍然是 qdisc backlog 和 RTT 膨胀更明显，`bytes_in_flight_max` 没有稳定追上 ideal/postbuf 上限。工具链差异会影响绝对吞吐，但不会改变当前未决问题的方向。
+
+### BBR recovery 时间序列补充判断
+
+对 iperf3 reverse 的 server 侧 1s diag 做时间序列抽样后，发现 `bbr_recovery_state=2` 在 100ms 和 200ms 活跃阶段都长期存在：
+
+- 100ms：活跃样本 31 个，其中 29 个为 `recovery_state=2`，平均 `srtt` 约 `105.07ms`，最大 `bytes_in_flight_max` 约 `444MiB`。
+- 200ms：活跃样本 30 个，其中 29 个为 `recovery_state=2`，平均 `srtt` 约 `258.48ms`，最大 `bytes_in_flight_max` 约 `798MiB`。
+
+因此，`recovery_state=2` 本身不是区分 100ms 高吞吐和 200ms 低吞吐的充分条件。更准确的表述是：两种场景都在丢包恢复背景下运行，但 200ms 场景更容易伴随更大的 qdisc backlog、RTT 尖峰和 `bytes_in_flight` 回落。
+
+200ms 时间序列中的典型现象：
+
+- `srtt` 多次从约 `200ms` 抬升到 `357ms`、`386ms`、`618ms`、`652ms`。
+- `posted` 多数时间维持在约 `895MiB ~ 938MiB`，说明应用层/relay 仍在持续给 MsQuic 足够数据。
+- `bytes_in_flight` 会在 RTT 尖峰附近明显回落，例如低到几十 MiB，但 `bytes_in_flight_max` 仍维持在约 `686MiB ~ 798MiB` 区间。
+- `flush_scheduling` 持续增长，`flush_cc_blocked` 也增长但数量级更小；这说明 batch=240 后调度粒度仍是重要观测项，但不再能单独解释 200ms 的全部波动。
+
+下一步如果继续深挖 200ms download 波动，应该把 `bbr_recovery_state` 从“是否进入 recovery”改成“recovery 状态下的具体行为”来分析，包括 `recovery_window`、`pacing_gain` 周期、RTT 尖峰时 `bytes_in_flight` 为什么掉下去，以及 qdisc backlog 是先因还是后果。
+
+### 步骤 1：高 RTT 样本拆分
+
+对上面的 iperf3 reverse 样本继续拆分高 RTT/低 RTT 区间：
+
+| 场景 | 样本分组 | 样本数 | 平均 srtt | 平均 bytes_in_flight | 平均 posted | 平均 BBR bw | 最大 bytes_in_flight_max |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 100ms + 5% | `srtt <= 120ms` | 29 | 102.74ms | 182.8 MiB | 555.4 MiB | 19589.5 Mbps | 444.3 MiB |
+| 100ms + 5% | `srtt > 120ms` | 2 | 135.18ms | 118.5 MiB | 416.2 MiB | 21101.2 Mbps | 373.7 MiB |
+| 200ms + 5% | `srtt <= 300ms` | 26 | 218.67ms | 253.6 MiB | 701.2 MiB | 13852.0 Mbps | 798.5 MiB |
+| 200ms + 5% | `srtt > 300ms` | 4 | 503.21ms | 111.0 MiB | 925.9 MiB | 19893.8 Mbps | 798.5 MiB |
+
+200ms 高 RTT 样本的关键特征是：
+
+- `posted` 仍然约 `925.9MiB`，说明应用层/relay 给 MsQuic 的数据并不缺。
+- `BBR bw` 平均仍约 `19.89Gbps`，并不是带宽估计突然降低到实际 `6Gbps`。
+- `bytes_in_flight` 平均只有约 `111MiB`，比 200ms 低 RTT 样本的 `253.6MiB` 还低。
+- `bytes_in_flight_max` 保持约 `798.5MiB`，说明历史上能打到较高在途，但高 RTT 尖峰时当前在途会掉下去。
+
+这一步的中间结论是：200ms 低吞吐不是因为应用层没有填队列，也不是因为 BBR 带宽估计直接降到低值；更像是 RTT/backlog/recovery 状态下，MsQuic 当前可持续发送的在途数据被周期性打断，导致 `bytes_in_flight` 从高位回落。下一步需要补采 `ss -tinmp` 和 qdisc 时间序列，确认远端 UDP 发送侧是否出现 socket 队列、qdisc backlog 或 pacing 层排队。
+
+### 步骤 2：200ms 低吞吐样本的 qdisc/ss 补采
+
+继续固定 batch=240，补跑一轮 2*DGX 1x1 download、`200ms + 5% loss`、`limit 5000000`，同时采样远端发送侧：
+
+- qdisc：`tc -s qdisc show dev enp1s0f0np0`
+- UDP 4433 socket：`ss -u -a -n -m -p`
+- 远端 HTTP 源到 proxy 的 TCP socket：`ss -t -i -n -m -p`
+- server diag：`--diag-stats --diag-stats-interval 1`
+
+结果目录：
+
+```text
+docs/dgx-mainline-download-200ms-5loss-ss-qdisc-diag-20260622
+```
+
+本轮 curl 结果：
+
+| 指标 | 值 |
+|---|---:|
+| `speed_download` | 537715577 B/s |
+| 折算吞吐 | 4301.72 Mbps |
+| `time_total` | 30.001045s |
+| `size_download` | 16132029242 bytes |
+| curl exit | 28 |
+
+这是一个典型的 200ms 低吞吐/timeout 样本。
+
+远端 qdisc 采样：
+
+| 指标 | 值 |
+|---|---:|
+| qdisc drop delta | 14265 |
+| qdisc backlog max | 569.55 MB |
+| qdisc backlog max packets | 8967 |
+| 测试结束 qdisc dropped | 28313 |
+
+server diag：
+
+| 指标 | 值 |
+|---|---:|
+| `srtt` | 200.967ms ~ 804.630ms，平均 302.766ms |
+| `bbr_bw_mbps` | 89.52 ~ 21881.78 Mbps，平均 12626.38 Mbps |
+| `bytes_in_flight` | 2944 ~ 694151040 bytes，平均 219994795 bytes |
+| `bytes_in_flight_max` | 2454000 ~ 857571695 bytes |
+| `posted` | 122681113 ~ 984113601 bytes，平均 758290662 bytes |
+| `ideal_send_threshold_bytes` | 134217728 ~ 980658109 bytes |
+| `flush_scheduling` | 4 ~ 22144 |
+| `flush_cc_blocked` | 5 ~ 202 |
+| `flush_pacing_delayed` | 6 ~ 16 |
+
+高 RTT 样本中继续出现“posted 高、当前在途低”的特征：
+
+| 样本 | srtt | BBR bw | bytes_in_flight | posted | bytes_in_flight_max | recovery | recovery_window |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 11 | 805ms | 14575 Mbps | 37 MiB | 776 MiB | 799 MiB | 2 | 1861 MiB |
+| 12 | 697ms | 14575 Mbps | 55 MiB | 880 MiB | 799 MiB | 2 | 2218 MiB |
+| 20 | 695ms | 15584 Mbps | 69 MiB | 937 MiB | 818 MiB | 2 | 4027 MiB |
+| 26 | 697ms | 12531 Mbps | 128 MiB | 883 MiB | 818 MiB | 2 | 4044 MiB |
+| 33 | 309ms | 12376 Mbps | 10 MiB | 851 MiB | 818 MiB | 2 | 1004 MiB |
+
+`ss` 观察：
+
+- UDP 4433 socket 的 `Recv-Q/Send-Q` 显示为 `0/0`，`skmem` 中 `w0,o0,bl0`，没有看到 UDP socket 发送队列自身明显堆积。
+- 远端 HTTP 源到 proxy 的本机 TCP 连接有 `notsent` 和接收队列堆积，例如 HTTP sender 侧 `notsent` 约 `31MB`，proxy 接收侧 `Recv-Q` 约 `34MB`。这更像是 QUIC 发送节奏降低后，proxy 对上游 TCP 读取被反压造成的结果；它说明应用/TCP 源可以供给数据，但不是当前低吞吐的首要根因。
+
+这一步的中间结论是：200ms 低吞吐时，瓶颈不表现为 UDP socket send queue 堆积，也不表现为应用层数据不足；更直接的外部症状是远端 netem qdisc backlog 堆到数百 MB，同时 MsQuic diag 中 `bytes_in_flight` 在高 RTT 尖峰时从高位掉到几十 MiB。下一步需要用 100ms 同采样方式做对照，确认差异是否主要集中在 qdisc backlog/RTT 尖峰强度，而不是 socket 队列。
+
+### 步骤 3：100ms 同采样对照
+
+使用与步骤 2 相同的采样方式，只把 netem delay 从 `200ms` 改成 `100ms`，继续保持 `5% loss`、`limit 5000000`、batch=240。
+
+结果目录：
+
+```text
+docs/dgx-mainline-download-100ms-5loss-ss-qdisc-diag-20260622
+```
+
+curl 结果：
+
+| 场景 | speed_download | 折算吞吐 | time_total | size_download | curl exit |
+|---|---:|---:|---:|---:|---:|
+| 100ms + 5% | 1089389321 B/s | 8715.11 Mbps | 19.712729s | 21474836480 bytes | 0 |
+| 200ms + 5% | 537715577 B/s | 4301.72 Mbps | 30.001045s | 16132029242 bytes | 28 |
+
+qdisc 对比：
+
+| 场景 | qdisc samples | drop delta | backlog max | backlog max packets |
+|---|---:|---:|---:|---:|
+| 100ms + 5% | 10 | 23591 | 216.83 MB | 3416 |
+| 200ms + 5% | 4 | 14265 | 569.55 MB | 8967 |
+
+server diag 对比：
+
+| 场景 | active diag | srtt | BBR bw avg | bytes_in_flight avg | bytes_in_flight_max max | posted avg | ideal threshold max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100ms + 5% | 20 | 100.93ms ~ 224.67ms，平均 122.38ms | 17640.07 Mbps | 185451022 bytes | 470733824 bytes | 527900993 bytes | 653772073 bytes |
+| 200ms + 5% | 34 | 200.97ms ~ 804.63ms，平均 302.77ms | 12626.38 Mbps | 219994795 bytes | 857571695 bytes | 758290662 bytes | 980658109 bytes |
+
+高 RTT 样本对比：
+
+| 场景 | 高 RTT 条件 | 样本数 | 高 RTT 平均 bytes_in_flight | 高 RTT 平均 posted |
+|---|---|---:|---:|---:|
+| 100ms + 5% | `srtt > 150ms` | 3 | 75.49 MiB | 569.01 MiB |
+| 200ms + 5% | `srtt > 300ms` | 9 | 131.65 MiB | 879.73 MiB |
+
+100ms 也会出现短暂高 RTT 样本，例如 `srtt=224ms/225ms/207ms`，但持续时间短，整体仍能在 19.7s 内完成 20GB。200ms 则高 RTT 样本更多，峰值达到 `804.63ms`，且测试结束时仍 timeout。
+
+关于 qdisc backlog 的解释需要更精确：
+
+- 这里的 qdisc 是 netem root qdisc，backlog 包含 netem 为模拟 delay 而持有的报文，不等价于真实物理网卡排队。
+- 但在相同 `5% loss`、相同 `limit 5000000`、相同应用/QUIC 参数下，200ms 样本的 backlog 峰值显著高于 100ms，且伴随更高的 `srtt` 尖峰和 timeout。
+- 因此 backlog 不能单独作为“网卡拥塞”的证据，但可以作为 netem 延迟队列和发送突发强度的外部观测指标。
+
+这一步的中间结论是：100ms/200ms 差异不在 UDP socket 队列，也不在应用层供给；差异更集中在 netem 延迟队列更深、RTT 尖峰更强、以及高 RTT 期间 `bytes_in_flight` 回落更频繁。下一步要继续区分：这是 BBR 在高 RTT/loss 下的恢复和 pacing 行为，还是 MsQuic send flush batch=240 的突发形态在 200ms netem 下放大了队列和 RTT。
+
+### 步骤 4：MsQuic 发送路径代码解释
+
+结合 `third_party/msquic/src/core/send.c`、`packet_builder.c`、`bbr.c`、`loss_detection.c` 的代码，当前诊断计数含义如下。
+
+`QUIC_MAX_DATAGRAMS_PER_SEND` 的位置：
+
+- `packet_builder.c` 在新建 datagram/UDP payload 前检查 `Builder->TotalCountDatagrams >= QUIC_MAX_DATAGRAMS_PER_SEND`，达到上限后返回失败。
+- `send.c::QuicSendFlush()` 的主循环条件是 `Builder.SendData != NULL || Builder.TotalCountDatagrams < QUIC_MAX_DATAGRAMS_PER_SEND`。
+- 如果循环退出时 `Result` 仍是 `QUIC_SEND_INCOMPLETE`，说明还有数据可发，但本轮 flush 被调度粒度限制截断；随后设置 `QUIC_FLOW_BLOCKED_SCHEDULING` 并通过 `QuicSendQueueFlush(..., REASON_SCHEDULING)` 重新排队。
+- 我们的 `flush_scheduling` 计数正是这个分支。
+
+pacing/CC 的位置：
+
+- `QuicPacketBuilderHasAllowance(&Builder)` 失败时，说明当前 packet builder 的发送 allowance 用完。
+- 如果此时 `QuicCongestionControlCanSend()` 仍为 true，说明拥塞控制还允许发送，但当前 pacing chunk 用完，于是设置 `QUIC_FLOW_BLOCKED_PACING` 和 pacing timer；我们的 `flush_pacing_delayed` 对应这个分支。
+- 如果 `QuicCongestionControlCanSend()` 为 false，则当前拥塞控制不允许继续发新数据；我们的 `flush_cc_blocked` 对应这个分支。
+
+BBR `CanSend` 的核心判断：
+
+```text
+BbrCongestionControlCanSend:
+  CongestionWindow = BbrCongestionControlGetCongestionWindow()
+  return BytesInFlight < CongestionWindow || Exemptions > 0
+
+BbrCongestionControlGetCongestionWindow:
+  ProbeRTT: MinCongestionWindow
+  InRecovery: min(CongestionWindow, RecoveryWindow)
+  Otherwise: CongestionWindow
+```
+
+因此，在 BBR recovery 中，真正能否继续发新数据取决于：
+
+```text
+BytesInFlight < min(CongestionWindow, RecoveryWindow)
+```
+
+loss detection 的关系：
+
+- `loss_detection.c` 对已发送包做 FACK/RACK 判断。
+- FACK：包号落后 `LargestAck` 超过 packet reorder threshold。
+- RACK：包号小于 `LargestAck`，并且 `SentTime + TimeReorderThreshold <= now`。
+- `TimeReorderThreshold` 基于 `max(SmoothedRtt, LatestRttSample)` 计算。
+- 一旦识别出 lost retransmittable bytes，会调用 `QuicCongestionControlOnDataLost()`，BBR 中会减少 `BytesInFlight`，更新 `RecoveryWindow`，并 `QuicSendQueueFlush(..., REASON_LOSS)` 触发重发/继续发送。
+
+结合当前数据，能确认的边界是：
+
+- `flush_scheduling` 仍然是最大计数项，说明 batch=240 后仍有大量 flush 是因为单轮 batch 用完而重新排队。
+- 但 200ms 低吞吐样本里 `flush_pacing_delayed` 和 `flush_cc_blocked` 仍显著小于 `flush_scheduling`，不能简单说“拥塞窗口直接挡住了绝大多数发送”。
+- 高 RTT 样本里 `posted` 仍高、BBR bw 仍高，但当前 `bytes_in_flight` 会掉到几十 MiB；从代码逻辑看，这可能来自 lost packet 被确认后 `BytesInFlight` 扣减、recovery window 更新、pacing allowance 分片，以及 batch 重新调度之间的组合效应。
+- 当前证据还不能证明 MsQuic loss detection/retransmit 有 bug；只能说明在 200ms+5% 下，loss/recovery/RTT 尖峰会把当前在途数据周期性打低，而 batch=240 的突发/重新调度会影响这种状态的放大或恢复速度。
+
+这一步的中间结论是：下一轮如果继续定位根因，应该补充“loss 事件粒度”的诊断，例如每秒 lost bytes、lost packet count、retransmit bytes、`LargestAck` 推进、FACK/RACK 触发次数。仅靠当前 1s BBR stats 还无法判断 `bytes_in_flight` 回落是合理 loss accounting，还是过早/过多 loss detection 导致。
+
+### 步骤 5：增加 loss detection 诊断字段
+
+为了继续定位 200ms 高 RTT 时 `bytes_in_flight` 回落的原因，本轮在诊断路径中新增 loss detection 计数。该修改只增加统计字段和日志输出，不改变发送、拥塞控制、丢包检测或重传行为。
+
+新增 MsQuic 内部统计字段：
+
+- `LossDetectionEventCount`：检测到 retransmittable lost bytes 的 loss batch 次数。
+- `LossDetectionFackPacketCount`：通过 packet threshold/FACK 判定为 lost 的 packet 数。
+- `LossDetectionRackPacketCount`：通过 time threshold/RACK 判定为 lost 的 packet 数。
+- `LostRetransmittableBytes`：累计被标记 lost 的 retransmittable bytes。
+- `LastLostRetransmittableBytes`：最近一次 loss batch 的 lost retransmittable bytes。
+
+修改位置：
+
+- `third_party/msquic/src/core/connection.h`：在 `Connection->Stats.SendDiag` 增加 loss 统计字段。
+- `third_party/msquic/src/inc/msquic.h`：在 `QUIC_CONNECTION_EVENT_NETWORK_STATISTICS` 增加对应事件字段。
+- `third_party/msquic/src/core/loss_detection.c`：在 FACK/RACK 分支和 `LostRetransmittableBytes > 0` 分支累计统计。
+- `third_party/msquic/src/core/bbr.c`：把 `SendDiag` 中的 loss 字段带到 `NETWORK_STATISTICS` 事件。
+- `src/runtime/trace.h` / `src/runtime/trace.cpp`：在 `TqTraceNetworkStats` 和 `net_stats` 文本中输出 loss 字段。
+- `src/protocol/quic_session.cpp`：client/server 两侧 network stats 回调透传新字段。
+- `src/unittest/trace_network_stats_test.cpp`：增加格式化输出断言。
+
+新增输出字段：
+
+```text
+loss_events=<n>
+loss_fack_packets=<n>
+loss_rack_packets=<n>
+lost_retransmittable_bytes=<n>
+loss_last_bytes=<n>
+```
+
+验证：
+
+```text
+cmake --build build-plan --target tcpquic-proxy -j4
+cmake --build build-plan --target tcpquic_trace_network_stats_test -j4
+./build-plan/bin/Release/tcpquic_trace_network_stats_test
+```
+
+结果：`tcpquic-proxy` 构建通过，`tcpquic_trace_network_stats_test` 运行返回 0。
+
+### 步骤 6：200ms lossdiag 首轮结果
+
+使用新增 loss diag 字段后，重新跑一轮 2*DGX 1x1 download、`200ms + 5% loss`、`limit 5000000`。本轮不采 `ss`，只采 qdisc 和 1s `diag_stats`，避免采样开销影响吞吐。
+
+结果目录：
+
+```text
+docs/dgx-mainline-download-200ms-5loss-lossdiag-20260622
+```
+
+curl 结果：
+
+| 指标 | 值 |
+|---|---:|
+| `speed_download` | 757350587 B/s |
+| 折算吞吐 | 6058.80 Mbps |
+| `time_total` | 28.355212s |
+| `size_download` | 21474836480 bytes |
+| curl exit | 0 |
+
+server diag 摘要：
+
+| 指标 | 值 |
+|---|---:|
+| active diag samples | 28 |
+| `srtt` | 200.58ms ~ 328.94ms，平均 214.55ms |
+| `bbr_bw_mbps` | 0.28 ~ 27219.99 Mbps，平均 14578.77 Mbps |
+| `bytes_in_flight` | 0 ~ 578700608 bytes，平均 184915797 bytes |
+| `bytes_in_flight_max` | 1220000 ~ 862304012 bytes |
+| `posted` | 130119750 ~ 983707700 bytes，平均 528518235 bytes |
+| `ideal_send_threshold_bytes` | 134217728 ~ 980658109 bytes |
+| `flush_scheduling` | 0 ~ 20170 |
+| `flush_cc_blocked` | 2 ~ 418 |
+| `flush_pacing_delayed` | 5 ~ 45 |
+
+新增 loss diag 摘要：
+
+| 指标 | 值 |
+|---|---:|
+| `loss_events` | 1 ~ 20732 |
+| `loss_fack_packets` | 0 ~ 1285722 |
+| `loss_rack_packets` | 1 ~ 34 |
+| `lost_retransmittable_bytes` | 18 ~ 1892400554 bytes |
+| `loss_last_bytes` | 18 ~ 15102720 bytes |
+
+本轮新增字段给出的关键信息：
+
+- 200ms 场景下，loss detection 主要由 FACK/packet-threshold 驱动，`loss_fack_packets=1285722`，而 `loss_rack_packets=34` 很少。
+- 累计 `lost_retransmittable_bytes` 约 `1.89GB`，约为本轮 20GB 下载量的 `8.8%`。该值包含 QUIC 层按 retransmittable bytes 统计的丢失数据，不应直接等同于 qdisc 的 UDP skb dropped 计数。
+- 高 RTT 样本里，loss delta 很大。例如：
+  - `srtt=329ms` 时，前后 1s 内 `loss_fack_packets` 增量约 `136477`，`lost_retransmittable_bytes` 增量约 `191.6MiB`。
+  - `srtt=307ms` 时，前后 1s 内 `loss_fack_packets` 增量约 `137191`，`lost_retransmittable_bytes` 增量约 `192.6MiB`。
+- 同时这些高 RTT 样本仍然显示 `BBR bw` 很高，分别约 `22.7Gbps` 和 `27.1Gbps`，说明“带宽估计低”不是直接解释。
+
+qdisc 摘要：
+
+| 指标 | 值 |
+|---|---:|
+| qdisc samples | 5 |
+| drop delta | 24776 |
+| backlog max | 406.15 MB |
+| backlog max packets | 6400 |
+
+这一步的中间结论是：`bytes_in_flight` 回落和高 RTT 样本附近确实伴随大批量 FACK loss detection。当前更具体的未决问题变成：这些 FACK loss 是 5% 丢包 + 大 batch/high BDP 下合理产生的结果，还是 200ms 场景中 ACK 压缩、packet threshold、burst 形态共同导致的过度 loss 判断。下一步需要跑 100ms lossdiag 对照，比较相同丢包率下 FACK/RACK/lost bytes 的比例。
+
+### 步骤 7：100ms/200ms lossdiag 对照
+
+继续使用新增 loss diag 字段，补跑同口径 `100ms + 5% loss` 对照。
+
+结果目录：
+
+```text
+docs/dgx-mainline-download-100ms-5loss-lossdiag-20260622
+docs/dgx-mainline-download-200ms-5loss-lossdiag-20260622
+```
+
+吞吐对比：
+
+| 场景 | 吞吐 | time_total | size_download | curl exit |
+|---|---:|---:|---:|---:|
+| 100ms + 5% | 9699.43 Mbps | 17.712251s | 21474836480 bytes | 0 |
+| 200ms + 5% | 6058.80 Mbps | 28.355212s | 21474836480 bytes | 0 |
+
+server diag 对比：
+
+| 场景 | active diag | srtt max/avg | BBR bw avg | bytes_in_flight avg | bytes_in_flight_max max | posted avg | ideal max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100ms + 5% | 17 | 122.04ms / 102.72ms | 19665.88 Mbps | 173410175 bytes | 381483520 bytes | 356241142 bytes | 435848049 bytes |
+| 200ms + 5% | 28 | 328.94ms / 214.55ms | 14578.77 Mbps | 184915797 bytes | 862304012 bytes | 528518235 bytes | 980658109 bytes |
+
+loss diag 对比：
+
+| 场景 | loss_events | loss_fack_packets | loss_rack_packets | lost_retransmittable_bytes | lost/download |
+|---|---:|---:|---:|---:|---:|
+| 100ms + 5% | 21093 | 1119566 | 18 | 1647915046 bytes | 7.67% |
+| 200ms + 5% | 20732 | 1285722 | 34 | 1892400554 bytes | 8.81% |
+
+qdisc 对比：
+
+| 场景 | qdisc samples | drop delta | backlog max | backlog max packets |
+|---|---:|---:|---:|---:|
+| 100ms + 5% | 7 | 23736 | 234.55 MB | 3694 |
+| 200ms + 5% | 5 | 24776 | 406.15 MB | 6400 |
+
+这组对照修正了上一步的判断：
+
+- FACK/packet-threshold loss detection 不是 200ms 场景独有。100ms 高吞吐样本也有 `loss_fack_packets=1119566` 和约 `1.65GB` lost retransmittable bytes。
+- RACK/time-threshold loss 很少，100ms 为 `18`，200ms 为 `34`。因此当前瓶颈优先级不在 RACK time threshold 过早触发。
+- 200ms 的 lost bytes 比例更高一些，但不是数量级差异：`8.81%` vs `7.67%`。
+- 真正拉开吞吐的是同类 FACK/loss 背景下，200ms 的 qdisc backlog、srtt 和 ideal/postbuf 都更高，且高 RTT 样本出现 `bytes_in_flight` 明显回落。
+
+当前更收敛的解释是：
+
+```text
+5% loss 下，两种 RTT 都会触发大量 FACK loss；
+100ms 场景可以较快恢复，RTT 尖峰不明显，吞吐接近 9.7Gbps；
+200ms 场景的更大 BDP/更深 netem 延迟队列把同类 loss/recovery 放大，
+导致 qdisc backlog 更高、srtt 尖峰更明显、当前 bytes_in_flight 周期性掉低，
+最终吞吐下降到约 6Gbps。
+```
+
+所以，下一步不应再把重点放在“是否存在 FACK loss”这个二值问题上，而应观察 FACK loss 后的恢复速度：`bytes_in_flight` 从低位恢复到 `bytes_in_flight_max/ideal` 需要多久，恢复期间是否被 batch 重新调度、pacing allowance 或 ACK 节奏限制。
+
 ## 下一步计划
 
-1. 在固定 batch=240 的基础上做重复性验证，确认 100ms/200ms+5% 的吞吐稳定区间。
-2. 如需继续精确锁定最优值，可在 `230/235/245` 附近测试，不建议直接扩大到 `250+` 或 `480+`。
-3. batch 扩大后继续观察 `srtt`、`event_queue_full_errors`、`flush_last_datagrams` 和 `bytes_in_flight_max`，重点避免吞吐提升来自短期突发但伴随 RTT 膨胀。
-4. 若 batch=240 稳定后仍未达到 secnetperf 上限，再回到 BBR recovery/RTT 膨胀路径，检查 `bytes_in_flight_max` 为什么仍未稳定跨过 `980MiB`。
-5. 继续保持 `--diag-stats` 低开销采样，避免 spdlog trace 对吞吐造成显著干扰。
+已关闭：
+
+1. `230/235/245` 邻近值验证：用户已决定固定采用 `240`，任务关闭。
+2. ProbeRTT 单独解释：已验证不成立。
+3. 单纯继续扩大窗口、postbuf、relay 队列：已验证不是正确方向，过大反而降低吞吐。
+4. iperf3 proxy receive path 作为根因：历史 `gost`/minimal sink 验证和本轮 iperf3 reverse 对照都不支持该方向作为主要根因。
+5. RACK/time-threshold 过早触发作为主要根因：当前 lossdiag 中 `loss_rack_packets` 很少，100ms 为 `18`，200ms 为 `34`，优先级下降。
+6. “是否存在 FACK loss”作为二值问题：已确认 100ms/200ms 都有大量 FACK loss，不能单独解释 200ms 低吞吐。
+
+仍需继续验证：
+
+1. FACK loss 后的恢复速度。需要观察 `bytes_in_flight` 从几十/百 MiB 恢复到 `bytes_in_flight_max/ideal` 需要多久，以及恢复期间 `flush_scheduling`、`flush_pacing_delayed`、`flush_cc_blocked` 的增量。
+2. ACK 节奏和 packet-threshold/FACK 的关系。当前 200ms 下 FACK loss 比例略高，且高 RTT 样本附近出现单秒约 `190MiB` lost bytes 增量；需要判断是否有 ACK 压缩或 burst 形态导致 packet-threshold 更集中触发。
+3. qdisc backlog 的形成机制。netem backlog 包含延迟队列，不等价于物理网卡拥塞；但 200ms backlog 峰值高于 100ms，需要继续判断它是正常 BDP 表现，还是 batch=240 突发被 200ms netem 放大。
+4. `bytes_in_flight_max` 为什么没有稳定跨过约 `980MiB`。目前看不是应用层供给不足，也不是 RACK 主导，更可能是 FACK loss/recovery、pacing allowance、batch 重新调度和 ACK 节奏共同限制恢复速度。
+5. download 与 upload 的差异。upload 已验证可达到约 `10.84Gbps`/`7.58Gbps`，download 在 200ms 下仍波动更大；后续需要用同一 lossdiag 采样粒度比较 upload 发送端。
+6. 是否需要把 `QUIC_MAX_DATAGRAMS_PER_SEND=240` 做成 tcpquic-proxy 构建/运行配置。当前主线先固定 240；如果后续需要跨环境部署，再评估可配置化。

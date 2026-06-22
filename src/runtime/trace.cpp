@@ -1024,13 +1024,13 @@ extern "C" void TqTraceLinuxRelayIdealSendBufferEvent(
 }
 
 std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
-    char buffer[1280];
+    char buffer[2048];
     const double bandwidthMbps =
         static_cast<double>(stats.BandwidthBytesPerSecond) * 8.0 / 1000000.0;
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u bytes_in_flight_max=%u posted=%llu ideal=%llu srtt=%.3fms cwnd=%u bbr_state=%u bbr_recovery_state=%u recovery_window=%u pacing_gain=%u cwnd_gain=%u bbr_min_rtt=%.3fms send_quantum=%llu app_limited=%u flush_count=%llu flush_pacing_delayed=%llu flush_cc_blocked=%llu flush_scheduling=%llu flush_amp_blocked=%llu flush_no_work=%llu flush_last_allowance=%u flush_last_path_allowance=%u flush_last_result=%u flush_last_datagrams=%u out_flow_blocked=0x%x",
+        "net_stats: bbr_bw_bytes_per_sec=%llu bbr_bw_mbps=%.2f bytes_in_flight=%u bytes_in_flight_max=%u posted=%llu ideal=%llu srtt=%.3fms cwnd=%u bbr_state=%u bbr_recovery_state=%u recovery_window=%u pacing_gain=%u cwnd_gain=%u bbr_min_rtt=%.3fms send_quantum=%llu app_limited=%u flush_count=%llu flush_pacing_delayed=%llu flush_cc_blocked=%llu flush_scheduling=%llu flush_amp_blocked=%llu flush_no_work=%llu flush_last_allowance=%u flush_last_path_allowance=%u flush_last_result=%u flush_last_datagrams=%u out_flow_blocked=0x%x loss_events=%llu loss_fack_packets=%llu loss_rack_packets=%llu lost_retransmittable_bytes=%llu loss_last_bytes=%u",
         static_cast<unsigned long long>(stats.BandwidthBytesPerSecond),
         bandwidthMbps,
         stats.BytesInFlight,
@@ -1057,7 +1057,12 @@ std::string TqFormatTraceNetworkStatsLine(const TqTraceNetworkStats& stats) {
         stats.SendFlushLastPathAllowance,
         stats.SendFlushLastResult,
         stats.SendFlushLastDatagrams,
-        stats.OutFlowBlockedReasons);
+        stats.OutFlowBlockedReasons,
+        static_cast<unsigned long long>(stats.LossDetectionEventCount),
+        static_cast<unsigned long long>(stats.LossDetectionFackPacketCount),
+        static_cast<unsigned long long>(stats.LossDetectionRackPacketCount),
+        static_cast<unsigned long long>(stats.LostRetransmittableBytes),
+        stats.LastLostRetransmittableBytes);
     return buffer;
 }
 
