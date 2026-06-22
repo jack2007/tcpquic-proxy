@@ -18,6 +18,18 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #if !defined(_WIN32)
 #include <arpa/inet.h>
 #endif
@@ -445,31 +457,96 @@ bool TqFormatSocketPeerAddr(TqSocketHandle fd, std::string& out) {
     return true;
 }
 
+std::string JoinTracePath(const std::string& base, const char* child) {
+    if (child == nullptr || child[0] == '\0') {
+        return base;
+    }
+    if (base.empty()) {
+        return child;
+    }
+    if (base.back() == '/' || base.back() == '\\') {
+        return base + child;
+    }
+    return base + "/" + child;
+}
+
+bool EnsureTraceLogDirectory(const std::string& logDir) {
+#if defined(_WIN32)
+    if (CreateDirectoryA(logDir.c_str(), nullptr) != 0) {
+        return true;
+    }
+    return GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+    if (mkdir(logDir.c_str(), 0755) == 0) {
+        return true;
+    }
+    return errno == EEXIST;
+#endif
+}
+
 bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     if (g_traceEnabled.load()) {
         return true;
     }
 
-    std::string exeDir;
-    if (!TqGetExecutableDirectory(exeDir)) {
-        exeDir = ".";
+    char exeDir[PATH_MAX]{};
+    if (!TqGetExecutableDirectory(exeDir, sizeof(exeDir))) {
+        std::strncpy(exeDir, ".", sizeof(exeDir) - 1);
     }
 
-    const fs::path logDir = fs::path(exeDir) / "log";
-    std::error_code ec;
-    fs::create_directories(logDir, ec);
+#if defined(_WIN32)
+    wchar_t savedCwd[MAX_PATH]{};
+    const bool haveSavedCwd = GetCurrentDirectoryW(MAX_PATH, savedCwd) != 0;
+    bool changedCwd = false;
+    if (std::strcmp(exeDir, ".") != 0) {
+        int required = MultiByteToWideChar(CP_UTF8, 0, exeDir, -1, nullptr, 0, nullptr, nullptr);
+        if (required > 0) {
+            std::wstring wideExeDir(static_cast<size_t>(required - 1), L'\0');
+            if (MultiByteToWideChar(
+                    CP_UTF8,
+                    0,
+                    exeDir,
+                    -1,
+                    wideExeDir.data(),
+                    required) > 0) {
+                changedCwd = SetCurrentDirectoryW(wideExeDir.c_str()) != 0;
+            }
+        }
+    }
+#else
+    if (std::strcmp(exeDir, ".") != 0 && chdir(exeDir) != 0) {
+        std::strncpy(exeDir, ".", sizeof(exeDir) - 1);
+    }
+#endif
 
     const char* logName = mode == TqMode::Client ? "client.log" : "server.log";
-    const fs::path logPath = logDir / logName;
+    char logPathForMessage[PATH_MAX]{};
+    if (std::strcmp(exeDir, ".") == 0) {
+        std::snprintf(logPathForMessage, sizeof(logPathForMessage), "./log/%s", logName);
+    } else {
+        std::snprintf(logPathForMessage, sizeof(logPathForMessage), "%s/log/%s", exeDir, logName);
+    }
+
+    const std::string logDir = "./log";
+    if (!EnsureTraceLogDirectory(logDir)) {
+        std::fprintf(stderr, "tcpquic-proxy: failed to create trace log dir %s\n", logDir.c_str());
+        return false;
+    }
+
+    const std::string logPath = JoinTracePath(logDir, logName);
 
     try {
-        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath.string(), true);
+        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath, true);
         g_logger = std::make_shared<spdlog::logger>("tcpquic-trace", sink);
         g_logger->set_level(spdlog::level::info);
         g_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
         g_logger->flush_on(spdlog::level::info);
     } catch (const std::exception& ex) {
-        std::fprintf(stderr, "tcpquic-proxy: failed to open trace log %s: %s\n", logPath.string().c_str(), ex.what());
+        std::fprintf(
+            stderr,
+            "tcpquic-proxy: failed to open trace log %s: %s\n",
+            logPathForMessage,
+            ex.what());
         g_logger.reset();
         return false;
     }
@@ -481,12 +558,18 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     LogInfo(
         "event=trace_started role=%s log=%s interval=%us",
         mode == TqMode::Client ? "client" : "server",
-        logPath.string().c_str(),
+        logPathForMessage,
         statsIntervalSec);
 
     if (statsIntervalSec > 0) {
         g_statsThread = std::thread(StatsThreadMain);
     }
+
+#if defined(_WIN32)
+    if (haveSavedCwd && changedCwd) {
+        SetCurrentDirectoryW(savedCwd);
+    }
+#endif
 
     return true;
 }
