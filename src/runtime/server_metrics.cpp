@@ -45,6 +45,7 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     out << ",\"active_streams\":" << metrics.ActiveStreams.load();
     out << ",\"total_streams\":" << metrics.TotalStreams.load();
     out << ",\"acl_denied\":" << metrics.AclDenied.load();
+    out << ",\"tcp_dialing\":" << metrics.TcpDialing.load();
     auto relayMetrics = TqSnapshotRelayMetrics();
 #if !defined(__linux__)
     relayMetrics.Wakeups = metrics.LinuxRelayWakeups;

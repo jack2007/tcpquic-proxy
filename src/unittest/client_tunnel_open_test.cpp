@@ -40,6 +40,8 @@ TqSocketHandle g_last_relay_fd = TqInvalidSocket;
 bool g_relay_start_should_fail = false;
 bool g_stream_send_should_fail = false;
 unsigned g_trace_stream_closed_count = 0;
+bool g_capture_relay_receive = false;
+std::vector<uint8_t> g_relay_receive_bytes;
 
 void ResetFakeState() {
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
@@ -50,6 +52,8 @@ void ResetFakeState() {
     g_relay_start_should_fail = false;
     g_stream_send_should_fail = false;
     g_trace_stream_closed_count = 0;
+    g_capture_relay_receive = false;
+    g_relay_receive_bytes.clear();
 }
 
 void QUIC_API FakeSetCallbackHandler(HQUIC handle, void* handler, void* context) {
@@ -196,6 +200,42 @@ bool DispatchOpenResponse(HQUIC handle, const TqOpenResponse& response) {
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.Buffers = &buffer;
     return DispatchFakeStreamEvent(handle, event);
+}
+
+bool DispatchOpenResponseWithPayload(
+    HQUIC handle,
+    const TqOpenResponse& response,
+    const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeOpenResponse(response, encoded)) {
+        return false;
+    }
+    encoded.insert(encoded.end(), payload.begin(), payload.end());
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(encoded.size()),
+        encoded.data(),
+    };
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.Buffers = &buffer;
+    return DispatchFakeStreamEvent(handle, event);
+}
+
+QUIC_STATUS QUIC_API RelayCaptureCallback(
+    MsQuicStream*,
+    void*,
+    QUIC_STREAM_EVENT* event) {
+    if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
+        for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
+            const QUIC_BUFFER& buffer = event->RECEIVE.Buffers[i];
+            g_relay_receive_bytes.insert(
+                g_relay_receive_bytes.end(),
+                buffer.Buffer,
+                buffer.Buffer + buffer.Length);
+        }
+    }
+    return QUIC_STATUS_SUCCESS;
 }
 
 TunnelRequest MakeRequest() {
@@ -350,7 +390,7 @@ bool TqAttachServerSpeedControlStream(
 
 bool TqRelayStart(
     TqSocketHandle tcpFd,
-    MsQuicStream*,
+    MsQuicStream* stream,
     ITqCompressor*,
     ITqDecompressor*,
     TqRelayHandle* handle,
@@ -365,6 +405,10 @@ bool TqRelayStart(
     ++g_relay_start_count;
     g_last_relay_fd = tcpFd;
     handle->Backend = TqRelayBackendType::LinuxWorker;
+    if (g_capture_relay_receive) {
+        stream->Callback = RelayCaptureCallback;
+        stream->Context = nullptr;
+    }
     return true;
 }
 
@@ -483,6 +527,34 @@ int TestOpenSuccessWaitsForExplicitAcceptBeforeRelay() {
     if (!TqAcceptClientTunnelOpen(handle)) return 18;
     if (g_relay_start_count != 1) return 19;
     if (g_last_relay_fd == TqInvalidSocket) return 20;
+    return 0;
+}
+
+int TestOpenResponsePayloadIsDeliveredToRelayAfterAccept() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 21;
+
+    FakeClientOpen fake;
+    TqConfig cfg{};
+    TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
+        fake.Conn.get(),
+        MakeRequest(),
+        fake.ClientFd(),
+        cfg,
+        [](TqClientTunnelOpenHandle*, TqTunnelStartResult) {});
+    fake.ReleaseClientFdToTunnel();
+    if (handle == nullptr) return 22;
+
+    HQUIC stream = LatestFakeStreamHandle();
+    const std::vector<uint8_t> payload{'h', 'e', 'l', 'l', 'o'};
+    if (!DispatchOpenResponseWithPayload(stream, TqOpenResponse{true, TqOpenError::Ok, 99}, payload)) {
+        return 23;
+    }
+    if (!DispatchFakeSendComplete(stream)) return 24;
+
+    g_capture_relay_receive = true;
+    if (!TqAcceptClientTunnelOpen(handle)) return 25;
+    if (g_relay_receive_bytes != payload) return 26;
     return 0;
 }
 
@@ -672,6 +744,7 @@ int main() {
     if (int rc = TestInvalidInputsReturnNullAndDoNotComplete()) return rc;
     if (int rc = TestCancelNullIsSafe()) return rc;
     if (int rc = TestOpenSuccessWaitsForExplicitAcceptBeforeRelay()) return rc;
+    if (int rc = TestOpenResponsePayloadIsDeliveredToRelayAfterAccept()) return rc;
     if (int rc = TestRejectInsideCompletionDoesNotStartRelay()) return rc;
     if (int rc = TestCancelInsideCompletionDoesNotDoubleDeleteOrStartRelay()) return rc;
     if (int rc = TestFailureResponseCompletesAndCleansUpWithoutRelay()) return rc;

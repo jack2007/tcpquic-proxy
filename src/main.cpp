@@ -272,9 +272,10 @@ int RunServer(const TqConfig& cfg) {
             std::fprintf(stderr, "tcpquic-proxy: invalid admin listen: %s\n", err.c_str());
             return 1;
         }
-        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [metrics, started](const TqHttpRequest& req) {
+        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [metrics, started, &serverDial](const TqHttpRequest& req) {
             const uint64_t uptimeSeconds = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
+            metrics->TcpDialing.store(serverDial.PendingCount());
             if (req.Method == "GET" && req.Path == "/health") {
                 return TqJsonResponse(200, TqServerHealthJson(*metrics, uptimeSeconds));
             }

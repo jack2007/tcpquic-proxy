@@ -12,6 +12,7 @@ struct TqServerMetrics {
     std::atomic<uint64_t> ActiveStreams{0};
     std::atomic<uint64_t> TotalStreams{0};
     std::atomic<uint64_t> AclDenied{0};
+    std::atomic<uint64_t> TcpDialing{0};
     uint64_t LinuxRelayWakeups{0};
     uint64_t LinuxRelayEventsProcessed{0};
     uint64_t LinuxRelayPendingEvents{0};

@@ -71,6 +71,7 @@ public:
 #if defined(TQ_UNIT_TESTING)
     std::string SocksListenAddressForTest(const std::string& peerId) const;
     std::string HttpListenAddressForTest(const std::string& peerId) const;
+    void SetOpenTimeoutForTest(std::chrono::milliseconds timeout);
 #endif
 
 private:
@@ -149,6 +150,7 @@ private:
     void HandleClientWrite(TqSocketHandle clientFd);
     void HandleIngressResult(TqSocketHandle clientFd, TqClientIngressResult result);
     void StartClientOpen(TqSocketHandle clientFd);
+    void TimeoutClientOpen(TqSocketHandle clientFd, std::shared_ptr<OpenCompletionState> completionState);
     void CompleteClientOpen(
         TqSocketHandle clientFd,
         TqClientTunnelOpenHandle* handle,
@@ -192,4 +194,5 @@ private:
     std::unordered_map<std::string, PeerEntry> Peers;
     std::unordered_map<TqSocketHandle, ListenEntry> Listens;
     std::unordered_map<TqSocketHandle, ClientEntry> Clients;
+    std::chrono::milliseconds OpenTimeout{std::chrono::seconds(10)};
 };

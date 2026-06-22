@@ -447,6 +447,7 @@ int main() {
         serverMetrics.ActiveStreams = 2;
         serverMetrics.TotalStreams = 5;
         serverMetrics.AclDenied = 1;
+        serverMetrics.TcpDialing = 4;
         serverMetrics.LastError = "acl denied";
         std::string health = TqServerHealthJson(serverMetrics, 7);
         if (health.find("\"role\":\"server\"") == std::string::npos) return 34;
@@ -456,6 +457,7 @@ int main() {
         if (health.find("\"active_streams\":2") == std::string::npos) return 38;
         if (health.find("\"total_streams\":5") == std::string::npos) return 39;
         if (health.find("\"acl_denied\":1") == std::string::npos) return 40;
+        if (health.find("\"tcp_dialing\":4") == std::string::npos) return 182;
         if (health.find("\"last_error\":\"acl denied\"") == std::string::npos) return 41;
         TqServerMetrics connectionMetrics;
         TqServerMetricsConnectionAccepted(connectionMetrics);

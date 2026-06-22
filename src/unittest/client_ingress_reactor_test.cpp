@@ -619,6 +619,75 @@ int TestSocksOpenFailureWritesReplyThenRejects() {
     return 0;
 }
 
+int TestSocksOpenTimesOutAndCancelsOnce() {
+    std::atomic<int> cancelCalls{0};
+    std::atomic<int> rejectCalls{0};
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x30));
+
+    TqClientIngressPeer peer = MakePeer("socks-timeout");
+    peer.StartTunnel = [fakeHandle](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [](TqClientTunnelOpenHandle*) {
+        return false;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++rejectCalls;
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            ++cancelCalls;
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    reactor.SetOpenTimeoutForTest(std::chrono::milliseconds(50));
+    if (!reactor.Start()) {
+        return 1090;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 1091;
+    }
+
+    TqSocketHandle fd = TqInvalidSocket;
+    std::vector<uint8_t> response;
+    if (!StartSocksOpen(reactor, "socks-timeout", fd, response)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1092;
+    }
+    if (!ReadExactWithTimeout(fd, 10, response)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1093;
+    }
+    if (response.size() != 10 || response[0] != 0x05 || response[1] != 0x06) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1094;
+    }
+    if (!WaitUntil([&]() { return cancelCalls == 1; })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1095;
+    }
+    if (rejectCalls != 0 || cancelCalls != 1) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1096;
+    }
+
+    CloseFd(fd);
+    reactor.Stop();
+    return 0;
+}
+
 int TestRemovePeerBeforeLateCompletionCancelsOnce() {
     std::atomic<int> acceptCalls{0};
     std::atomic<int> rejectCalls{0};
@@ -982,6 +1051,8 @@ int main() {
     result = TestHttpConnectSamePacketPayloadRemainsForTunnel();
     if (result != 0) return result;
     result = TestSocksOpenFailureWritesReplyThenRejects();
+    if (result != 0) return result;
+    result = TestSocksOpenTimesOutAndCancelsOnce();
     if (result != 0) return result;
     result = TestRemovePeerBeforeLateCompletionCancelsOnce();
     if (result != 0) return result;

@@ -242,7 +242,8 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
     MsQuicConnection* conn = nullptr;
     {
         std::lock_guard<std::mutex> guard(TunnelStartMutex);
-        if (!Quic || !Quic->EnsureAnyConnected()) {
+        conn = Quic ? Quic->PickConnection() : nullptr;
+        if (conn == nullptr) {
             if (LogMode == TqClientPeerLogMode::Primary) {
                 std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
             } else {
@@ -250,10 +251,6 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
                     "tcpquic-proxy: peer %s has no connected QUIC connection for tunnel\n",
                     PeerId.c_str());
             }
-            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
-        }
-        conn = Quic->PickConnection();
-        if (conn == nullptr) {
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
     }

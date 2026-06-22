@@ -1097,6 +1097,64 @@ int TestCompletionCallbackDoesNotHoldReactorLock() {
     return 0;
 }
 
+int TestPendingCountTracksDnsPendingDial() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 170;
+    }
+
+    FakeDns fakeDns;
+    fakeDns.Result.Completed = true;
+    fakeDns.Result.Success = false;
+
+    TqServerDialReactor::TestHooks hooks;
+    hooks.Resolve = [&](const std::string& host, uint16_t port, TqDnsResolveCallback callback) {
+        return fakeDns.Resolve(host, port, std::move(callback));
+    };
+    hooks.CancelResolve = [&](uint64_t id) {
+        fakeDns.Cancel(id);
+    };
+    hooks.RunDnsOnce = [&](int timeoutMs) {
+        return fakeDns.RunOnce(timeoutMs);
+    };
+
+    TqServerDialReactor reactor(AllowAllAcl(), hooks);
+    if (!reactor.Start()) {
+        return 171;
+    }
+    if (reactor.PendingCount() != 0) {
+        reactor.Stop();
+        return 172;
+    }
+
+    bool completed = false;
+    TqServerDialRequest request;
+    request.Host = "pending-count.test";
+    request.Port = 443;
+    request.Complete = [&](const TqServerDialResult&) {
+        completed = true;
+    };
+    const uint64_t token = reactor.Submit(std::move(request));
+    if (token == 0) {
+        reactor.Stop();
+        return 173;
+    }
+    if (reactor.PendingCount() != 1) {
+        reactor.Stop();
+        return 174;
+    }
+    if (!RunUntil(completed, reactor, 1000)) {
+        reactor.Stop();
+        return 175;
+    }
+    if (reactor.PendingCount() != 0) {
+        reactor.Stop();
+        return 176;
+    }
+    reactor.Stop();
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -1165,6 +1223,10 @@ int main() {
         return result;
     }
     result = TestCompletionCallbackDoesNotHoldReactorLock();
+    if (result != 0) {
+        return result;
+    }
+    result = TestPendingCountTracksDnsPendingDial();
     if (result != 0) {
         return result;
     }

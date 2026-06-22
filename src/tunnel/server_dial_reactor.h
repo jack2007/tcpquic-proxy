@@ -59,6 +59,7 @@ public:
     uint64_t Submit(TqServerDialRequest request);
     void Cancel(uint64_t token);
     bool RunOnce(int timeoutMs);
+    size_t PendingCount() const;
 
 private:
     struct Impl;

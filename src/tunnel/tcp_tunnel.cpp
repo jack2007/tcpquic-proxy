@@ -465,7 +465,31 @@ public:
             TqTraceRelayStarted(TraceTunnelId);
             TraceRelayStarted = true;
         }
+        DispatchPendingRelayRx(stream);
         return true;
+    }
+
+    void DispatchPendingRelayRx(MsQuicStream* stream) {
+        if (stream == nullptr) {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingRelayRxDispatchBuffer.swap(PendingRelayRx);
+        }
+        if (PendingRelayRxDispatchBuffer.empty() || stream->Callback == nullptr) {
+            return;
+        }
+
+        QUIC_BUFFER buffer{};
+        buffer.Length = static_cast<uint32_t>(PendingRelayRxDispatchBuffer.size());
+        buffer.Buffer = PendingRelayRxDispatchBuffer.data();
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_RECEIVE;
+        event.RECEIVE.BufferCount = 1;
+        event.RECEIVE.Buffers = &buffer;
+        (void)stream->Callback(stream, stream->Context, &event);
     }
 
     void ArmSelfDeleteOnShutdown() {
@@ -953,6 +977,12 @@ private:
         if (!ok) {
             response = TqOpenResponse{false, TqOpenError::Internal, 0};
         }
+        if (ok && response.Ok && OpeningRx.size() > TQ_OPEN_RESPONSE_SIZE) {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingRelayRx.assign(
+                OpeningRx.begin() + static_cast<std::ptrdiff_t>(TQ_OPEN_RESPONSE_SIZE),
+                OpeningRx.end());
+        }
         CompleteOpen(ok && response.Ok, response);
     }
 
@@ -1081,6 +1111,12 @@ private:
             ServerOpenDispatched.store(true, std::memory_order_release);
             SendOpenFailure(TqOpenError::Internal);
             return;
+        }
+        if (OpeningRx.size() > expectedLen) {
+            std::lock_guard<std::mutex> guard(Lock);
+            PendingRelayRx.assign(
+                OpeningRx.begin() + static_cast<std::ptrdiff_t>(expectedLen),
+                OpeningRx.end());
         }
 
         std::string host;
@@ -1459,6 +1495,8 @@ private:
     std::mutex Lock;
     std::condition_variable StateChanged;
     std::vector<uint8_t> OpeningRx;
+    std::vector<uint8_t> PendingRelayRx;
+    std::vector<uint8_t> PendingRelayRxDispatchBuffer;
     TqOpenResponse OpenResponse{};
     bool OpenDone{false};
     bool OpenOk{false};

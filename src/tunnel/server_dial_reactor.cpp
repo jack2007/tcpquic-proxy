@@ -120,7 +120,7 @@ struct TqServerDialReactor::Impl {
 #ifdef TQ_UNIT_TESTING
     TestHooks Hooks;
 #endif
-    std::mutex Lock;
+    mutable std::mutex Lock;
 #ifndef TQ_UNIT_TESTING
     std::thread Worker;
     std::atomic<bool> StopRequested{false};
@@ -274,6 +274,11 @@ struct TqServerDialReactor::Impl {
         }
         CleanupState(*it->second, true);
         Pending.erase(it);
+    }
+
+    size_t PendingCount() const {
+        std::lock_guard<std::mutex> guard(Lock);
+        return Pending.size();
     }
 
     bool RunOnce(int timeoutMs) {
@@ -806,4 +811,8 @@ void TqServerDialReactor::Cancel(uint64_t token) {
 
 bool TqServerDialReactor::RunOnce(int timeoutMs) {
     return State != nullptr && State->RunOnce(timeoutMs);
+}
+
+size_t TqServerDialReactor::PendingCount() const {
+    return State != nullptr ? State->PendingCount() : 0;
 }

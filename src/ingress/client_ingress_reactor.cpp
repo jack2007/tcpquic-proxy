@@ -360,6 +360,14 @@ std::string TqClientIngressReactor::HttpListenAddressForTest(const std::string& 
     }
     return it->second.HttpAddress;
 }
+
+void TqClientIngressReactor::SetOpenTimeoutForTest(std::chrono::milliseconds timeout) {
+    if (timeout < std::chrono::milliseconds(1)) {
+        timeout = std::chrono::milliseconds(1);
+    }
+    std::lock_guard<std::mutex> lock(Mutex);
+    OpenTimeout = timeout;
+}
 #endif
 
 void TqClientIngressReactor::Run() {
@@ -831,16 +839,50 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         return;
     }
 
-    std::lock_guard<std::mutex> lock(Mutex);
-    auto it = Clients.find(clientFd);
-    if (it == Clients.end()) {
-        RejectOpenHandleOnce(handle, rejectTunnel, completionState);
-        return;
+    std::chrono::milliseconds timeout{};
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = Clients.find(clientFd);
+        if (it == Clients.end()) {
+            RejectOpenHandleOnce(handle, rejectTunnel, completionState);
+            return;
+        }
+        it->second.OpenHandle = handle;
+        if (it->second.PendingWrite.empty()) {
+            it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
+        }
+        timeout = OpenTimeout;
     }
-    it->second.OpenHandle = handle;
-    if (it->second.PendingWrite.empty()) {
-        it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
+    (void)EnqueueDelayed(timeout, [this, clientFd, completionState]() {
+        TimeoutClientOpen(clientFd, completionState);
+    });
+}
+
+void TqClientIngressReactor::TimeoutClientOpen(
+    TqSocketHandle clientFd,
+    std::shared_ptr<OpenCompletionState> completionState) {
+    TqClientTunnelOpenHandle* handle = nullptr;
+    TqClientIngressTunnelCloseFn cancelTunnel;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = Clients.find(clientFd);
+        if (it == Clients.end()) {
+            return;
+        }
+        ClientEntry& client = it->second;
+        if (client.Phase != ClientPhase::Opening || client.OpenCompletion != completionState) {
+            return;
+        }
+        handle = client.OpenHandle;
+        cancelTunnel = client.CancelTunnel;
+        client.OpenHandle = nullptr;
+        client.OpenSucceeded = false;
+        client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, TqOpenError::TcpTimeout);
+        client.Phase = ClientPhase::WritingOpenResponse;
+        (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
     }
+    CancelOpenHandleOnce(handle, cancelTunnel, completionState);
+    HandleClientWrite(clientFd);
 }
 
 bool TqClientIngressReactor::EnqueueOpenCompletion(
