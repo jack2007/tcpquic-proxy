@@ -514,7 +514,12 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
         }
     }
 #else
-    if (std::strcmp(exeDir, ".") != 0 && chdir(exeDir) != 0) {
+    char savedCwd[PATH_MAX]{};
+    const bool haveSavedCwd = getcwd(savedCwd, sizeof(savedCwd)) != nullptr;
+    bool changedCwd = false;
+    if (std::strcmp(exeDir, ".") != 0 && chdir(exeDir) == 0) {
+        changedCwd = true;
+    } else if (std::strcmp(exeDir, ".") != 0) {
         std::strncpy(exeDir, ".", sizeof(exeDir) - 1);
     }
 #endif
@@ -568,6 +573,10 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
 #if defined(_WIN32)
     if (haveSavedCwd && changedCwd) {
         SetCurrentDirectoryW(savedCwd);
+    }
+#else
+    if (haveSavedCwd && changedCwd) {
+        chdir(savedCwd);
     }
 #endif
 
