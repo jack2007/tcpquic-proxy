@@ -38,6 +38,11 @@ struct TqCredentialConfig {
         CertFile.CertificateFile = cfg.QuicCert.c_str();
         Config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
         Config.Flags = flags | QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+#if defined(__APPLE__)
+        // Darwin msquic validates via SecTrust (system roots) unless this flag
+        // is set; --ca PEM must use OpenSSL chain verify like Linux.
+        Config.Flags |= QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION;
+#endif
         Config.CertificateFile = &CertFile;
         Config.CaCertificateFile = cfg.QuicCa.c_str();
     }
