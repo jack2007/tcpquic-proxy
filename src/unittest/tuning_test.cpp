@@ -13,6 +13,10 @@
 
 int main() {
     {
+        TQ_TEST_REQUIRE(TqValidationRelaySendBufferCapBytes == 512ull * 1024 * 1024);
+    }
+
+    {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);

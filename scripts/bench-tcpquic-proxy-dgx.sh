@@ -37,6 +37,10 @@ NETEM_LIMIT="${NETEM_LIMIT:-1000000}"
 #   HTTP_PORT     对端 HTTP 目标端口（默认 16001）
 #   QUIC_PORT     对端 QUIC UDP 端口（默认 4433）
 #   PROXY_PORT    本机 HTTP CONNECT 代理端口（默认 18080）
+#   CLIENT_QUIC_READY_WAIT_SEC
+#                  等待本地 client QUIC 连接建立秒数（默认 60）
+#   CLIENT_HTTP_READY_WAIT_SEC
+#                  QUIC 连接建立后等待 HTTP CONNECT 监听秒数（默认 15）
 #   SKIP_APPEND   1 时不写入 research_progress.md
 #
 # sudoers 示例（对端 netem 免密）:
@@ -64,6 +68,8 @@ EXTRA_PROXY_ARGS="${EXTRA_PROXY_ARGS:-}"
 HTTP_PORT="${HTTP_PORT:-16001}"
 QUIC_PORT="${QUIC_PORT:-4433}"
 PROXY_PORT="${PROXY_PORT:-18080}"
+CLIENT_QUIC_READY_WAIT_SEC="${CLIENT_QUIC_READY_WAIT_SEC:-60}"
+CLIENT_HTTP_READY_WAIT_SEC="${CLIENT_HTTP_READY_WAIT_SEC:-15}"
 SKIP_APPEND="${SKIP_APPEND:-0}"
 METRIC_MODE="${METRIC_MODE:-average}"  # steady | average
 # RATE: unset vs empty distinguished — default applied in main when NETEM=1
@@ -146,12 +152,16 @@ cleanup_netem() {
 }
 
 remote_kill() {
-    ssh "$PEER" "killall -9 tcpquic-proxy 2>/dev/null; fuser -k ${HTTP_PORT}/tcp >/dev/null 2>&1; true" || true
+    local remote_name
+    remote_name="$(basename "${REMOTE_BIN}")"
+    ssh "$PEER" "killall -9 tcpquic-proxy '${remote_name}' 2>/dev/null || true; pkill -9 -f '${REMOTE_BIN}' 2>/dev/null || true; fuser -k ${HTTP_PORT}/tcp >/dev/null 2>&1; true" || true
     pkill -9 -f "${BIN} client" 2>/dev/null || true
 }
 
 remote_kill_proxy() {
-    ssh "$PEER" "killall -9 tcpquic-proxy 2>/dev/null; true" || true
+    local remote_name
+    remote_name="$(basename "${REMOTE_BIN}")"
+    ssh "$PEER" "killall -9 tcpquic-proxy '${remote_name}' 2>/dev/null || true; pkill -9 -f '${REMOTE_BIN}' 2>/dev/null || true; true" || true
     pkill -9 -f "${BIN} client" 2>/dev/null || true
 }
 
@@ -321,13 +331,32 @@ start_local_client() {
         "${warmup_args[@]}" \
         >/tmp/tcpquic-dgx-client.log 2>&1 &
     CLIENT_PID=$!
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+    log "waiting for QUIC client connection (timeout=${CLIENT_QUIC_READY_WAIT_SEC}s)"
+    local quic_wait_ticks=$((CLIENT_QUIC_READY_WAIT_SEC * 2))
+    [[ "$quic_wait_ticks" -gt 0 ]] || quic_wait_ticks=1
+    for _ in $(seq 1 "$quic_wait_ticks"); do
+        sleep 0.5
+        if grep -q "QUIC client connected" /tmp/tcpquic-dgx-client.log 2>/dev/null; then
+            log "QUIC client connection established"
+            break
+        fi
+    done
+    if ! grep -q "QUIC client connected" /tmp/tcpquic-dgx-client.log 2>/dev/null; then
+        log "local client failed before QUIC connection (compress=${compress})"
+        tail -20 /tmp/tcpquic-dgx-client.log >&2 || true
+        return 1
+    fi
+
+    log "waiting for HTTP CONNECT listener (timeout=${CLIENT_HTTP_READY_WAIT_SEC}s)"
+    local http_wait_ticks=$((CLIENT_HTTP_READY_WAIT_SEC * 2))
+    [[ "$http_wait_ticks" -gt 0 ]] || http_wait_ticks=1
+    for _ in $(seq 1 "$http_wait_ticks"); do
         sleep 0.5
         if grep -q "HTTP CONNECT listening" /tmp/tcpquic-dgx-client.log 2>/dev/null; then
             return 0
         fi
     done
-    log "local client failed (compress=${compress})"
+    log "local client failed before HTTP CONNECT listener (compress=${compress})"
     tail -20 /tmp/tcpquic-dgx-client.log >&2 || true
     return 1
 }

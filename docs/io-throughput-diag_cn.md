@@ -34,7 +34,7 @@
 - `StreamRecvWindowDefault = 2GiB`
 - `ConnFlowControlWindow = 2GiB`
 - `QUIC_MAX_IDEAL_SEND_BUFFER_SIZE = 2GiB`
-- relay send buffer cap = `4GiB`
+- relay send buffer cap = `512MiB`
 - 默认初始 read-ahead = `128MiB`
 
 ### 低开销诊断
@@ -102,6 +102,50 @@
 
 - 早期曾跑到接近 secnetperf 的 8.6Gbps。
 - 后续复测波动较大，因此需要依赖低开销运行时状态判断瓶颈，而不是只看单次吞吐。
+
+### relay_pending 512MiB/128MiB 对照
+
+为验证 QUIC -> TCP receive 方向的 `relay_pending` 上限是否会影响 IO 吞吐，使用独立二进制对比：
+
+- `tcpquic-proxy-relaypending512`：`relay_pending=536870912`
+- `tcpquic-proxy-relaypending128`：`relay_pending=134217728`
+
+共同测试条件：
+
+- `100ms + 5% loss, limit 5000000`
+- `tunnel_off`
+- `QUIC_CONNECTIONS=1`
+- `SIZE_MB=20000`
+- `DURATION_SEC=30`
+- `WARMUP_MB=0`
+- `--initrtt-ms 100 --diag-stats --diag-stats-interval 1`
+- 每轮启动前清理远端残留 `tcpquic-proxy` 进程和旧 netem qdisc。
+
+512MiB 结果：
+
+| run | 吞吐 | max_pending_quic_receive_bytes | pause/resume | curl exit |
+|---|---:|---:|---:|---:|
+| 1 | 8762.51 Mbps | 310088355 bytes | 0 / 0 | 0 |
+| 2 | 9200.47 Mbps | 405487546 bytes | 0 / 0 | 0 |
+| 3 | 8695.65 Mbps | 306718791 bytes | 0 / 0 | 0 |
+
+512MiB 三个有完整日志且 curl 正常结束的样本平均吞吐为 `8886.21 Mbps`。三轮 `max_pending_quic_receive_bytes` 均低于 512MiB，`quic_receive_paused/resumed` 均为 `0/0`，说明该上限在当前 100ms/5% download 场景下没有实际介入 receive 背压。
+
+128MiB 结果：
+
+| run | 吞吐 | max_pending_quic_receive_bytes | pause/resume | curl exit |
+|---|---:|---:|---:|---:|
+| 1 | 8358.46 Mbps | 363397871 bytes | 14 / 14 | 0 |
+| 2 | 6197.94 Mbps | 触发 receive pause | 至少 9 / 9 | 18 |
+| 3 | 6476.43 Mbps | 425565168 bytes | 9 / 9 | 18 |
+
+128MiB 已经明确触发 QUIC receive pause，并且 3 次里 2 次出现 `curl exit 18`。第三轮 client 日志中还出现多条 `linux relay unrecoverable error reason=tcp_write_hard_error`。
+
+结论：
+
+- `512MiB` 对当前实测的 100ms/5% download 吞吐没有可见负面影响，且不会触发 receive pause。
+- `128MiB` 太小，会实际介入 receive 背压，并在本场景下带来下载不完整的稳定性风险。
+- 当前默认 `relay_pending` 固定为 `512MiB`，比 4GiB 明显降低 QUIC -> TCP receive 方向的最坏 pending 内存上限，同时保留本轮测试中的吞吐表现。
 
 ### 200ms 自然 ideal/postbuf 诊断
 
