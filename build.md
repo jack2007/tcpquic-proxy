@@ -53,8 +53,6 @@ sudo apt install git cmake build-essential perl
 | [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `v1.2.1-2576-gd1d1b6ff` |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `v1.34.6` |
 
-仓库中还包含 `third_party/lz4` 子模块，但**顶层 CMake 当前未引用**；主构建不依赖 lz4。
-
 ### mimalloc（third_party，默认静态启用）
 
 - 路径：`third_party/mimalloc`（Git 子模块，与 msquic/zstd 相同）
