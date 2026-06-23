@@ -272,6 +272,7 @@ int main() {
         cfg.Peers[0].PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
         std::string err;
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 185;
+        if (adapter.LastStartedPeer.PortForwards.size() != 1) return 191;
         if (adapter.LastStartedPeer.PortForwards[0].Listen != "127.0.0.1:15432") return 132;
         if (adapter.LastStartedPeer.PortForwards[0].TargetHost != "db.internal") return 133;
         if (adapter.LastStartedPeer.PortForwards[0].TargetPort != 5432) return 134;

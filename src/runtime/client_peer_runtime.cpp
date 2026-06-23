@@ -169,7 +169,9 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
 
     ListenersOpen = true;
     if (LogMode == TqClientPeerLogMode::Primary) {
-        std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
+        if (!Config.SocksListen.empty()) {
+            std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
+        }
         if (!Config.HttpListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", Config.HttpListen.c_str());
         }
@@ -179,8 +181,10 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
                 forward.Listen.c_str(), target.c_str());
         }
     } else {
-        std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
-            PeerId.c_str(), Config.SocksListen.c_str());
+        if (!Config.SocksListen.empty()) {
+            std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
+                PeerId.c_str(), Config.SocksListen.c_str());
+        }
         if (!Config.HttpListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: peer %s HTTP CONNECT listening on %s\n",
                 PeerId.c_str(), Config.HttpListen.c_str());
