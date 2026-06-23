@@ -8,6 +8,7 @@ TMP_DIR="/tmp/tcpquic-test-$$"
 SERVER_PID=""
 CLIENT_PID=""
 HTTP_PID=""
+ECHO_PID=""
 NEG_SERVER_PID=""
 NEG_CLIENT_PID=""
 SERVER_STDIN_FD=""
@@ -20,12 +21,12 @@ log() {
 cleanup() {
     local status=$?
     set +e
-    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
+    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
         if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null
         fi
     done
-    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
+    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
         if [ -n "${pid:-}" ]; then
             wait "$pid" 2>/dev/null
         fi
@@ -102,6 +103,16 @@ wait_for_closed_port() {
         sleep 0.2
     done
     return 0
+}
+
+pick_free_tcp_port() {
+  python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
 }
 
 wait_log() {
@@ -279,6 +290,28 @@ start_client() {
     echo "$!"
 }
 
+start_client_with_forward() {
+    local quic_port=$1
+    local http_port=$2
+    local socks_port=$3
+    local forward_port=$4
+    local target_port=$5
+    local compress_mode=$6
+    local log_file=$7
+
+    "$BIN" client \
+        --peer "127.0.0.1:${quic_port}" \
+        --http-listen "127.0.0.1:${http_port}" \
+        --socks-listen "127.0.0.1:${socks_port}" \
+        --forward "127.0.0.1:${forward_port}=127.0.0.1:${target_port}" \
+        --cert "$TMP_DIR/client.crt" \
+        --key "$TMP_DIR/client.key" \
+        --ca "$TMP_DIR/ca.crt" \
+        --compress "$compress_mode" \
+        >"$log_file" 2>&1 &
+    echo "$!"
+}
+
 start_configured_client() {
     local config_file=$1
     local log_file=$2
@@ -372,7 +405,7 @@ read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
 
 cat > "$TMP_DIR/client-config.json" <<EOF
-{"version":1,"peers":[{"peer_id":"healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","quic_reconnect_interval_ms":1000,"compress":"off"}]}
+{"version":1,"peers":[{"peer_id":"healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","compress":"off"}]}
 EOF
 
 CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")
@@ -405,6 +438,47 @@ curl -fsS \
     fail_with_logs "SOCKS5 curl failed"
 grep -q "tcpquic-proxy smoke test" "$TMP_DIR/socks5.out" ||
     fail_with_logs "SOCKS5 response did not contain expected body"
+
+FORWARD_TARGET_PORT=$(pick_free_tcp_port)
+FORWARD_LISTEN_PORT=$(pick_free_tcp_port)
+
+log "starting forward echo target on 127.0.0.1:${FORWARD_TARGET_PORT}"
+python3 - "$FORWARD_TARGET_PORT" >"$TMP_DIR/forward-echo.log" 2>&1 <<'PY' &
+import socket
+import sys
+
+port = int(sys.argv[1])
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port))
+srv.listen(16)
+while True:
+    conn, _ = srv.accept()
+    data = conn.recv(4096)
+    if data:
+        conn.sendall(data)
+    conn.close()
+PY
+ECHO_PID=$!
+wait_tcp 127.0.0.1 "$FORWARD_TARGET_PORT" "forward echo target"
+
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+CLIENT_PID=""
+CLIENT_PID=$(start_client_with_forward 4433 8080 1080 "$FORWARD_LISTEN_PORT" "$FORWARD_TARGET_PORT" off "$TMP_DIR/proxy-client-forward.log")
+wait_tcp 127.0.0.1 "$FORWARD_LISTEN_PORT" "port forward listener"
+
+python3 - "$FORWARD_LISTEN_PORT" <<'PY'
+import socket
+import sys
+
+port = int(sys.argv[1])
+with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+    s.sendall(b"port-forward-ok")
+    data = s.recv(4096)
+if data != b"port-forward-ok":
+    raise SystemExit(f"unexpected echo: {data!r}")
+PY
 
 REFUSED_PORT=59998
 while python3 - "$REFUSED_PORT" <<'PY' >/dev/null 2>&1
