@@ -208,7 +208,7 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
 | `peers[].proto_peer` | client | Remote protocol endpoint. Required. |
 | `peers[].socks_listen` | client | Optional SOCKS5 listener for this peer; each peer requires at least one ingress among SOCKS, HTTP, or `port_forwards`. |
 | `peers[].http_listen` | client | Optional HTTP CONNECT listener for this peer. |
-| `peers[].port_forwards` | client peer | `[]` | Local port-forward rules. Each item contains `listen` and `target`. |
+| `peers[].port_forwards` | client | Optional local port-forward rules, default `[]`. Each item contains `listen` and `target`. |
 | `peers[].proto_connections` | client | Optional per-peer connection count override. |
 | `peers[].proto_reconnect_interval_ms` | client | Optional per-peer reconnect interval override. |
 | `peers[].compress` | client | Optional per-peer compression override. |
