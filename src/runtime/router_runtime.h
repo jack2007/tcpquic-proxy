@@ -15,6 +15,7 @@ struct TqPeerMetrics {
     std::string QuicPeer;
     std::string SocksListen;
     std::string HttpListen;
+    std::vector<TqPortForwardConfig> PortForwards;
     std::string State{"starting"};
     uint32_t ConnectionCount{0};
     uint32_t ConnectedConnections{0};

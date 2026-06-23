@@ -23,6 +23,7 @@ inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     peer.QuicPeer = cfg.QuicPeer;
     peer.SocksListen = cfg.SocksListen;
     peer.HttpListen = cfg.HttpListen;
+    peer.PortForwards = cfg.PortForwards;
     peer.QuicConnections = cfg.QuicConnections;
     peer.Compress = cfg.Compress;
     return peer;
@@ -35,6 +36,7 @@ inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeer
     cfg.QuicPeer = peer.QuicPeer;
     cfg.SocksListen = peer.SocksListen;
     cfg.HttpListen = peer.HttpListen;
+    cfg.PortForwards = peer.PortForwards;
     cfg.QuicConnections = peer.QuicConnections == 0 ? baseConfig.QuicConnections : peer.QuicConnections;
     cfg.Compress = peer.Compress.empty() ? baseConfig.Compress : peer.Compress;
     return cfg;

@@ -113,11 +113,13 @@ public:
     std::vector<std::string> Stopped;
     std::vector<std::string> Drained;
     std::vector<std::string> AbortAll;
+    TqPeerConfig LastStartedPeer;
     uint32_t FailStarts{0};
     uint32_t ConnectedConnections{0};
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
+        LastStartedPeer = peer;
         if (FailStarts != 0) {
             --FailStarts;
             err = "start failed";
@@ -157,6 +159,14 @@ static TqPeerConfig Peer(const std::string& id, const std::string& listen, bool 
     p.Compress = "auto";
     p.Enabled = enabled;
     return p;
+}
+
+static TqPortForwardConfig Forward(const std::string& listen, const std::string& host, uint16_t port) {
+    TqPortForwardConfig forward;
+    forward.Listen = listen;
+    forward.TargetHost = host;
+    forward.TargetPort = port;
+    return forward;
 }
 
 static std::string JsonBody(const std::string& response) {
@@ -243,6 +253,45 @@ int main() {
         if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-change") return 117;
         if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-change") return 118;
         if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-change") return 119;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-forward", ""));
+        cfg.Peers[0].PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 183;
+        if (adapter.LastStartedPeer.PortForwards.size() != 1) return 184;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-forward-change", ""));
+        cfg.Peers[0].PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 185;
+        cfg.Peers[0].PortForwards[0].TargetPort = 5433;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 186;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-forward-change") return 187;
+        if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-forward-change") return 188;
+        if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-forward-change") return 189;
+        if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-forward-change") return 190;
+    }
+    {
+        TqRouterRuntime runtime;
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-forward-json", ""));
+        cfg.Peers[0].PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
+        std::string err;
+        if (!runtime.ApplyConfig(cfg, err)) return 191;
+        const std::string configJson = runtime.ConfigJson();
+        if (configJson.find("\"port_forwards\"") == std::string::npos) return 192;
+        if (configJson.find("\"target\":\"db.internal:5432\"") == std::string::npos) return 193;
+        const std::string metricsJson = runtime.MetricsJson();
+        if (metricsJson.find("\"port_forwards\"") == std::string::npos) return 194;
+        if (metricsJson.find("\"listen\":\"127.0.0.1:15432\"") == std::string::npos) return 195;
     }
     {
         FakeAdapter adapter;

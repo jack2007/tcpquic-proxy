@@ -4,6 +4,36 @@
 
 #include <sstream>
 
+namespace {
+
+std::string TqPortForwardTargetText(const TqPortForwardConfig& forward) {
+    std::ostringstream out;
+    if (forward.TargetHost.find(':') != std::string::npos) {
+        out << '[' << forward.TargetHost << ']';
+    } else {
+        out << forward.TargetHost;
+    }
+    out << ':' << forward.TargetPort;
+    return out.str();
+}
+
+void TqAppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortForwardConfig>& forwards) {
+    out << ",\"port_forwards\":[";
+    for (size_t i = 0; i < forwards.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << '{';
+        TqAppendJsonString(out, "listen", forwards[i].Listen);
+        out << ',';
+        TqAppendJsonString(out, "target", TqPortForwardTargetText(forwards[i]));
+        out << '}';
+    }
+    out << ']';
+}
+
+} // namespace
+
 std::string TqClientMetricsJson(const TqClientMetrics& metrics, uint64_t uptimeSeconds) {
     std::ostringstream out;
     out << '{';
@@ -17,6 +47,7 @@ std::string TqClientMetricsJson(const TqClientMetrics& metrics, uint64_t uptimeS
     TqAppendJsonString(out, "socks_listen", metrics.SocksListen);
     out << ',';
     TqAppendJsonString(out, "http_listen", metrics.HttpListen);
+    TqAppendPortForwardsJson(out, metrics.PortForwards);
     out << ",\"uptime_seconds\":" << uptimeSeconds;
     out << ",\"connection_count\":" << metrics.ConnectionCount;
     out << ",\"connected_connections\":" << metrics.ConnectedConnections;

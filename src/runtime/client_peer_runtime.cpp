@@ -86,6 +86,7 @@ TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
     metrics.QuicPeer = Config.QuicPeer;
     metrics.SocksListen = Config.SocksListen;
     metrics.HttpListen = Config.HttpListen;
+    metrics.PortForwards = Config.PortForwards;
     metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     metrics.State = metrics.ConnectedConnections > 0 ? "healthy" : "connecting";
@@ -97,6 +98,7 @@ TqClientMetrics TqClientPeerRuntime::SnapshotClientMetrics() const {
     metrics.QuicPeer = Config.QuicPeer;
     metrics.SocksListen = Config.SocksListen;
     metrics.HttpListen = Config.HttpListen;
+    metrics.PortForwards = Config.PortForwards;
     metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     return metrics;
