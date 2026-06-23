@@ -717,7 +717,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND TCPQUIC_TUNNEL_TEST_SOURCES
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
     )
 endif()
 if(WIN32)
@@ -737,7 +743,7 @@ if(TCPQUIC_TEST_INCLUDES)
     target_include_directories(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
 endif()
 target_link_libraries(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     target_link_libraries(tcpquic_tunnel_test PRIVATE ${TCPQUIC_CARES_TARGET})
 endif()
 if(BUILD_SHARED_LIBS)
@@ -811,7 +817,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     list(APPEND TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
     )
 endif()
 if(WIN32)
@@ -830,7 +842,7 @@ if(TCPQUIC_TEST_INCLUDES)
     target_include_directories(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
 endif()
 target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     target_link_libraries(tcpquic_client_tunnel_open_test PRIVATE ${TCPQUIC_CARES_TARGET})
 endif()
 if(BUILD_SHARED_LIBS)
@@ -954,6 +966,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/linux_relay_worker.cpp
     )
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
+    )
+endif()
 if(WIN32)
     list(APPEND TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
         tunnel/relay_alloc.cpp
@@ -969,7 +989,7 @@ if(BUILD_SHARED_LIBS)
 endif()
 set_property(TARGET tcpquic_router_runtime_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_router_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_link_mimalloc(tcpquic_router_runtime_test)
 endif()
 if(WIN32)
