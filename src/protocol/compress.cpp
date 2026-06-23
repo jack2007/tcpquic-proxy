@@ -4,7 +4,10 @@
 #include <cstring>
 
 #ifdef TCPQUIC_HAS_ZSTD
+#define ZSTD_STATIC_LINKING_ONLY
 #include <zstd.h>
+
+#include "relay_alloc.h"
 #endif
 
 namespace {
@@ -72,10 +75,24 @@ public:
 
 #ifdef TCPQUIC_HAS_ZSTD
 
+void* TqZstdAlloc(void* opaque, size_t size) {
+    (void)opaque;
+    return TqMalloc(size);
+}
+
+void TqZstdFree(void* opaque, void* address) {
+    (void)opaque;
+    TqFree(address);
+}
+
+ZSTD_customMem TqZstdCustomMem() {
+    return ZSTD_customMem{TqZstdAlloc, TqZstdFree, nullptr};
+}
+
 class TqZstdCompressor final : public ITqCompressor {
 public:
     explicit TqZstdCompressor(int level) {
-        ctx_ = ZSTD_createCCtx();
+        ctx_ = ZSTD_createCCtx_advanced(TqZstdCustomMem());
         if (ctx_ != nullptr) {
             const int clamped = std::clamp(level, 1, ZSTD_maxCLevel());
             ZSTD_CCtx_setParameter(ctx_, ZSTD_c_compressionLevel, clamped);
@@ -150,7 +167,7 @@ private:
 class TqZstdDecompressor final : public ITqDecompressor {
 public:
     TqZstdDecompressor() {
-        ctx_ = ZSTD_createDCtx();
+        ctx_ = ZSTD_createDCtx_advanced(TqZstdCustomMem());
     }
 
     ~TqZstdDecompressor() override {

@@ -304,9 +304,19 @@ tcpquic_link_mimalloc(tcpquic_relay_buffer_test)
 set_property(TARGET tcpquic_relay_buffer_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_relay_buffer_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_relay_alloc_test
+    unittest/relay_alloc_test.cpp
+    tunnel/relay_alloc.cpp
+)
+tcpquic_target_include_dirs(tcpquic_relay_alloc_test)
+tcpquic_link_mimalloc(tcpquic_relay_alloc_test)
+set_property(TARGET tcpquic_relay_alloc_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_relay_alloc_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 set(TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES
     unittest/ares_dns_resolver_test.cpp
     tunnel/ares_dns_resolver.cpp
+    tunnel/relay_alloc.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 if(WIN32)
@@ -320,6 +330,7 @@ add_executable(tcpquic_ares_dns_resolver_test ${TCPQUIC_ARES_DNS_RESOLVER_TEST_S
 tcpquic_target_include_dirs(tcpquic_ares_dns_resolver_test)
 target_link_libraries(tcpquic_ares_dns_resolver_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
 target_compile_definitions(tcpquic_ares_dns_resolver_test PRIVATE TQ_UNIT_TESTING=1)
+tcpquic_link_mimalloc(tcpquic_ares_dns_resolver_test)
 set_property(TARGET tcpquic_ares_dns_resolver_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_ares_dns_resolver_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 if(WIN32)
@@ -331,6 +342,7 @@ set(TCPQUIC_SERVER_DIAL_REACTOR_TEST_SOURCES
     unittest/server_dial_reactor_test.cpp
     tunnel/server_dial_reactor.cpp
     tunnel/ares_dns_resolver.cpp
+    tunnel/relay_alloc.cpp
     acl/acl.cpp
     acl/acl_filter.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
@@ -353,6 +365,7 @@ if(WIN32)
     tcpquic_copy_msquic_runtime(tcpquic_server_dial_reactor_test)
 endif()
 target_compile_definitions(tcpquic_server_dial_reactor_test PRIVATE TQ_UNIT_TESTING=1)
+tcpquic_link_mimalloc(tcpquic_server_dial_reactor_test)
 set_property(TARGET tcpquic_server_dial_reactor_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_server_dial_reactor_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -403,6 +416,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/server_dial_reactor_worker_test.cpp
         tunnel/server_dial_reactor.cpp
         tunnel/ares_dns_resolver.cpp
+        tunnel/relay_alloc.cpp
         runtime/linux_reactor.cpp
         acl/acl.cpp
         acl/acl_filter.cpp
@@ -410,6 +424,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
     tcpquic_target_include_dirs(tcpquic_server_dial_reactor_worker_test)
     target_link_libraries(tcpquic_server_dial_reactor_worker_test PRIVATE Threads::Threads ${TCPQUIC_CARES_TARGET})
+    tcpquic_link_mimalloc(tcpquic_server_dial_reactor_worker_test)
     set_property(TARGET tcpquic_server_dial_reactor_worker_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_server_dial_reactor_worker_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -515,6 +530,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_target_include_dirs(tcpquic_darwin_relay_worker_io_test)
     target_compile_definitions(tcpquic_darwin_relay_worker_io_test PRIVATE TCPQUIC_TESTING=1)
     target_link_libraries(tcpquic_darwin_relay_worker_io_test PRIVATE Threads::Threads libzstd spdlog::spdlog msquic logging base_link inc warnings)
+    tcpquic_link_mimalloc(tcpquic_darwin_relay_worker_io_test)
     set_property(TARGET tcpquic_darwin_relay_worker_io_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_darwin_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -529,6 +545,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_target_include_dirs(tcpquic_darwin_relay_metrics_test)
     target_compile_definitions(tcpquic_darwin_relay_metrics_test PRIVATE TCPQUIC_TESTING=1)
     target_link_libraries(tcpquic_darwin_relay_metrics_test PRIVATE Threads::Threads libzstd spdlog::spdlog msquic logging base_link inc warnings)
+    tcpquic_link_mimalloc(tcpquic_darwin_relay_metrics_test)
     set_property(TARGET tcpquic_darwin_relay_metrics_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_darwin_relay_metrics_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 endif()
@@ -617,7 +634,7 @@ endif()
 target_compile_definitions(tcpquic_speed_test_test PRIVATE ${TCPQUIC_TEST_DEFS})
 set_property(TARGET tcpquic_speed_test_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_speed_test_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_link_mimalloc(tcpquic_speed_test_test)
 endif()
 if(WIN32)
@@ -661,6 +678,7 @@ set_property(TARGET tcpquic_config_router_test APPEND PROPERTY BUILD_RPATH "$ORI
 add_executable(tcpquic_compress_test
     unittest/compress_test.cpp
     protocol/compress.cpp
+    tunnel/relay_alloc.cpp
 )
 tcpquic_target_include_dirs(tcpquic_compress_test)
 if(TCPQUIC_TEST_INCLUDES)
@@ -668,6 +686,7 @@ if(TCPQUIC_TEST_INCLUDES)
 endif()
 target_link_libraries(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_LIBS})
 target_compile_definitions(tcpquic_compress_test PRIVATE ${TCPQUIC_TEST_DEFS})
+tcpquic_link_mimalloc(tcpquic_compress_test)
 set_property(TARGET tcpquic_compress_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_compress_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -694,6 +713,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/linux_relay_worker.cpp
+    )
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_TUNNEL_TEST_SOURCES
+        tunnel/relay_alloc.cpp
     )
 endif()
 if(WIN32)
@@ -725,7 +749,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
 endif()
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_link_mimalloc(tcpquic_tunnel_test)
 endif()
 if(WIN32)
@@ -785,6 +809,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/linux_relay_worker.cpp
     )
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    list(APPEND TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
+        tunnel/relay_alloc.cpp
+    )
+endif()
 if(WIN32)
     list(APPEND TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
         tunnel/server_dial_reactor.cpp
@@ -813,7 +842,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
 endif()
 set_property(TARGET tcpquic_client_tunnel_open_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_client_tunnel_open_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     tcpquic_link_mimalloc(tcpquic_client_tunnel_open_test)
 endif()
 if(WIN32)
@@ -1031,6 +1060,7 @@ endif()
 
 set(TCPQUIC_TEST_TARGETS
     tcpquic_relay_buffer_test
+    tcpquic_relay_alloc_test
     tcpquic_tuning_test
     tcpquic_quic_settings_test
     tcpquic_thread_pool_test

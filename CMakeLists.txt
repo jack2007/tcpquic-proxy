@@ -38,6 +38,91 @@ if(TCPQUIC_MSQUIC_DISABLE_XDP)
     set(QUIC_DISABLE_XDP ON CACHE BOOL "Disable Windows XDP raw datapath at build time" FORCE)
 endif()
 
+option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers" ON)
+set(TCPQUIC_ADDRESS_SANITIZER_ENABLED OFF)
+set(TCPQUIC_SANITIZER_FLAGS
+    "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}")
+if(TCPQUIC_SANITIZER_FLAGS MATCHES "(^|[ =,])-fsanitize=address([, ]|$)")
+    set(TCPQUIC_ADDRESS_SANITIZER_ENABLED ON)
+endif()
+if(QUIC_ENABLE_ASAN OR QUIC_ENABLE_ALL_SANITIZERS)
+    set(TCPQUIC_ADDRESS_SANITIZER_ENABLED ON)
+endif()
+if(TCPQUIC_ADDRESS_SANITIZER_ENABLED AND TCPQUIC_USE_MIMALLOC)
+    message(STATUS "AddressSanitizer detected; disabling static mimalloc override")
+    set(TCPQUIC_USE_MIMALLOC OFF CACHE BOOL "Statically link vendored mimalloc for relay buffers" FORCE)
+endif()
+
+if(DEFINED CACHE{TCPQUIC_MSQUIC_USE_MIMALLOC})
+    get_property(TCPQUIC_MSQUIC_USE_MIMALLOC_CACHE_TYPE
+        CACHE TCPQUIC_MSQUIC_USE_MIMALLOC PROPERTY TYPE)
+    if(TCPQUIC_MSQUIC_USE_MIMALLOC_CACHE_TYPE STREQUAL "BOOL")
+        string(TOUPPER "${TCPQUIC_MSQUIC_USE_MIMALLOC}" TCPQUIC_MSQUIC_USE_MIMALLOC_BOOL_VALUE)
+        if(TCPQUIC_MSQUIC_USE_MIMALLOC_BOOL_VALUE MATCHES "^(1|ON|YES|TRUE|Y)$")
+            set(TCPQUIC_MSQUIC_USE_MIMALLOC ON CACHE STRING
+                "Use mimalloc in vendored MsQuic platform allocator: AUTO, ON, or OFF" FORCE)
+        elseif(TCPQUIC_MSQUIC_USE_MIMALLOC_BOOL_VALUE MATCHES "^(0|OFF|NO|FALSE|N|IGNORE)$"
+            OR TCPQUIC_MSQUIC_USE_MIMALLOC_BOOL_VALUE MATCHES "-NOTFOUND$")
+            set(TCPQUIC_MSQUIC_USE_MIMALLOC OFF CACHE STRING
+                "Use mimalloc in vendored MsQuic platform allocator: AUTO, ON, or OFF" FORCE)
+        else()
+            set(TCPQUIC_MSQUIC_USE_MIMALLOC "${TCPQUIC_MSQUIC_USE_MIMALLOC}" CACHE STRING
+                "Use mimalloc in vendored MsQuic platform allocator: AUTO, ON, or OFF" FORCE)
+        endif()
+    else()
+        set(TCPQUIC_MSQUIC_USE_MIMALLOC "${TCPQUIC_MSQUIC_USE_MIMALLOC}" CACHE STRING
+            "Use mimalloc in vendored MsQuic platform allocator: AUTO, ON, or OFF" FORCE)
+    endif()
+else()
+    set(TCPQUIC_MSQUIC_USE_MIMALLOC AUTO CACHE STRING
+        "Use mimalloc in vendored MsQuic platform allocator: AUTO, ON, or OFF")
+endif()
+set_property(CACHE TCPQUIC_MSQUIC_USE_MIMALLOC PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${TCPQUIC_MSQUIC_USE_MIMALLOC}" TCPQUIC_MSQUIC_USE_MIMALLOC_MODE)
+
+set(TCPQUIC_MSQUIC_MIMALLOC_ENABLED OFF)
+if(TCPQUIC_MSQUIC_USE_MIMALLOC_MODE STREQUAL "AUTO")
+    set(TCPQUIC_MSQUIC_MIMALLOC_ENABLED ${TCPQUIC_USE_MIMALLOC})
+elseif(TCPQUIC_MSQUIC_USE_MIMALLOC_MODE STREQUAL "ON")
+    if(NOT TCPQUIC_USE_MIMALLOC)
+        message(FATAL_ERROR "TCPQUIC_MSQUIC_USE_MIMALLOC=ON requires TCPQUIC_USE_MIMALLOC=ON")
+    endif()
+    set(TCPQUIC_MSQUIC_MIMALLOC_ENABLED ON)
+elseif(TCPQUIC_MSQUIC_USE_MIMALLOC_MODE STREQUAL "OFF")
+    set(TCPQUIC_MSQUIC_MIMALLOC_ENABLED OFF)
+else()
+    message(FATAL_ERROR
+        "TCPQUIC_MSQUIC_USE_MIMALLOC must be one of AUTO, ON, or OFF; got '${TCPQUIC_MSQUIC_USE_MIMALLOC}'")
+endif()
+
+set(TCPQUIC_MIMALLOC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mimalloc" CACHE PATH "mimalloc source tree")
+if(TCPQUIC_USE_MIMALLOC AND NOT EXISTS "${TCPQUIC_MIMALLOC_SOURCE_DIR}/include/mimalloc.h")
+    message(FATAL_ERROR "mimalloc submodule missing. Run: git submodule update --init --recursive third_party/mimalloc")
+endif()
+
+if(TCPQUIC_USE_MIMALLOC)
+    set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
+    set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+    # Relay buffers use mi_malloc explicitly; global override breaks on macOS when
+    # msquic/spdlog/STL mix allocators (see microsoft/mimalloc#1239).
+    set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
+    set(MI_OSX_INTERPOSE OFF CACHE BOOL "" FORCE)
+    set(MI_OSX_ZONE OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${TCPQUIC_MIMALLOC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/mimalloc")
+    # MsQuic's static archive flattener records only static targets with an
+    # explicit archive output directory.
+    set_target_properties(mimalloc-static PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/mimalloc")
+endif()
+
+if(TCPQUIC_MSQUIC_MIMALLOC_ENABLED)
+    if(NOT TARGET mimalloc-static)
+        message(FATAL_ERROR "TCPQUIC_MSQUIC_MIMALLOC_ENABLED requires the mimalloc-static target")
+    endif()
+endif()
+
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
 
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
@@ -55,34 +140,6 @@ set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${TCPQUIC_SPDLOG_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/spdlog")
-
-option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers" ON)
-set(TCPQUIC_ADDRESS_SANITIZER_ENABLED OFF)
-set(TCPQUIC_SANITIZER_FLAGS
-    "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}")
-if(TCPQUIC_SANITIZER_FLAGS MATCHES "(^|[ =,])-fsanitize=address([, ]|$)")
-    set(TCPQUIC_ADDRESS_SANITIZER_ENABLED ON)
-endif()
-if(TCPQUIC_ADDRESS_SANITIZER_ENABLED AND TCPQUIC_USE_MIMALLOC)
-    message(STATUS "AddressSanitizer detected; disabling static mimalloc override")
-    set(TCPQUIC_USE_MIMALLOC OFF CACHE BOOL "Statically link vendored mimalloc for relay buffers" FORCE)
-endif()
-
-set(TCPQUIC_MIMALLOC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mimalloc" CACHE PATH "mimalloc source tree")
-if(TCPQUIC_USE_MIMALLOC AND NOT EXISTS "${TCPQUIC_MIMALLOC_SOURCE_DIR}/include/mimalloc.h")
-    message(FATAL_ERROR "mimalloc submodule missing. Run: git submodule update --init --recursive third_party/mimalloc")
-endif()
-
-if(TCPQUIC_USE_MIMALLOC)
-    set(MI_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-    set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
-    set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-    set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
-    # Relay buffers use mi_malloc explicitly; global override breaks on macOS when
-    # msquic/spdlog/STL mix allocators (see microsoft/mimalloc#1239).
-    set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
-    add_subdirectory("${TCPQUIC_MIMALLOC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/mimalloc")
-endif()
 
 # Align tool/test binaries with msquic convention: build/bin/Release/
 set(TCPQUIC_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/$<IF:$<CONFIG:Debug>,Debug,Release>")
