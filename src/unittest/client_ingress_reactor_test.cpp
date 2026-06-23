@@ -250,6 +250,40 @@ int TestStartAddPeerCountRemoveStop() {
     return 0;
 }
 
+int TestPortForwardListenAddressIsConnectable() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 1400;
+    }
+
+    TqClientIngressPeer peer = MakePeer("forward-listen");
+    TqPortForwardConfig forward;
+    forward.Listen = "127.0.0.1:0";
+    forward.TargetHost = "db.internal";
+    forward.TargetPort = 5432;
+    peer.PortForwards.push_back(forward);
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 1401;
+    }
+
+    const std::string forwardAddress = reactor.PortForwardListenAddressForTest("forward-listen", 0);
+    if (forwardAddress.empty() || forwardAddress == "127.0.0.1:0") {
+        reactor.Stop();
+        return 1402;
+    }
+
+    TqSocketHandle forwardFd = TqInvalidSocket;
+    if (!ConnectTo(forwardAddress, forwardFd)) {
+        reactor.Stop();
+        return 1403;
+    }
+    CloseFd(forwardFd);
+
+    reactor.Stop();
+    return 0;
+}
+
 int TestDuplicateAddPeerReturnsFalse() {
     TqClientIngressReactor reactor;
     if (!reactor.Start()) {
@@ -1039,6 +1073,8 @@ int main() {
     }
 
     int result = TestStartAddPeerCountRemoveStop();
+    if (result != 0) return result;
+    result = TestPortForwardListenAddressIsConnectable();
     if (result != 0) return result;
     result = TestDuplicateAddPeerReturnsFalse();
     if (result != 0) return result;
