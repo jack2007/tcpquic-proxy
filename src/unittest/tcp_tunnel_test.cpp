@@ -483,6 +483,7 @@ std::vector<uint8_t> BuildOpenRequestBytes(const char* host, uint16_t port) {
     return encoded;
 }
 
+#if defined(__linux__)
 std::vector<uint8_t> BuildDomainOpenRequestBytes(const char* host, uint16_t port) {
     TqOpenRequest req{};
     req.Flags = TQ_FLAG_DNS_REMOTE;
@@ -500,6 +501,7 @@ std::vector<uint8_t> BuildDomainOpenRequestBytes(const char* host, uint16_t port
     }
     return encoded;
 }
+#endif
 
 std::vector<uint8_t> BuildSpeedStartBytes(uint32_t sessionId) {
     TqSpeedStart start{};
@@ -885,6 +887,7 @@ int TestLegacyServerOpenCancelKeepsPendingUntilDetachedDialFinishes() {
     return 0;
 }
 
+#if defined(__linux__)
 int TestServerOpenCancelDoesNotUseFreedTunnel() {
     TqSocketStartup startup;
     if (!startup.Ok()) return 315;
@@ -1016,6 +1019,7 @@ int TestServerOpenCancelDoesNotUseFreedTunnel() {
     reactor.Stop();
     return 0;
 }
+#endif
 
 int TestServerOpenReactorAllowsEphemeralLoopback() {
     TqSocketStartup startup;
