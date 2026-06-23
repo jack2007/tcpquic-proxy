@@ -127,6 +127,29 @@ std::vector<uint8_t> ReadAvailable(TqSocketHandle fd) {
     }
 }
 
+bool WaitForCloseWithoutBytes(TqSocketHandle fd) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    uint8_t buffer[128]{};
+    while (std::chrono::steady_clock::now() < deadline) {
+        const int received = TqRecv(fd, buffer, sizeof(buffer), TqRecvFlags::DontWait);
+        if (received > 0) {
+            return false;
+        }
+        if (received == 0) {
+            return true;
+        }
+        if (TqSocketInterrupted(TqLastSocketError())) {
+            continue;
+        }
+        if (TqSocketWouldBlock(TqLastSocketError())) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
 bool WaitUntil(std::function<bool()> predicate) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -247,6 +270,218 @@ int TestStartAddPeerCountRemoveStop() {
     if (reactor.PeerCountForTest() != 0) {
         return 20;
     }
+    return 0;
+}
+
+int TestPortForwardListenAddressIsConnectable() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 1400;
+    }
+
+    TqClientIngressPeer peer = MakePeer("forward-listen");
+    TqPortForwardConfig forward;
+    forward.Listen = "127.0.0.1:0";
+    forward.TargetHost = "db.internal";
+    forward.TargetPort = 5432;
+    peer.PortForwards.push_back(forward);
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 1401;
+    }
+
+    const std::string forwardAddress = reactor.PortForwardListenAddressForTest("forward-listen", 0);
+    if (forwardAddress.empty() || forwardAddress == "127.0.0.1:0") {
+        reactor.Stop();
+        return 1402;
+    }
+
+    TqSocketHandle forwardFd = TqInvalidSocket;
+    if (!ConnectTo(forwardAddress, forwardFd)) {
+        reactor.Stop();
+        return 1403;
+    }
+    CloseFd(forwardFd);
+
+    reactor.Stop();
+    return 0;
+}
+
+int TestPortForwardOpenAcceptsWithoutProxyResponse() {
+    std::atomic<int> startCalls{0};
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
+    TunnelRequest capturedRequest{};
+    std::mutex capturedMutex;
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x300));
+
+    TqClientIngressPeer peer = MakePeer("forward-open");
+    TqPortForwardConfig forward;
+    forward.Listen = "127.0.0.1:0";
+    forward.TargetHost = "db.internal";
+    forward.TargetPort = 5432;
+    peer.PortForwards.push_back(forward);
+    peer.StartTunnel = [&](const TunnelRequest& req, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        {
+            std::lock_guard<std::mutex> lock(capturedMutex);
+            capturedRequest = req;
+        }
+        startCalls.fetch_add(1, std::memory_order_relaxed);
+        std::thread([onComplete, fakeHandle]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            onComplete(fakeHandle, TqTunnelStartResult{true, TqOpenError::Ok, 300});
+        }).detach();
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle != fakeHandle) {
+            return false;
+        }
+        acceptCalls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            rejectCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            cancelCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 1500;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 1501;
+    }
+
+    TqSocketHandle fd = TqInvalidSocket;
+    if (!ConnectTo(reactor.PortForwardListenAddressForTest("forward-open", 0), fd)) {
+        reactor.Stop();
+        return 1502;
+    }
+
+    if (!WaitUntil([&]() { return acceptCalls.load(std::memory_order_relaxed) == 1; })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1503;
+    }
+    if (!ReadAvailable(fd).empty()) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1504;
+    }
+    if (startCalls.load(std::memory_order_relaxed) != 1 ||
+        rejectCalls.load(std::memory_order_relaxed) != 0 ||
+        cancelCalls.load(std::memory_order_relaxed) != 0) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1505;
+    }
+
+    TunnelRequest request{};
+    {
+        std::lock_guard<std::mutex> lock(capturedMutex);
+        request = capturedRequest;
+    }
+    if (request.AddrType != TQ_ADDR_DOMAIN ||
+        std::string(request.Host) != "db.internal" ||
+        request.Port != 5432 ||
+        request.IngressTraceProto != 3) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1506;
+    }
+
+    CloseFd(fd);
+    reactor.Stop();
+    return 0;
+}
+
+int TestPortForwardOpenFailureClosesClient() {
+    std::atomic<int> startCalls{0};
+    std::atomic<int> acceptCalls{0};
+    std::atomic<int> rejectCalls{0};
+    std::atomic<int> cancelCalls{0};
+    auto* fakeHandle = reinterpret_cast<TqClientTunnelOpenHandle*>(static_cast<uintptr_t>(0x301));
+
+    TqClientIngressPeer peer = MakePeer("forward-fail");
+    TqPortForwardConfig forward;
+    forward.Listen = "127.0.0.1:0";
+    forward.TargetHost = "db.internal";
+    forward.TargetPort = 5432;
+    peer.PortForwards.push_back(forward);
+    peer.StartTunnel = [&](const TunnelRequest&, TqSocketHandle fd, TqClientTunnelOpenComplete onComplete) {
+        if (!TqSocketValid(fd)) {
+            return static_cast<TqClientTunnelOpenHandle*>(nullptr);
+        }
+        startCalls.fetch_add(1, std::memory_order_relaxed);
+        std::thread([onComplete, fakeHandle]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            onComplete(fakeHandle, TqTunnelStartResult{false, TqOpenError::AclDenied, 0});
+        }).detach();
+        return fakeHandle;
+    };
+    peer.AcceptTunnel = [&](TqClientTunnelOpenHandle*) {
+        acceptCalls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+    peer.RejectTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            rejectCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    peer.CancelTunnel = [&](TqClientTunnelOpenHandle* handle) {
+        if (handle == fakeHandle) {
+            cancelCalls.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 1510;
+    }
+    if (!reactor.AddPeer(peer)) {
+        reactor.Stop();
+        return 1511;
+    }
+
+    TqSocketHandle fd = TqInvalidSocket;
+    if (!ConnectTo(reactor.PortForwardListenAddressForTest("forward-fail", 0), fd)) {
+        reactor.Stop();
+        return 1512;
+    }
+
+    if (!WaitUntil([&]() { return rejectCalls.load(std::memory_order_relaxed) == 1; })) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1513;
+    }
+    if (!WaitForCloseWithoutBytes(fd)) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1514;
+    }
+    if (startCalls.load(std::memory_order_relaxed) != 1 ||
+        acceptCalls.load(std::memory_order_relaxed) != 0 ||
+        rejectCalls.load(std::memory_order_relaxed) != 1 ||
+        cancelCalls.load(std::memory_order_relaxed) != 0) {
+        CloseFd(fd);
+        reactor.Stop();
+        return 1515;
+    }
+
+    CloseFd(fd);
+    reactor.Stop();
     return 0;
 }
 
@@ -1039,6 +1274,12 @@ int main() {
     }
 
     int result = TestStartAddPeerCountRemoveStop();
+    if (result != 0) return result;
+    result = TestPortForwardListenAddressIsConnectable();
+    if (result != 0) return result;
+    result = TestPortForwardOpenAcceptsWithoutProxyResponse();
+    if (result != 0) return result;
+    result = TestPortForwardOpenFailureClosesClient();
     if (result != 0) return result;
     result = TestDuplicateAddPeerReturnsFalse();
     if (result != 0) return result;

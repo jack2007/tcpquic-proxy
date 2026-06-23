@@ -8,6 +8,8 @@
 
 namespace {
 
+constexpr size_t kMaxPortForwardTargetHostLength = 255;
+
 std::string JsonEscape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 2);
@@ -40,6 +42,62 @@ void AppendJsonString(std::ostringstream& out, const char* name, const std::stri
     out << '"' << name << "\":\"" << JsonEscape(value) << '"';
 }
 
+bool IsHostPort(const std::string& value) {
+    size_t portStart = std::string::npos;
+    if (!value.empty() && value[0] == '[') {
+        const size_t close = value.find(']');
+        if (close == std::string::npos || close == 1 || close + 2 > value.size() || value[close + 1] != ':') {
+            return false;
+        }
+        portStart = close + 2;
+    } else {
+        const size_t colon = value.find(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size() || value.find(':', colon + 1) != std::string::npos) {
+            return false;
+        }
+        portStart = colon + 1;
+    }
+
+    uint32_t port = 0;
+    for (size_t i = portStart; i < value.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
+            return false;
+        }
+        const uint32_t digit = static_cast<uint32_t>(value[i] - '0');
+        if (port > 6553 || (port == 6553 && digit > 5)) {
+            return false;
+        }
+        port = port * 10 + digit;
+    }
+    return port != 0;
+}
+
+std::string PortForwardTargetText(const TqPortForwardConfig& forward) {
+    std::ostringstream out;
+    if (forward.TargetHost.find(':') != std::string::npos) {
+        out << '[' << forward.TargetHost << ']';
+    } else {
+        out << forward.TargetHost;
+    }
+    out << ':' << forward.TargetPort;
+    return out.str();
+}
+
+void AppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortForwardConfig>& forwards) {
+    out << ",\"port_forwards\":[";
+    for (size_t i = 0; i < forwards.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << '{';
+        AppendJsonString(out, "listen", forwards[i].Listen);
+        out << ',';
+        AppendJsonString(out, "target", PortForwardTargetText(forwards[i]));
+        out << '}';
+    }
+    out << ']';
+}
+
 void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     out << '{';
     AppendJsonString(out, "peer_id", peer.PeerId);
@@ -49,6 +107,7 @@ void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     AppendJsonString(out, "socks_listen", peer.SocksListen);
     out << ',';
     AppendJsonString(out, "http_listen", peer.HttpListen);
+    AppendPortForwardsJson(out, peer.PortForwards);
     if (peer.QuicConnections != 0) {
         out << ",\"quic_connections\":" << peer.QuicConnections;
     }
@@ -67,6 +126,7 @@ void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
     AppendJsonString(out, "socks_listen", peer.SocksListen);
     out << ',';
     AppendJsonString(out, "http_listen", peer.HttpListen);
+    AppendPortForwardsJson(out, peer.PortForwards);
     out << ',';
     AppendJsonString(out, "state", peer.State);
     out << ",\"connection_count\":" << peer.ConnectionCount;
@@ -158,6 +218,8 @@ private:
                 if (!ParseStringField(peer.SocksListen, "invalid socks_listen")) return false;
             } else if (key == "http_listen") {
                 if (!ParseStringField(peer.HttpListen, "invalid http_listen")) return false;
+            } else if (key == "port_forwards") {
+                if (!ParsePortForwards(peer.PortForwards)) return false;
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
@@ -173,6 +235,99 @@ private:
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
         return Consume('}') || Error("malformed peer object");
+    }
+
+    bool ParsePortForwardPort(const std::string& value, size_t portStart, uint16_t& port) {
+        if (portStart >= value.size()) {
+            return false;
+        }
+        uint32_t parsedPort = 0;
+        for (size_t i = portStart; i < value.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
+                return false;
+            }
+            const uint32_t digit = static_cast<uint32_t>(value[i] - '0');
+            if (parsedPort > 6553 || (parsedPort == 6553 && digit > 5)) {
+                return false;
+            }
+            parsedPort = parsedPort * 10 + digit;
+        }
+        if (parsedPort == 0) {
+            return false;
+        }
+        port = static_cast<uint16_t>(parsedPort);
+        return true;
+    }
+
+    bool ParsePortForwardTargetText(const std::string& target, std::string& host, uint16_t& port) {
+        host.clear();
+        port = 0;
+
+        size_t portStart = std::string::npos;
+        if (!target.empty() && target[0] == '[') {
+            const size_t close = target.find(']');
+            if (close == std::string::npos || close == 1 || close + 2 > target.size() || target[close + 1] != ':') {
+                return false;
+            }
+            host = target.substr(1, close - 1);
+            portStart = close + 2;
+        } else {
+            const size_t colon = target.find(':');
+            if (colon == std::string::npos || colon == 0 || colon + 1 >= target.size() ||
+                target.find(':', colon + 1) != std::string::npos) {
+                return false;
+            }
+            host = target.substr(0, colon);
+            portStart = colon + 1;
+        }
+
+        if (host.empty() || host.size() > kMaxPortForwardTargetHostLength ||
+            !ParsePortForwardPort(target, portStart, port)) {
+            host.clear();
+            port = 0;
+            return false;
+        }
+        return true;
+    }
+
+    bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
+        forwards.clear();
+        if (!Consume('[')) return Error("port_forwards must be an array");
+        if (Consume(']')) return true;
+        do {
+            TqPortForwardConfig forward;
+            if (!ParsePortForwardObject(forward)) return false;
+            forwards.push_back(forward);
+        } while (Consume(','));
+        return Consume(']') || Error("malformed port_forwards array");
+    }
+
+    bool ParsePortForwardObject(TqPortForwardConfig& forward) {
+        if (!Consume('{')) return Error("port_forward must be an object");
+        bool hasListen = false;
+        bool hasTarget = false;
+        if (Consume('}')) return Error("port_forward listen and target are required");
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed port_forward object");
+            if (key == "listen") {
+                hasListen = true;
+                if (!ParseString(forward.Listen)) return Error("invalid port_forward.listen");
+                if (!IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
+            } else if (key == "target") {
+                hasTarget = true;
+                std::string target;
+                if (!ParseString(target)) return Error("invalid port_forward.target");
+                if (!ParsePortForwardTargetText(target, forward.TargetHost, forward.TargetPort)) {
+                    return Error("invalid port_forward.target");
+                }
+            } else {
+                return Error("unknown port_forward key: " + key);
+            }
+        } while (Consume(','));
+        if (!Consume('}')) return Error("malformed port_forward object");
+        if (!hasListen || !hasTarget) return Error("port_forward listen and target are required");
+        return true;
     }
 
     bool ParseStringField(std::string& out, const std::string& err) {
@@ -324,11 +479,26 @@ const TqPeerConfig* FindSingleEnabledPeer(const TqRouterConfig& config, size_t& 
     return enabledPeers == 1 ? enabledPeer : nullptr;
 }
 
+bool SamePortForwards(const std::vector<TqPortForwardConfig>& a, const std::vector<TqPortForwardConfig>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].Listen != b[i].Listen ||
+            a[i].TargetHost != b[i].TargetHost ||
+            a[i].TargetPort != b[i].TargetPort) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SameBridgeActivePeer(const TqPeerConfig& a, const TqPeerConfig& b) {
     return a.PeerId == b.PeerId &&
         a.QuicPeer == b.QuicPeer &&
         a.SocksListen == b.SocksListen &&
         a.HttpListen == b.HttpListen &&
+        SamePortForwards(a.PortForwards, b.PortForwards) &&
         a.QuicConnections == b.QuicConnections &&
         a.Compress == b.Compress;
 }
@@ -337,6 +507,7 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
     return a.QuicPeer != b.QuicPeer ||
         a.SocksListen != b.SocksListen ||
         a.HttpListen != b.HttpListen ||
+        !SamePortForwards(a.PortForwards, b.PortForwards) ||
         a.QuicConnections != b.QuicConnections ||
         a.Compress != b.Compress;
 }
@@ -409,6 +580,7 @@ bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err
         metrics.QuicPeer = peer.QuicPeer;
         metrics.SocksListen = peer.SocksListen;
         metrics.HttpListen = peer.HttpListen;
+        metrics.PortForwards = peer.PortForwards;
         metrics.LastError = adapterErr;
         if (!peer.Enabled) {
             metrics.State = "disabled";
@@ -462,6 +634,7 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
                 peer.LastError = live.LastError;
                 peer.LastConnectedAt = live.LastConnectedAt;
                 peer.State = live.State;
+                peer.PortForwards = item.second.PortForwards;
             }
         }
         snapshot.Peers.push_back(peer);

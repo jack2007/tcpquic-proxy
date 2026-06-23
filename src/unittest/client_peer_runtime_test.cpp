@@ -7,6 +7,7 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     cfg.QuicPeer = "10.0.0.1:4433";
     cfg.SocksListen = "127.0.0.1:1080";
     cfg.HttpListen = "127.0.0.1:18080";
+    cfg.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15432", "db.internal", 5432});
     cfg.QuicConnections = 4;
     cfg.Compress = "off";
 
@@ -18,6 +19,8 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     if (peer.QuicConnections != cfg.QuicConnections) return 14;
     if (peer.Compress != cfg.Compress) return 15;
     if (!peer.Enabled) return 16;
+    if (peer.PortForwards.size() != 1) return 17;
+    if (peer.PortForwards[0].Listen != "127.0.0.1:15432") return 18;
     return 0;
 }
 
@@ -31,6 +34,7 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     peer.QuicPeer = "10.0.0.2:4433";
     peer.SocksListen = "127.0.0.1:11001";
     peer.HttpListen = "127.0.0.1:18081";
+    peer.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15433", "cache.internal", 6379});
     peer.QuicConnections = 8;
     peer.Compress = "off";
 
@@ -42,6 +46,9 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     if (out.Compress != peer.Compress) return 24;
     if (!out.ClientConfigPath.empty()) return 25;
     if (!out.AdminListen.empty()) return 26;
+    if (out.PortForwards.size() != 1) return 27;
+    if (out.PortForwards[0].TargetHost != "cache.internal") return 28;
+    if (out.PortForwards[0].TargetPort != 6379) return 29;
     return 0;
 }
 

@@ -46,6 +46,7 @@ struct TqClientIngressPeer {
     std::string PeerId;
     std::string SocksListen;
     std::string HttpListen;
+    std::vector<TqPortForwardConfig> PortForwards;
     TqConfig Config;
     TqClientIngressTunnelStartFn StartTunnel;
     TqClientIngressTunnelAcceptFn AcceptTunnel;
@@ -71,6 +72,7 @@ public:
 #if defined(TQ_UNIT_TESTING)
     std::string SocksListenAddressForTest(const std::string& peerId) const;
     std::string HttpListenAddressForTest(const std::string& peerId) const;
+    std::string PortForwardListenAddressForTest(const std::string& peerId, size_t index) const;
     void SetOpenTimeoutForTest(std::chrono::milliseconds timeout);
 #endif
 
@@ -78,6 +80,7 @@ private:
     enum class ListenProto {
         Socks5,
         HttpConnect,
+        PortForward,
     };
 
     enum class LifecycleState {
@@ -86,17 +89,22 @@ private:
         Stopping,
     };
 
-    struct PeerEntry {
-        TqClientIngressPeer Peer;
-        TqSocketHandle SocksFd{TqInvalidSocket};
-        TqSocketHandle HttpFd{TqInvalidSocket};
-        std::string SocksAddress;
-        std::string HttpAddress;
-    };
-
     struct ListenEntry {
         std::string PeerId;
         ListenProto Proto{ListenProto::Socks5};
+        TqPortForwardConfig Forward;
+    };
+
+    struct PeerListen {
+        ListenProto Proto{ListenProto::Socks5};
+        TqSocketHandle Fd{TqInvalidSocket};
+        std::string Address;
+        TqPortForwardConfig Forward;
+    };
+
+    struct PeerEntry {
+        TqClientIngressPeer Peer;
+        std::vector<PeerListen> Listeners;
     };
 
     struct DelayedTask {
@@ -125,6 +133,8 @@ private:
         TqClientIngressTunnelCloseFn RejectTunnel;
         TqClientIngressTunnelCloseFn CancelTunnel;
         ClientPhase Phase{ClientPhase::Handshake};
+        TunnelRequest FixedRequest{};
+        bool HasFixedRequest{false};
         std::string PendingWrite;
         TqClientTunnelOpenHandle* OpenHandle{nullptr};
         std::shared_ptr<OpenCompletionState> OpenCompletion;

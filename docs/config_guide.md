@@ -88,6 +88,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
       // Local proxy listeners for this peer.
       "socks_listen": "127.0.0.1:1080",
       "http_listen": "127.0.0.1:8080",
+      "port_forwards": [
+        {"listen": "127.0.0.1:15432", "target": "db.internal.example.com:5432"}
+      ],
 
       // Optional per-peer overrides.
       "proto_connections": 16,
@@ -95,6 +98,22 @@ Client config uses `peers` for all destinations. A single remote server is repre
       "compress": "off",
       "enabled": true
     }
+  ]
+}
+```
+
+## Local Port Forward Example
+
+Use multiple `port_forwards` array items to configure multiple local forwards.
+
+```json
+{
+  "id": "db",
+  "proto_peer": "proxy-b.example.com:443",
+  "socks_listen": "",
+  "http_listen": "",
+  "port_forwards": [
+    {"listen": "127.0.0.1:15432", "target": "db.internal.example.com:5432"}
   ]
 }
 ```
@@ -187,8 +206,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `trace.interval_sec` | client/server | Periodic trace interval in seconds. |
 | `peers[].id` | client | Stable peer id. Required. |
 | `peers[].proto_peer` | client | Remote protocol endpoint. Required. |
-| `peers[].socks_listen` | client | SOCKS5 listener for this peer. Required. |
+| `peers[].socks_listen` | client | Optional SOCKS5 listener for this peer; each peer requires at least one ingress among SOCKS, HTTP, or `port_forwards`. |
 | `peers[].http_listen` | client | Optional HTTP CONNECT listener for this peer. |
+| `peers[].port_forwards` | client | Optional local port-forward rules, default `[]`. Each item contains `listen` and `target`. |
 | `peers[].proto_connections` | client | Optional per-peer connection count override. |
 | `peers[].proto_reconnect_interval_ms` | client | Optional per-peer reconnect interval override. |
 | `peers[].compress` | client | Optional per-peer compression override. |

@@ -22,7 +22,7 @@ struct TunnelRequest {
     char Host[256];
     uint16_t Port;
     uint8_t CompressFlags;
-    uint8_t IngressTraceProto{0}; // 1=socks5, 2=http (trace)
+    uint8_t IngressTraceProto{0}; // 1=socks5, 2=http, 3=port-forward (trace)
 };
 
 struct TqTunnelStartResult {

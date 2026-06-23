@@ -1,9 +1,12 @@
 #pragma once
 
+#include "config.h"
+
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 struct TqServerMetrics {
     mutable std::mutex Lock;
@@ -27,6 +30,7 @@ struct TqClientMetrics {
     std::string QuicPeer;
     std::string SocksListen;
     std::string HttpListen;
+    std::vector<TqPortForwardConfig> PortForwards;
     uint32_t ConnectionCount{0};
     uint32_t ConnectedConnections{0};
     std::string LastError;

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <future>
 #include <memory>
@@ -119,6 +120,29 @@ std::string TqBuildOpenResponse(bool socks, TqOpenError error) {
         return TqBuildSocks5Response(error);
     }
     return TqBuildHttpConnectResponse(error);
+}
+
+uint8_t TqAddrTypeForForwardHost(const std::string& host) {
+    in_addr ipv4{};
+    if (TqInetPton(AF_INET, host.c_str(), &ipv4)) {
+        return TQ_ADDR_IPV4;
+    }
+
+    in6_addr ipv6{};
+    if (TqInetPton(AF_INET6, host.c_str(), &ipv6)) {
+        return TQ_ADDR_IPV6;
+    }
+
+    return TQ_ADDR_DOMAIN;
+}
+
+TunnelRequest TqBuildPortForwardRequest(const TqPortForwardConfig& forward) {
+    TunnelRequest request{};
+    request.AddrType = TqAddrTypeForForwardHost(forward.TargetHost);
+    std::snprintf(request.Host, sizeof(request.Host), "%s", forward.TargetHost.c_str());
+    request.Port = forward.TargetPort;
+    request.IngressTraceProto = 3;
+    return request;
 }
 
 } // namespace
@@ -247,35 +271,63 @@ void TqClientIngressReactor::Stop() {
 bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
     {
         std::lock_guard<std::mutex> lock(Mutex);
-        if (!Running.load(std::memory_order_acquire) || peer.PeerId.empty() || peer.SocksListen.empty() ||
+        if (!Running.load(std::memory_order_acquire) || peer.PeerId.empty() ||
             Peers.find(peer.PeerId) != Peers.end()) {
             return false;
         }
     }
 
-    auto socks = std::make_shared<TqListenSocket>();
-    if (!TqCreateNonBlockingListenSocket(peer.SocksListen, *socks)) {
+    struct PendingListen {
+        ListenProto Proto{ListenProto::Socks5};
+        TqListenSocket Socket;
+        TqPortForwardConfig Forward;
+    };
+
+    auto pending = std::make_shared<std::vector<PendingListen>>();
+    if (!peer.SocksListen.empty()) {
+        PendingListen listen;
+        listen.Proto = ListenProto::Socks5;
+        if (!TqCreateNonBlockingListenSocket(peer.SocksListen, listen.Socket)) {
+            return false;
+        }
+        pending->push_back(std::move(listen));
+    }
+    if (!peer.HttpListen.empty()) {
+        PendingListen listen;
+        listen.Proto = ListenProto::HttpConnect;
+        if (!TqCreateNonBlockingListenSocket(peer.HttpListen, listen.Socket)) {
+            for (auto& pendingListen : *pending) {
+                TqCloseFd(pendingListen.Socket.Fd);
+            }
+            return false;
+        }
+        pending->push_back(std::move(listen));
+    }
+    for (const auto& forward : peer.PortForwards) {
+        PendingListen listen;
+        listen.Proto = ListenProto::PortForward;
+        listen.Forward = forward;
+        if (!TqCreateNonBlockingListenSocket(forward.Listen, listen.Socket)) {
+            for (auto& pendingListen : *pending) {
+                TqCloseFd(pendingListen.Socket.Fd);
+            }
+            return false;
+        }
+        pending->push_back(std::move(listen));
+    }
+    if (pending->empty()) {
         return false;
     }
 
-    auto http = std::make_shared<TqListenSocket>();
-    if (!peer.HttpListen.empty() && !TqCreateNonBlockingListenSocket(peer.HttpListen, *http)) {
-        TqCloseFd(socks->Fd);
-        return false;
-    }
-
-    const bool added = EnqueueSync([this, peer, socks, http]() {
+    const bool added = EnqueueSync([this, peer, pending]() {
         std::lock_guard<std::mutex> lock(Mutex);
         auto cleanup = [&]() {
-            if (TqSocketValid(socks->Fd)) {
-                (void)Reactor.Remove(socks->Fd);
-                Listens.erase(socks->Fd);
-                TqCloseFd(socks->Fd);
-            }
-            if (TqSocketValid(http->Fd)) {
-                (void)Reactor.Remove(http->Fd);
-                Listens.erase(http->Fd);
-                TqCloseFd(http->Fd);
+            for (auto& pendingListen : *pending) {
+                if (TqSocketValid(pendingListen.Socket.Fd)) {
+                    (void)Reactor.Remove(pendingListen.Socket.Fd);
+                    Listens.erase(pendingListen.Socket.Fd);
+                    TqCloseFd(pendingListen.Socket.Fd);
+                }
             }
         };
 
@@ -284,25 +336,15 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
             return false;
         }
 
-        Listens.emplace(socks->Fd, ListenEntry{peer.PeerId, ListenProto::Socks5});
-        if (!Reactor.Add(socks->Fd, TqReactorEvents::Read,
+        for (const auto& pendingListen : *pending) {
+            Listens.emplace(pendingListen.Socket.Fd,
+                ListenEntry{peer.PeerId, pendingListen.Proto, pendingListen.Forward});
+            if (!Reactor.Add(pendingListen.Socket.Fd, TqReactorEvents::Read,
                 [this](TqSocketHandle fd, uint32_t events) {
                     if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
                         AcceptLoop(fd);
                     }
                 })) {
-            cleanup();
-            return false;
-        }
-
-        if (TqSocketValid(http->Fd)) {
-            Listens.emplace(http->Fd, ListenEntry{peer.PeerId, ListenProto::HttpConnect});
-            if (!Reactor.Add(http->Fd, TqReactorEvents::Read,
-                    [this](TqSocketHandle fd, uint32_t events) {
-                        if ((events & (TqReactorEvents::Read | TqReactorEvents::Error)) != 0) {
-                            AcceptLoop(fd);
-                        }
-                    })) {
                 cleanup();
                 return false;
             }
@@ -310,18 +352,23 @@ bool TqClientIngressReactor::AddPeer(const TqClientIngressPeer& peer) {
 
         PeerEntry entry{};
         entry.Peer = peer;
-        entry.SocksFd = socks->Fd;
-        entry.HttpFd = http->Fd;
-        entry.SocksAddress = socks->Address;
-        entry.HttpAddress = http->Address;
-        socks->Fd = TqInvalidSocket;
-        http->Fd = TqInvalidSocket;
+        entry.Listeners.reserve(pending->size());
+        for (auto& pendingListen : *pending) {
+            PeerListen listen;
+            listen.Proto = pendingListen.Proto;
+            listen.Fd = pendingListen.Socket.Fd;
+            listen.Address = pendingListen.Socket.Address;
+            listen.Forward = std::move(pendingListen.Forward);
+            pendingListen.Socket.Fd = TqInvalidSocket;
+            entry.Listeners.push_back(std::move(listen));
+        }
         Peers.emplace(peer.PeerId, std::move(entry));
         return true;
     });
     if (!added) {
-        TqCloseFd(socks->Fd);
-        TqCloseFd(http->Fd);
+        for (auto& pendingListen : *pending) {
+            TqCloseFd(pendingListen.Socket.Fd);
+        }
     }
     return added;
 }
@@ -349,7 +396,12 @@ std::string TqClientIngressReactor::SocksListenAddressForTest(const std::string&
     if (it == Peers.end()) {
         return {};
     }
-    return it->second.SocksAddress;
+    for (const auto& listen : it->second.Listeners) {
+        if (listen.Proto == ListenProto::Socks5) {
+            return listen.Address;
+        }
+    }
+    return {};
 }
 
 std::string TqClientIngressReactor::HttpListenAddressForTest(const std::string& peerId) const {
@@ -358,7 +410,33 @@ std::string TqClientIngressReactor::HttpListenAddressForTest(const std::string& 
     if (it == Peers.end()) {
         return {};
     }
-    return it->second.HttpAddress;
+    for (const auto& listen : it->second.Listeners) {
+        if (listen.Proto == ListenProto::HttpConnect) {
+            return listen.Address;
+        }
+    }
+    return {};
+}
+
+std::string TqClientIngressReactor::PortForwardListenAddressForTest(
+    const std::string& peerId,
+    size_t index) const {
+    std::lock_guard<std::mutex> lock(Mutex);
+    const auto it = Peers.find(peerId);
+    if (it == Peers.end()) {
+        return {};
+    }
+    size_t forwardIndex = 0;
+    for (const auto& listen : it->second.Listeners) {
+        if (listen.Proto != ListenProto::PortForward) {
+            continue;
+        }
+        if (forwardIndex == index) {
+            return listen.Address;
+        }
+        ++forwardIndex;
+    }
+    return {};
 }
 
 void TqClientIngressReactor::SetOpenTimeoutForTest(std::chrono::milliseconds timeout) {
@@ -527,6 +605,7 @@ int TqClientIngressReactor::NextRunTimeoutMsLocked() const {
 void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
     std::string peerId;
     ListenProto proto = ListenProto::Socks5;
+    TqPortForwardConfig forward;
     {
         std::lock_guard<std::mutex> lock(Mutex);
         const auto listenIt = Listens.find(listenFd);
@@ -535,39 +614,53 @@ void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
         }
         peerId = listenIt->second.PeerId;
         proto = listenIt->second.Proto;
+        forward = listenIt->second.Forward;
     }
 
     for (int accepted = 0; accepted < TqMaxIngressAcceptsPerEvent; ++accepted) {
         TqSocketHandle clientFd = TqAcceptClient(listenFd);
 
         if (TqSocketValid(clientFd)) {
-            std::lock_guard<std::mutex> lock(Mutex);
-            const auto peerIt = Peers.find(peerId);
-            if (peerIt == Peers.end()) {
-                TqCloseFd(clientFd);
-                continue;
-            }
+            bool startDirectOpen = false;
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                const auto peerIt = Peers.find(peerId);
+                if (peerIt == Peers.end()) {
+                    TqCloseFd(clientFd);
+                    continue;
+                }
 
-            ClientEntry client{};
-            client.PeerId = peerId;
-            client.Proto = proto;
-            std::shared_ptr<const TqProxyAuthTable> auth =
-                std::make_shared<TqProxyAuthTable>(peerIt->second.Peer.Config.Router.ProxyAuth);
-            client.State = TqClientIngressState(
-                TqToIngressProto(proto == ListenProto::Socks5),
-                auth);
-            client.StartTunnel = peerIt->second.Peer.StartTunnel;
-            client.AcceptTunnel = peerIt->second.Peer.AcceptTunnel;
-            client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
-            client.CancelTunnel = peerIt->second.Peer.CancelTunnel;
-            if (!Reactor.Add(clientFd, TqReactorEvents::Read,
-                    [this](TqSocketHandle fd, uint32_t events) {
-                        HandleClientEvents(fd, events);
-                    })) {
-                TqCloseFd(clientFd);
-                continue;
+                ClientEntry client{};
+                client.PeerId = peerId;
+                client.Proto = proto;
+                if (proto == ListenProto::PortForward) {
+                    client.State = TqClientIngressState(TqClientIngressProto::Socks5);
+                    client.FixedRequest = TqBuildPortForwardRequest(forward);
+                    client.HasFixedRequest = true;
+                    startDirectOpen = true;
+                } else {
+                    std::shared_ptr<const TqProxyAuthTable> auth =
+                        std::make_shared<TqProxyAuthTable>(peerIt->second.Peer.Config.Router.ProxyAuth);
+                    client.State = TqClientIngressState(
+                        TqToIngressProto(proto == ListenProto::Socks5),
+                        auth);
+                }
+                client.StartTunnel = peerIt->second.Peer.StartTunnel;
+                client.AcceptTunnel = peerIt->second.Peer.AcceptTunnel;
+                client.RejectTunnel = peerIt->second.Peer.RejectTunnel;
+                client.CancelTunnel = peerIt->second.Peer.CancelTunnel;
+                if (!Reactor.Add(clientFd, TqReactorEvents::Read,
+                        [this](TqSocketHandle fd, uint32_t events) {
+                            HandleClientEvents(fd, events);
+                        })) {
+                    TqCloseFd(clientFd);
+                    continue;
+                }
+                Clients.emplace(clientFd, std::move(client));
             }
-            Clients.emplace(clientFd, std::move(client));
+            if (startDirectOpen) {
+                StartClientOpen(clientFd);
+            }
             continue;
         }
 
@@ -665,8 +758,14 @@ void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
                     completedOpenSucceeded = client.OpenSucceeded;
                     acceptTunnel = client.AcceptTunnel;
                     rejectTunnel = client.RejectTunnel;
-                    removeOwnedByTunnel = completedHandle != nullptr;
-                    closeOwnedByReactor = completedHandle == nullptr;
+                    if (client.Proto == ListenProto::PortForward && !completedOpenSucceeded) {
+                        client.OpenHandle = nullptr;
+                        removeOwnedByTunnel = false;
+                        closeOwnedByReactor = true;
+                    } else {
+                        removeOwnedByTunnel = completedHandle != nullptr;
+                        closeOwnedByReactor = completedHandle == nullptr;
+                    }
                 }
             } else {
                 const int sent = TqSend(clientFd, pending.data(), pending.size(), TqSendFlags::NoSignal);
@@ -682,8 +781,14 @@ void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
                             completedOpenSucceeded = client.OpenSucceeded;
                             acceptTunnel = client.AcceptTunnel;
                             rejectTunnel = client.RejectTunnel;
-                            removeOwnedByTunnel = completedHandle != nullptr;
-                            closeOwnedByReactor = completedHandle == nullptr;
+                            if (client.Proto == ListenProto::PortForward && !completedOpenSucceeded) {
+                                client.OpenHandle = nullptr;
+                                removeOwnedByTunnel = false;
+                                closeOwnedByReactor = true;
+                            } else {
+                                removeOwnedByTunnel = completedHandle != nullptr;
+                                closeOwnedByReactor = completedHandle == nullptr;
+                            }
                         }
                     }
                 } else if (sent < 0 && TqIsSocketInterrupted()) {
@@ -766,6 +871,7 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
     TqClientIngressTunnelStartFn startTunnel;
     TqClientIngressTunnelCloseFn rejectTunnel;
     bool socks = true;
+    bool portForward = false;
     std::weak_ptr<CompletionToken> completionToken;
     std::shared_ptr<OpenCompletionState> completionState;
     {
@@ -778,10 +884,11 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         if (client.Phase != ClientPhase::Handshake) {
             return;
         }
-        request = client.State.Request();
+        request = client.HasFixedRequest ? client.FixedRequest : client.State.Request();
         startTunnel = client.StartTunnel;
         rejectTunnel = client.RejectTunnel;
         socks = client.Proto == ListenProto::Socks5;
+        portForward = client.Proto == ListenProto::PortForward;
         completionToken = CompletionTokenPtr;
         completionState = std::make_shared<OpenCompletionState>();
         client.OpenCompletion = completionState;
@@ -848,7 +955,7 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
             return;
         }
         it->second.OpenHandle = handle;
-        if (it->second.PendingWrite.empty()) {
+        if (it->second.PendingWrite.empty() && !portForward) {
             it->second.PendingWrite = TqBuildOpenResponse(socks, TqOpenError::Internal);
         }
         timeout = OpenTimeout;
@@ -877,7 +984,11 @@ void TqClientIngressReactor::TimeoutClientOpen(
         cancelTunnel = client.CancelTunnel;
         client.OpenHandle = nullptr;
         client.OpenSucceeded = false;
-        client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, TqOpenError::TcpTimeout);
+        if (client.Proto == ListenProto::PortForward) {
+            client.PendingWrite.clear();
+        } else {
+            client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, TqOpenError::TcpTimeout);
+        }
         client.Phase = ClientPhase::WritingOpenResponse;
         (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
     }
@@ -946,7 +1057,11 @@ void TqClientIngressReactor::CompleteClientOpen(
         const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
         client.OpenCompletion = completionState;
         client.OpenSucceeded = result.Ok;
-        client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
+        if (client.Proto == ListenProto::PortForward) {
+            client.PendingWrite.clear();
+        } else {
+            client.PendingWrite = TqBuildOpenResponse(client.Proto == ListenProto::Socks5, error);
+        }
         client.Phase = ClientPhase::WritingOpenResponse;
         (void)Reactor.Modify(clientFd, TqReactorEvents::Write | TqReactorEvents::Error);
         writeNow = true;
@@ -989,16 +1104,14 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
         return;
     }
 
-    if (TqSocketValid(it->second.SocksFd)) {
-        (void)Reactor.Remove(it->second.SocksFd);
-        Listens.erase(it->second.SocksFd);
-        TqCloseFd(it->second.SocksFd);
+    for (auto& listen : it->second.Listeners) {
+        if (TqSocketValid(listen.Fd)) {
+            (void)Reactor.Remove(listen.Fd);
+            Listens.erase(listen.Fd);
+            TqCloseFd(listen.Fd);
+        }
     }
-    if (TqSocketValid(it->second.HttpFd)) {
-        (void)Reactor.Remove(it->second.HttpFd);
-        Listens.erase(it->second.HttpFd);
-        TqCloseFd(it->second.HttpFd);
-    }
+    it->second.Listeners.clear();
 
     std::vector<TqSocketHandle> clientFds;
     for (auto clientIt = Clients.begin(); clientIt != Clients.end(); ++clientIt) {
@@ -1015,14 +1128,14 @@ void TqClientIngressReactor::RemovePeerLocked(const std::string& peerId) {
 
 void TqClientIngressReactor::CloseAllLocked() {
     for (auto& item : Peers) {
-        if (TqSocketValid(item.second.SocksFd)) {
-            (void)Reactor.Remove(item.second.SocksFd);
-            TqCloseFd(item.second.SocksFd);
+        for (auto& listen : item.second.Listeners) {
+            if (TqSocketValid(listen.Fd)) {
+                (void)Reactor.Remove(listen.Fd);
+                Listens.erase(listen.Fd);
+                TqCloseFd(listen.Fd);
+            }
         }
-        if (TqSocketValid(item.second.HttpFd)) {
-            (void)Reactor.Remove(item.second.HttpFd);
-            TqCloseFd(item.second.HttpFd);
-        }
+        item.second.Listeners.clear();
     }
 
     std::vector<TqSocketHandle> clientFds;
