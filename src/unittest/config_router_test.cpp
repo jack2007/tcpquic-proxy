@@ -27,6 +27,12 @@ static bool Parse(int argc, char** argv, TqConfig& cfg, std::string& err) {
     return ok;
 }
 
+static bool ParseRuntimeConfig(const std::string& body, TqConfig& cfg, std::string& err) {
+    std::string file = WriteTempConfig(body);
+    const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+    return Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err);
+}
+
 static bool Load(const std::string& body, TqRouterConfig& router, std::string& err) {
     std::string file = WriteTempConfig(body);
     err.clear();
@@ -377,6 +383,34 @@ int main() {
         if (cfg.PortForwards[1].TargetPort != 8080) return 195;
     }
     {
+        const char* values[] = {
+            "=target",
+            "listen=",
+            "127.0.0.1:0=target:1",
+            "127.0.0.1:99999=target:1",
+            "127.0.0.1:15432=2001:db8::1:443",
+        };
+        for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i) {
+            const char* args[] = {
+                "tcpquic-proxy",
+                "client",
+                "--peer",
+                "127.0.0.1:14444",
+                "--forward",
+                values[i],
+                "--cert",
+                "a.crt",
+                "--key",
+                "a.key",
+                "--ca",
+                "ca.crt"};
+            TqConfig cfg;
+            std::string err;
+            if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 220;
+            if (err.find("--forward") == std::string::npos) return 221;
+        }
+    }
+    {
         const char* args[] = {
             "tcpquic-proxy",
             "client",
@@ -539,6 +573,54 @@ int main() {
         if (cfg.QuicCa != "ca.crt") return 183;
         if (!cfg.QuicCert.empty()) return 184;
         if (!cfg.QuicKey.empty()) return 185;
+    }
+    {
+        TqConfig cfg;
+        std::string err;
+        if (!ParseRuntimeConfig(R"json({
+            "tls":{"ca":"ca.crt"},
+            "peers":[{
+                "id":"primary",
+                "proto_peer":"127.0.0.1:4433",
+                "port_forwards":[
+                    {"listen":"127.0.0.1:15432","target":"db.example.com:5432"},
+                    {"listen":"[::1]:18080","target":"10.0.0.15:8080"}
+                ]
+            }]
+        })json", cfg, err)) return 222;
+        if (cfg.Router.Peers.size() != 1) return 223;
+        if (cfg.Router.Peers[0].PeerId != "primary") return 224;
+        if (cfg.Router.Peers[0].QuicPeer != "127.0.0.1:4433") return 225;
+        if (cfg.Router.Peers[0].PortForwards.size() != 2) return 226;
+        if (cfg.Router.Peers[0].PortForwards[0].Listen != "127.0.0.1:15432") return 227;
+        if (cfg.Router.Peers[0].PortForwards[0].TargetHost != "db.example.com") return 228;
+        if (cfg.Router.Peers[0].PortForwards[0].TargetPort != 5432) return 229;
+        if (cfg.Router.Peers[0].PortForwards[1].Listen != "[::1]:18080") return 230;
+        if (cfg.Router.Peers[0].PortForwards[1].TargetHost != "10.0.0.15") return 231;
+        if (cfg.Router.Peers[0].PortForwards[1].TargetPort != 8080) return 232;
+    }
+    {
+        struct Case {
+            const char* portForwards;
+            const char* expectedError;
+        };
+        const Case cases[] = {
+            {R"json([{"target":"db.example.com:5432"}])json", "port_forward listen and target are required"},
+            {R"json([{"listen":"127.0.0.1:15432"}])json", "port_forward listen and target are required"},
+            {R"json([{"listen":"127.0.0.1:15432","target":"db.example.com:5432","extra":true}])json", "unknown port_forward key"},
+            {R"json({"listen":"127.0.0.1:15432","target":"db.example.com:5432"})json", "port_forwards must be an array"},
+            {R"json([{"listen":"127.0.0.1:15432","target":"db.example.com:99999"}])json", "invalid port_forward.target"},
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+            std::string body =
+                R"json({"tls":{"ca":"ca.crt"},"peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","port_forwards":)json";
+            body += cases[i].portForwards;
+            body += R"json(}]})json";
+            TqConfig cfg;
+            std::string err;
+            if (ParseRuntimeConfig(body, cfg, err)) return 233;
+            if (err.find(cases[i].expectedError) == std::string::npos) return 234;
+        }
     }
     {
         std::string file = WriteTempConfig(R"json({
