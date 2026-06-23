@@ -69,6 +69,7 @@ int main() {
         if (usage.find("--keepalive-ms <n>") == std::string::npos) return 154;
         if (usage.find("default 5000, 1000..15000") == std::string::npos) return 155;
         if (usage.find("--diag-stats                 Low-overhead periodic stderr stats") == std::string::npos) return 169;
+        if (usage.find("--trace-connect-on-start") != std::string::npos) return 174;
         if (usage.find("--compress <mode>            auto|zstd|off (default off)") == std::string::npos) return 133;
         if (usage.find("--quic-") != std::string::npos) return 134;
         if (usage.find("QUIC") != std::string::npos) return 135;
@@ -76,7 +77,15 @@ int main() {
         if (usage.find("--download-sink-test") != std::string::npos) return 137;
         if (usage.find("--enable-encrypt") == std::string::npos) return 138;
         if (usage.find("--disable-1rtt-encryption") != std::string::npos) return 139;
-        if (usage.find("--relay-inflight-bytes <n>") == std::string::npos) return 144;
+        if (usage.find("--relay-inflight-bytes") != std::string::npos) return 144;
+        if (usage.find("--initial-quic-read-ahead") != std::string::npos) return 147;
+        if (usage.find("--target-bandwidth-mbps") != std::string::npos) return 148;
+        if (usage.find("--target-rtt-ms") != std::string::npos) return 156;
+        if (usage.find("--fcw") != std::string::npos) return 157;
+        if (usage.find("--srw") != std::string::npos) return 158;
+        if (usage.find("custom") != std::string::npos) return 159;
+        if (usage.find("--iw <packets>") == std::string::npos) return 160;
+        if (usage.find("--initrtt-ms <n>") == std::string::npos) return 161;
         if (usage.find("--relay-io-size <bytes>      Override relay IO size") == std::string::npos) return 145;
         if (usage.find("Linux relay TCP read chunk size") == std::string::npos) return 146;
         if (usage.find("--max-memory-mb <n>") == std::string::npos) return 149;
@@ -408,7 +417,7 @@ int main() {
             },
             "compression":{"mode":"off"},
             "proto":{"disable_1rtt_encryption":true,"initrtt_ms":1},
-            "tuning":{"mode":"custom"},
+            "tuning":{"mode":"wan"},
             "relay":{"linux":{"read_chunk_size":262144,"worker_slots":1024}}
         })json");
         const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
@@ -447,51 +456,34 @@ int main() {
         if (cfg.QuicDisable1RttEncryption) return 143;
     }
     {
-        const char* args[] = {
-            "tcpquic-proxy",
-            "server",
-            "--listen",
-            "0.0.0.0:4433",
-            "--allow-targets",
-            "127.0.0.1/32",
-            "--relay-inflight-bytes",
-            "1048576",
-            "--cert",
-            "a.crt",
-            "--key",
-            "a.key",
-            "--ca",
-            "ca.crt"};
-        TqConfig cfg;
-        std::string err;
-        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 147;
-        if (cfg.TuningOverrideRelayInflightBytes != 1048576) return 148;
-        if (cfg.Tuning.RelayDefaultIdealSend != 1048576) return 149;
-        if (cfg.Tuning.RelayMaxInFlightSends < 1) return 150;
-    }
-    {
-        const char* args[] = {
-            "tcpquic-proxy",
-            "client",
-            "--peer",
-            "127.0.0.1:4433",
-            "--relay-inflight-bytes",
-            "1073741824",
-            "--relay-io-size",
-            "1048576",
-            "--cert",
-            "a.crt",
-            "--key",
-            "a.key",
-            "--ca",
-            "ca.crt"};
-        TqConfig cfg;
-        std::string err;
-        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
-        if (cfg.Tuning.RelayMaxInFlightSends != 1024) return 157;
-        if (cfg.Tuning.TcpSocketBufferBytes != 64 * 1024 * 1024) return 158;
-        if (cfg.Tuning.LinuxRelayPerTunnelPendingBytes < TqValidationRelaySendBufferCapBytes) return 159;
-        if (cfg.Tuning.InitialQuicReadAheadBytes != 512ull * 1024 * 1024) return 160;
+        const char* removed[][2] = {
+            {"--target-bandwidth-mbps", "10000"},
+            {"--target-rtt-ms", "100"},
+            {"--relay-inflight-bytes", "1048576"},
+            {"--initial-quic-read-ahead", "2097152"},
+            {"--fcw", "1073741824"},
+            {"--srw", "1073741824"},
+            {"--tuning", "custom"},
+        };
+        for (const auto& item : removed) {
+            const char* args[] = {
+                "tcpquic-proxy",
+                "client",
+                "--peer",
+                "127.0.0.1:4433",
+                item[0],
+                item[1],
+                "--cert",
+                "a.crt",
+                "--key",
+                "a.key",
+                "--ca",
+                "ca.crt"};
+            TqConfig cfg;
+            std::string err;
+            if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 147;
+            if (err.empty()) return 148;
+        }
     }
     {
         const char* args[] = {
@@ -530,11 +522,30 @@ int main() {
         if (err.find("unknown tuning key: max_memory_mb") == std::string::npos) return 153;
     }
     {
+        const char* configs[] = {
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"proto":{"fcw":1073741824}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"proto":{"srw":1073741824}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"relay":{"inflight_bytes":1048576}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"relay":{"initial_quic_read_ahead":2097152}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"tuning":{"target_bandwidth_mbps":10000}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"tuning":{"target_rtt_ms":100}})json",
+            R"json({"tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},"server":{"proto_listen":"0.0.0.0:4433"},"tuning":{"mode":"custom"}})json",
+        };
+        for (const char* body : configs) {
+            std::string file = WriteTempConfig(body);
+            const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
+            TqConfig cfg;
+            std::string err;
+            if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 154;
+            if (err.empty()) return 155;
+        }
+    }
+    {
         std::string file = WriteTempConfig(R"json({
             "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
             "proto":{"profile":"low-latency","connections":8,"connection_stream_count":2048,"keepalive_ms":15000},
             "client":{"download_test":30,"handshake_threads":4},
-            "trace":{"enabled":true,"interval_sec":2,"connect_on_start":true},
+            "trace":{"enabled":true,"interval_sec":2},
             "peers":[{
                 "id":"primary",
                 "proto_peer":"127.0.0.1:4433",
@@ -558,7 +569,37 @@ int main() {
         if (cfg.SpeedTestDurationSec != 30) return 98;
         if (cfg.QuicProfile != TqQuicProfile::LowLatency) return 99;
         if (cfg.HandshakeThreads != 4) return 100;
-        if (!cfg.Trace || cfg.TraceIntervalSec != 2 || !cfg.TraceConnectOnStart) return 101;
+        if (!cfg.Trace || cfg.TraceIntervalSec != 2) return 101;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:4433",
+            "--trace-connect-on-start",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key",
+            "--ca",
+            "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 175;
+        if (err.find("unknown option: --trace-connect-on-start") == std::string::npos) return 176;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "trace":{"connect_on_start":true},
+            "peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 177;
+        if (err.find("unknown trace key: connect_on_start") == std::string::npos) return 178;
     }
     {
         std::string file = WriteTempConfig(R"json({

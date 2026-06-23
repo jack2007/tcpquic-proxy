@@ -12,7 +12,7 @@ BBR + 500MB 连接流控 + 512MiB Stream 接收窗口 + iw=2000 + initrtt=100ms
 + 正确 netem limit/interface + 足够长的测试载荷或 steady 指标口径
 ```
 
-当前程序默认 `--tuning wan`，因此不显式传 tuning 参数时已经启用上述 WAN 档位。`--tuning auto` / `custom` 可按目标带宽和 RTT 做 BDP 计算，`wan` / `auto` 还会利用运行时 RTT、吞吐和 MsQuic ideal-send hint 做保守下调。
+当前程序默认 `--tuning wan`，因此不显式传 tuning 参数时已经启用上述 WAN 档位。`--tuning auto` 当前等价于 WAN 档位入口，并保留给后续运行时自适应策略；`wan` / `auto` 会利用运行时 RTT 和 MsQuic ideal-send hint 做保守下调。
 
 ## 最有效参数
 
@@ -20,9 +20,9 @@ BBR + 500MB 连接流控 + 512MiB Stream 接收窗口 + iw=2000 + initrtt=100ms
 |-------------|-----------------|------|------|
 | 拥塞控制 | BBR | 高 RTT / 有丢包时比默认 CUBIC 更适合维持高吞吐 | `TqMakeMsQuicSettings()` 固定设置 `QUIC_CONGESTION_CONTROL_ALGORITHM_BBR` |
 | 连接流控窗口 | 500,000,000 bytes | 提供足够连接级在途数据窗口，填充高 BDP 管道 | `ApplyWanDefaults()` 默认；1GB 试验未超过 500MB，普通 WAN 档暂不继续增大 |
-| Stream 接收窗口 | 536,870,912 bytes（512MiB） | 避免单流接收窗口限制下载吞吐 | `--quic-srw` override 会向上取 2 的幂 |
+| Stream 接收窗口 | 536,870,912 bytes（512MiB） | 避免单流接收窗口限制下载吞吐 | 固定使用验证后的窗口值，不再暴露 `--srw` 覆盖 |
 | 初始拥塞窗口 | 2000 packets | 降低启动阶段窗口爬升时间 | 约 2.4MB，按 1200B 包估算 |
-| 初始 RTT | 100 ms | 让拥塞控制按 netem 后真实 RTT 收敛 | 运行时可用实测 RTT 覆盖，前提是未显式 `--target-rtt-ms` / `--quic-initrtt-ms` |
+| 初始 RTT | 100 ms | 让拥塞控制按 netem 后真实 RTT 收敛 | 运行时可用实测 RTT 覆盖，前提是未显式 `--initrtt-ms` |
 | SendBuffering | false | 应用自行管理发送流水线 | 与 secnetperf 高吞吐配置对齐 |
 | Pacing | true | 保持平滑发送，避免突发拥塞 | `pacing:0` 未观察到明显收益 |
 | StreamMultiReceive | true | 允许 MsQuic 多 receive 语义 | 当前 settings 显式启用 |
@@ -32,85 +32,57 @@ BBR + 500MB 连接流控 + 512MiB Stream 接收窗口 + iw=2000 + initrtt=100ms
 | Ideal send buffer | 64MiB | 保证应用层发送队列足够深 | WAN 默认 `RelayDefaultIdealSend` |
 | in-flight send | 64 | 保持 TCP→QUIC 转发流水线深度 | WAN 默认 `RelayMaxInFlightSends` / `RelayMaxFreeSendContexts` |
 | TCP socket buffer | 4MiB | 提高本地 TCP 后端 / 前端吞吐 | `TqTuneTcpForThroughput()` 设置 NODELAY + SNDBUF/RCVBUF |
-| Linux relay pending | 默认 16MiB/隧道，内存预算一半为全局 pending | 约束 Linux relay 队列内存 | custom 高 BDP 会把每隧道 pending 提升到 `min(ideal_send, 512MiB)` |
+| Linux relay pending | 默认不低于 512MiB/隧道，内存预算一半为全局 pending | 约束 Linux relay 队列内存 | 以 relay pending 512MiB 作为高吞吐基线，不再由 `--relay-inflight-bytes` 推导 |
 
 ## 当前 tuning profile 实现
 
 程序已实现轻量 tuning profile，而不是只停留在设计建议阶段：
 
 ```text
---tuning auto|lan|wan|custom
---target-bandwidth-mbps <n>
---target-rtt-ms <n>
+--tuning auto|lan|wan
 --relay-io-size <bytes>                  # Windows relay IO buffer size
 --linux-relay-read-chunk-size <bytes>    # Linux relay TCP read chunk size
 --linux-relay-worker-slots <n>
---quic-fcw <bytes>
---quic-srw <bytes>
---quic-iw <packets>
---quic-initrtt-ms <n>
+--iw <packets>
+--initrtt-ms <n>
 ```
 
 | profile | 当前行为 | 适用场景 |
 |---------|----------|----------|
 | `wan` | 默认 profile；固定使用 512MiB SRW、500MB FCW、iw=2000、initrtt=100ms、1MiB relay IO、64MiB ideal send、64 in-flight | 生产默认、高 RTT / 大 BDP、DGX WAN 压测 |
 | `lan` | 16MiB SRW/FCW、iw=256、initrtt=10ms、256KiB relay IO、4MiB ideal send、16 in-flight、1MiB TCP buffer | 低 RTT、本地/LAN、降低每隧道内存占用 |
-| `auto` | 若提供 `--target-bandwidth-mbps` + `--target-rtt-ms`，按 BDP 计算；否则退回 WAN 默认 | 希望按目标链路档位自动计算窗口 |
-| `custom` | 先按目标 BDP 或 WAN 默认初始化，再应用 `--quic-*` / `--relay-*` override；禁用运行时自动下调 | 明确压测极限或需要复现实验参数 |
+| `auto` | 当前退回 WAN 默认，并保留运行时 RTT / ideal-send 观测收敛 | 需要后续接入运行时自适应策略，但不希望引入静态 BDP 输入 |
 
 ### profile 默认值对照
 
-| 参数 | `wan` 默认 | `lan` 默认 | `auto/custom` + 目标带宽/RTT |
-|------|------------|------------|------------------------------|
-| `StreamRecvWindow` | 512MiB | 16MiB | `round_up_power_of_2(clamp(2×BDP, 1MiB, 512MiB))` |
-| `ConnFlowControlWindow` | 500MB | 16MiB | `clamp(2×BDP, 16MiB, 500MB)` |
-| `InitialWindowPackets` | 2000 | 256 | `clamp(ceil(min(BDP/16, 4MiB)/1200), 32, 4000)` |
-| `InitialRttMs` | 100 | 10 | `--target-rtt-ms`，缺省 100ms |
-| `RelayIoSize` | 1MiB | 256KiB | `<=100Mbps: 256KiB`，`<=1Gbps: 512KiB`，更高为 1MiB |
-| `RelayDefaultIdealSend` | 64MiB | 4MiB | `clamp(2×BDP, 16MiB, 500MiB)` |
-| `RelayMaxInFlightSends` | 64 | 16 | `clamp(ceil(send_buffer/relay_io), 8, 64)` |
-| `TcpSocketBufferBytes` | 4MiB | 1MiB | `clamp(2×BDP, 256KiB, 4MiB)`；custom 高 BDP 管线扩展可提升到 16–64MiB |
+| 参数 | `wan` 默认 | `lan` 默认 | `auto` 当前行为 |
+|------|------------|------------|----------------|
+| `StreamRecvWindow` | 512MiB | 16MiB | 同 WAN |
+| `ConnFlowControlWindow` | 500MB | 16MiB | 同 WAN |
+| `InitialWindowPackets` | 2000 | 256 | 同 WAN，可用实验参数 `--iw` 覆盖 |
+| `InitialRttMs` | 100 | 10 | 同 WAN，可用实验参数 `--initrtt-ms` 覆盖 |
+| `RelayIoSize` | 1MiB | 256KiB | 同 WAN |
+| `RelayDefaultIdealSend` | 64MiB | 4MiB | 同 WAN，运行时可按 MsQuic ideal-send hint 保守下调 |
+| `RelayMaxInFlightSends` | 64 | 16 | 同 WAN |
+| `TcpSocketBufferBytes` | 4MiB | 1MiB | 同 WAN |
 
 ## 是否可以按不同带宽自适应
 
-可以，而且当前代码已经分成三层：
+可以，但当前代码只保留运行时观测层，不再暴露静态目标带宽 / RTT 参数：
 
-1. **启动期 profile 自适应**：`auto/custom` 可根据 `--target-bandwidth-mbps` 和 `--target-rtt-ms` 按 BDP 公式计算窗口、relay IO、ideal send 和 in-flight 数。
-2. **运行时保守下调**：`wan/auto` 会记录 RTT、relay 吞吐和 ideal-send hint；当实测链路低于当前 profile 上限时，保守降低 `InitialRttMs`、`RelayDefaultIdealSend`、in-flight 和按实测 BDP 推导出的窗口/队列上限。`lan/custom` 不启用这层运行时调参。
-3. **压缩模式自适应**：`--compress auto` 初始选择 `off`；采样压缩率后，若压缩后大小低于原始大小的 98% 阈值，则选择 `zstd`，否则保持 `off`。
-
-### BDP 计算公式
-
-```text
-BDP(bytes) = bandwidth_mbps * 1_000_000 / 8 * rtt_ms / 1000
-window_bytes = clamp(2 × BDP, 16MiB, 500MiB)
-StreamRecvWindow = round_up_power_of_2(clamp(window_bytes, 1MiB, 512MiB))
-ConnFlowControlWindow = clamp(window_bytes, 16MiB, 500MB)
-send_buffer = clamp(2 × BDP, 16MiB, 500MiB)
-InitialWindowPackets = clamp(ceil(min(BDP/16, 4MiB) / 1200), 32, 4000)
-in-flight sends = clamp(ceil(send_buffer / relay_io_size), 8, 64)
-```
-
-示例：
-
-| 带宽 / RTT | BDP | 推荐窗口档位 | 当前 auto 结果倾向 |
-|------------|-----|--------------|--------------------|
-| 100 Mbps / 100ms | 1.25MB | 16–32MiB 已足够 | 16MiB 窗口，256KiB relay IO |
-| 1 Gbps / 100ms | 12.5MB | 32–64MiB | 32MiB 窗口，512KiB relay IO |
-| 5 Gbps / 100ms | 62.5MB | 128–256MiB | 128MiB 级窗口，1MiB relay IO |
-| 10 Gbps / 100ms | 125MB | 256–500MiB | 256MiB 级窗口，1MiB relay IO |
-| 20 Gbps / 100ms | 250MB | 500MB | 500MB FCW、512MiB SRW 上限 |
+1. **运行时保守下调**：`wan/auto` 会记录 RTT 和 MsQuic ideal-send hint；当实测 hint 低于当前 profile 上限时，保守降低 `InitialRttMs`、`RelayDefaultIdealSend` 和 in-flight。`lan` 不启用这层运行时调参。
+2. **压缩模式自适应**：`--compress auto` 初始选择 `off`；采样压缩率后，若压缩后大小低于原始大小的 98% 阈值，则选择 `zstd`，否则保持 `off`。
 
 ### 哪些参数适合自动调
 
 | 参数 | 当前支持状态 | 原因 |
 |------|--------------|------|
-| `ConnFlowControlWindow` / `StreamRecvWindowDefault` | 支持启动期 BDP 计算；`wan/auto` 支持运行时保守下调 | 本质是 BDP 上限，适合按目标带宽和 RTT 设定 |
-| `InitialRttMs` | 支持目标 RTT 和运行时实测 RTT 覆盖 | 连接后可测量 RTT，但首次收敛仍需要 profile 或外部配置提示 |
-| `InitialWindowPackets` | 支持启动期 BDP 档位计算 | 有助于启动，但过大可能造成突发丢包 |
-| relay IO size | 支持按目标带宽分档 | 低带宽小块降低延迟，高带宽大块降低 syscall 开销 |
-| in-flight sends | 支持由 `send_buffer / relay_io_size` 推导 | 保持应用层流水线深度，同时受内存预算约束 |
-| TCP socket buffer | 支持 profile/BDP 设置 | 保护本地 TCP 侧不成为瓶颈 |
+| `ConnFlowControlWindow` / `StreamRecvWindowDefault` | 固定为验证后的高吞吐窗口 | 当前测试不支持继续通过命令行覆盖 |
+| `InitialRttMs` | 支持运行时实测 RTT 覆盖；`--initrtt-ms` 仅作为实验/诊断参数保留 | 连接后可测量 RTT，当前实验候选值为 100ms |
+| `InitialWindowPackets` | `--iw` 仅作为实验/诊断参数保留 | 当前实验候选值为 4000，但测试未证明稳定正向收益 |
+| relay IO size | 支持 `--relay-io-size` 覆盖 | 高带宽大块降低 syscall 开销 |
+| in-flight sends | profile 固定并受运行时 ideal-send hint 保守下调 | 保持应用层流水线深度，同时受内存预算约束 |
+| TCP socket buffer | profile 固定设置 | 保护本地 TCP 侧不成为瓶颈 |
 | compression | 支持 `auto` 采样选择 off / zstd | 避免在不可压缩载荷上浪费 CPU |
 | QUIC 连接数 | 不按带宽自动调 | 更应按并发 TCP 隧道数、CPU、连接稳定性决定；WAN 单流优先 1 |
 | netem limit/interface | 测试脚本支持 | 只影响测试环境，脚本会自动解析对端发送方向 interface |
@@ -262,25 +234,14 @@ NETEM=1 DELAY=100ms LOSS=0% NETEM_LIMIT=1000000 RATE= \
   ./scripts/bench-tcpquic-proxy-dgx.sh
 ```
 
-### 按目标 BDP 自动计算 10Gbps / 100ms 档
-
-```bash
-EXTRA_PROXY_ARGS="--tuning auto --target-bandwidth-mbps 10000 --target-rtt-ms 100" \
-  NETEM=1 DELAY=100ms LOSS=0% NETEM_LIMIT=1000000 RATE= \
-  QUIC_CONNECTIONS=1 METRIC_MODE=steady DURATION_SEC=10 MODES="tunnel_off" \
-  ./scripts/bench-tcpquic-proxy-dgx.sh
-```
-
-### 极限自定义 20Gbps 参数
+### 20Gbps 实验参数
 
 脚本仍保留 `TUNING_20GBPS=1` 快捷开关，会向 client/server 注入：
 
 ```text
---tuning custom
---quic-fcw 1073741824
---quic-srw 1073741824
---quic-iw 4000
---quic-initrtt-ms 200
+--tuning wan
+--iw 4000
+--initrtt-ms 100
 --relay-io-size 1048576
 ```
 

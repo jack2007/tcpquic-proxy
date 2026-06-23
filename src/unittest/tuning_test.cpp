@@ -11,6 +11,27 @@
         } \
     } while (false)
 
+static bool ParseClientOption(const char* option, const char* value, TqConfig& cfg, std::string& err) {
+    const char* args[] = {
+        "tcpquic-proxy",
+        "client",
+        "--peer",
+        "127.0.0.1:4433",
+        option,
+        value,
+        "--cert",
+        "cert.pem",
+        "--key",
+        "key.pem",
+        "--ca",
+        "ca.pem"};
+    return TqParseArgs(
+        static_cast<int>(sizeof(args) / sizeof(args[0])),
+        const_cast<char**>(args),
+        cfg,
+        err);
+}
+
 int main() {
     {
         TQ_TEST_REQUIRE(TqValidationRelaySendBufferCapBytes == 512ull * 1024 * 1024);
@@ -53,34 +74,18 @@ int main() {
     {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Auto;
-        cfg.TargetBandwidthMbps = 100;
-        cfg.TargetRttMs = 100;
-        TqComputeTuning(cfg, cfg.Tuning);
-
-        assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
-        assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
-        assert(cfg.Tuning.RelayIoSize == 256 * 1024);
-        assert(cfg.Tuning.InitialRttMs == 100);
-    }
-
-    {
-        TqConfig cfg{};
-        cfg.TuningMode = TqTuningMode::Auto;
-        cfg.TargetBandwidthMbps = 10000;
-        cfg.TargetRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.RelayIoSize == 1024 * 1024);
+        assert(cfg.Tuning.InitialRttMs == 100);
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
     }
 
     {
         TqConfig cfg{};
-        cfg.TuningMode = TqTuningMode::Custom;
-        cfg.TargetBandwidthMbps = 1000;
-        cfg.TargetRttMs = 50;
+        cfg.TuningMode = TqTuningMode::Wan;
         cfg.TuningOverrideRelayIoSize = 512 * 1024;
         cfg.TuningOverrideLinuxRelayReadChunkSize = 256 * 1024;
         cfg.TuningOverrideQuicInitRttMs = 50;
@@ -93,9 +98,7 @@ int main() {
 
     {
         TqConfig cfg{};
-        cfg.TuningMode = TqTuningMode::Custom;
-        cfg.TargetBandwidthMbps = 11000;
-        cfg.TargetRttMs = 200;
+        cfg.TuningMode = TqTuningMode::Wan;
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
         cfg.TuningOverrideLinuxRelayReadChunkSize = 131072;
         cfg.TuningOverrideQuicInitRttMs = 100;
@@ -108,15 +111,16 @@ int main() {
 
     {
         TqConfig cfg{};
-        cfg.TuningMode = TqTuningMode::Custom;
-        cfg.TargetBandwidthMbps = 11000;
-        cfg.TargetRttMs = 200;
+        cfg.TuningMode = TqTuningMode::Wan;
         cfg.TuningOverrideRelayIoSize = 1024 * 1024;
-        cfg.TuningOverrideQuicInitRttMs = 200;
+        cfg.TuningOverrideQuicIw = 4000;
+        cfg.TuningOverrideQuicInitRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
         assert(cfg.Tuning.RelayMaxInFlightSends == 64);
-        assert(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
+        assert(cfg.Tuning.RelayDefaultIdealSend == 64ull * 1024 * 1024);
+        assert(cfg.Tuning.InitialWindowPackets == 4000);
+        assert(cfg.Tuning.InitialRttMs == 100);
         assert(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
         assert(cfg.Tuning.TcpSocketBufferBytes >= 16 * 1024 * 1024);
     }
@@ -125,8 +129,6 @@ int main() {
         TqSetRelayMemoryBudget(0);
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Auto;
-        cfg.TargetBandwidthMbps = 1000;
-        cfg.TargetRttMs = 50;
         TqComputeTuning(cfg, cfg.Tuning);
 
         TQ_TEST_REQUIRE(TqGetRelayMemoryBudget() >= 256);
@@ -137,26 +139,11 @@ int main() {
         TqSetRelayMemoryBudget(0);
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Auto;
-        cfg.TargetBandwidthMbps = 20000;
-        cfg.TargetRttMs = 100;
         TqComputeTuning(cfg, cfg.Tuning);
 
         TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
         TQ_TEST_REQUIRE(cfg.Tuning.MaxPendingBufferBytesPerRelay >= TqValidationRelaySendBufferCapBytes);
         TQ_TEST_REQUIRE(TqGetRelayMemoryBudget() >= 512);
-    }
-
-    {
-        TqConfig cfg{};
-        cfg.TuningMode = TqTuningMode::Auto;
-        cfg.TargetBandwidthMbps = 1073741824u;
-        cfg.TargetRttMs = 2147483648u;
-        TqComputeTuning(cfg, cfg.Tuning);
-
-        TQ_TEST_REQUIRE(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
-        TQ_TEST_REQUIRE(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
-        TQ_TEST_REQUIRE(cfg.Tuning.RelayDefaultIdealSend == 500ull * 1024 * 1024);
-        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayPerTunnelPendingBytes >= TqValidationRelaySendBufferCapBytes);
     }
 
     {
@@ -389,26 +376,23 @@ int main() {
     }
 
     {
-        TqConfig cfg{};
-        std::string err;
-        char arg0[] = "tcpquic-proxy";
-        char arg1[] = "client";
-        char arg2[] = "--peer";
-        char arg3[] = "127.0.0.1:4433";
-        char arg4[] = "--cert";
-        char arg5[] = "cert.pem";
-        char arg6[] = "--key";
-        char arg7[] = "key.pem";
-        char arg8[] = "--ca";
-        char arg9[] = "ca.pem";
-        char arg10[] = "--initial-quic-read-ahead";
-        char arg11[] = "2097152";
-        char* argv[] = {
-            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
-            arg8, arg9, arg10, arg11};
-        assert(TqParseArgs(12, argv, cfg, err));
-        TqFinalizeConfig(cfg);
-        assert(cfg.Tuning.InitialQuicReadAheadBytes == 2097152);
+        const char* removedOptions[][2] = {
+            {"--target-bandwidth-mbps", "10000"},
+            {"--target-rtt-ms", "100"},
+            {"--relay-inflight-bytes", "1048576"},
+            {"--initial-quic-read-ahead", "2097152"},
+            {"--fcw", "1073741824"},
+            {"--srw", "1073741824"},
+            {"--tuning", "custom"},
+        };
+        for (const auto& removed : removedOptions) {
+            TqConfig cfg{};
+            std::string err;
+            TQ_TEST_REQUIRE(!ParseClientOption(removed[0], removed[1], cfg, err));
+            TQ_TEST_REQUIRE(err.find(removed[0]) != std::string::npos ||
+                            err.find("custom") != std::string::npos ||
+                            err.find("unknown option") != std::string::npos);
+        }
     }
 
     {

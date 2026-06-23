@@ -173,7 +173,7 @@ run_secnetperf_client() {
 proxy_args() {
     local initrtt="$1" quic_conns="$2"
     printf '%s' \
-        "--tuning custom --fcw 1073741824 --srw 1073741824 --iw 4000 \
+        "--tuning wan --iw 4000 \
         --initrtt-ms ${initrtt} --relay-io-size 1048576 \
         --connections ${quic_conns} --compress off ${PROXY_EXTRA_ARGS}"
 }

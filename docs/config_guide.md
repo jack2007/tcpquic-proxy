@@ -39,11 +39,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
     "reconnect_interval_ms": 3000,
     "keepalive_ms": 5000,
 
-    // QUIC transport overrides for high-BDP/high-throughput tests.
-    "fcw": 1073741824,
-    "srw": 1073741824,
+    // Experimental startup overrides for high-BDP/high-throughput tests.
     "iw": 4000,
-    "initrtt_ms": 1
+    "initrtt_ms": 100
   },
   "client": {
     // SOCKS/HTTP handshake worker threads. 0 means auto.
@@ -65,10 +63,8 @@ Client config uses `peers` for all destinations. A single remote server is repre
     "level": 1
   },
   "tuning": {
-    // Use custom when setting explicit override fields.
-    "mode": "custom",
-    "target_bandwidth_mbps": 100000,
-    "target_rtt_ms": 1
+    // Supported modes: auto, lan, wan.
+    "mode": "wan"
   },
   "relay": {
     "io_size": 1048576,
@@ -81,8 +77,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
   },
   "trace": {
     "enabled": false,
-    "interval_sec": 10,
-    "connect_on_start": false
+    "interval_sec": 10
   },
   "peers": [
     {
@@ -131,19 +126,15 @@ Client config uses `peers` for all destinations. A single remote server is repre
   "proto": {
     "profile": "max-throughput",
     "disable_1rtt_encryption": true,
-    "fcw": 1073741824,
-    "srw": 1073741824,
     "iw": 4000,
-    "initrtt_ms": 1
+    "initrtt_ms": 100
   },
   "compression": {
     "mode": "off",
     "level": 1
   },
   "tuning": {
-    "mode": "custom",
-    "target_bandwidth_mbps": 100000,
-    "target_rtt_ms": 1
+    "mode": "wan"
   },
   "relay": {
     "io_size": 1048576,
@@ -175,10 +166,8 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `proto.connection_stream_count` | client/server | Max bidirectional streams allowed per QUIC connection, range 1..65535. |
 | `proto.reconnect_interval_ms` | client | Default reconnect interval inherited by peers, 1000..60000 ms. |
 | `proto.keepalive_ms` | client/server | Keepalive interval, 1000..15000 ms. Defaults to 5000. |
-| `proto.fcw` | client/server | QUIC connection flow-control window override. |
-| `proto.srw` | client/server | QUIC stream receive window override. |
-| `proto.iw` | client/server | QUIC initial congestion window in packets. |
-| `proto.initrtt_ms` | client/server | QUIC initial RTT estimate. |
+| `proto.iw` | client/server | Experimental QUIC initial congestion window override in packets. |
+| `proto.initrtt_ms` | client/server | Experimental QUIC initial RTT estimate override. |
 | `client.handshake_threads` | client | SOCKS/HTTP handshake worker threads. |
 | `client.warmup_mb` | client | Startup warmup download size per enabled peer. |
 | `client.warmup_target` | client | Warmup target host:port. |
@@ -191,9 +180,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `server.deny_targets` | server | Optional deny ACL. |
 | `compression.mode` | client/server | `auto`, `zstd`, or `off`. |
 | `compression.level` | client/server | Zstd compression level. |
-| `tuning.mode` | client/server | `auto`, `lan`, `wan`, or `custom`. |
-| `tuning.target_bandwidth_mbps` | client/server | Target bandwidth for BDP-based tuning. |
-| `tuning.target_rtt_ms` | client/server | Target RTT for BDP-based tuning. |
+| `tuning.mode` | client/server | `auto`, `lan`, or `wan`. |
 | `relay.io_size` | client/server | Relay IO chunk size override. |
 | `relay.linux.read_chunk_size` | client/server | Linux relay TCP read chunk size. |
 | `relay.linux.worker_slots` | client/server | Linux relay worker buffer slots per tunnel. |
@@ -201,7 +188,6 @@ Client config uses `peers` for all destinations. A single remote server is repre
 | `relay.linux.tcp_write_burst_bytes` | client/server | Cap bytes per TCP write flush burst; omit when not overriding. |
 | `trace.enabled` | client/server | Enable trace/debug file logging. |
 | `trace.interval_sec` | client/server | Periodic trace interval in seconds. |
-| `trace.connect_on_start` | client | Debug option to connect protocol sessions at startup. |
 | `peers[].id` | client | Stable peer id. Required. |
 | `peers[].proto_peer` | client | Remote protocol endpoint. Required. |
 | `peers[].socks_listen` | client | SOCKS5 listener for this peer. Required. |
@@ -215,6 +201,6 @@ Client config uses `peers` for all destinations. A single remote server is repre
 
 - Use `proto`, not `quic`, in the config schema. Internal code may still use QUIC names because the current protocol backend is QUIC.
 - Client configs should use `peers` even for a single remote server.
-- Use `tuning.mode: "custom"` when relying on explicit override keys such as `relay.linux.worker_slots`, `proto.fcw`, or `proto.initrtt_ms`.
+- Use `--trace` / `trace.enabled` for startup diagnostics; client startup no longer needs a separate connect-on-start switch.
 - Built-in speed-test options require exactly one enabled peer.
 - `proto.disable_1rtt_encryption: true` is insecure and should be used only in isolated lab measurements.

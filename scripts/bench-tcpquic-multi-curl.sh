@@ -39,6 +39,8 @@
 #   PROXY_PORT        本机 HTTP CONNECT 代理端口（默认 18080）
 #   SKIP_APPEND       1 时不写入 research_progress.md
 #   TUNING_20GBPS     1 时启用 docs/20gbps-paramenter.md 高 BDP 参数
+#   EXTRA_PROXY_ARGS  追加到 client/server 的 tcpquic-proxy 参数，空格分隔
+#   REUSE_REMOTE_PAYLOAD 1 时双机模式复用 ~/tcpquic-dgx-payload.bin，跳过生成/同步
 #   HTTP_BACKEND      busybox|python（双机默认 python ThreadingHTTPServer）
 set -euo pipefail
 
@@ -69,6 +71,8 @@ QUIC_PORT="${QUIC_PORT:-4433}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 SKIP_APPEND="${SKIP_APPEND:-0}"
 TUNING_20GBPS="${TUNING_20GBPS:-0}"
+EXTRA_PROXY_ARGS="${EXTRA_PROXY_ARGS:-}"
+REUSE_REMOTE_PAYLOAD="${REUSE_REMOTE_PAYLOAD:-0}"
 HTTP_BACKEND="${HTTP_BACKEND:-python}"
 LOG_FILE="${ROOT}/research_progress.md"
 
@@ -89,13 +93,16 @@ proxy_tuning_args() {
     local -a args=()
     if [[ "$TUNING_20GBPS" == "1" ]]; then
         args+=(
-            --tuning custom
-            --fcw 1073741824
-            --srw 1073741824
+            --tuning wan
             --iw 4000
-            --initrtt-ms 200
+            --initrtt-ms 100
             --relay-io-size 1048576
         )
+    fi
+    if [[ -n "$EXTRA_PROXY_ARGS" ]]; then
+        # shellcheck disable=SC2206
+        local extra_args=($EXTRA_PROXY_ARGS)
+        args+=("${extra_args[@]}")
     fi
     printf '%s\n' "${args[@]}"
 }
@@ -320,6 +327,11 @@ EOF
 }
 
 deploy_payload() {
+    if [[ "$MODE" == "dual" && "$REUSE_REMOTE_PAYLOAD" == "1" ]] &&
+        ssh "$PEER" "test -s ~/tcpquic-dgx-payload.bin"; then
+        log "reusing remote payload: ~/tcpquic-dgx-payload.bin"
+        return 0
+    fi
     case "$PAYLOAD_KIND" in
         repeat|zeros|text) ;;
         *)

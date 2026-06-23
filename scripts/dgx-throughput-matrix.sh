@@ -122,7 +122,7 @@ EOF
 }
 
 proxy_args() {
-    printf '%s' "--tuning custom --fcw 1073741824 --srw 1073741824 --iw 4000 --initrtt-ms 200 --relay-io-size 1048576 --connections 1"
+    printf '%s' "--tuning wan --iw 4000 --initrtt-ms 100 --relay-io-size 1048576 --connections 1"
 }
 
 start_proxy_stack() {

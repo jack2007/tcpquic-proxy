@@ -202,7 +202,7 @@ try {
     "--compress", $Compress
   )
   if ($Trace) {
-    $ClientArgs += @("--trace", "--trace-interval", "1", "--trace-connect-on-start")
+    $ClientArgs += @("--trace", "--trace-interval", "1")
   }
   $Client = Start-Process -PassThru -FilePath $BinPath -ArgumentList $ClientArgs -RedirectStandardError $ClientErr
   Start-Sleep -Seconds 1

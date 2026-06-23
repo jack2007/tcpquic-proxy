@@ -33,9 +33,10 @@ QUIC_PORT="${QUIC_PORT:-4433}"
 PERF_PORT="${PERF_PORT:-4434}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 DURATION_SEC="${DURATION_SEC:-25}"
-CASE="${CASE:-proxy-1x1}"   # proxy-1x1 | proxy-4x16 | secnetperf-1conn
+CASE="${CASE:-proxy-1x1}"   # proxy-1x1 | proxy-4x16 | proxy-custom | secnetperf-1conn
 QUIC_CONNS="${QUIC_CONNS:-1}"
 CURL_PARALLEL="${CURL_PARALLEL:-1}"
+PROXY_EXTRA_ARGS="${PROXY_EXTRA_ARGS:-}"
 FREQ="${FREQ:-999}"
 TS="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${OUT_DIR:-${ROOT}/docs/dgx-perf-profile-${TS}}"
@@ -114,9 +115,9 @@ generate_certs() {
 proxy_args() {
     local quic_conns="${1:-${QUIC_CONNS}}"
     printf '%s' \
-        "--tuning custom --fcw 1073741824 --srw 1073741824 --iw 4000 \
-        --initrtt-ms 1 --relay-io-size 1048576 \
-        --connections ${quic_conns} --compress off"
+        "--tuning wan --iw 4000 \
+        --initrtt-ms 100 --relay-io-size 1048576 \
+        --connections ${quic_conns} --compress off ${PROXY_EXTRA_ARGS}"
 }
 
 start_proxy_stack() {
@@ -347,6 +348,13 @@ case "$CASE" in
         perf_top_report "${OUT_DIR}/client.perf.data" "${OUT_DIR}/client.top.txt" tcpquic-proxy
         perf_top_report "${OUT_DIR}/server.perf.data" "${OUT_DIR}/server.top.txt" tcpquic-proxy
         write_summary "tcpquic-proxy quic=16 + 4 并行 curl"
+        ;;
+    proxy-custom)
+        generate_certs
+        run_proxy_perf
+        perf_top_report "${OUT_DIR}/client.perf.data" "${OUT_DIR}/client.top.txt" tcpquic-proxy
+        perf_top_report "${OUT_DIR}/server.perf.data" "${OUT_DIR}/server.top.txt" tcpquic-proxy
+        write_summary "tcpquic-proxy quic=${QUIC_CONNS} + ${CURL_PARALLEL} 并行 curl"
         ;;
     secnetperf-1conn)
         [[ -x "$SECNETPERF" ]] || { log "missing $SECNETPERF"; exit 1; }

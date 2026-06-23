@@ -1295,6 +1295,98 @@ qdisc 对比：
 
 所以，下一步不应再把重点放在“是否存在 FACK loss”这个二值问题上，而应观察 FACK loss 后的恢复速度：`bytes_in_flight` 从低位恢复到 `bytes_in_flight_max/ideal` 需要多久，恢复期间是否被 batch 重新调度、pacing allowance 或 ACK 节奏限制。
 
+### 步骤 8：`--iw` / `--initrtt-ms` 对照
+
+为了验证启动期 QUIC 参数是否仍然对高吞吐有明显影响，补充对照 `--iw` 和 `--initrtt-ms`：
+
+- 拓扑：2 台 DGX，HTTP CONNECT download。
+- QUIC：1 条 connection，1 个 stream。
+- client：1 个 curl。
+- netem：发送端 egress。
+- netem：`limit 5000000`，`5% loss`。
+- 载荷：复用远端已有 `~/tcpquic-dgx-payload.bin`，大小 20GB。
+- curl：`--max-time 30`。
+- 两组都开启 `--diag-stats --diag-stats-interval 1`，确保只比较 `--iw` / `--initrtt-ms` 差异。
+
+对照组：
+
+```bash
+EXTRA_PROXY_ARGS="--diag-stats --diag-stats-interval 1"
+```
+
+实验组：
+
+```bash
+EXTRA_PROXY_ARGS="--diag-stats --diag-stats-interval 1 --iw 4000 --initrtt-ms <RTT>"
+```
+
+其中 `100ms` 场景使用 `--initrtt-ms 100`，`200ms` 场景使用 `--initrtt-ms 200`。每个组合独立启动 client/server 跑 3 次。
+
+结果目录：
+
+```text
+docs/iw-initrtt-impact-20260623
+```
+
+吞吐结果：
+
+| 场景 | 参数 | run1 | run2 | run3 | 平均 | curl exit |
+|---|---|---:|---:|---:|---:|---|
+| 100ms + 5% | default，不设置 `--iw` / `--initrtt-ms` | 9477.67 | 9773.57 | 7925.08 | 9058.77 | 0 / 0 / 0 |
+| 100ms + 5% | `--iw 4000 --initrtt-ms 100` | 9129.64 | 9630.67 | 9743.81 | 9501.37 | 0 / 0 / 0 |
+| 200ms + 5% | default，不设置 `--iw` / `--initrtt-ms` | 7131.28 | 4582.00 | 7544.06 | 6419.11 | 0 / 28 / 0 |
+| 200ms + 5% | `--iw 4000 --initrtt-ms 200` | 4930.18 | 4816.15 | 5454.84 | 5067.06 | 28 / 28 / 28 |
+
+单位：Mbps。
+
+观察：
+
+- `100ms + 5%` 下，显式设置 `--iw 4000 --initrtt-ms 100` 平均值高约 `4.9%`，但 default 自身三轮波动范围为 `7925.08 ~ 9773.57 Mbps`，大于两组均值差。tuned 三轮结果都落在 default 自然波动范围内。
+- `200ms + 5%` 下，显式设置 `--iw 4000 --initrtt-ms 200` 平均值低约 `21.1%`，且三轮均未在 30 秒内完整下载 20GB。
+- 本轮没有测试 `--initrtt-ms 400`。因此不能把结论外推为 “400ms 一定等价”；当前直接结论仅覆盖 `100ms -> 100`、`200ms -> 200` 这两个对照。
+
+补充测试 MsQuic 自身默认值：
+
+MsQuic 不设置这两个 settings 时，默认值为：
+
+- `InitialWindowPackets = 10`
+- `InitialRttMs = 333ms`
+
+tcpquic-proxy 当前代码默认并不会走这两个 MsQuic 默认值，因为 `wan` profile 会显式设置 `InitialWindowPackets=2000`、`InitialRttMs=100`。
+
+为验证 MsQuic 默认值的吞吐表现，单独补跑：
+
+```bash
+EXTRA_PROXY_ARGS="--diag-stats --diag-stats-interval 1 --iw 10 --initrtt-ms 333"
+```
+
+结果目录：
+
+```text
+docs/iw10-initrtt333-impact-20260623
+```
+
+吞吐结果：
+
+| 场景 | 参数 | 吞吐 | curl exit | wall time |
+|---|---|---:|---:|---:|
+| 100ms + 5% | `--iw 10 --initrtt-ms 333` | 7320.24 Mbps | 0 | 22926 ms |
+| 200ms + 5% | `--iw 10 --initrtt-ms 333` | 6857.03 Mbps | 0 | 24477 ms |
+
+与前面数据对比：
+
+- `100ms + 5%` 下，`iw=10/initrtt=333` 明显低于 default 三轮平均 `9058.77 Mbps`，也低于 `iw=4000/initrtt=100` 三轮平均 `9501.37 Mbps`。
+- `200ms + 5%` 下，`iw=10/initrtt=333` 单轮为 `6857.03 Mbps`，高于 `iw=4000/initrtt=200` 三轮平均 `5067.06 Mbps`，也略高于 default 三轮平均 `6419.11 Mbps`；但这是单轮结果，不能单独说明 MsQuic 默认值更优。
+- 综合 `100ms` 与既有 `200ms` 多轮样本，`iw=4000/initrtt=100` 是当前更适合作为实验候选的启动期参数组合；`iw=10/initrtt=333` 不适合作为 tcpquic-proxy 高吞吐默认推荐。
+
+结论：
+
+- `--iw` 和 `--initrtt-ms` 仍是实际生效的 MsQuic 启动期参数。
+- 但在当前 ideal-send-buffer 驱动背压模型下，它们对高吞吐没有表现出稳定、可重复的正向帮助。
+- 对当前 100ms/200ms + 5% loss download 场景，可以理解为 tcpquic-proxy 当前默认 profile 与单独设置 `--iw 4000 --initrtt-ms <RTT>` 对 IO 吞吐无明显稳定正向差异；200ms 样本中显式设置 `--initrtt-ms 200` 反而更差。
+- 如果必须保留一个实验候选值，从当前测试对比看 `--iw 4000 --initrtt-ms 100` 的效果相对较好，尤其明显优于 MsQuic 自身默认 `--iw 10 --initrtt-ms 333` 在 100ms 场景下的表现。
+- 因此它们应保留为实验/诊断参数，而不应作为高吞吐默认推荐参数。
+
 ## 下一步计划
 
 已关闭：
@@ -1305,6 +1397,7 @@ qdisc 对比：
 4. iperf3 proxy receive path 作为根因：历史 `gost`/minimal sink 验证和本轮 iperf3 reverse 对照都不支持该方向作为主要根因。
 5. RACK/time-threshold 过早触发作为主要根因：当前 lossdiag 中 `loss_rack_packets` 很少，100ms 为 `18`，200ms 为 `34`，优先级下降。
 6. “是否存在 FACK loss”作为二值问题：已确认 100ms/200ms 都有大量 FACK loss，不能单独解释 200ms 低吞吐。
+7. `--iw` / `--initrtt-ms` 作为高吞吐必选参数：已验证没有稳定正向帮助，保留为实验/诊断参数即可。
 
 仍需继续验证：
 

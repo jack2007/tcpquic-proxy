@@ -313,10 +313,6 @@ private:
                         cfg.QuicKeepAliveIntervalMs)) {
                     return Error("invalid proto.keepalive_ms");
                 }
-            } else if (key == "fcw") {
-                if (!ParseUint32(cfg.TuningOverrideQuicFcw)) return Error("invalid proto.fcw");
-            } else if (key == "srw") {
-                if (!ParseUint32(cfg.TuningOverrideQuicSrw)) return Error("invalid proto.srw");
             } else if (key == "iw") {
                 if (!ParseUint32(cfg.TuningOverrideQuicIw)) return Error("invalid proto.iw");
             } else if (key == "initrtt_ms") {
@@ -355,14 +351,6 @@ private:
             if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
             if (key == "io_size") {
                 if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
-            } else if (key == "inflight_bytes") {
-                if (!ParseNonZeroUint32(
-                        cfg.TuningOverrideRelayInflightBytes,
-                        "relay.inflight_bytes")) return false;
-            } else if (key == "initial_quic_read_ahead") {
-                if (!ParseNonZeroUint32(
-                        cfg.TuningOverrideInitialQuicReadAheadBytes,
-                        "relay.initial_quic_read_ahead")) return false;
             } else if (key == "linux") {
                 if (!ParseLinuxRelayConfig(cfg)) return false;
             } else {
@@ -405,11 +393,7 @@ private:
                 std::string value;
                 if (!ParseString(value)) return Error("invalid tuning.mode");
                 cfg.TuningMode = TqParseTuningMode(value.c_str());
-                if (value != "auto" && value != "lan" && value != "wan" && value != "custom") return Error("invalid tuning.mode");
-            } else if (key == "target_bandwidth_mbps") {
-                if (!ParseUint32(cfg.TargetBandwidthMbps)) return Error("invalid tuning.target_bandwidth_mbps");
-            } else if (key == "target_rtt_ms") {
-                if (!ParseUint32(cfg.TargetRttMs)) return Error("invalid tuning.target_rtt_ms");
+                if (value != "auto" && value != "lan" && value != "wan") return Error("invalid tuning.mode");
             } else {
                 return Error(("unknown tuning key: " + key).c_str());
             }
@@ -446,9 +430,6 @@ private:
             } else if (key == "interval_sec") {
                 if (!ParseUint32(cfg.TraceIntervalSec)) return Error("invalid trace.interval_sec");
                 cfg.Trace = true;
-            } else if (key == "connect_on_start") {
-                if (!ParseBool(cfg.TraceConnectOnStart)) return Error("invalid trace.connect_on_start");
-                if (cfg.TraceConnectOnStart) cfg.Trace = true;
             } else {
                 return Error(("unknown trace key: " + key).c_str());
             }
@@ -931,18 +912,11 @@ void TqPrintUsage(FILE* out) {
         "Protocol and relay tuning:\n"
         "  --profile <mode>             max-throughput|low-latency (default max-throughput)\n"
         "  --enable-encrypt            Enable packet encryption\n"
-        "  --fcw <bytes>                Override connection flow window\n"
-        "  --srw <bytes>                Override stream recv window\n"
         "  --iw <packets>               Override initial window packets\n"
         "  --initrtt-ms <n>             Override initial RTT\n"
-        "  --tuning <mode>              auto|lan|wan|custom (default wan)\n"
-        "  --target-bandwidth-mbps <n>  Target bandwidth for auto/custom BDP\n"
-        "  --target-rtt-ms <n>          Target RTT for auto/custom BDP\n"
+        "  --tuning <mode>              auto|lan|wan (default wan)\n"
         "  --max-memory-mb <n>          Cap relay pool memory across tunnels\n"
         "  --relay-io-size <bytes>      Override relay IO size\n"
-        "  --relay-inflight-bytes <n>   Override relay ideal in-flight bytes\n"
-        "  --initial-quic-read-ahead <bytes>\n"
-        "                              Initial/minimum read-ahead bytes (default 1048576)\n"
         "  --linux-relay-read-chunk-size <bytes>\n"
         "                              Linux relay TCP read chunk size\n"
         "  --linux-relay-tcp-write-max-bytes <bytes>\n"
@@ -953,7 +927,6 @@ void TqPrintUsage(FILE* out) {
         "Diagnostics:\n"
         "  --trace                      Event + periodic debug trace (spdlog file log)\n"
         "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
-        "  --trace-connect-on-start     Client: connect at startup (debug)\n"
         "  --diag-stats                 Low-overhead periodic stderr stats\n"
         "  --diag-stats-interval <sec>  Periodic stderr stats interval (default 5)\n");
 }
@@ -1268,30 +1241,8 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             cfg.TuningMode = TqParseTuningMode(value);
             if (std::strcmp(value, "auto") != 0 && std::strcmp(value, "lan") != 0 &&
-                std::strcmp(value, "wan") != 0 && std::strcmp(value, "custom") != 0) {
-                err = "invalid value for --tuning (auto|lan|wan|custom)";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--target-bandwidth-mbps", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--target-bandwidth-mbps", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TargetBandwidthMbps)) {
-                err = "invalid value for --target-bandwidth-mbps";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--target-rtt-ms", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--target-rtt-ms", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TargetRttMs)) {
-                err = "invalid value for --target-rtt-ms";
+                std::strcmp(value, "wan") != 0) {
+                err = "invalid value for --tuning (auto|lan|wan)";
                 return false;
             }
         } else if (GetOptionValue(arg, "--max-memory-mb", value)) {
@@ -1314,30 +1265,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayIoSize)) {
                 err = "invalid value for --relay-io-size";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--relay-inflight-bytes", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--relay-inflight-bytes", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideRelayInflightBytes) ||
-                cfg.TuningOverrideRelayInflightBytes == 0) {
-                err = "invalid value for --relay-inflight-bytes";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--initial-quic-read-ahead", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--initial-quic-read-ahead", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideInitialQuicReadAheadBytes) ||
-                cfg.TuningOverrideInitialQuicReadAheadBytes == 0) {
-                err = "invalid value for --initial-quic-read-ahead";
                 return false;
             }
         } else if (GetOptionValue(arg, "--linux-relay-read-chunk-size", value)) {
@@ -1376,28 +1303,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --linux-relay-tcp-write-burst-bytes";
                 return false;
             }
-        } else if (GetOptionValue(arg, "--fcw", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--fcw", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideQuicFcw)) {
-                err = "invalid value for --fcw";
-                return false;
-            }
-        } else if (GetOptionValue(arg, "--srw", value)) {
-            if (value == nullptr) {
-                value = NextArg(i, argc, argv, "--srw", err);
-                if (value == nullptr) {
-                    return false;
-                }
-            }
-            if (!ParseUint32(value, cfg.TuningOverrideQuicSrw)) {
-                err = "invalid value for --srw";
-                return false;
-            }
         } else if (GetOptionValue(arg, "--iw", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--iw", err);
@@ -1434,9 +1339,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --trace-interval";
                 return false;
             }
-        } else if (std::strcmp(arg, "--trace-connect-on-start") == 0) {
-            cfg.Trace = true;
-            cfg.TraceConnectOnStart = true;
         } else if (std::strcmp(arg, "--diag-stats") == 0) {
             cfg.DiagStats = true;
         } else if (GetOptionValue(arg, "--diag-stats-interval", value)) {

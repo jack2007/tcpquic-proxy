@@ -12,7 +12,6 @@ enum class TqTuningMode {
     Auto,
     Lan,
     Wan,
-    Custom,
 };
 
 struct TqTuningConfig {

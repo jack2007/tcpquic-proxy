@@ -44,32 +44,6 @@ uint32_t ClampU32(uint64_t value, uint32_t minValue, uint32_t maxValue) {
     return static_cast<uint32_t>(clamped);
 }
 
-uint32_t RoundUpPowerOfTwo(uint32_t value) {
-    if (value <= 1) {
-        return 1;
-    }
-    uint32_t result = 1;
-    while (result < value && result < (1u << 31)) {
-        result <<= 1;
-    }
-    return result;
-}
-
-bool MulWouldOverflow(uint64_t left, uint64_t right) {
-    return right != 0 && left > std::numeric_limits<uint64_t>::max() / right;
-}
-
-uint64_t ComputeBdpBytes(uint32_t bandwidthMbps, uint32_t rttMs) {
-    if (bandwidthMbps == 0 || rttMs == 0) {
-        return 0;
-    }
-    const uint64_t bytesPerSecond = static_cast<uint64_t>(bandwidthMbps) * 1'000'000ull / 8ull;
-    if (MulWouldOverflow(bytesPerSecond, rttMs)) {
-        return std::numeric_limits<uint64_t>::max();
-    }
-    return bytesPerSecond * rttMs / 1000ull;
-}
-
 uint64_t DetectSystemMemoryBytes() {
 #if defined(_WIN32)
     MEMORYSTATUSEX status{};
@@ -121,16 +95,6 @@ uint64_t ComputeAutomaticRelayBudgetBytes(const TqTuningConfig& tuning) {
     return ClampU64(budgetBytes, kAutoRelayBudgetMinBytes, kAutoRelayBudgetMaxBytes);
 }
 
-size_t ChooseRelayIoSize(uint32_t bandwidthMbps) {
-    if (bandwidthMbps == 0 || bandwidthMbps <= 100) {
-        return 256 * 1024;
-    }
-    if (bandwidthMbps <= 1000) {
-        return 512 * 1024;
-    }
-    return 1024 * 1024;
-}
-
 void ApplyWanDefaults(TqTuningConfig& out) {
     out.StreamRecvWindow = 536870912u;
     out.ConnFlowControlWindow = 500000000u;
@@ -155,31 +119,6 @@ void ApplyLanDefaults(TqTuningConfig& out) {
     out.RelayMaxInFlightSends = 16;
     out.RelayMaxFreeSendContexts = 16;
     out.TcpSocketBufferBytes = 1024 * 1024;
-}
-
-void ApplyBdpTuning(uint32_t bandwidthMbps, uint32_t rttMs, TqTuningConfig& out) {
-    const uint64_t bdpBytes = ComputeBdpBytes(bandwidthMbps, rttMs);
-    const uint64_t windowBytes = ClampU64(2 * bdpBytes, 16 * MiB, 500 * MiB);
-    const uint64_t sendBufferBytes = ClampU64(2 * bdpBytes, 16 * MiB, 500 * MiB);
-
-    out.StreamRecvWindow = RoundUpPowerOfTwo(
-        ClampU32(ClampU64(windowBytes, 1 * MiB, 512 * MiB), 1u, 536870912u));
-    out.ConnFlowControlWindow = ClampU32(windowBytes, 16u * 1024 * 1024, 500000000u);
-    out.InitialRttMs = rttMs > 0 ? rttMs : 100;
-
-    const uint64_t iwBytes = std::min(bdpBytes / 16, 4 * MiB);
-    const uint64_t iwPackets = (iwBytes + 1199) / 1200;
-    out.InitialWindowPackets = ClampU32(iwPackets, 32, 4000);
-
-    out.RelayIoSize = ChooseRelayIoSize(bandwidthMbps);
-    out.RelayCompressIoSize = 256 * 1024;
-    out.RelayDefaultIdealSend = sendBufferBytes;
-    out.RelayMaxInFlightSends = ClampU32(
-        (sendBufferBytes + out.RelayIoSize - 1) / out.RelayIoSize, 8, 64);
-    out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
-
-    const uint64_t tcpBuf = ClampU64(windowBytes, 256 * KiB, 4 * MiB);
-    out.TcpSocketBufferBytes = static_cast<int>(tcpBuf);
 }
 
 void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
@@ -214,17 +153,6 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
     }
-    if (cfg.TuningOverrideRelayInflightBytes > 0) {
-        out.RelayDefaultIdealSend = cfg.TuningOverrideRelayInflightBytes;
-        if (out.RelayIoSize > 0) {
-            out.RelayMaxInFlightSends = ClampU32(
-                (cfg.TuningOverrideRelayInflightBytes + out.RelayIoSize - 1) /
-                    out.RelayIoSize,
-                1,
-                2048);
-            out.RelayMaxFreeSendContexts = out.RelayMaxInFlightSends;
-        }
-    }
     if (cfg.TuningOverrideLinuxRelayReadChunkSize > 0) {
         out.LinuxRelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
     }
@@ -233,15 +161,6 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     }
     if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes > 0) {
         out.LinuxRelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
-    }
-    if (cfg.TuningOverrideInitialQuicReadAheadBytes > 0) {
-        out.InitialQuicReadAheadBytes = cfg.TuningOverrideInitialQuicReadAheadBytes;
-    }
-    if (cfg.TuningOverrideQuicFcw > 0) {
-        out.ConnFlowControlWindow = cfg.TuningOverrideQuicFcw;
-    }
-    if (cfg.TuningOverrideQuicSrw > 0) {
-        out.StreamRecvWindow = RoundUpPowerOfTwo(cfg.TuningOverrideQuicSrw);
     }
     if (cfg.TuningOverrideQuicIw > 0) {
         out.InitialWindowPackets = cfg.TuningOverrideQuicIw;
@@ -361,17 +280,6 @@ const char* TqModeFromRatioPermille(uint32_t ratioPermille) {
     return "zstd";
 }
 
-void MergeDowngradeTuning(TqTuningConfig& current, const TqTuningConfig& measured) {
-    current.InitialWindowPackets =
-        std::min(current.InitialWindowPackets, measured.InitialWindowPackets);
-    current.RelayDefaultIdealSend =
-        std::min(current.RelayDefaultIdealSend, measured.RelayDefaultIdealSend);
-    current.RelayMaxInFlightSends =
-        std::min(current.RelayMaxInFlightSends, measured.RelayMaxInFlightSends);
-    current.RelayMaxFreeSendContexts =
-        std::min(current.RelayMaxFreeSendContexts, measured.RelayMaxFreeSendContexts);
-}
-
 TqTuningMode TqParseTuningMode(const char* value) {
     if (value == nullptr) {
         return TqTuningMode::Wan;
@@ -385,9 +293,6 @@ TqTuningMode TqParseTuningMode(const char* value) {
     if (std::strcmp(value, "wan") == 0) {
         return TqTuningMode::Wan;
     }
-    if (std::strcmp(value, "custom") == 0) {
-        return TqTuningMode::Custom;
-    }
     return TqTuningMode::Wan;
 }
 
@@ -400,18 +305,7 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         ApplyWanDefaults(out);
         break;
     case TqTuningMode::Auto:
-        if (cfg.TargetBandwidthMbps > 0 && cfg.TargetRttMs > 0) {
-            ApplyBdpTuning(cfg.TargetBandwidthMbps, cfg.TargetRttMs, out);
-        } else {
-            ApplyWanDefaults(out);
-        }
-        break;
-    case TqTuningMode::Custom:
-        if (cfg.TargetBandwidthMbps > 0 && cfg.TargetRttMs > 0) {
-            ApplyBdpTuning(cfg.TargetBandwidthMbps, cfg.TargetRttMs, out);
-        } else {
-            ApplyWanDefaults(out);
-        }
+        ApplyWanDefaults(out);
         break;
     }
     ApplyCustomOverrides(cfg, out);
@@ -484,7 +378,7 @@ void TqApplyRelayPoolBudget(TqTuningConfig& tuning, uint32_t activeRelays) {
 }
 
 bool TqRuntimeTuningEnabled(const TqConfig& cfg) {
-    if (cfg.TuningMode == TqTuningMode::Lan || cfg.TuningMode == TqTuningMode::Custom) {
+    if (cfg.TuningMode == TqTuningMode::Lan) {
         return false;
     }
     return true;
@@ -563,12 +457,11 @@ void TqApplyRuntimeObservations(TqConfig& cfg) {
 
     const TqTuningConfig profile = cfg.Tuning;
 
-    if (obs.HasRtt && cfg.TargetRttMs == 0 && cfg.TuningOverrideQuicInitRttMs == 0) {
+    if (obs.HasRtt && cfg.TuningOverrideQuicInitRttMs == 0) {
         cfg.Tuning.InitialRttMs = ClampU32(obs.MeasuredRttMs, 1, 60000);
     }
 
-    if (obs.HasIdealSend && cfg.TuningOverrideRelayInflightBytes == 0 &&
-        obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
+    if (obs.HasIdealSend && obs.IdealSendBytes < cfg.Tuning.RelayDefaultIdealSend) {
         cfg.Tuning.RelayDefaultIdealSend = obs.IdealSendBytes;
         if (cfg.Tuning.RelayIoSize > 0) {
             const uint32_t maxContexts = ClampU32(
@@ -580,24 +473,6 @@ void TqApplyRuntimeObservations(TqConfig& cfg) {
             cfg.Tuning.RelayMaxFreeSendContexts =
                 std::min(cfg.Tuning.RelayMaxFreeSendContexts, static_cast<size_t>(maxContexts));
         }
-    }
-
-    if (cfg.TuningMode == TqTuningMode::Auto && obs.HasThroughput && obs.HasRtt &&
-        cfg.TargetBandwidthMbps == 0) {
-        TqConfig measuredCfg = cfg;
-        measuredCfg.TargetBandwidthMbps = std::max(obs.ThroughputMbps, 1u);
-        measuredCfg.TargetRttMs = obs.MeasuredRttMs;
-        TqTuningConfig measured{};
-        TqComputeTuning(measuredCfg, measured);
-        MergeDowngradeTuning(cfg.Tuning, measured);
-    } else if (cfg.TuningMode == TqTuningMode::Wan && obs.HasRtt && obs.HasThroughput) {
-        TqConfig measuredCfg = cfg;
-        measuredCfg.TuningMode = TqTuningMode::Auto;
-        measuredCfg.TargetBandwidthMbps = std::max(obs.ThroughputMbps, 1u);
-        measuredCfg.TargetRttMs = obs.MeasuredRttMs;
-        TqTuningConfig measured{};
-        TqComputeTuning(measuredCfg, measured);
-        MergeDowngradeTuning(cfg.Tuning, measured);
     }
     cfg.Tuning.StreamRecvWindow = TqValidationFlowWindowBytes;
     cfg.Tuning.ConnFlowControlWindow = TqValidationFlowWindowBytes;

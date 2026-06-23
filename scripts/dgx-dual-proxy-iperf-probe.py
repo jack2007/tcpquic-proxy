@@ -132,11 +132,9 @@ def bps_from_iperf(text):
 
 def proxy_args():
     args = [
-        "--tuning", "custom",
-        "--fcw", "1073741824",
-        "--srw", "1073741824",
+        "--tuning", "wan",
         "--iw", "4000",
-        "--initrtt-ms", "1",
+        "--initrtt-ms", "100",
         "--relay-io-size", "1048576",
         "--connections", str(Q_PER_LANE),
         "--compress", "off",

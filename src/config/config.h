@@ -66,24 +66,17 @@ struct TqConfig {
     std::vector<std::string> DenyTargets;
 
     TqTuningMode TuningMode{TqTuningMode::Wan};
-    uint32_t TargetBandwidthMbps{0};
-    uint32_t TargetRttMs{0};
     uint32_t MaxMemoryMb{0};
     uint32_t TuningOverrideRelayIoSize{0};
-    uint32_t TuningOverrideRelayInflightBytes{0};
     uint32_t TuningOverrideLinuxRelayReadChunkSize{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteMaxBytes{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteBurstBytes{0};
-    uint32_t TuningOverrideInitialQuicReadAheadBytes{0};
-    uint32_t TuningOverrideQuicFcw{0};
-    uint32_t TuningOverrideQuicSrw{0};
     uint32_t TuningOverrideQuicIw{0};
     uint32_t TuningOverrideQuicInitRttMs{0};
     TqTuningConfig Tuning{};
 
     bool Trace{false};
     uint32_t TraceIntervalSec{10};
-    bool TraceConnectOnStart{false};
     bool DiagStats{false};
     uint32_t DiagStatsIntervalSec{5};
 };

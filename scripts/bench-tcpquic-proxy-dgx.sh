@@ -85,11 +85,9 @@ proxy_tuning_args() {
     local -a args=()
     if [[ "$TUNING_20GBPS" == "1" ]]; then
         args+=(
-            --tuning custom
-            --fcw 1073741824
-            --srw 1073741824
+            --tuning wan
             --iw 4000
-            --initrtt-ms 200
+            --initrtt-ms 100
             --relay-io-size 1048576
         )
     fi
