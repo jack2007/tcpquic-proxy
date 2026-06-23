@@ -67,6 +67,9 @@ if(TCPQUIC_USE_MIMALLOC)
     set(MI_BUILD_STATIC ON CACHE BOOL "" FORCE)
     set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+    # Relay buffers use mi_malloc explicitly; global override breaks on macOS when
+    # msquic/spdlog/STL mix allocators (see microsoft/mimalloc#1239).
+    set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
     add_subdirectory("${TCPQUIC_MIMALLOC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/mimalloc")
 endif()
 
