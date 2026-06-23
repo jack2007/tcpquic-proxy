@@ -24,8 +24,19 @@ set(QUIC_ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 option(TCPQUIC_MSQUIC_SHARED "Build msquic as a shared library (libmsquic.so)" OFF)
 set(QUIC_BUILD_SHARED ${TCPQUIC_MSQUIC_SHARED} CACHE BOOL "Builds msquic as a dynamic library" FORCE)
 
+# Windows: skip XDP-for-Windows datapath; use socket raw path only.
+if(WIN32)
+    option(TCPQUIC_MSQUIC_DISABLE_XDP "Build msquic without Windows XDP datapath" ON)
+else()
+    set(TCPQUIC_MSQUIC_DISABLE_XDP OFF CACHE BOOL "Build msquic without Windows XDP datapath" FORCE)
+endif()
+
+# Always use bundled quictls; never Schannel/system TLS.
 set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use" FORCE)
 set(QUIC_USE_SYSTEM_LIBCRYPTO OFF CACHE BOOL "Use vendored quictls crypto" FORCE)
+if(TCPQUIC_MSQUIC_DISABLE_XDP)
+    set(QUIC_DISABLE_XDP ON CACHE BOOL "Disable Windows XDP raw datapath at build time" FORCE)
+endif()
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
 

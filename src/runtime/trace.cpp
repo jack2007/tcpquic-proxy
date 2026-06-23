@@ -23,6 +23,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#ifndef PATH_MAX
+#define PATH_MAX MAX_PATH
+#endif
 #else
 #include <cerrno>
 #include <limits.h>
@@ -491,7 +494,8 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
 
     char exeDir[PATH_MAX]{};
     if (!TqGetExecutableDirectory(exeDir, sizeof(exeDir))) {
-        std::strncpy(exeDir, ".", sizeof(exeDir) - 1);
+        exeDir[0] = '.';
+        exeDir[1] = '\0';
     }
 
 #if defined(_WIN32)
@@ -499,7 +503,7 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     const bool haveSavedCwd = GetCurrentDirectoryW(MAX_PATH, savedCwd) != 0;
     bool changedCwd = false;
     if (std::strcmp(exeDir, ".") != 0) {
-        int required = MultiByteToWideChar(CP_UTF8, 0, exeDir, -1, nullptr, 0, nullptr, nullptr);
+        int required = MultiByteToWideChar(CP_UTF8, 0, exeDir, -1, nullptr, 0);
         if (required > 0) {
             std::wstring wideExeDir(static_cast<size_t>(required - 1), L'\0');
             if (MultiByteToWideChar(
@@ -520,7 +524,8 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     if (std::strcmp(exeDir, ".") != 0 && chdir(exeDir) == 0) {
         changedCwd = true;
     } else if (std::strcmp(exeDir, ".") != 0) {
-        std::strncpy(exeDir, ".", sizeof(exeDir) - 1);
+        exeDir[0] = '.';
+        exeDir[1] = '\0';
     }
 #endif
 

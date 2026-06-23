@@ -478,7 +478,8 @@ int main() {
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 256 * 1024);
         assert(cfg.Tuning.LinuxRelayWorkerEventBudget == 1024);
-        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick == 16u * 1024 * 1024);
+        assert(cfg.Tuning.LinuxRelayWorkerByteBudgetPerTick ==
+               TqValidationInitialIdealSendFallbackBytes);
     }
 
     {
