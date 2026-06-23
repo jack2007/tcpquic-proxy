@@ -133,6 +133,8 @@ private:
         TqClientIngressTunnelCloseFn RejectTunnel;
         TqClientIngressTunnelCloseFn CancelTunnel;
         ClientPhase Phase{ClientPhase::Handshake};
+        TunnelRequest FixedRequest{};
+        bool HasFixedRequest{false};
         std::string PendingWrite;
         TqClientTunnelOpenHandle* OpenHandle{nullptr};
         std::shared_ptr<OpenCompletionState> OpenCompletion;
