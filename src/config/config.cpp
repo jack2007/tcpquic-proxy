@@ -19,6 +19,7 @@ namespace {
 constexpr uint32_t TqMaxQuicConnectionStreamCount = 65535;
 constexpr uint32_t TqMinQuicKeepAliveIntervalMs = 1000;
 constexpr uint32_t TqMaxQuicKeepAliveIntervalMs = 15000;
+constexpr size_t kMaxPortForwardTargetHostLength = 255;
 
 const char* NextArg(int& i, int argc, char** argv, const char* flag, std::string& err) {
     if (i + 1 >= argc) {
@@ -172,7 +173,7 @@ bool SplitHostPortValue(const std::string& value, std::string& host, uint16_t& p
         }
         parsedPort = parsedPort * 10 + digit;
     }
-    if (host.empty() || parsedPort == 0) {
+    if (host.empty() || host.size() > kMaxPortForwardTargetHostLength || parsedPort == 0) {
         host.clear();
         return false;
     }
@@ -199,7 +200,9 @@ bool ParsePortForwardValue(const std::string& value, TqPortForwardConfig& out) {
 }
 
 bool IsValidPortForwardTarget(const TqPortForwardConfig& forward) {
-    return !forward.TargetHost.empty() && forward.TargetPort != 0;
+    return !forward.TargetHost.empty() &&
+           forward.TargetHost.size() <= kMaxPortForwardTargetHostLength &&
+           forward.TargetPort != 0;
 }
 
 bool IsValidCompress(const std::string& value) {

@@ -411,6 +411,27 @@ int main() {
         }
     }
     {
+        const std::string longHost(256, 'a');
+        const std::string forward = "127.0.0.1:15432=" + longHost + ":5432";
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:14444",
+            "--forward",
+            forward.c_str(),
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key",
+            "--ca",
+            "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 275;
+        if (err.find("--forward") == std::string::npos) return 276;
+    }
+    {
         const char* args[] = {
             "tcpquic-proxy",
             "client",
@@ -601,15 +622,17 @@ int main() {
     }
     {
         struct Case {
-            const char* portForwards;
+            std::string portForwards;
             const char* expectedError;
         };
+        const std::string longHost(256, 'a');
         const Case cases[] = {
             {R"json([{"target":"db.example.com:5432"}])json", "port_forward listen and target are required"},
             {R"json([{"listen":"127.0.0.1:15432"}])json", "port_forward listen and target are required"},
             {R"json([{"listen":"127.0.0.1:15432","target":"db.example.com:5432","extra":true}])json", "unknown port_forward key"},
             {R"json({"listen":"127.0.0.1:15432","target":"db.example.com:5432"})json", "port_forwards must be an array"},
             {R"json([{"listen":"127.0.0.1:15432","target":"db.example.com:99999"}])json", "invalid port_forward.target"},
+            {R"json([{"listen":"127.0.0.1:15432","target":")json" + longHost + R"json(:5432"}])json", "invalid port_forward.target"},
         };
         for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
             std::string body =

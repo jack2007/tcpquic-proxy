@@ -8,6 +8,8 @@
 
 namespace {
 
+constexpr size_t kMaxPortForwardTargetHostLength = 255;
+
 std::string JsonEscape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 2);
@@ -279,7 +281,8 @@ private:
             portStart = colon + 1;
         }
 
-        if (host.empty() || !ParsePortForwardPort(target, portStart, port)) {
+        if (host.empty() || host.size() > kMaxPortForwardTargetHostLength ||
+            !ParsePortForwardPort(target, portStart, port)) {
             host.clear();
             port = 0;
             return false;

@@ -449,10 +449,17 @@ int main() {
         const TqRouterConfig beforeReject = adminRuntime.SnapshotConfig();
         if (beforeReject.Peers.size() != 1 || beforeReject.Peers[0].PortForwards.size() != 2) return 205;
 
+        const std::string longHost(256, 'a');
+        const std::string overlongTargetConfig =
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-long-target\","
+            "\"quic_peer\":\"127.0.0.1:14454\","
+            "\"socks_listen\":\"\","
+            "\"port_forwards\":[{\"listen\":\"127.0.0.1:15433\",\"target\":\"" + longHost + ":5432\"}]}]}";
         const char* invalidConfigs[] = {
             "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-object\",\"quic_peer\":\"127.0.0.1:14451\",\"socks_listen\":\"\",\"port_forwards\":{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}}]}",
             "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-array\",\"quic_peer\":\"127.0.0.1:14452\",\"socks_listen\":\"\",\"port_forwards\":[\"127.0.0.1:15432=db.internal:5432\"]}]}",
-            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-target\",\"quic_peer\":\"127.0.0.1:14453\",\"socks_listen\":\"\",\"port_forwards\":[{\"listen\":\"127.0.0.1:15432\",\"target\":\"2001:db8::10:443\"}]}]}"
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-target\",\"quic_peer\":\"127.0.0.1:14453\",\"socks_listen\":\"\",\"port_forwards\":[{\"listen\":\"127.0.0.1:15432\",\"target\":\"2001:db8::10:443\"}]}]}",
+            overlongTargetConfig.c_str()
         };
         for (const char* invalidConfig : invalidConfigs) {
             TqHttpRequest invalidPut = Request("PUT", "/config", invalidConfig);
