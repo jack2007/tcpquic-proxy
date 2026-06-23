@@ -315,6 +315,9 @@ Usage: tcpquic-proxy client|server [options]
 | `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
 | `--deny-targets` | server | 空 | 逗号分隔 CIDR 黑名单 |
 | `--admin-listen` | 双方 | 空 | Admin HTTP 监听地址；当前只允许 loopback：`127.0.0.1`、`localhost`、`::1` |
+| `--admin-token-file` | 双方 | pid 默认路径 | Admin Bearer token JSON 文件路径 |
+| `--admin-threads` | 双方 | `2` | Admin HTTP 固定 worker 线程数，范围 `1..32` |
+| `--admin-allow-unauthenticated-legacy` | 双方 | 关闭 | 仅允许旧路径在 loopback 上跳过 token；`/api/v1/*` 仍要求 token |
 
 - Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
 - Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
@@ -325,6 +328,16 @@ Usage: tcpquic-proxy client|server [options]
 ## Admin HTTP API
 
 Admin HTTP 通过 `--admin-listen host:port` 开启；不配置该参数时不会启动。当前实现只允许绑定 loopback 地址，适合本机运维脚本或 SSH tunnel 访问。
+
+启动 Admin 时会生成 Bearer token 并写入 token JSON 文件。可用 `--admin-token-file <path>` 指定路径；未指定时使用包含 pid 的运行时默认路径。日志只打印 token 文件路径，不打印 token 内容。
+
+```bash
+TOKEN=$(jq -r .token "$TOKEN_FILE")
+curl -H "Authorization: Bearer ${TOKEN}" \
+  http://127.0.0.1:18080/api/v1/health
+```
+
+新路径 `/api/v1/health`、`/api/v1/metrics`、`/api/v1/config` 和 `PUT /api/v1/config` 映射到现有能力。旧路径 `/health`、`/metrics`、`/config` 和 `/peers/{peer_id}/enable|disable` 保留兼容，但默认同样要求 Bearer token。只有显式开启 `--admin-allow-unauthenticated-legacy` 时，旧路径才允许无 token 访问；该开关不影响 `/api/v1/*`。
 
 ### Client 多 peer 模式
 
@@ -415,7 +428,7 @@ server metrics 字段包括：
 }
 ```
 
-Admin API 当前没有鉴权或 TLS，依赖 loopback 绑定限制访问面。
+Admin API 当前有本机 Bearer token 鉴权但没有 TLS；仍依赖 loopback 绑定限制访问面。旧路径已进入兼容期，建议新脚本使用 `/api/v1/*`。
 
 ## 安全与 ACL
 
