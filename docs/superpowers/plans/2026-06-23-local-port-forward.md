@@ -16,6 +16,8 @@
 - Modify `src/config/config.cpp`: parse and validate `--forward`, runtime JSON `port_forwards`, legacy router JSON `port_forwards`, and listener uniqueness.
 - Modify `src/runtime/router_runtime.h`: add `PortForwards` to `TqPeerMetrics`.
 - Modify `src/runtime/router_runtime.cpp`: serialize/parse `port_forwards`, compare forward configs in data-plane change checks, include metrics/config JSON.
+- Modify `src/runtime/server_metrics.h`: add `PortForwards` to single-peer `TqClientMetrics`.
+- Modify `src/runtime/server_metrics.cpp`: serialize `port_forwards` in single-peer client metrics JSON.
 - Modify `src/runtime/client_peer_runtime.h`: copy `PortForwards` through primary and peer runtime config helpers.
 - Modify `src/runtime/client_peer_runtime.cpp`: pass `PortForwards` to ingress, expose metrics, log forward listeners.
 - Modify `src/ingress/client_ingress_reactor.h`: represent peer listeners as a vector, add `ListenProto::PortForward`, add forward test accessors.
@@ -23,9 +25,10 @@
 - Modify `src/tunnel/tcp_tunnel.h`: document `IngressTraceProto = 3` for port-forward.
 - Modify `src/unittest/config_router_test.cpp`: add config parsing/validation coverage.
 - Modify `src/unittest/router_runtime_test.cpp`: add router JSON, metrics, and data-plane change coverage.
+- Modify `src/unittest/client_peer_runtime_test.cpp`: add primary/peer helper propagation coverage.
 - Modify `src/unittest/client_ingress_reactor_test.cpp`: add forward listener/open success/failure/timeout coverage.
 - Modify `scripts/test-tcpquic-proxy.sh`: add one local forward end-to-end smoke path.
-- Modify `README.md` and `docs/config_guide_cn.md`: document CLI and JSON usage.
+- Modify `README.md`, `docs/config_guide.md`, and `docs/config_guide_cn.md`: document CLI and JSON usage.
 
 ## Implementation Notes
 
@@ -364,6 +367,8 @@ rtk git commit -m "feat: parse local port forwards"
 **Files:**
 - Modify: `src/runtime/router_runtime.h`
 - Modify: `src/runtime/router_runtime.cpp`
+- Modify: `src/runtime/server_metrics.h`
+- Modify: `src/runtime/server_metrics.cpp`
 - Modify: `src/runtime/client_peer_runtime.h`
 - Modify: `src/runtime/client_peer_runtime.cpp`
 - Test: `src/unittest/router_runtime_test.cpp`
@@ -455,6 +460,20 @@ std::vector<TqPortForwardConfig> PortForwards;
 
 to `TqPeerMetrics`.
 
+In `src/runtime/server_metrics.h`, add includes:
+
+```cpp
+#include "config.h"
+
+#include <vector>
+```
+
+Then add the same field to `TqClientMetrics`:
+
+```cpp
+std::vector<TqPortForwardConfig> PortForwards;
+```
+
 In `src/runtime/client_peer_runtime.h`, update helpers:
 
 ```cpp
@@ -476,6 +495,36 @@ metrics.PortForwards = Config.PortForwards;
 ```
 
 in both `SnapshotPeerMetrics()` and `SnapshotClientMetrics()` where peer/client metrics carry listen addresses.
+
+In `src/runtime/server_metrics.cpp`, add a local serializer matching router runtime output:
+
+```cpp
+static std::string TqPortForwardTargetText(const TqPortForwardConfig& forward) {
+    const bool ipv6 = forward.TargetHost.find(':') != std::string::npos;
+    return (ipv6 ? "[" + forward.TargetHost + "]" : forward.TargetHost) + ":" +
+        std::to_string(forward.TargetPort);
+}
+
+static void TqAppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortForwardConfig>& forwards) {
+    out << "\"port_forwards\":[";
+    for (size_t i = 0; i < forwards.size(); ++i) {
+        if (i != 0) out << ',';
+        out << '{';
+        TqAppendJsonString(out, "listen", forwards[i].Listen);
+        out << ',';
+        TqAppendJsonString(out, "target", TqPortForwardTargetText(forwards[i]));
+        out << '}';
+    }
+    out << ']';
+}
+```
+
+Call it from `TqClientMetricsJson()` after `http_listen`:
+
+```cpp
+out << ',';
+TqAppendPortForwardsJson(out, metrics.PortForwards);
+```
 
 - [ ] **Step 4: Add router JSON serialization**
 
@@ -521,13 +570,78 @@ In `RouterJsonParser::ParsePeer()`, add:
 Add parser methods mirroring Task 1 parser logic. Keep the target parser local to `router_runtime.cpp`:
 
 ```cpp
-bool SplitForwardTarget(const std::string& value, std::string& host, uint16_t& port) {
-    TqPortForwardConfig parsed;
-    return ParsePortForwardText(value, parsed.Listen, host, port);
+bool ParsePortForwardPort(const std::string& text, uint16_t& port) {
+    if (text.empty()) return false;
+    uint32_t value = 0;
+    for (char ch : text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+        value = value * 10 + static_cast<uint32_t>(ch - '0');
+        if (value > 65535) return false;
+    }
+    if (value == 0) return false;
+    port = static_cast<uint16_t>(value);
+    return true;
+}
+
+bool ParsePortForwardTargetText(const std::string& value, std::string& host, uint16_t& port) {
+    std::string portText;
+    if (!value.empty() && value[0] == '[') {
+        const size_t close = value.find(']');
+        if (close == std::string::npos || close == 1 || close + 2 > value.size() || value[close + 1] != ':') {
+            return false;
+        }
+        host = value.substr(1, close - 1);
+        portText = value.substr(close + 2);
+    } else {
+        const size_t colon = value.find(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size() ||
+            value.find(':', colon + 1) != std::string::npos) {
+            return false;
+        }
+        host = value.substr(0, colon);
+        portText = value.substr(colon + 1);
+    }
+    return !host.empty() && ParsePortForwardPort(portText, port);
+}
+
+bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
+    forwards.clear();
+    if (!Consume('[')) return Error("port_forwards must be an array");
+    if (Consume(']')) return true;
+    do {
+        TqPortForwardConfig forward;
+        if (!ParsePortForwardObject(forward)) return false;
+        forwards.push_back(std::move(forward));
+    } while (Consume(','));
+    return Consume(']') || Error("malformed port_forwards array");
+}
+
+bool ParsePortForwardObject(TqPortForwardConfig& forward) {
+    if (!Consume('{')) return Error("port_forward must be an object");
+    bool hasListen = false;
+    bool hasTarget = false;
+    std::string target;
+    if (Consume('}')) return Error("port_forward listen and target are required");
+    do {
+        std::string key;
+        if (!ParseString(key) || !Consume(':')) return Error("malformed port_forward object");
+        if (key == "listen") {
+            hasListen = true;
+            if (!ParseStringField(forward.Listen, "invalid port_forward.listen")) return false;
+        } else if (key == "target") {
+            hasTarget = true;
+            if (!ParseStringField(target, "invalid port_forward.target") ||
+                !ParsePortForwardTargetText(target, forward.TargetHost, forward.TargetPort)) {
+                return Error("invalid port_forward.target");
+            }
+        } else {
+            return Error(("unknown port_forward key: " + key).c_str());
+        }
+    } while (Consume(','));
+    if (!Consume('}')) return Error("malformed port_forward object");
+    return (hasListen && hasTarget) || Error("port_forward listen and target are required");
 }
 ```
-
-Use an implementation that accepts `host:port` and `[ipv6]:port`, rejects port 0, and returns `Error("invalid port_forward.target")` for bad target values.
 
 - [ ] **Step 6: Compare forward configs**
 
@@ -571,7 +685,7 @@ Expected: build succeeds and test exits 0.
 - [ ] **Step 8: Commit**
 
 ```bash
-rtk git add src/runtime/router_runtime.h src/runtime/router_runtime.cpp src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/router_runtime_test.cpp
+rtk git add src/runtime/router_runtime.h src/runtime/router_runtime.cpp src/runtime/server_metrics.h src/runtime/server_metrics.cpp src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/router_runtime_test.cpp
 rtk git commit -m "feat: expose port forwards in router runtime"
 ```
 
@@ -958,36 +1072,70 @@ bool HasFixedRequest{false};
 Add helper in `client_ingress_reactor.cpp`:
 
 ```cpp
+uint8_t TqAddrTypeForForwardHost(const std::string& host) {
+    in_addr ipv4{};
+    if (TqInetPton(AF_INET, host.c_str(), &ipv4)) {
+        return TQ_ADDR_IPV4;
+    }
+
+    in6_addr ipv6{};
+    if (TqInetPton(AF_INET6, host.c_str(), &ipv6)) {
+        return TQ_ADDR_IPV6;
+    }
+
+    return TQ_ADDR_DOMAIN;
+}
+
 TunnelRequest TqBuildPortForwardRequest(const TqPortForwardConfig& forward) {
     TunnelRequest req{};
     req.Port = forward.TargetPort;
     req.IngressTraceProto = 3;
     std::snprintf(req.Host, sizeof(req.Host), "%s", forward.TargetHost.c_str());
-
-    in_addr ipv4{};
-    in6_addr ipv6{};
-    if (TqInetPton(AF_INET, forward.TargetHost.c_str(), &ipv4)) {
-        req.AddrType = TQ_ADDR_IPV4;
-    } else if (TqInetPton(AF_INET6, forward.TargetHost.c_str(), &ipv6)) {
-        req.AddrType = TQ_ADDR_IPV6;
-    } else {
-        req.AddrType = TQ_ADDR_DOMAIN;
-    }
+    req.AddrType = TqAddrTypeForForwardHost(forward.TargetHost);
     return req;
 }
 ```
 
-Include the platform headers already used for `TqInetPton`.
+Add includes if they are not already present:
+
+```cpp
+#include <cstdio>
+```
+
+`client_ingress_reactor.h` already includes `platform_socket.h`, which provides `in_addr`, `in6_addr`, `AF_INET`, `AF_INET6`, and `TqInetPton` on all supported platforms.
 
 - [ ] **Step 4: Start forward open immediately after accept**
 
-In `AcceptLoop()`, after constructing `ClientEntry client`, branch on proto:
+In `AcceptLoop()`, copy the forward config while reading the listen table:
+
+```cpp
+TqPortForwardConfig forward;
+{
+    std::lock_guard<std::mutex> lock(Mutex);
+    const auto listenIt = Listens.find(listenFd);
+    if (listenIt == Listens.end()) {
+        return;
+    }
+    peerId = listenIt->second.PeerId;
+    proto = listenIt->second.Proto;
+    forward = listenIt->second.Forward;
+}
+```
+
+When accepting a client fd, avoid calling `StartClientOpen()` while holding `Mutex`. Use a local flag:
+
+```cpp
+bool startDirectOpen = false;
+```
+
+Inside the existing client creation lock, after constructing `ClientEntry client`, branch on proto:
 
 ```cpp
 if (proto == ListenProto::PortForward) {
     client.State = TqClientIngressState(TqClientIngressProto::Socks5);
-    client.FixedRequest = TqBuildPortForwardRequest(listenIt->second.Forward);
+    client.FixedRequest = TqBuildPortForwardRequest(forward);
     client.HasFixedRequest = true;
+    startDirectOpen = true;
 } else {
     std::shared_ptr<const TqProxyAuthTable> auth =
         std::make_shared<TqProxyAuthTable>(peerIt->second.Peer.Config.Router.ProxyAuth);
@@ -995,15 +1143,15 @@ if (proto == ListenProto::PortForward) {
 }
 ```
 
-After `Clients.emplace(clientFd, std::move(client));`, call:
+After leaving the lock, call:
 
 ```cpp
-if (proto == ListenProto::PortForward) {
+if (startDirectOpen) {
     StartClientOpen(clientFd);
 }
 ```
 
-Make sure the reactor event registration for port-forward clients uses `TqReactorEvents::Error` initially or is immediately modified by `StartClientOpen()`. It must not wait for a read event before opening.
+Use `if (startDirectOpen)` rather than re-reading shared state. The reactor event registration for port-forward clients can still register `Read`; `StartClientOpen()` immediately modifies the fd to `Error` while OPEN is pending. It must not wait for a read event before opening.
 
 - [ ] **Step 5: Use fixed request in StartClientOpen**
 
@@ -1107,10 +1255,31 @@ if (adapter.LastStartedPeer.PortForwards[0].TargetHost != "db.internal") return 
 if (adapter.LastStartedPeer.PortForwards[0].TargetPort != 5432) return 134;
 ```
 
-Add a single-peer helper assertion in `config_router_test.cpp` after the CLI success case from Task 1:
+Add helper propagation assertions in `src/unittest/client_peer_runtime_test.cpp`. In `TestPrimaryPeerConfigUsesCliFields()`, set:
 
 ```cpp
-if (TqMakePrimaryPeerConfig(cfg).PortForwards.size() != cfg.PortForwards.size()) return 212;
+cfg.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15432", "db.internal", 5432});
+```
+
+and assert:
+
+```cpp
+if (peer.PortForwards.size() != 1) return 17;
+if (peer.PortForwards[0].Listen != "127.0.0.1:15432") return 18;
+```
+
+In `TestPeerConfigOverlayUsesPeerOverrides()`, set:
+
+```cpp
+peer.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15433", "cache.internal", 6379});
+```
+
+and assert:
+
+```cpp
+if (out.PortForwards.size() != 1) return 27;
+if (out.PortForwards[0].TargetHost != "cache.internal") return 28;
+if (out.PortForwards[0].TargetPort != 6379) return 29;
 ```
 
 - [ ] **Step 2: Run tests to verify failure**
@@ -1118,9 +1287,9 @@ if (TqMakePrimaryPeerConfig(cfg).PortForwards.size() != cfg.PortForwards.size())
 Run:
 
 ```bash
-rtk cmake --build build --target tcpquic_router_runtime_test tcpquic_config_router_test -j$(nproc)
+rtk cmake --build build --target tcpquic_router_runtime_test tcpquic_client_peer_runtime_test -j$(nproc)
 rtk ./build/bin/Release/tcpquic_router_runtime_test
-rtk ./build/bin/Release/tcpquic_config_router_test
+rtk ./build/bin/Release/tcpquic_client_peer_runtime_test
 ```
 
 Expected: assertions fail if helper propagation or metrics are missing.
@@ -1153,9 +1322,9 @@ for (const auto& forward : Config.PortForwards) {
 Run:
 
 ```bash
-rtk cmake --build build --target tcpquic_router_runtime_test tcpquic_config_router_test -j$(nproc)
+rtk cmake --build build --target tcpquic_router_runtime_test tcpquic_client_peer_runtime_test -j$(nproc)
 rtk ./build/bin/Release/tcpquic_router_runtime_test
-rtk ./build/bin/Release/tcpquic_config_router_test
+rtk ./build/bin/Release/tcpquic_client_peer_runtime_test
 ```
 
 Expected: both tests exit 0.
@@ -1163,7 +1332,7 @@ Expected: both tests exit 0.
 - [ ] **Step 5: Commit**
 
 ```bash
-rtk git add src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/router_runtime_test.cpp src/unittest/config_router_test.cpp
+rtk git add src/runtime/client_peer_runtime.h src/runtime/client_peer_runtime.cpp src/unittest/router_runtime_test.cpp src/unittest/client_peer_runtime_test.cpp
 rtk git commit -m "feat: wire port forwards into client runtime"
 ```
 
@@ -1276,21 +1445,26 @@ Expected before implementation: client rejects `--forward` or the forward connec
 
 - [ ] **Step 3: Keep the script in the existing style**
 
-Confirm the e2e block uses existing script variables for the binary, cert paths, server listen, and compression. The client invocation must include:
+Confirm the e2e block uses existing script variables for the binary, cert paths, server listen, and compression. The new helper must invoke:
 
 ```bash
-"$TCPQUIC_PROXY_BIN" client \
-  --peer "$server_listen" \
-  --ca "$ca_crt" \
-  --compress "$COMPRESS" \
-  --forward "127.0.0.1:${forward_port}=127.0.0.1:${target_port}"
+"$BIN" client \
+    --peer "127.0.0.1:${quic_port}" \
+    --http-listen "127.0.0.1:${http_port}" \
+    --socks-listen "127.0.0.1:${socks_port}" \
+    --forward "127.0.0.1:${forward_port}=127.0.0.1:${target_port}" \
+    --cert "$TMP_DIR/client.crt" \
+    --key "$TMP_DIR/client.key" \
+    --ca "$TMP_DIR/ca.crt" \
+    --compress "$compress_mode"
 ```
 
-Keep cleanup robust:
+Cleanup must include `ECHO_PID` in the existing `cleanup()` loops, so no extra inline cleanup is needed in the happy path. When restarting the client for the forward check, keep the existing guarded kill/wait pattern:
 
 ```bash
-kill "$echo_pid" 2>/dev/null || true
-wait "$echo_pid" 2>/dev/null || true
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+CLIENT_PID=""
 ```
 
 - [ ] **Step 4: Run e2e script**
@@ -1314,6 +1488,7 @@ rtk git commit -m "test: cover local port forward e2e"
 
 **Files:**
 - Modify: `README.md`
+- Modify: `docs/config_guide.md`
 - Modify: `docs/config_guide_cn.md`
 
 - [ ] **Step 1: Update README CLI and examples**
@@ -1326,7 +1501,7 @@ In `README.md`, add to the CLI table:
 
 Add usage example near SOCKS/HTTP examples:
 
-```markdown
+````markdown
 ### 本地端口转发
 
 ```bash
@@ -1337,7 +1512,7 @@ Add usage example near SOCKS/HTTP examples:
 
 psql -h 127.0.0.1 -p 15432
 ```
-```
+````
 
 Update Admin config JSON examples to include:
 
@@ -1347,7 +1522,27 @@ Update Admin config JSON examples to include:
 ]
 ```
 
-- [ ] **Step 2: Update config guide**
+- [ ] **Step 2: Update config guides**
+
+In `docs/config_guide.md`, add peer field documentation:
+
+```markdown
+| `port_forwards` | client peer | `[]` | Local port-forward rules. Each item contains `listen` and `target`. |
+```
+
+Add JSON example:
+
+```json
+{
+  "id": "db",
+  "proto_peer": "proxy-b.example.com:443",
+  "socks_listen": "",
+  "http_listen": "",
+  "port_forwards": [
+    {"listen": "127.0.0.1:15432", "target": "db.internal.example.com:5432"}
+  ]
+}
+```
 
 In `docs/config_guide_cn.md`, add peer field documentation:
 
@@ -1410,7 +1605,7 @@ Expected: `git diff --check` exits 0. `git status --short` shows only intentiona
 - [ ] **Step 6: Commit**
 
 ```bash
-rtk git add README.md docs/config_guide_cn.md
+rtk git add README.md docs/config_guide.md docs/config_guide_cn.md
 rtk git commit -m "docs: document local port forwarding"
 ```
 
