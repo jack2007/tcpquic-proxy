@@ -112,9 +112,15 @@ if(TCPQUIC_USE_MIMALLOC)
     set(MI_OSX_ZONE OFF CACHE BOOL "" FORCE)
     add_subdirectory("${TCPQUIC_MIMALLOC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/mimalloc")
     # MsQuic's static archive flattener records only static targets with an
-    # explicit archive output directory.
+    # explicit archive output directory. MSVC multi-config generators append
+    # $<CONFIG> unless per-config output directories are set explicitly.
+    set(_TCPQUIC_MIMALLOC_ARCHIVE_DIR "${CMAKE_BINARY_DIR}/mimalloc")
     set_target_properties(mimalloc-static PROPERTIES
-        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/mimalloc")
+        ARCHIVE_OUTPUT_DIRECTORY "${_TCPQUIC_MIMALLOC_ARCHIVE_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${_TCPQUIC_MIMALLOC_ARCHIVE_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${_TCPQUIC_MIMALLOC_ARCHIVE_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY_RELWITHDEBINFO "${_TCPQUIC_MIMALLOC_ARCHIVE_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY_MINSIZEREL "${_TCPQUIC_MIMALLOC_ARCHIVE_DIR}")
 endif()
 
 if(TCPQUIC_MSQUIC_MIMALLOC_ENABLED)
@@ -124,6 +130,10 @@ if(TCPQUIC_MSQUIC_MIMALLOC_ENABLED)
 endif()
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
+
+if(TCPQUIC_MSQUIC_MIMALLOC_ENABLED AND TARGET msquic_lib AND TARGET mimalloc-static)
+    add_dependencies(msquic_lib mimalloc-static)
+endif()
 
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
 set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
