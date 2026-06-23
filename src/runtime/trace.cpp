@@ -576,7 +576,11 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     }
 #else
     if (haveSavedCwd && changedCwd) {
-        chdir(savedCwd);
+        if (chdir(savedCwd) != 0) {
+            std::fprintf(
+                stderr,
+                "tcpquic-proxy: warning: failed to restore cwd after trace init\n");
+        }
     }
 #endif
 
