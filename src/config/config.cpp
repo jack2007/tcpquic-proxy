@@ -12,6 +12,7 @@
 #include <fstream>
 #include <limits>
 #include <set>
+#include <utility>
 
 namespace {
 
@@ -128,12 +129,77 @@ bool IsHostPort(const std::string& value) {
         if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
             return false;
         }
-        port = port * 10 + static_cast<uint32_t>(value[i] - '0');
-        if (port > 65535) {
+        const uint32_t digit = static_cast<uint32_t>(value[i] - '0');
+        if (port > 6553 || (port == 6553 && digit > 5)) {
             return false;
         }
+        port = port * 10 + digit;
     }
     return port != 0;
+}
+
+bool SplitHostPortValue(const std::string& value, std::string& host, uint16_t& port) {
+    host.clear();
+    port = 0;
+
+    size_t portStart = std::string::npos;
+    if (!value.empty() && value[0] == '[') {
+        const size_t close = value.find(']');
+        if (close == std::string::npos || close == 1 || close + 2 > value.size() || value[close + 1] != ':') {
+            return false;
+        }
+        host = value.substr(1, close - 1);
+        portStart = close + 2;
+    } else {
+        const size_t colon = value.find(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size() || value.find(':', colon + 1) != std::string::npos) {
+            return false;
+        }
+        host = value.substr(0, colon);
+        portStart = colon + 1;
+    }
+
+    uint32_t parsedPort = 0;
+    for (size_t i = portStart; i < value.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
+            host.clear();
+            return false;
+        }
+        const uint32_t digit = static_cast<uint32_t>(value[i] - '0');
+        if (parsedPort > 6553 || (parsedPort == 6553 && digit > 5)) {
+            host.clear();
+            return false;
+        }
+        parsedPort = parsedPort * 10 + digit;
+    }
+    if (host.empty() || parsedPort == 0) {
+        host.clear();
+        return false;
+    }
+    port = static_cast<uint16_t>(parsedPort);
+    return true;
+}
+
+bool ParsePortForwardValue(const std::string& value, TqPortForwardConfig& out) {
+    const size_t equals = value.find('=');
+    if (equals == std::string::npos || equals == 0 || equals + 1 >= value.size()) {
+        return false;
+    }
+
+    TqPortForwardConfig parsed;
+    parsed.Listen = value.substr(0, equals);
+    if (!IsHostPort(parsed.Listen)) {
+        return false;
+    }
+    if (!SplitHostPortValue(value.substr(equals + 1), parsed.TargetHost, parsed.TargetPort)) {
+        return false;
+    }
+    out = std::move(parsed);
+    return true;
+}
+
+bool IsValidPortForwardTarget(const TqPortForwardConfig& forward) {
+    return !forward.TargetHost.empty() && forward.TargetPort != 0;
 }
 
 bool IsValidCompress(const std::string& value) {
@@ -522,6 +588,8 @@ private:
                 if (!ParseString(peer.SocksListen)) return Error("invalid peer.socks_listen");
             } else if (key == "http_listen") {
                 if (!ParseString(peer.HttpListen)) return Error("invalid peer.http_listen");
+            } else if (key == "port_forwards") {
+                if (!ParsePortForwards(peer.PortForwards)) return false;
             } else if (key == "proto_connections") {
                 protoConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid peer.proto_connections");
@@ -578,6 +646,8 @@ private:
                 if (!ParseString(peer.SocksListen)) return Error("invalid socks_listen");
             } else if (key == "http_listen") {
                 if (!ParseString(peer.HttpListen)) return Error("invalid http_listen");
+            } else if (key == "port_forwards") {
+                if (!ParsePortForwards(peer.PortForwards)) return false;
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
@@ -595,6 +665,62 @@ private:
             return Error("quic_connections out of range");
         }
         return Consume('}') || Error("malformed peer object");
+    }
+
+    bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
+        forwards.clear();
+        if (!Consume('[')) {
+            return Error("port_forwards must be an array");
+        }
+        if (Consume(']')) {
+            return true;
+        }
+        do {
+            TqPortForwardConfig forward;
+            if (!ParsePortForwardObject(forward)) {
+                return false;
+            }
+            forwards.push_back(std::move(forward));
+        } while (Consume(','));
+        return Consume(']') || Error("malformed port_forwards array");
+    }
+
+    bool ParsePortForwardObject(TqPortForwardConfig& forward) {
+        if (!Consume('{')) {
+            return Error("port_forward must be an object");
+        }
+        bool hasListen = false;
+        bool hasTarget = false;
+        if (Consume('}')) {
+            return Error("port_forward listen and target are required");
+        }
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) {
+                return Error("malformed port_forward object");
+            }
+            if (key == "listen") {
+                hasListen = true;
+                if (!ParseString(forward.Listen)) return Error("invalid port_forward.listen");
+                if (!IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
+            } else if (key == "target") {
+                hasTarget = true;
+                std::string target;
+                if (!ParseString(target)) return Error("invalid port_forward.target");
+                if (!SplitHostPortValue(target, forward.TargetHost, forward.TargetPort)) {
+                    return Error("invalid port_forward.target");
+                }
+            } else {
+                return Error(("unknown port_forward key: " + key).c_str());
+            }
+        } while (Consume(','));
+        if (!Consume('}')) {
+            return Error("malformed port_forward object");
+        }
+        if (!hasListen || !hasTarget) {
+            return Error("port_forward listen and target are required");
+        }
+        return true;
     }
 
     bool ParseProxyAuth(std::vector<TqProxyAuthUser>& users) {
@@ -903,6 +1029,7 @@ void TqPrintUsage(FILE* out) {
         "Client specific:\n"
         "  --socks-listen <addr>        SOCKS5 listen address (default 127.0.0.1:1080)\n"
         "  --http-listen <addr>         HTTP CONNECT listen address (default 127.0.0.1:8080)\n"
+        "  --forward <local=target>    Local port forward, repeatable\n"
         "  --client-config <path>       Legacy router client config JSON\n"
         "  --peer <addr>                Legacy single-peer address\n"
         "  --connections <n>            Connection count (default 1)\n"
@@ -1039,6 +1166,19 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.QuicPeer = value;
+        } else if (GetOptionValue(arg, "--forward", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--forward", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            TqPortForwardConfig forward;
+            if (!ParsePortForwardValue(value, forward)) {
+                err = "invalid value for --forward";
+                return false;
+            }
+            cfg.PortForwards.push_back(std::move(forward));
         } else if (GetOptionValue(arg, "--client-config", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--client-config", err);
@@ -1380,6 +1520,10 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         err = "--client-config is valid only in client mode";
         return false;
     }
+    if (!cfg.PortForwards.empty() && cfg.Mode != TqMode::Client) {
+        err = "--forward is valid only in client mode";
+        return false;
+    }
     if (!cfg.ClientConfigPath.empty() && (!cfg.QuicPeer.empty() || quicPeerSpecified)) {
         err = "--client-config and --peer are mutually exclusive";
         return false;
@@ -1408,6 +1552,47 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     if (cfg.Mode == TqMode::Client) {
         if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--peer", err)) {
             return false;
+        }
+        if (cfg.Router.Peers.empty()) {
+            std::set<std::string> listens;
+            if (cfg.SocksListen.empty() && cfg.HttpListen.empty() && cfg.PortForwards.empty()) {
+                err = "at least one ingress is required";
+                return false;
+            }
+            if (!cfg.SocksListen.empty()) {
+                if (!IsHostPort(cfg.SocksListen)) {
+                    err = "invalid socks listen";
+                    return false;
+                }
+                if (!listens.insert(cfg.SocksListen).second) {
+                    err = "duplicate listen: " + cfg.SocksListen;
+                    return false;
+                }
+            }
+            if (!cfg.HttpListen.empty()) {
+                if (!IsHostPort(cfg.HttpListen)) {
+                    err = "invalid http listen";
+                    return false;
+                }
+                if (!listens.insert(cfg.HttpListen).second) {
+                    err = "duplicate listen: " + cfg.HttpListen;
+                    return false;
+                }
+            }
+            for (const auto& forward : cfg.PortForwards) {
+                if (!IsHostPort(forward.Listen)) {
+                    err = "invalid port_forward.listen";
+                    return false;
+                }
+                if (!IsValidPortForwardTarget(forward)) {
+                    err = "invalid port_forward.target";
+                    return false;
+                }
+                if (!listens.insert(forward.Listen).second) {
+                    err = "duplicate listen: " + forward.Listen;
+                    return false;
+                }
+            }
         }
         if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
             return false;
@@ -1473,11 +1658,19 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
         if (peer.PeerId.empty()) { err = "peer_id is required"; return false; }
         if (!peerIds.insert(peer.PeerId).second) { err = "duplicate peer_id: " + peer.PeerId; return false; }
         if (!IsHostPort(peer.QuicPeer)) { err = "invalid quic_peer for " + peer.PeerId; return false; }
-        if (peer.SocksListen.empty()) { err = "socks_listen is required for " + peer.PeerId; return false; }
-        if (!IsHostPort(peer.SocksListen)) { err = "invalid socks_listen for " + peer.PeerId; return false; }
-        if (!listens.insert(peer.SocksListen).second) { err = "duplicate listen: " + peer.SocksListen; return false; }
+        if (peer.SocksListen.empty() && peer.HttpListen.empty() && peer.PortForwards.empty()) {
+            err = "at least one ingress is required for " + peer.PeerId;
+            return false;
+        }
+        if (!peer.SocksListen.empty() && !IsHostPort(peer.SocksListen)) { err = "invalid socks_listen for " + peer.PeerId; return false; }
+        if (!peer.SocksListen.empty() && !listens.insert(peer.SocksListen).second) { err = "duplicate listen: " + peer.SocksListen; return false; }
         if (!peer.HttpListen.empty() && !IsHostPort(peer.HttpListen)) { err = "invalid http_listen for " + peer.PeerId; return false; }
         if (!peer.HttpListen.empty() && !listens.insert(peer.HttpListen).second) { err = "duplicate listen: " + peer.HttpListen; return false; }
+        for (const auto& forward : peer.PortForwards) {
+            if (!IsHostPort(forward.Listen)) { err = "invalid port_forward.listen for " + peer.PeerId; return false; }
+            if (!IsValidPortForwardTarget(forward)) { err = "invalid port_forward.target for " + peer.PeerId; return false; }
+            if (!listens.insert(forward.Listen).second) { err = "duplicate listen: " + forward.Listen; return false; }
+        }
         if (peer.QuicConnections > 128) { err = "quic_connections out of range for " + peer.PeerId; return false; }
         if (!IsValidCompress(peer.Compress)) { err = "invalid compress for " + peer.PeerId; return false; }
     }

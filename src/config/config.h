@@ -18,11 +18,18 @@ enum class TqSpeedTestMode {
 
 enum class TqQuicProfile { MaxThroughput, LowLatency };
 
+struct TqPortForwardConfig {
+    std::string Listen;
+    std::string TargetHost;
+    uint16_t TargetPort{0};
+};
+
 struct TqPeerConfig {
     std::string PeerId;
     std::string QuicPeer;
     std::string SocksListen;
     std::string HttpListen;
+    std::vector<TqPortForwardConfig> PortForwards;
     uint32_t QuicConnections{0};
     std::string Compress;
     bool Enabled{true};
@@ -45,6 +52,7 @@ struct TqConfig {
     std::string SocksListen = "127.0.0.1:1080";
     std::string HttpListen = "127.0.0.1:8080";
     std::string QuicPeer;
+    std::vector<TqPortForwardConfig> PortForwards;
     std::string ConfigPath;
     std::string ClientConfigPath;
     std::string AdminListen;

@@ -92,6 +92,7 @@ int main() {
         if (usage.find("--relay-io-size <bytes>      Override relay IO size") == std::string::npos) return 145;
         if (usage.find("Linux relay TCP read chunk size") == std::string::npos) return 146;
         if (usage.find("--max-memory-mb <n>") == std::string::npos) return 149;
+        if (usage.find("--forward <local=target>") == std::string::npos) return 187;
     }
     {
         const char* helpOptions[] = {"-h", "--help", "--usage"};
@@ -191,6 +192,31 @@ int main() {
     {
         TqRouterConfig router;
         std::string err;
+        if (!Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","port_forwards":[{"listen":"127.0.0.1:15432","target":"db.example.com:5432"},{"listen":"[::1]:18080","target":"10.0.0.15:8080"}]}]})json", router, err)) return 200;
+        if (router.Peers.size() != 1) return 201;
+        if (router.Peers[0].PortForwards.size() != 2) return 202;
+        if (router.Peers[0].PortForwards[0].Listen != "127.0.0.1:15432") return 203;
+        if (router.Peers[0].PortForwards[0].TargetHost != "db.example.com") return 204;
+        if (router.Peers[0].PortForwards[0].TargetPort != 5432) return 205;
+        if (router.Peers[0].PortForwards[1].Listen != "[::1]:18080") return 206;
+        if (router.Peers[0].PortForwards[1].TargetHost != "10.0.0.15") return 207;
+        if (router.Peers[0].PortForwards[1].TargetPort != 8080) return 208;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"","http_listen":"","port_forwards":[]}]})json", router, err)) return 209;
+        if (err.find("at least one ingress") == std::string::npos) return 210;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:15432","port_forwards":[{"listen":"127.0.0.1:15432","target":"db.example.com:5432"}]}]})json", router, err)) return 211;
+        if (err.find("duplicate listen") == std::string::npos) return 212;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
         if (Load(R"json({"version":2,"peers":[]})json", router, err)) return 17;
         if (err.find("version must be 1") == std::string::npos) return 18;
     }
@@ -230,7 +256,7 @@ int main() {
         TqRouterConfig router;
         std::string err;
         if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":""}]})json", router, err)) return 29;
-        if (err.find("socks_listen is required") == std::string::npos) return 30;
+        if (err.find("at least one ingress") == std::string::npos) return 30;
     }
     {
         TqRouterConfig router;
@@ -323,6 +349,68 @@ int main() {
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 57;
         if (cfg.QuicConnectionStreamCount != 1024) return 119;
         if (cfg.Compress != "off") return 138;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:14444",
+            "--forward",
+            "127.0.0.1:15432=db.example.com:5432",
+            "--forward=[::1]:18080=10.0.0.15:8080",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key",
+            "--ca",
+            "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 188;
+        if (cfg.PortForwards.size() != 2) return 189;
+        if (cfg.PortForwards[0].Listen != "127.0.0.1:15432") return 190;
+        if (cfg.PortForwards[0].TargetHost != "db.example.com") return 191;
+        if (cfg.PortForwards[0].TargetPort != 5432) return 192;
+        if (cfg.PortForwards[1].Listen != "[::1]:18080") return 193;
+        if (cfg.PortForwards[1].TargetHost != "10.0.0.15") return 194;
+        if (cfg.PortForwards[1].TargetPort != 8080) return 195;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:14444",
+            "--forward",
+            "127.0.0.1:15432",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key",
+            "--ca",
+            "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 196;
+        if (err.find("--forward") == std::string::npos) return 197;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "server",
+            "--listen",
+            "0.0.0.0:4433",
+            "--forward",
+            "127.0.0.1:15432=db.example.com:5432",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 198;
+        if (err.find("--forward") == std::string::npos) return 199;
     }
     {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--connection-stream-count", "2048", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
