@@ -289,9 +289,11 @@ int main() {
         const std::string configJson = runtime.ConfigJson();
         if (configJson.find("\"port_forwards\"") == std::string::npos) return 192;
         if (configJson.find("\"target\":\"db.internal:5432\"") == std::string::npos) return 193;
+        if (configJson.find("{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}") == std::string::npos) return 196;
         const std::string metricsJson = runtime.MetricsJson();
         if (metricsJson.find("\"port_forwards\"") == std::string::npos) return 194;
         if (metricsJson.find("\"listen\":\"127.0.0.1:15432\"") == std::string::npos) return 195;
+        if (metricsJson.find("{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}") == std::string::npos) return 197;
     }
     {
         FakeAdapter adapter;
@@ -385,7 +387,7 @@ int main() {
         std::string config = adminRuntime.HandleAdmin(getConfig);
         if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 27;
         if (config.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 28;
-        if (config.find("quic_reconnect_interval_ms") != std::string::npos) return 96;
+        if (config.find("quic_reconnect_interval_ms") != std::string::npos) return 259;
         TqHttpRequest putRoundTrip = Request("PUT", "/config", JsonBody(config));
         std::string roundTrip = adminRuntime.HandleAdmin(putRoundTrip);
         if (roundTrip.find("HTTP/1.1 200 OK") == std::string::npos) return 74;
@@ -413,6 +415,55 @@ int main() {
         TqHttpRequest leadingZeroConnections = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-leading-zero\",\"quic_peer\":\"127.0.0.1:14448\",\"socks_listen\":\"127.0.0.1:11005\",\"quic_connections\":004}]}");
         std::string leadingZeroResp = adminRuntime.HandleAdmin(leadingZeroConnections);
         if (leadingZeroResp.find("HTTP/1.1 400") == std::string::npos) return 73;
+    }
+    {
+        TqRouterRuntime adminRuntime;
+        const std::string validConfig =
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-forward-admin\","
+            "\"quic_peer\":\"127.0.0.1:14450\","
+            "\"socks_listen\":\"\","
+            "\"port_forwards\":["
+            "{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"},"
+            "{\"listen\":\"[::1]:18080\",\"target\":\"[2001:db8::10]:443\"}"
+            "]}]}";
+        TqHttpRequest putConfig = Request("PUT", "/config", validConfig);
+        std::string put = adminRuntime.HandleAdmin(putConfig);
+        if (put.find("HTTP/1.1 200 OK") == std::string::npos) return 198;
+        if (put.find("{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}") == std::string::npos) return 199;
+        if (put.find("{\"listen\":\"[::1]:18080\",\"target\":\"[2001:db8::10]:443\"}") == std::string::npos) return 200;
+
+        TqHttpRequest getConfig = Request("GET", "/config", "");
+        std::string config = adminRuntime.HandleAdmin(getConfig);
+        if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 201;
+        if (config.find("{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}") == std::string::npos) return 202;
+        if (config.find("{\"listen\":\"[::1]:18080\",\"target\":\"[2001:db8::10]:443\"}") == std::string::npos) return 203;
+
+        TqHttpRequest roundTrip = Request("PUT", "/config", JsonBody(config));
+        std::string roundTripResp = adminRuntime.HandleAdmin(roundTrip);
+        if (roundTripResp.find("HTTP/1.1 200 OK") == std::string::npos) return 204;
+
+        const TqRouterConfig beforeReject = adminRuntime.SnapshotConfig();
+        if (beforeReject.Peers.size() != 1 || beforeReject.Peers[0].PortForwards.size() != 2) return 205;
+
+        const char* invalidConfigs[] = {
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-object\",\"quic_peer\":\"127.0.0.1:14451\",\"socks_listen\":\"\",\"port_forwards\":{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}}]}",
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-array\",\"quic_peer\":\"127.0.0.1:14452\",\"socks_listen\":\"\",\"port_forwards\":[\"127.0.0.1:15432=db.internal:5432\"]}]}",
+            "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-bad-target\",\"quic_peer\":\"127.0.0.1:14453\",\"socks_listen\":\"\",\"port_forwards\":[{\"listen\":\"127.0.0.1:15432\",\"target\":\"2001:db8::10:443\"}]}]}"
+        };
+        for (const char* invalidConfig : invalidConfigs) {
+            TqHttpRequest invalidPut = Request("PUT", "/config", invalidConfig);
+            std::string invalidResp = adminRuntime.HandleAdmin(invalidPut);
+            if (invalidResp.find("HTTP/1.1 400") == std::string::npos) return 206;
+            const TqRouterConfig afterReject = adminRuntime.SnapshotConfig();
+            if (afterReject.Peers.size() != 1) return 207;
+            if (afterReject.Peers[0].PeerId != "agent-forward-admin") return 208;
+            if (afterReject.Peers[0].PortForwards.size() != 2) return 209;
+            if (afterReject.Peers[0].PortForwards[0].Listen != "127.0.0.1:15432") return 210;
+            if (afterReject.Peers[0].PortForwards[0].TargetHost != "db.internal") return 211;
+            if (afterReject.Peers[0].PortForwards[0].TargetPort != 5432) return 212;
+            if (afterReject.Peers[0].PortForwards[1].TargetHost != "2001:db8::10") return 213;
+            if (afterReject.Peers[0].PortForwards[1].TargetPort != 443) return 214;
+        }
     }
     {
         TqRouterRuntime unicodeRuntime;
@@ -468,26 +519,28 @@ int main() {
         metrics.QuicPeer = "127.0.0.1:14444";
         metrics.SocksListen = "127.0.0.1:1080";
         metrics.HttpListen = "127.0.0.1:8080";
+        metrics.PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
         metrics.ConnectionCount = 4;
         metrics.ConnectedConnections = 3;
         const std::string body = TqClientMetricsJson(metrics, 9);
-        if (body.find("\"role\":\"client\"") == std::string::npos) return 76;
-        if (body.find("\"status\":\"healthy\"") == std::string::npos) return 77;
-        if (body.find("\"quic_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 78;
+        if (body.find("\"role\":\"client\"") == std::string::npos) return 216;
+        if (body.find("\"status\":\"healthy\"") == std::string::npos) return 217;
+        if (body.find("\"quic_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 218;
         if (body.find("\"socks_listen\":\"127.0.0.1:1080\"") == std::string::npos) return 180;
         if (body.find("\"http_listen\":\"127.0.0.1:8080\"") == std::string::npos) return 181;
-        if (body.find("\"uptime_seconds\":9") == std::string::npos) return 81;
-        if (body.find("\"connection_count\":4") == std::string::npos) return 82;
-        if (body.find("\"connected_connections\":3") == std::string::npos) return 83;
-        if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 84;
-        if (body.find("\"linux_relay_deferred_receive_complete_bytes\":") == std::string::npos) return 85;
-        if (body.find("\"linux_relay_max_pending_quic_receive_bytes\":") == std::string::npos) return 87;
-        if (body.find("\"linux_relay_active_relays\":") == std::string::npos) return 88;
-        if (body.find("\"linux_relay_max_worker_pending_bytes\":") == std::string::npos) return 89;
-        if (body.find("\"linux_relay_max_relay_pending_quic_receive_bytes\":") == std::string::npos) return 90;
-        if (body.find("\"linux_relay_hot_relay_id\":") == std::string::npos) return 91;
-        if (body.find("\"linux_relay_hot_relay_local\":") == std::string::npos) return 92;
-        if (body.find("\"linux_relay_hot_relay_peer\":") == std::string::npos) return 93;
+        if (body.find("\"port_forwards\":[{\"listen\":\"127.0.0.1:15432\",\"target\":\"db.internal:5432\"}]") == std::string::npos) return 215;
+        if (body.find("\"uptime_seconds\":9") == std::string::npos) return 219;
+        if (body.find("\"connection_count\":4") == std::string::npos) return 220;
+        if (body.find("\"connected_connections\":3") == std::string::npos) return 221;
+        if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 222;
+        if (body.find("\"linux_relay_deferred_receive_complete_bytes\":") == std::string::npos) return 223;
+        if (body.find("\"linux_relay_max_pending_quic_receive_bytes\":") == std::string::npos) return 224;
+        if (body.find("\"linux_relay_active_relays\":") == std::string::npos) return 225;
+        if (body.find("\"linux_relay_max_worker_pending_bytes\":") == std::string::npos) return 226;
+        if (body.find("\"linux_relay_max_relay_pending_quic_receive_bytes\":") == std::string::npos) return 227;
+        if (body.find("\"linux_relay_hot_relay_id\":") == std::string::npos) return 228;
+        if (body.find("\"linux_relay_hot_relay_local\":") == std::string::npos) return 229;
+        if (body.find("\"linux_relay_hot_relay_peer\":") == std::string::npos) return 230;
     }
     {
         TqServerMetrics serverMetrics;
@@ -529,10 +582,10 @@ int main() {
     {
         TqServerMetrics metrics;
         const std::string body = TqServerMetricsJson(metrics, 0);
-        if (body.find("\"linux_relay_wakeups\"") == std::string::npos) return 95;
-        if (body.find("\"linux_relay_events_processed\"") == std::string::npos) return 96;
-        if (body.find("\"linux_relay_pending_events\"") == std::string::npos) return 97;
-        if (body.find("\"linux_relay_pending_bytes\"") == std::string::npos) return 98;
+        if (body.find("\"linux_relay_wakeups\"") == std::string::npos) return 231;
+        if (body.find("\"linux_relay_events_processed\"") == std::string::npos) return 232;
+        if (body.find("\"linux_relay_pending_events\"") == std::string::npos) return 233;
+        if (body.find("\"linux_relay_pending_bytes\"") == std::string::npos) return 234;
         if (body.find("\"linux_relay_buffer_bytes_in_use\":0") == std::string::npos) return 171;
         if (body.find("linux_relay_worker_slots_allocated") != std::string::npos) return 172;
         if (body.find("linux_relay_worker_slots_free") != std::string::npos) return 173;
@@ -540,19 +593,19 @@ int main() {
         if (body.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (body.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
 #if defined(__linux__) || defined(_WIN32)
-        if (body.find("\"linux_relay_backend\":\"worker\"") == std::string::npos) return 102;
+        if (body.find("\"linux_relay_backend\":\"worker\"") == std::string::npos) return 235;
 #else
-        if (body.find("\"linux_relay_backend\":\"unsupported\"") == std::string::npos) return 102;
+        if (body.find("\"linux_relay_backend\":\"unsupported\"") == std::string::npos) return 236;
 #endif
         if (body.find("\"linux_relay_compressed_tcp_bytes\":") == std::string::npos) return 103;
         if (body.find("\"linux_relay_decompressed_tcp_bytes\":") == std::string::npos) return 104;
-        if (body.find("\"linux_relay_zstd_decompress_input_bytes\":") == std::string::npos) return 147;
-        if (body.find("\"linux_relay_zstd_decompress_output_bytes\":") == std::string::npos) return 148;
-        if (body.find("\"linux_relay_zstd_decompress_calls\":") == std::string::npos) return 149;
-        if (body.find("\"linux_relay_zstd_decompress_need_input\":") == std::string::npos) return 150;
-        if (body.find("\"linux_relay_zstd_decompress_need_output\":") == std::string::npos) return 151;
-        if (body.find("\"linux_relay_zstd_decompress_failures\":") == std::string::npos) return 152;
-        if (body.find("ingress_buffer") != std::string::npos) return 153;
+        if (body.find("\"linux_relay_zstd_decompress_input_bytes\":") == std::string::npos) return 237;
+        if (body.find("\"linux_relay_zstd_decompress_output_bytes\":") == std::string::npos) return 238;
+        if (body.find("\"linux_relay_zstd_decompress_calls\":") == std::string::npos) return 239;
+        if (body.find("\"linux_relay_zstd_decompress_need_input\":") == std::string::npos) return 240;
+        if (body.find("\"linux_relay_zstd_decompress_need_output\":") == std::string::npos) return 241;
+        if (body.find("\"linux_relay_zstd_decompress_failures\":") == std::string::npos) return 242;
+        if (body.find("ingress_buffer") != std::string::npos) return 243;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
         if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
@@ -562,9 +615,9 @@ int main() {
         if (body.find("\"linux_relay_quic_send_buffer_too_large_failures\":") == std::string::npos) return 140;
         if (body.find("\"linux_relay_quic_send_operation_alloc_failures\":") == std::string::npos) return 141;
         if (body.find("\"linux_relay_quic_send_api_failures\":") == std::string::npos) return 142;
-        if (body.find("\"linux_relay_quic_send_backpressure_events\":") == std::string::npos) return 157;
-        if (body.find("\"linux_relay_quic_send_fatal_errors\":") == std::string::npos) return 158;
-        if (body.find("\"linux_relay_quic_receive_view_backpressure_queued\":") == std::string::npos) return 159;
+        if (body.find("\"linux_relay_quic_send_backpressure_events\":") == std::string::npos) return 244;
+        if (body.find("\"linux_relay_quic_send_fatal_errors\":") == std::string::npos) return 245;
+        if (body.find("\"linux_relay_quic_receive_view_backpressure_queued\":") == std::string::npos) return 246;
         if (body.find("\"linux_relay_quic_receive_decompress_failures\":") == std::string::npos) return 135;
         if (body.find("\"linux_relay_quic_receive_view_alloc_failures\":") == std::string::npos) return 143;
         if (body.find("\"linux_relay_quic_receive_view_null_buffer_failures\":") == std::string::npos) return 144;
@@ -573,27 +626,27 @@ int main() {
         if (body.find("\"linux_relay_tcp_write_hard_errors\":") == std::string::npos) return 136;
         if (body.find("\"linux_relay_tcp_read_hard_errors\":") == std::string::npos) return 160;
         if (body.find("\"linux_relay_last_tcp_read_errno\":") == std::string::npos) return 161;
-        if (body.find("\"linux_relay_fatal_relay_resets\":") == std::string::npos) return 162;
+        if (body.find("\"linux_relay_fatal_relay_resets\":") == std::string::npos) return 247;
         if (body.find("\"linux_relay_tcp_write_sendmsg_calls\":") == std::string::npos) return 126;
         if (body.find("\"linux_relay_max_tcp_write_sendmsg_bytes\":") == std::string::npos) return 127;
         if (body.find("\"linux_relay_tcp_write_eagain_count\":") == std::string::npos) return 128;
         if (body.find("\"linux_relay_tcp_write_partial_count\":") == std::string::npos) return 129;
         if (body.find("\"linux_relay_deferred_receive_completion_flushes\":") == std::string::npos) return 130;
         if (body.find("\"linux_relay_max_pending_quic_receive_queue\":") == std::string::npos) return 131;
-        if (body.find("\"linux_relay_max_worker_active_relays\":") == std::string::npos) return 147;
-        if (body.find("\"linux_relay_max_relay_pending_quic_receive_queue\":") == std::string::npos) return 148;
-        if (body.find("\"linux_relay_max_relay_tcp_write_eagain_count\":") == std::string::npos) return 149;
-        if (body.find("\"linux_relay_hot_relay_worker_index\":") == std::string::npos) return 150;
-        if (body.find("\"linux_relay_hot_relay_tcp_write_eagain_count\":") == std::string::npos) return 151;
-        if (body.find("\"linux_relay_hot_relay_pending_quic_receive_bytes\":") == std::string::npos) return 152;
-        if (body.find("\"linux_relay_hot_relay_epollout_events\":") == std::string::npos) return 153;
+        if (body.find("\"linux_relay_max_worker_active_relays\":") == std::string::npos) return 248;
+        if (body.find("\"linux_relay_max_relay_pending_quic_receive_queue\":") == std::string::npos) return 249;
+        if (body.find("\"linux_relay_max_relay_tcp_write_eagain_count\":") == std::string::npos) return 250;
+        if (body.find("\"linux_relay_hot_relay_worker_index\":") == std::string::npos) return 251;
+        if (body.find("\"linux_relay_hot_relay_tcp_write_eagain_count\":") == std::string::npos) return 252;
+        if (body.find("\"linux_relay_hot_relay_pending_quic_receive_bytes\":") == std::string::npos) return 253;
+        if (body.find("\"linux_relay_hot_relay_epollout_events\":") == std::string::npos) return 254;
         if (body.find("\"linux_relay_hot_relay_tcp_write_armed\":") == std::string::npos) return 154;
         if (body.find("\"linux_relay_active_tcp_relays\":") == std::string::npos) return 155;
         if (body.find("\"linux_relay_active_sink_relays\":") == std::string::npos) return 156;
-        if (body.find("\"linux_relay_active_quic_send_relays\":") == std::string::npos) return 157;
-        if (body.find("\"linux_relay_current_pending_quic_receive_bytes\":") == std::string::npos) return 158;
-        if (body.find("\"linux_relay_current_pending_quic_receive_queue\":") == std::string::npos) return 159;
-        if (body.find("\"linux_relay_tcp_read_armed_relays\":") == std::string::npos) return 162;
+        if (body.find("\"linux_relay_active_quic_send_relays\":") == std::string::npos) return 255;
+        if (body.find("\"linux_relay_current_pending_quic_receive_bytes\":") == std::string::npos) return 256;
+        if (body.find("\"linux_relay_current_pending_quic_receive_queue\":") == std::string::npos) return 257;
+        if (body.find("\"linux_relay_tcp_read_armed_relays\":") == std::string::npos) return 258;
         if (body.find("\"linux_relay_tcp_read_disabled_relays\":") == std::string::npos) return 163;
         if (body.find("\"linux_relay_tcp_write_armed_relays\":") == std::string::npos) return 164;
         if (body.find("\"linux_relay_closing_relays\":") == std::string::npos) return 165;
