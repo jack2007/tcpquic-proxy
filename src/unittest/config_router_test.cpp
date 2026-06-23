@@ -58,8 +58,11 @@ int main() {
         if (usage.find("Server specific:") == std::string::npos) return 112;
         if (usage.find("Protocol and relay tuning:") == std::string::npos) return 113;
         if (usage.find("Diagnostics:") == std::string::npos) return 114;
+        if (usage.find("-h, --help, --usage") == std::string::npos) return 180;
         if (usage.find("--config <path>") == std::string::npos) return 115;
         if (usage.find("--allow-targets <list>") == std::string::npos) return 116;
+        if (usage.find("Client TLS: --ca is required") == std::string::npos) return 175;
+        if (usage.find("Server TLS: --cert and --key are required") == std::string::npos) return 176;
         if (usage.find("default 0.0.0.0/0") == std::string::npos) return 150;
         if (usage.find("--download-test <sec>") == std::string::npos) return 117;
         if (usage.find("--connection-stream-count <n>") == std::string::npos) return 118;
@@ -91,8 +94,27 @@ int main() {
         if (usage.find("--max-memory-mb <n>") == std::string::npos) return 149;
     }
     {
+        const char* helpOptions[] = {"-h", "--help", "--usage"};
+        for (const char* helpOption : helpOptions) {
+            const char* args[] = {"tcpquic-proxy", helpOption};
+            TqConfig cfg;
+            std::string err;
+            if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 181;
+            if (!cfg.ShowUsage) return 182;
+            if (!err.empty()) return 183;
+        }
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--help"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 184;
+        if (!cfg.ShowUsage) return 185;
+        if (!err.empty()) return 186;
+    }
+    {
         std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","http_listen":"127.0.0.1:18001","quic_connections":4,"compress":"auto","enabled":true}]})json");
-        const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--admin-listen", "127.0.0.1:19091", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--admin-listen", "127.0.0.1:19091", "--ca", "ca.crt"};
         TqConfig cfg;
         std::string err;
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 1;
@@ -105,6 +127,9 @@ int main() {
         if (cfg.Router.Peers[0].HttpListen != "127.0.0.1:18001") return 8;
         if (cfg.Router.Peers[0].QuicConnections != 4) return 9;
         if (!cfg.Router.Peers[0].Enabled) return 10;
+        if (cfg.QuicCa != "ca.crt") return 177;
+        if (!cfg.QuicCert.empty()) return 178;
+        if (!cfg.QuicKey.empty()) return 179;
     }
     {
         TqRouterConfig router;
@@ -390,6 +415,13 @@ int main() {
         if (err.find("mutually exclusive") == std::string::npos) return 80;
     }
     {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 180;
+        if (err.find("--ca") == std::string::npos) return 181;
+    }
+    {
         TqRouterConfig router;
         std::string err;
         if (Load(R"json({"version":1,"peers":[{"peer_id":"bad","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","quic_reconnect_interval_ms":5000}]})json", router, err)) return 71;
@@ -409,7 +441,20 @@ int main() {
     }
     {
         std::string file = WriteTempConfig(R"json({
-            "tls":{"cert":"server.crt","key":"server.key","ca":"ca.crt"},
+            "tls":{"ca":"ca.crt"},
+            "peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 182;
+        if (cfg.QuicCa != "ca.crt") return 183;
+        if (!cfg.QuicCert.empty()) return 184;
+        if (!cfg.QuicKey.empty()) return 185;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"server.crt","key":"server.key"},
             "server":{
                 "proto_listen":"0.0.0.0:4433",
                 "allow_targets":["127.0.0.1/32","10.0.0.0/8"],
@@ -432,9 +477,10 @@ int main() {
         if (!cfg.QuicDisable1RttEncryption) return 87;
         if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 88;
         if (cfg.Tuning.InitialRttMs != 1) return 90;
+        if (!cfg.QuicCa.empty()) return 186;
     }
     {
-        const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--allow-targets", "127.0.0.1/32", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
+        const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--allow-targets", "127.0.0.1/32", "--cert", "a.crt", "--key", "a.key"};
         TqConfig cfg;
         std::string err;
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 140;

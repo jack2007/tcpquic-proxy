@@ -18,7 +18,7 @@
 [A 节点] TCP 应用（curl、浏览器等）
     ↓  SOCKS5 :1080 / HTTP CONNECT :8080
   tcpquic-proxy client
-    ↓  QUIC/UDP 长连接（mTLS，ALPN: tcpquic-tunnel/1）
+    ↓  QUIC/UDP 长连接（client 验证 server 证书，ALPN: tcpquic-tunnel/1）
   tcpquic-proxy server
     ↓  TCP connect（DNS + CIDR ACL 校验后）
 [B 侧网络] 目标 TCP 服务
@@ -29,7 +29,7 @@
 | 模式 | 部署 | 职责 |
 |------|------|------|
 | `client` | A 节点 | SOCKS5 / HTTP CONNECT 入口、压缩、QUIC 客户端、长连接维护 |
-| `server` | B 节点 | QUIC 监听、mTLS、ACL、解压、TCP 拨号 |
+| `server` | B 节点 | QUIC 监听、服务端证书、ACL、解压、TCP 拨号 |
 
 ## 依赖
 
@@ -38,7 +38,7 @@
 | 组件 | 路径 | 用途 |
 |------|------|------|
 | [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 栈 |
-| [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS/mTLS（msquic 子模块，**首次构建从源码编译**） |
+| [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS（msquic 子模块，**首次构建从源码编译**） |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 |
 
@@ -74,7 +74,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 | 命令 | 用途 |
 |------|------|
-| `openssl` | 生成测试用 mTLS 证书 |
+| `openssl` | 生成测试用 CA 和 server 证书 |
 | `curl` | HTTP CONNECT / SOCKS5 端到端验证 |
 | `python3` | 临时 HTTP 服务、辅助计算 |
 
@@ -83,7 +83,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 | 开关 | 默认 | 说明 |
 |------|------|------|
 | `TCPQUIC_MSQUIC_SHARED` | `OFF` | 设为 `ON` 时构建 `libmsquic.so` 动态库（旧行为） |
-| `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF` | 设为 `ON` 时 msquic 使用系统 `libcrypto`，而非 vendored quictls |
+| `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF`（强制） | 固定使用 vendored quictls crypto，不使用系统 `libcrypto` |
 
 本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。
 
@@ -164,7 +164,7 @@ done
 ./scripts/test-tcpquic-proxy.sh
 ```
 
-覆盖 happy path、ACL/DNS/refused 负路径、zstd 端到端、`--quic-connections 4` 连接池。
+覆盖 happy path、ACL/DNS/refused 负路径、zstd 端到端、`--connections 4` 连接池。
 
 ### 内置吞吐测试
 
@@ -174,28 +174,23 @@ client 再用正常 TCP-over-QUIC tunnel 连接该端口，因此不需要额外
 ```bash
 # server
 ./build/bin/Release/tcpquic-proxy server \
-  --quic-listen 127.0.0.1:14443 \
-  --quic-cert cert/server/server.crt \
-  --quic-key cert/server/server.key \
-  --quic-ca cert/ca.crt \
+  --listen 127.0.0.1:14443 \
+  --cert cert/server/server.crt \
+  --key cert/server/server.key \
   --allow-targets 10.0.0.0/8
 
 # client download / upload
 ./build/bin/Release/tcpquic-proxy client \
-  --quic-peer 127.0.0.1:14443 \
-  --quic-cert cert/client/client.crt \
-  --quic-key cert/client/client.key \
-  --quic-ca cert/ca.crt \
-  --quic-connections 1 \
+  --peer 127.0.0.1:14443 \
+  --ca cert/ca.crt \
+  --connections 1 \
   --compress off \
   --download-test 10
 
 ./build/bin/Release/tcpquic-proxy client \
-  --quic-peer 127.0.0.1:14443 \
-  --quic-cert cert/client/client.crt \
-  --quic-key cert/client/client.key \
-  --quic-ca cert/ca.crt \
-  --quic-connections 1 \
+  --peer 127.0.0.1:14443 \
+  --ca cert/ca.crt \
+  --connections 1 \
   --compress off \
   --upload-test 10
 ```
@@ -242,16 +237,15 @@ NETEM=1 NETEM_DELAY=100ms NETEM_LOSS=5% ./scripts/bench-tcpquic-proxy.sh
 
 ## 快速开始
 
-双方需 mTLS 证书（同一 CA 签发 server / client 证书）。以下为最小示例。
+默认使用客户端单向验证服务端证书：server 配置 `server.crt/server.key`，client 只配置签发 server 证书的 `ca.crt`。
 
 **B 节点（server）：**
 
 ```bash
 ./build/bin/Release/tcpquic-proxy server \
-  --quic-listen 0.0.0.0:443 \
-  --quic-cert /path/server.crt \
-  --quic-key  /path/server.key \
-  --quic-ca   /path/ca.crt \
+  --listen 0.0.0.0:443 \
+  --cert /path/server.crt \
+  --key  /path/server.key \
   --allow-targets 10.0.0.0/8,192.168.0.0/16 \
   --deny-targets 127.0.0.0/8 \
   --compress auto
@@ -261,10 +255,8 @@ NETEM=1 NETEM_DELAY=100ms NETEM_LOSS=5% ./scripts/bench-tcpquic-proxy.sh
 
 ```bash
 ./build/bin/Release/tcpquic-proxy client \
-  --quic-peer proxy-b.example.com:443 \
-  --quic-cert /path/client.crt \
-  --quic-key  /path/client.key \
-  --quic-ca   /path/ca.crt \
+  --peer proxy-b.example.com:443 \
+  --ca   /path/ca.crt \
   --socks-listen 127.0.0.1:1080 \
   --http-listen 127.0.0.1:8080 \
   --compress auto
@@ -292,13 +284,14 @@ Usage: tcpquic-proxy client|server [options]
 
 | 参数 | 模式 | 默认值 | 说明 |
 |------|------|--------|------|
+| `-h` / `--help` / `--usage` | 双方 | - | 展示命令行帮助并退出 |
 | `--socks-listen` | client | `127.0.0.1:1080` | SOCKS5 监听地址 |
 | `--http-listen` | client | `127.0.0.1:8080` | HTTP CONNECT 监听地址 |
 | `--peer` | client | （必填） | B 节点 QUIC 地址 `host:port` |
 | `--listen` | server | （必填） | QUIC 监听 `host:port` |
-| `--cert` | 双方 | （必填） | 本端证书 PEM |
-| `--key` | 双方 | （必填） | 本端私钥 PEM |
-| `--ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
+| `--cert` | server | （必填） | 服务端证书 PEM；client 模式忽略 |
+| `--key` | server | （必填） | 服务端私钥 PEM；client 模式忽略 |
+| `--ca` | client | （必填） | 用于验证服务端证书的 CA PEM；server 模式可选且不使用 |
 | `--connections` | client | `1` | QUIC 连接池大小（最大 128） |
 | `--connection-stream-count` | client/server | `1024` | 每条 QUIC 连接允许的双向 stream 上限（范围 `1..65535`） |
 | `--reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
@@ -312,7 +305,7 @@ Usage: tcpquic-proxy client|server [options]
 | `--admin-listen` | 双方 | 空 | Admin HTTP 监听地址；当前只允许 loopback：`127.0.0.1`、`localhost`、`::1` |
 
 - Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
-- Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--quic-connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
+- Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
 - `--download-test` 和 `--upload-test` 只允许 client 单 peer 模式使用，不能与 `--warmup-mb` 或 router `--client-config` 同时使用。
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
@@ -392,7 +385,7 @@ Admin API 当前没有鉴权或 TLS，依赖 loopback 绑定限制访问面。
 
 ## 安全与 ACL
 
-- **mTLS：** server 要求客户端证书；client 校验 server 证书。
+- **TLS：** client 使用 `--ca` 验证 server 证书；server 不要求客户端证书。
 - **ALPN：** `tcpquic-tunnel/1`
 - **本地绑定：** SOCKS / HTTP 默认仅 `127.0.0.1`。
 - **ACL（server 侧）：**
@@ -442,10 +435,10 @@ src/
 
 **已实现：**
 
-- 单 QUIC 长连接或连接池（`--quic-connections`）、1 TCP = 1 Stream
+- 单 QUIC 长连接或连接池（`--connections`）、1 TCP = 1 Stream
 - SOCKS5 CONNECT（NO AUTH）、HTTP CONNECT 隧道
 - 动态目标（B 侧 DNS + TCP 拨号）
-- mTLS、CIDR ACL、zstd 流式压缩
+- 客户端验证服务端证书、CIDR ACL、zstd 流式压缩
 
 **未实现（规格预留）：**
 

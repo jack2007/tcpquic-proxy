@@ -156,7 +156,6 @@ if(WIN32)
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
         runtime/windows_reactor.cpp
-        platform/quic_credentials_win.cpp
     )
 endif()
 
@@ -164,7 +163,7 @@ add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 
 if(WIN32)
     target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
-    target_link_libraries(tcpquic-proxy PRIVATE ws2_32 crypt32)
+    target_link_libraries(tcpquic-proxy PRIVATE ws2_32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)

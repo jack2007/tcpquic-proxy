@@ -313,6 +313,10 @@ int main(int argc, char** argv) {
         TqPrintUsage(stderr);
         return 1;
     }
+    if (cfg.ShowUsage) {
+        TqPrintUsage(stdout);
+        return 0;
+    }
 
     TqFinalizeConfig(cfg);
     const char* quicProfileName =

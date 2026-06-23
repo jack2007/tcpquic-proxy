@@ -16,9 +16,7 @@ Client config uses `peers` for all destinations. A single remote server is repre
 ```jsonc
 {
   "tls": {
-    // Client certificate, private key, and CA certificate used by MsQuic TLS.
-    "cert": "certs/client.crt",
-    "key": "certs/client.key",
+    // CA certificate used by the client to verify the server certificate.
     "ca": "certs/ca.crt"
   },
   "admin": {
@@ -106,10 +104,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
 ```jsonc
 {
   "tls": {
-    // Server certificate, private key, and CA certificate used by MsQuic TLS.
+    // Server certificate and private key presented to clients.
     "cert": "certs/server.crt",
-    "key": "certs/server.key",
-    "ca": "certs/ca.crt"
+    "key": "certs/server.key"
   },
   "admin": {
     // Optional admin HTTP endpoint for /health and /metrics.
@@ -156,9 +153,9 @@ Client config uses `peers` for all destinations. A single remote server is repre
 
 | Key | Mode | Purpose |
 | --- | --- | --- |
-| `tls.cert` | client/server | TLS certificate PEM path. Required. |
-| `tls.key` | client/server | TLS private key PEM path. Required. |
-| `tls.ca` | client/server | CA certificate PEM path. Required. |
+| `tls.cert` | server | TLS server certificate PEM path. Required in server mode; ignored in client mode. |
+| `tls.key` | server | TLS server private key PEM path. Required in server mode; ignored in client mode. |
+| `tls.ca` | client | CA certificate PEM path used to verify the server certificate. Required in client mode; optional and unused in server mode. |
 | `admin.listen` | client/server | Admin HTTP listen address. |
 | `proto.profile` | client/server | `max-throughput` or `low-latency`. |
 | `proto.disable_1rtt_encryption` | client/server | Insecure lab-only QUIC 1-RTT encryption disable switch. Defaults to `true`; set `false` to enable packet encryption. |

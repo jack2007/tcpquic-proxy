@@ -25,6 +25,7 @@ option(TCPQUIC_MSQUIC_SHARED "Build msquic as a shared library (libmsquic.so)" O
 set(QUIC_BUILD_SHARED ${TCPQUIC_MSQUIC_SHARED} CACHE BOOL "Builds msquic as a dynamic library" FORCE)
 
 set(QUIC_TLS_LIB "quictls" CACHE STRING "TLS Library to use" FORCE)
+set(QUIC_USE_SYSTEM_LIBCRYPTO OFF CACHE BOOL "Use vendored quictls crypto" FORCE)
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
 

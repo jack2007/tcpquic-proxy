@@ -16,7 +16,7 @@
 [A 节点] TCP 应用（curl、浏览器等）
     ↓  SOCKS5 :1080 / HTTP CONNECT :8080
   tcpquic-proxy client
-    ↓  QUIC/UDP 长连接（mTLS，ALPN: tcpquic-tunnel/1）
+    ↓  QUIC/UDP 长连接（client 验证 server 证书，ALPN: tcpquic-tunnel/1）
   tcpquic-proxy server
     ↓  TCP connect（DNS + CIDR ACL 校验后）
 [B 侧网络] 目标 TCP 服务
@@ -27,7 +27,7 @@
 | 模式 | 部署 | 职责 |
 |------|------|------|
 | `client` | A 节点 | SOCKS5 / HTTP CONNECT 入口、压缩、QUIC 客户端、长连接维护 |
-| `server` | B 节点 | QUIC 监听、mTLS、ACL、解压、TCP 拨号 |
+| `server` | B 节点 | QUIC 监听、服务端证书、ACL、解压、TCP 拨号 |
 
 ## 构建
 
@@ -85,7 +85,7 @@ NETEM=1 NETEM_DELAY=100ms NETEM_LOSS=5% ./scripts/bench-tcpquic-proxy.sh
 
 ## 快速开始
 
-双方需 mTLS 证书（同一 CA 签发 server / client 证书）。以下为最小示例。
+默认使用客户端单向验证服务端证书：server 配置 `server.crt/server.key`，client 只配置签发 server 证书的 `ca.crt`。
 
 **B 节点（server）：**
 
@@ -94,7 +94,6 @@ tcpquic-proxy server \
   --listen 0.0.0.0:443 \
   --cert /path/server.crt \
   --key  /path/server.key \
-  --ca   /path/ca.crt \
   --allow-targets 10.0.0.0/8,192.168.0.0/16 \
   --deny-targets 127.0.0.0/8 \
   --compress off
@@ -105,8 +104,6 @@ tcpquic-proxy server \
 ```bash
 tcpquic-proxy client \
   --peer proxy-b.example.com:443 \
-  --cert /path/client.crt \
-  --key  /path/client.key \
   --ca   /path/ca.crt \
   --socks-listen 127.0.0.1:1080 \
   --http-listen 127.0.0.1:8080 \
@@ -167,13 +164,14 @@ Usage: tcpquic-proxy client|server [options]
 
 | 参数 | 模式 | 默认值 | 说明 |
 |------|------|--------|------|
+| `-h` / `--help` / `--usage` | 双方 | - | 展示命令行帮助并退出 |
 | `--socks-listen` | client | `127.0.0.1:1080` | SOCKS5 监听地址 |
 | `--http-listen` | client | `127.0.0.1:8080` | HTTP CONNECT 监听地址 |
 | `--peer` | client | （必填） | B 节点地址 `host:port` |
 | `--listen` | server | （必填） | 监听地址 `host:port` |
-| `--cert` | 双方 | （必填） | 本端证书 PEM |
-| `--key` | 双方 | （必填） | 本端私钥 PEM |
-| `--ca` | 双方 | （必填） | CA / 对端校验用证书 PEM |
+| `--cert` | server | （必填） | 服务端证书 PEM；client 模式忽略 |
+| `--key` | server | （必填） | 服务端私钥 PEM；client 模式忽略 |
+| `--ca` | client | （必填） | 用于验证服务端证书的 CA PEM；server 模式可选且不使用 |
 | `--connections` | client | `1` | 连接池大小（最大 128） |
 | `--compress` | 双方 | `off` | `auto` / `zstd` / `off` |
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
@@ -185,7 +183,7 @@ Usage: tcpquic-proxy client|server [options]
 
 ## 安全与 ACL
 
-- **mTLS：** server 要求客户端证书；client 校验 server 证书。
+- **TLS：** client 使用 `--ca` 验证 server 证书；server 不要求客户端证书。
 - **ALPN：** `tcpquic-tunnel/1`
 - **本地绑定：** SOCKS / HTTP 默认仅 `127.0.0.1`。
 - **ACL（server 侧）：**
@@ -240,7 +238,7 @@ src/
 - 单 QUIC 长连接或连接池（`--connections`）、1 TCP = 1 Stream
 - SOCKS5 CONNECT、HTTP CONNECT 隧道；可选多用户代理鉴权（`--client-config` 内 `proxy_auth`）
 - 动态目标（B 侧 DNS + TCP 拨号）
-- mTLS、CIDR ACL、zstd 流式压缩
+- 客户端验证服务端证书、CIDR ACL、zstd 流式压缩
 
 **未实现（规格预留）：**
 

@@ -44,6 +44,12 @@ bool GetOptionValue(const char* arg, const char* prefix, const char*& value) {
     return false;
 }
 
+bool IsHelpOption(const char* arg) {
+    return std::strcmp(arg, "-h") == 0 ||
+           std::strcmp(arg, "--help") == 0 ||
+           std::strcmp(arg, "--usage") == 0;
+}
+
 bool ParseUint32(const char* s, uint32_t& out) {
     char* end = nullptr;
     const unsigned long v = std::strtoul(s, &end, 10);
@@ -882,11 +888,14 @@ void TqPrintUsage(FILE* out) {
         "Usage: tcpquic-proxy client|server [options]\n"
         "\n"
         "Client and Server:\n"
+        "  -h, --help, --usage         Show this help and exit\n"
         "  --config <path>              Runtime JSON config file\n"
         "                              (preferred; see docs/config_guide.md)\n"
         "  --cert <path>                TLS certificate PEM path\n"
         "  --key <path>                 TLS private key PEM path\n"
         "  --ca <path>                  CA certificate PEM path\n"
+        "                              Client TLS: --ca is required; --cert/--key are ignored\n"
+        "                              Server TLS: --cert and --key are required; --ca is optional\n"
         "  --admin-listen <addr>        Admin HTTP listen address for /health and /metrics\n"
         "  --compress <mode>            auto|zstd|off (default off)\n"
         "  --compress-level <n>         Compression level (default 1)\n"
@@ -937,6 +946,14 @@ void TqFinalizeConfig(TqConfig& cfg) {
 
 bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     cfg = TqConfig{};
+
+    for (int i = 1; i < argc; ++i) {
+        if (IsHelpOption(argv[i])) {
+            cfg.ShowUsage = true;
+            err.clear();
+            return true;
+        }
+    }
 
     if (argc < 2) {
         err = "missing mode (client|server)";
@@ -1392,12 +1409,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--peer", err)) {
             return false;
         }
-        if (!RequireNonEmpty(cfg.QuicCert, "--cert", err)) {
-            return false;
-        }
-        if (!RequireNonEmpty(cfg.QuicKey, "--key", err)) {
-            return false;
-        }
         if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
             return false;
         }
@@ -1421,9 +1432,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             return false;
         }
         if (!RequireNonEmpty(cfg.QuicKey, "--key", err)) {
-            return false;
-        }
-        if (!RequireNonEmpty(cfg.QuicCa, "--ca", err)) {
             return false;
         }
         if (cfg.AllowTargets.empty()) {

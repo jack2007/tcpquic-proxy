@@ -147,11 +147,62 @@ static int TestConnectionStartPendingIsAccepted() {
     return 0;
 }
 
+static int TestScheme2CredentialConfig() {
+    TqConfig client;
+    client.QuicCa = "ca.crt";
+    TqCredentialConfigSnapshot clientCred =
+        TqBuildCredentialConfigSnapshotForTest(client, false);
+    if (clientCred.Type != QUIC_CREDENTIAL_TYPE_NONE) {
+        return 60;
+    }
+    if (!(clientCred.Flags & QUIC_CREDENTIAL_FLAG_CLIENT)) {
+        return 61;
+    }
+    if (!(clientCred.Flags & QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE)) {
+        return 62;
+    }
+    if (clientCred.Flags & QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION) {
+        return 63;
+    }
+    if (clientCred.HasCertificateFile) {
+        return 64;
+    }
+    if (clientCred.CaCertificateFile != "ca.crt") {
+        return 65;
+    }
+
+    TqConfig server;
+    server.QuicCert = "server.crt";
+    server.QuicKey = "server.key";
+    TqCredentialConfigSnapshot serverCred =
+        TqBuildCredentialConfigSnapshotForTest(server, true);
+    if (serverCred.Type != QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE) {
+        return 66;
+    }
+    if (serverCred.Flags & QUIC_CREDENTIAL_FLAG_CLIENT) {
+        return 67;
+    }
+    if (serverCred.Flags & QUIC_CREDENTIAL_FLAG_REQUIRE_CLIENT_AUTHENTICATION) {
+        return 68;
+    }
+    if (serverCred.Flags & QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE) {
+        return 69;
+    }
+    if (!serverCred.HasCertificateFile) {
+        return 70;
+    }
+    if (!serverCred.CaCertificateFile.empty()) {
+        return 71;
+    }
+    return 0;
+}
+
 int main() {
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
+    if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

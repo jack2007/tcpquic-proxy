@@ -3,9 +3,6 @@
 #include "trace.h"
 #include "tunnel_registry.h"
 #include "tuning.h"
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-#include "quic_credentials_win.h"
-#endif
 
 #include <chrono>
 #include <cstdio>
@@ -33,20 +30,32 @@ struct TqCredentialConfig {
     QUIC_CREDENTIAL_CONFIG Config{};
     QUIC_CERTIFICATE_FILE CertFile{};
 
-    TqCredentialConfig(const TqConfig& cfg, QUIC_CREDENTIAL_FLAGS flags) {
-        CertFile.PrivateKeyFile = cfg.QuicKey.c_str();
-        CertFile.CertificateFile = cfg.QuicCert.c_str();
-        Config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
-        Config.Flags = flags | QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
+    TqCredentialConfig(const TqConfig& cfg, bool server, QUIC_CREDENTIAL_FLAGS flags) {
+        Config.Flags = flags;
 #if defined(__APPLE__)
-        // Darwin msquic validates via SecTrust (system roots) unless this flag
-        // is set; --ca PEM must use OpenSSL chain verify like Linux.
-        Config.Flags |= QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION;
+        if (!server) {
+            // Darwin msquic validates via SecTrust (system roots) unless this flag
+            // is set; --ca PEM must use OpenSSL chain verify like Linux.
+            Config.Flags |= QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION;
+        }
 #endif
-        Config.CertificateFile = &CertFile;
-        Config.CaCertificateFile = cfg.QuicCa.c_str();
+        if (server) {
+            CertFile.PrivateKeyFile = cfg.QuicKey.c_str();
+            CertFile.CertificateFile = cfg.QuicCert.c_str();
+            Config.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+            Config.CertificateFile = &CertFile;
+        } else {
+            Config.Type = QUIC_CREDENTIAL_TYPE_NONE;
+            Config.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(
+                Config.Flags | QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE);
+            Config.CaCertificateFile = cfg.QuicCa.c_str();
+        }
     }
 };
+
+QUIC_CREDENTIAL_FLAGS TqMakeCredentialFlags(bool server) {
+    return server ? QUIC_CREDENTIAL_FLAG_NONE : QUIC_CREDENTIAL_FLAG_CLIENT;
+}
 
 bool ParsePort(const std::string& value, uint16_t& port) {
     char* end = nullptr;
@@ -143,6 +152,20 @@ MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server) {
     return settings;
 }
 
+#if defined(TQ_UNIT_TESTING)
+TqCredentialConfigSnapshot TqBuildCredentialConfigSnapshotForTest(const TqConfig& cfg, bool server) {
+    TqCredentialConfig credential(cfg, server, TqMakeCredentialFlags(server));
+    TqCredentialConfigSnapshot snapshot{};
+    snapshot.Type = credential.Config.Type;
+    snapshot.Flags = credential.Config.Flags;
+    snapshot.HasCertificateFile = credential.Config.CertificateFile != nullptr;
+    if (credential.Config.CaCertificateFile != nullptr) {
+        snapshot.CaCertificateFile = credential.Config.CaCertificateFile;
+    }
+    return snapshot;
+}
+#endif
+
 namespace {
 
 QUIC_EXECUTION_PROFILE TqToMsQuicProfile(TqQuicProfile profile) {
@@ -221,41 +244,14 @@ bool InitConfiguration(
     const MsQuicRegistration& registration,
     bool server,
     std::unique_ptr<MsQuicConfiguration>& configuration
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-    ,
-    std::unique_ptr<TqQuicCredentialHolder>& credentials
-#endif
     ) {
     MsQuicAlpn alpn(TqAlpn);
     MsQuicSettings settings = TqMakeMsQuicSettings(cfg, server);
-#if defined(_WIN32) && defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-    const auto flags = server
-        ? QUIC_CREDENTIAL_FLAG_NONE
-        : static_cast<QUIC_CREDENTIAL_FLAGS>(QUIC_CREDENTIAL_FLAG_CLIENT | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
-#else
-#if defined(_WIN32)
-    const auto flags = server
-        ? QUIC_CREDENTIAL_FLAG_NONE
-        : static_cast<QUIC_CREDENTIAL_FLAGS>(QUIC_CREDENTIAL_FLAG_CLIENT | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION);
-#else
-    const auto flags = server
-        ? QUIC_CREDENTIAL_FLAG_REQUIRE_CLIENT_AUTHENTICATION
-        : QUIC_CREDENTIAL_FLAG_CLIENT;
-#endif
-#endif
+    const auto flags = TqMakeCredentialFlags(server);
 
     const QUIC_CREDENTIAL_CONFIG* credentialConfig = nullptr;
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-    credentials = std::make_unique<TqQuicCredentialHolder>();
-    if (!credentials->Build(cfg, flags)) {
-        credentials.reset();
-        return false;
-    }
-    credentialConfig = &credentials->Config();
-#else
-    TqCredentialConfig credential(cfg, flags);
+    TqCredentialConfig credential(cfg, server, flags);
     credentialConfig = &credential.Config;
-#endif
 
     configuration = std::make_unique<MsQuicConfiguration>(
         registration,
@@ -265,9 +261,6 @@ bool InitConfiguration(
     if (!configuration || !configuration->IsValid()) {
         std::fprintf(stderr, "ConfigurationOpen/LoadCredential failed, 0x%x\n",
             configuration ? configuration->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-        credentials.reset();
-#endif
         return false;
     }
     return true;
@@ -441,11 +434,7 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
     PeerPort = endpoint.Port;
 
     if (!InitApiAndRegistration(Api, Registration, TqToMsQuicProfile(cfg.QuicProfile)) ||
-        !InitConfiguration(Config, *Registration, false, Configuration
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-            , Credentials
-#endif
-            )) {
+        !InitConfiguration(Config, *Registration, false, Configuration)) {
         Stop(false);
         {
             std::lock_guard<std::mutex> guard(State->Lock);
@@ -829,11 +818,7 @@ bool QuicClientSession::StartSlot(size_t index) {
 
     if (TqRuntimeTuningEnabled(Config)) {
         TqApplyRuntimeObservations(Config);
-        if (!InitConfiguration(Config, *Registration, false, Configuration
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-                , Credentials
-#endif
-                )) {
+        if (!InitConfiguration(Config, *Registration, false, Configuration)) {
             std::fprintf(stderr, "Configuration refresh failed\n");
             ScheduleStartRetry(index);
             return false;
@@ -1244,11 +1229,7 @@ bool QuicServerSession::Start(const TqConfig& cfg) {
 
     Config = cfg;
     if (!InitApiAndRegistration(Api, Registration, TqToMsQuicProfile(cfg.QuicProfile)) ||
-        !InitConfiguration(Config, *Registration, true, Configuration
-#if defined(_WIN32) && !defined(TCPQUIC_WINDOWS_TLS_QUICTLS)
-            , Credentials
-#endif
-            )) {
+        !InitConfiguration(Config, *Registration, true, Configuration)) {
         Stop();
         return false;
     }
