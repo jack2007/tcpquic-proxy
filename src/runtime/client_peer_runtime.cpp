@@ -140,6 +140,7 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
     peer.PeerId = PeerId;
     peer.SocksListen = Config.SocksListen;
     peer.HttpListen = Config.HttpListen;
+    peer.PortForwards = Config.PortForwards;
     peer.Config = Config;
     std::weak_ptr<TqClientPeerRuntime> weakSelf = shared_from_this();
     peer.StartTunnel = [weakSelf](
@@ -172,12 +173,22 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
         if (!Config.HttpListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: HTTP CONNECT listening on %s\n", Config.HttpListen.c_str());
         }
+        for (const auto& forward : Config.PortForwards) {
+            const std::string target = forward.TargetHost + ":" + std::to_string(forward.TargetPort);
+            std::fprintf(stderr, "tcpquic-proxy: port forward listening on %s -> %s\n",
+                forward.Listen.c_str(), target.c_str());
+        }
     } else {
         std::fprintf(stderr, "tcpquic-proxy: peer %s SOCKS5 listening on %s\n",
             PeerId.c_str(), Config.SocksListen.c_str());
         if (!Config.HttpListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: peer %s HTTP CONNECT listening on %s\n",
                 PeerId.c_str(), Config.HttpListen.c_str());
+        }
+        for (const auto& forward : Config.PortForwards) {
+            const std::string target = forward.TargetHost + ":" + std::to_string(forward.TargetPort);
+            std::fprintf(stderr, "tcpquic-proxy: peer %s port forward listening on %s -> %s\n",
+                PeerId.c_str(), forward.Listen.c_str(), target.c_str());
         }
     }
     return true;

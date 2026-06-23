@@ -272,6 +272,9 @@ int main() {
         cfg.Peers[0].PortForwards.push_back(Forward("127.0.0.1:15432", "db.internal", 5432));
         std::string err;
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 185;
+        if (adapter.LastStartedPeer.PortForwards[0].Listen != "127.0.0.1:15432") return 132;
+        if (adapter.LastStartedPeer.PortForwards[0].TargetHost != "db.internal") return 133;
+        if (adapter.LastStartedPeer.PortForwards[0].TargetPort != 5432) return 134;
         cfg.Peers[0].PortForwards[0].TargetPort = 5433;
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 186;
         if (adapter.Stopped.size() != 1 || adapter.Stopped[0] != "agent-forward-change") return 187;
@@ -607,11 +610,11 @@ int main() {
         if (body.find("\"linux_relay_zstd_decompress_failures\":") == std::string::npos) return 242;
         if (body.find("ingress_buffer") != std::string::npos) return 243;
         if (body.find("\"linux_relay_errors\":") == std::string::npos) return 105;
-        if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 132;
-        if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 133;
+        if (body.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 260;
+        if (body.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 261;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":") == std::string::npos) return 137;
         if (body.find("\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":") == std::string::npos) return 139;
-        if (body.find("\"linux_relay_quic_send_failures\":") == std::string::npos) return 134;
+        if (body.find("\"linux_relay_quic_send_failures\":") == std::string::npos) return 262;
         if (body.find("\"linux_relay_quic_send_buffer_too_large_failures\":") == std::string::npos) return 140;
         if (body.find("\"linux_relay_quic_send_operation_alloc_failures\":") == std::string::npos) return 141;
         if (body.find("\"linux_relay_quic_send_api_failures\":") == std::string::npos) return 142;
