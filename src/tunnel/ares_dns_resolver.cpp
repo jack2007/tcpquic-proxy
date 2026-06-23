@@ -1,4 +1,5 @@
 #include "ares_dns_resolver.h"
+#include "relay_alloc.h"
 
 #if defined(_WIN32)
 #include "windows_reactor.h"
@@ -34,11 +35,25 @@ TqSocketHandle TqAresSocketToHandle(ares_socket_t socketFd) {
     return static_cast<TqSocketHandle>(socketFd);
 }
 
+void* TqAresMalloc(size_t size) {
+    return TqMalloc(size);
+}
+
+void TqAresFree(void* ptr) {
+    TqFree(ptr);
+}
+
+void* TqAresRealloc(void* ptr, size_t size) {
+    return TqRealloc(ptr, size);
+}
+
 class TqAresLibraryGuard {
 public:
     static bool Acquire() {
         std::lock_guard<std::mutex> lock(Mutex());
-        if (RefCount() == 0 && ares_library_init(ARES_LIB_INIT_ALL) != ARES_SUCCESS) {
+        if (RefCount() == 0 &&
+            ares_library_init_mem(ARES_LIB_INIT_ALL, TqAresMalloc, TqAresFree, TqAresRealloc) !=
+                ARES_SUCCESS) {
             return false;
         }
         ++RefCount();

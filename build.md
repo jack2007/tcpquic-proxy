@@ -57,8 +57,9 @@ sudo apt install git cmake build-essential perl
 
 - 路径：`third_party/mimalloc`（Git 子模块，与 msquic/zstd 相同）
 - 初始化：`git submodule update --init --recursive third_party/mimalloc`
-- 构建：`-DTCPQUIC_USE_MIMALLOC=ON`（默认）→ 静态链入 `mimalloc-static`
-- 关闭：`-DTCPQUIC_USE_MIMALLOC=OFF` → `TqAllocBytes` 回退 glibc `malloc`
+- 构建：`-DTCPQUIC_USE_MIMALLOC=ON`（默认）→ 静态链入 `mimalloc-static`，项目 allocator、zstd、c-ares 走显式 hook。
+- MsQuic：`-DTCPQUIC_MSQUIC_USE_MIMALLOC=AUTO|ON|OFF` 控制 vendored MsQuic 平台层 allocator patch。默认 `AUTO` 跟随最终 `TCPQUIC_USE_MIMALLOC`；`ON` 要求 `TCPQUIC_USE_MIMALLOC=ON`；`OFF` 只关闭 MsQuic patch。
+- 关闭：`-DTCPQUIC_USE_MIMALLOC=OFF` → 项目 allocator 回退 glibc `malloc`，MsQuic `AUTO` 也随之关闭。
 - 部署：无需附带 `libmimalloc.so`
 
 **不需要** 的系统包：`libzstd-dev`、`libssl-dev`、`libmsquic-dev` 等。
@@ -297,7 +298,7 @@ cmake -S . -B build-asan \
 cmake --build build-asan --target tcpquic-proxy tcpquic_tunnel_test -j$(nproc)
 ```
 
-配置检测到 `-fsanitize=address` 时会自动关闭静态 mimalloc override；ASAN 自带 allocator/interceptor 需要在进程启动早期接管 `malloc`。
+配置检测到 `-fsanitize=address`、`QUIC_ENABLE_ASAN=ON` 或 `QUIC_ENABLE_ALL_SANITIZERS=ON` 时会自动关闭显式 mimalloc 路径；ASAN 自带 allocator/interceptor 需要在进程启动早期接管 `malloc`。
 
 运行 ASAN 二进制时，静态构建下无需设置 `LD_LIBRARY_PATH` 指向 msquic；若使用 `TCPQUIC_MSQUIC_SHARED=ON` 则需：
 
