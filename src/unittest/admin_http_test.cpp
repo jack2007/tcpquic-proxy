@@ -243,7 +243,7 @@ int main() {
 
         TqSocketHandle fd = TqConnectLocal(port);
         if (!TqSocketValid(fd)) return 27;
-        if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 28;
+        if (!TqSendAll(fd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 28;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 29;
@@ -267,7 +267,7 @@ int main() {
 
         TqSocketHandle fd = TqConnectLocal(port);
         if (!TqSocketValid(fd)) return 37;
-        if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 38;
+        if (!TqSendAll(fd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 38;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 39;
@@ -363,7 +363,7 @@ int main() {
 
         TqSocketHandle closedFd = TqConnectLocal(port);
         if (!TqSocketValid(closedFd)) return 52;
-        if (!TqSendAll(closedFd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 53;
+        if (!TqSendAll(closedFd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 53;
         TqCloseSocket(closedFd);
 
         TqSocketHandle stalledFd1 = TqConnectLocal(port);
@@ -373,7 +373,7 @@ int main() {
 
         TqSocketHandle fd = TqConnectLocal(port);
         if (!TqSocketValid(fd)) return 55;
-        if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 56;
+        if (!TqSendAll(fd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 56;
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 57;
         TqCloseSocket(fd);
@@ -393,7 +393,7 @@ int main() {
         for (int i = 0; i < 1024; ++i) {
             TqSocketHandle fd = TqConnectLocal(port);
             if (!TqSocketValid(fd)) return 61;
-            if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 62;
+            if (!TqSendAll(fd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 62;
             std::string response;
             if (!TqRecvUntilClosed(fd, response)) return 63;
             TqCloseSocket(fd);
@@ -410,7 +410,6 @@ int main() {
         TqAdminHttpServerOptions options;
         options.AdminThreads = 2;
         options.TokenFile = TqSecureTokenFile("auth").string();
-        options.AllowUnauthenticatedLegacy = false;
         std::string err;
         TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
             if (req.Method == "GET" && req.Path == "/health") {
@@ -580,62 +579,37 @@ int main() {
     }
     {
         TqAdminHttpServerOptions options;
-        options.TokenFile = TqSecureTokenFile("legacy").string();
-        options.AllowUnauthenticatedLegacy = true;
+        options.TokenFile = TqSecureTokenFile("v1-only").string();
         std::string err;
         TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
             if (req.Method == "GET" && req.Path == "/health") {
-                return TqJsonResponse(200, "{\"legacy\":true}");
+                return TqJsonResponse(200, "{\"ok\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
+                return TqJsonResponse(200, "{\"legacy_enable\":true}");
             }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 105;
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 106;
-        TqSocketHandle fd = TqConnectLocal(port);
-        if (!TqSocketValid(fd)) return 107;
-        if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 108;
-        std::string response;
-        if (!TqRecvUntilClosed(fd, response)) return 109;
-        TqCloseSocket(fd);
-        server.Stop();
-        if (!TqHttpStatusIs(response, 200)) return 110;
-        if (response.find("\"legacy\":true") == std::string::npos) return 111;
-    }
-    {
-        TqAdminHttpServerOptions options;
-        options.TokenFile = TqSecureTokenFile("legacy-peer-scope").string();
-        options.AllowUnauthenticatedLegacy = true;
-        std::string err;
-        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
-            if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
-                return TqJsonResponse(200, "{\"legacy_enable\":true}");
-            }
-            if (req.Path.compare(0, 7, "/peers/") == 0) {
-                return TqJsonResponse(200, "{\"legacy_exposed\":true}");
-            }
-            return TqJsonResponse(404, "{}");
-        }, options);
-        if (!server.Start(err)) return 133;
-        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
-        if (port == 0) return 134;
 
-        TqSocketHandle fd = TqConnectLocal(port);
-        if (!TqSocketValid(fd)) return 135;
-        if (!TqSendAll(fd, "PATCH /peers/agent-d HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}")) return 136;
-        std::string patchResponse;
-        if (!TqRecvUntilClosed(fd, patchResponse)) return 137;
-        TqCloseSocket(fd);
-        if (!TqHttpStatusIs(patchResponse, 404)) return 138;
+        TqSocketHandle healthFd = TqConnectLocal(port);
+        if (!TqSocketValid(healthFd)) return 107;
+        if (!TqSendAll(healthFd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 108;
+        std::string healthResponse;
+        if (!TqRecvUntilClosed(healthFd, healthResponse)) return 109;
+        TqCloseSocket(healthFd);
+        if (!TqHttpStatusIs(healthResponse, 404)) return 110;
 
-        TqSocketHandle legacyFd = TqConnectLocal(port);
-        if (!TqSocketValid(legacyFd)) return 139;
-        if (!TqSendAll(legacyFd, "POST /peers/agent-d/enable HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")) return 140;
-        std::string legacyResponse;
-        if (!TqRecvUntilClosed(legacyFd, legacyResponse)) return 141;
-        TqCloseSocket(legacyFd);
+        TqSocketHandle peerFd = TqConnectLocal(port);
+        if (!TqSocketValid(peerFd)) return 111;
+        if (!TqSendAll(peerFd, "POST /peers/agent-d/enable HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")) return 112;
+        std::string peerResponse;
+        if (!TqRecvUntilClosed(peerFd, peerResponse)) return 113;
+        TqCloseSocket(peerFd);
         server.Stop();
-        if (!TqHttpStatusIs(legacyResponse, 200)) return 142;
+        if (!TqHttpStatusIs(peerResponse, 404)) return 114;
     }
     return 0;
 }

@@ -31,7 +31,6 @@ struct TqAdminHttpServerOptions {
     size_t MaxBodyBytes{1024 * 1024};
     std::string TokenFile;
     bool EnableTokenAuth{false};
-    bool AllowUnauthenticatedLegacy{false};
 };
 
 namespace httplib {

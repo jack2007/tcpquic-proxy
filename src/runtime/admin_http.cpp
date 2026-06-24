@@ -130,20 +130,6 @@ std::string TqLowerHeaderName(std::string text) {
     return TqAsciiLower(std::move(text));
 }
 
-bool TqIsLegacyAdminPath(const std::string& path) {
-    auto isLegacyPeerAction = [&path](const char* suffix) {
-        const size_t suffixLen = std::strlen(suffix);
-        return path.compare(0, 7, "/peers/") == 0 &&
-            path.size() > 7 + suffixLen &&
-            path.compare(path.size() - suffixLen, suffixLen, suffix) == 0;
-    };
-    return path == "/health" ||
-        path == "/metrics" ||
-        path == "/config" ||
-        isLegacyPeerAction("/enable") ||
-        isLegacyPeerAction("/disable");
-}
-
 bool TqIsV1PeerPath(const std::string& path) {
     constexpr const char* kPeers = "/api/v1/peers";
     constexpr size_t kPeersLen = std::char_traits<char>::length(kPeers);
@@ -505,14 +491,16 @@ std::string TqAdminHttpServer::AuthTokenForTesting() const {
 
 void TqAdminHttpServer::ConfigureRoutes() {
     auto dispatch = [this](const httplib::Request& req, httplib::Response& res) {
-        const bool isLegacy = TqIsLegacyAdminPath(req.path);
-        const bool isV1 = TqIsV1AdminPath(req.path);
+        if (!TqIsV1Prefix(req.path)) {
+            TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+            return;
+        }
         TqHttpRequest adminReq = TqMakeAdminRequest(req);
-        if (Auth && (TqIsV1Prefix(req.path) || (isLegacy && !Options.AllowUnauthenticatedLegacy)) && !Auth->Authorize(adminReq)) {
+        if (Auth && !Auth->Authorize(adminReq)) {
             TqSetJson(res, 401, TqUnauthorizedJson());
             return;
         }
-        if (!isLegacy && !isV1) {
+        if (!TqIsV1AdminPath(req.path)) {
             TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
             return;
         }
