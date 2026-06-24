@@ -324,16 +324,50 @@ std::string TqLowerHeaderName(std::string text) {
 }
 
 bool TqIsLegacyAdminPath(const std::string& path) {
+    auto isLegacyPeerAction = [&path](const char* suffix) {
+        const size_t suffixLen = std::strlen(suffix);
+        return path.compare(0, 7, "/peers/") == 0 &&
+            path.size() > 7 + suffixLen &&
+            path.compare(path.size() - suffixLen, suffixLen, suffix) == 0;
+    };
     return path == "/health" ||
         path == "/metrics" ||
         path == "/config" ||
-        path.compare(0, 7, "/peers/") == 0;
+        isLegacyPeerAction("/enable") ||
+        isLegacyPeerAction("/disable");
+}
+
+bool TqIsV1PeerPath(const std::string& path) {
+    constexpr const char* kPeers = "/api/v1/peers";
+    constexpr size_t kPeersLen = std::char_traits<char>::length(kPeers);
+    if (path == kPeers) {
+        return true;
+    }
+    if (path.compare(0, kPeersLen + 1, "/api/v1/peers/") != 0) {
+        return false;
+    }
+    const std::string tail = path.substr(kPeersLen + 1);
+    if (tail.empty() || tail.find('/') != std::string::npos) {
+        return false;
+    }
+    const size_t action = tail.find(':');
+    if (action == std::string::npos) {
+        return true;
+    }
+    const std::string name = tail.substr(action + 1);
+    return !tail.substr(0, action).empty() &&
+        (name == "enable" || name == "disable" || name == "drain" || name == "abort-tunnels");
 }
 
 bool TqIsV1AdminPath(const std::string& path) {
     return path == "/api/v1/health" ||
         path == "/api/v1/metrics" ||
-        path == "/api/v1/config";
+        path == "/api/v1/config" ||
+        TqIsV1PeerPath(path);
+}
+
+bool TqIsV1Prefix(const std::string& path) {
+    return path == "/api/v1" || path.compare(0, 8, "/api/v1/") == 0;
 }
 
 std::string TqV1ToLegacyPath(const std::string& path) {
@@ -631,7 +665,7 @@ void TqAdminHttpServer::ConfigureRoutes() {
         const bool isLegacy = TqIsLegacyAdminPath(req.path);
         const bool isV1 = TqIsV1AdminPath(req.path);
         TqHttpRequest adminReq = TqMakeAdminRequest(req);
-        if (Auth && (isV1 || (isLegacy && !Options.AllowUnauthenticatedLegacy)) && !Auth->Authorize(adminReq)) {
+        if (Auth && (TqIsV1Prefix(req.path) || (isLegacy && !Options.AllowUnauthenticatedLegacy)) && !Auth->Authorize(adminReq)) {
             TqSetJson(res, 401, TqUnauthorizedJson());
             return;
         }

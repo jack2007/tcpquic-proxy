@@ -329,7 +329,7 @@ Usage: tcpquic-proxy client|server [options]
 
 Admin HTTP 通过 `--admin-listen host:port` 开启；不配置该参数时不会启动。当前实现只允许绑定 loopback 地址，适合本机运维脚本或 SSH tunnel 访问。
 
-启动 Admin 时会生成 Bearer token 并写入 token JSON 文件。可用 `--admin-token-file <path>` 指定路径；未指定时使用包含 pid 的运行时默认路径。日志只打印 token 文件路径，不打印 token 内容。
+启动 Admin 时会生成 Bearer token 并写入 token JSON 文件。可用 `--admin-token-file <path>` 指定路径；未指定时使用包含 pid 的运行时默认路径。POSIX 下 token 文件父目录必须由当前用户拥有并会被限制为 `0700`，token 文件为 `0600`；不要把 token 文件直接写到 `/tmp/admin.json` 这类共享目录下。日志只打印 token 文件路径，不打印 token 内容。
 
 ```bash
 TOKEN=$(jq -r .token "$TOKEN_FILE")
@@ -337,7 +337,7 @@ curl -H "Authorization: Bearer ${TOKEN}" \
   http://127.0.0.1:18080/api/v1/health
 ```
 
-新路径 `/api/v1/health`、`/api/v1/metrics`、`/api/v1/config` 和 `PUT /api/v1/config` 映射到现有能力。旧路径 `/health`、`/metrics`、`/config` 和 `/peers/{peer_id}/enable|disable` 保留兼容，但默认同样要求 Bearer token。只有显式开启 `--admin-allow-unauthenticated-legacy` 时，旧路径才允许无 token 访问；该开关不影响 `/api/v1/*`。
+新路径 `/api/v1/health`、`/api/v1/metrics`、`/api/v1/config`、`/api/v1/peers` 及 peer 资源路径覆盖当前 client 管理能力。旧路径 `/health`、`/metrics`、`/config` 和 `/peers/{peer_id}/enable|disable` 保留兼容，但默认同样要求 Bearer token。只有显式开启 `--admin-allow-unauthenticated-legacy` 时，旧路径才允许无 token 访问；该开关不影响 `/api/v1/*`。
 
 ### Client 多 peer 模式
 
@@ -347,8 +347,18 @@ curl -H "Authorization: Bearer ${TOKEN}" \
 | `GET` | `/metrics` | 返回每个 peer 的运行指标 |
 | `GET` | `/config` | 返回当前 router 配置 |
 | `PUT` | `/config` | 用请求 body 中的 JSON 替换当前 router 配置 |
-| `POST` | `/peers/{peer_id}/enable` | 启用指定 peer |
-| `POST` | `/peers/{peer_id}/disable` | 禁用指定 peer |
+| `GET` | `/api/v1/peers` | 返回 peer 列表和状态 |
+| `POST` | `/api/v1/peers` | 创建 peer |
+| `GET` | `/api/v1/peers/{peer_id}` | 返回指定 peer 状态 |
+| `PUT` | `/api/v1/peers/{peer_id}` | 整体替换指定 peer |
+| `PATCH` | `/api/v1/peers/{peer_id}` | 局部更新指定 peer |
+| `DELETE` | `/api/v1/peers/{peer_id}` | 删除 peer；enabled peer 需要 body 指定 `{"mode":"drain"}` 或 `{"mode":"abort"}` |
+| `POST` | `/api/v1/peers/{peer_id}:enable` | 启用指定 peer |
+| `POST` | `/api/v1/peers/{peer_id}:disable` | 禁用指定 peer |
+| `POST` | `/api/v1/peers/{peer_id}:drain` | drain 指定 peer |
+| `POST` | `/api/v1/peers/{peer_id}:abort-tunnels` | 中断指定 peer 的 tunnel |
+| `POST` | `/peers/{peer_id}/enable` | 旧兼容路径：启用指定 peer |
+| `POST` | `/peers/{peer_id}/disable` | 旧兼容路径：禁用指定 peer |
 
 `GET /config` 和 `PUT /config` 使用相同的 peer JSON 字段，例如：
 
@@ -392,7 +402,7 @@ curl -H "Authorization: Bearer ${TOKEN}" \
 }
 ```
 
-`PUT /config` 与 peer enable/disable 会触发运行时变更。peer 被禁用、删除或 data-plane 参数变化时，client 会停止对应 listener、主动中断该 peer 的 tunnel，并 drain 旧 peer runtime。当前没有单独的 `DELETE /peers/{peer_id}` 或新增 peer 接口；新增、删除 peer 通过 `PUT /config` 整体替换配置完成。
+`PUT /config`、peer CRUD 和 peer enable/disable 会触发运行时变更。peer 被禁用、删除或 data-plane 参数变化时，client 会停止对应 listener、主动中断该 peer 的 tunnel，并 drain 旧 peer runtime。新增脚本应优先使用 `/api/v1/peers*`；整体 `PUT /config` 仍保留用于批量替换。
 
 ### Server 模式
 

@@ -9,6 +9,35 @@
 namespace {
 
 constexpr size_t kMaxPortForwardTargetHostLength = 255;
+constexpr uint32_t kDefaultPeerDrainGraceSeconds = 10;
+
+struct TqPeerPatch {
+    bool HasQuicPeer{false};
+    bool HasSocksListen{false};
+    bool HasHttpListen{false};
+    bool HasPortForwards{false};
+    bool HasQuicConnections{false};
+    bool HasCompress{false};
+    bool HasEnabled{false};
+    std::string QuicPeer;
+    std::string SocksListen;
+    std::string HttpListen;
+    std::vector<TqPortForwardConfig> PortForwards;
+    uint32_t QuicConnections{0};
+    std::string Compress;
+    bool Enabled{false};
+};
+
+struct TqPeerAdminPath {
+    bool Collection{false};
+    std::string PeerId;
+    std::string Action;
+};
+
+struct TqPeerActionBody {
+    std::string Mode{"reject-if-active"};
+    uint32_t GraceSeconds{kDefaultPeerDrainGraceSeconds};
+};
 
 std::string JsonEscape(const std::string& value) {
     std::string out;
@@ -141,6 +170,25 @@ void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
     out << '}';
 }
 
+std::string PeerMetricsJson(const TqPeerMetrics& peer) {
+    std::ostringstream out;
+    AppendPeerMetricsJson(out, peer);
+    return out.str();
+}
+
+std::string PeersJson(const std::vector<TqPeerMetrics>& peers) {
+    std::ostringstream out;
+    out << "{\"peers\":[";
+    for (size_t i = 0; i < peers.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        AppendPeerMetricsJson(out, peers[i]);
+    }
+    out << "]}";
+    return out.str();
+}
+
 int HexValue(char ch) {
     if (ch >= '0' && ch <= '9') return ch - '0';
     if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
@@ -184,11 +232,76 @@ public:
         return Finish(router);
     }
 
+    bool ParsePatch(TqPeerPatch& patch) {
+        patch = TqPeerPatch{};
+        if (!Consume('{')) return Error("peer patch must be an object");
+        if (Consume('}')) return FinishPatch();
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed peer patch object");
+            if (key == "peer_id") {
+                std::string ignored;
+                if (!ParseStringField(ignored, "invalid peer_id")) return false;
+            } else if (key == "quic_peer") {
+                patch.HasQuicPeer = true;
+                if (!ParseStringField(patch.QuicPeer, "invalid quic_peer")) return false;
+            } else if (key == "socks_listen") {
+                patch.HasSocksListen = true;
+                if (!ParseStringField(patch.SocksListen, "invalid socks_listen")) return false;
+            } else if (key == "http_listen") {
+                patch.HasHttpListen = true;
+                if (!ParseStringField(patch.HttpListen, "invalid http_listen")) return false;
+            } else if (key == "port_forwards") {
+                patch.HasPortForwards = true;
+                if (!ParsePortForwards(patch.PortForwards)) return false;
+            } else if (key == "quic_connections") {
+                patch.HasQuicConnections = true;
+                if (!ParseUint32(patch.QuicConnections)) return Error("invalid quic_connections");
+                if (patch.QuicConnections == 0) return Error("quic_connections out of range");
+            } else if (key == "compress") {
+                patch.HasCompress = true;
+                if (!ParseStringField(patch.Compress, "invalid compress")) return false;
+            } else if (key == "enabled") {
+                patch.HasEnabled = true;
+                if (!ParseBool(patch.Enabled)) return Error("invalid enabled");
+            } else if (!SkipValue()) {
+                return false;
+            }
+        } while (Consume(','));
+        if (!Consume('}')) return Error("malformed peer patch object");
+        return FinishPatch();
+    }
+
+    bool ParsePeerActionBody(TqPeerActionBody& body) {
+        body = TqPeerActionBody{};
+        if (!Consume('{')) return Error("peer action body must be an object");
+        if (Consume('}')) return FinishPatch();
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed peer action body");
+            if (key == "mode") {
+                if (!ParseStringField(body.Mode, "invalid mode")) return false;
+            } else if (key == "grace_seconds") {
+                if (!ParseUint32(body.GraceSeconds)) return Error("invalid grace_seconds");
+            } else if (!SkipValue()) {
+                return false;
+            }
+        } while (Consume(','));
+        if (!Consume('}')) return Error("malformed peer action body");
+        return FinishPatch();
+    }
+
 private:
     bool Finish(TqRouterConfig& router) {
         SkipWs();
         if (Pos != Text.size()) return Error("unexpected trailing content in config");
         return TqValidateRouterConfig(router, Err);
+    }
+
+    bool FinishPatch() {
+        SkipWs();
+        if (Pos != Text.size()) return Error("unexpected trailing content in peer patch");
+        return true;
     }
 
     bool ParsePeers(std::vector<TqPeerConfig>& peers) {
@@ -457,6 +570,118 @@ std::string ErrorJson(const std::string& err) {
     return out.str();
 }
 
+bool DecodePathSegment(const std::string& encoded, std::string& decoded) {
+    decoded.clear();
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        const char ch = encoded[i];
+        if (ch == '/') {
+            return false;
+        }
+        if (ch != '%') {
+            decoded.push_back(ch);
+            continue;
+        }
+        if (i + 2 >= encoded.size()) {
+            return false;
+        }
+        const int hi = HexValue(encoded[i + 1]);
+        const int lo = HexValue(encoded[i + 2]);
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        decoded.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+    }
+    return !decoded.empty();
+}
+
+bool ParsePeerAdminPath(const std::string& path, TqPeerAdminPath& out) {
+    out = TqPeerAdminPath{};
+    constexpr const char* PeerPrefix = "/peers";
+    if (path == PeerPrefix) {
+        out.Collection = true;
+        return true;
+    }
+    constexpr size_t peerPrefixLen = std::char_traits<char>::length(PeerPrefix);
+    if (path.compare(0, peerPrefixLen + 1, "/peers/") != 0) {
+        return false;
+    }
+
+    std::string tail = path.substr(peerPrefixLen + 1);
+    const struct LegacyAction {
+        const char* Suffix;
+        const char* Action;
+    } legacyActions[] = {
+        {"/enable", "enable"},
+        {"/disable", "disable"},
+    };
+    for (const auto& legacy : legacyActions) {
+        const size_t suffixLen = std::char_traits<char>::length(legacy.Suffix);
+        if (tail.size() > suffixLen && tail.compare(tail.size() - suffixLen, suffixLen, legacy.Suffix) == 0) {
+            out.Action = legacy.Action;
+            tail.resize(tail.size() - suffixLen);
+            return DecodePathSegment(tail, out.PeerId);
+        }
+    }
+
+    const size_t actionPos = tail.find(':');
+    if (actionPos != std::string::npos) {
+        out.Action = tail.substr(actionPos + 1);
+        tail.resize(actionPos);
+    }
+    return DecodePathSegment(tail, out.PeerId);
+}
+
+bool ParsePeerConfigBody(const std::string& body, TqPeerConfig& peer, std::string& err) {
+    TqRouterConfig wrapper;
+    const std::string wrapped = std::string("{\"version\":1,\"peers\":[") + body + "]}";
+    RouterJsonParser parser(wrapped, err);
+    if (!parser.Parse(wrapper)) {
+        return false;
+    }
+    if (wrapper.Peers.size() != 1) {
+        err = "peer body must contain one peer object";
+        return false;
+    }
+    peer = wrapper.Peers[0];
+    return true;
+}
+
+bool ParsePeerPatchBody(const std::string& body, TqPeerPatch& patch, std::string& err) {
+    RouterJsonParser parser(body, err);
+    return parser.ParsePatch(patch);
+}
+
+std::vector<TqPeerConfig>::iterator FindPeerConfig(std::vector<TqPeerConfig>& peers, const std::string& peerId) {
+    return std::find_if(peers.begin(), peers.end(), [&peerId](const TqPeerConfig& peer) {
+        return peer.PeerId == peerId;
+    });
+}
+
+void ApplyPeerPatch(TqPeerConfig& peer, const TqPeerPatch& patch) {
+    if (patch.HasQuicPeer) peer.QuicPeer = patch.QuicPeer;
+    if (patch.HasSocksListen) peer.SocksListen = patch.SocksListen;
+    if (patch.HasHttpListen) peer.HttpListen = patch.HttpListen;
+    if (patch.HasPortForwards) peer.PortForwards = patch.PortForwards;
+    if (patch.HasQuicConnections) peer.QuicConnections = patch.QuicConnections;
+    if (patch.HasCompress) peer.Compress = patch.Compress;
+    if (patch.HasEnabled) peer.Enabled = patch.Enabled;
+}
+
+bool DeleteModeAllowsEnabledPeer(const std::string& mode) {
+    return mode == "drain" || mode == "abort";
+}
+
+bool ParsePeerActionBodyText(const std::string& text, TqPeerActionBody& body, std::string& err) {
+    body = TqPeerActionBody{};
+    if (text.empty()) {
+        return true;
+    }
+    RouterJsonParser parser(text, err);
+    return parser.ParsePeerActionBody(body);
+}
+
 bool SetPeerEnabled(TqRouterConfig& config, const std::string& peerId, bool enabled) {
     for (auto& peer : config.Peers) {
         if (peer.PeerId == peerId) {
@@ -519,11 +744,15 @@ TqRouterRuntime::TqRouterRuntime(TqPeerRuntimeAdapter* adapter) : Adapter(adapte
 TqRouterRuntime::TqRouterRuntime(bool bridgeValidationMode) : BridgeValidationMode(bridgeValidationMode) {}
 
 bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::string& err) {
     if (!TqValidateRouterConfig(config, err)) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(Mutex);
     if (BridgeValidationMode) {
         size_t enabledPeers = 0;
         const TqPeerConfig* enabledPeer = FindSingleEnabledPeer(config, enabledPeers);
@@ -645,6 +874,125 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
     return snapshot;
 }
 
+std::vector<TqPeerMetrics> TqRouterRuntime::ListPeers() const {
+    return SnapshotMetrics().Peers;
+}
+
+bool TqRouterRuntime::GetPeer(const std::string& peerId, TqPeerMetrics& out) const {
+    const auto peers = ListPeers();
+    auto it = std::find_if(peers.begin(), peers.end(), [&peerId](const TqPeerMetrics& peer) {
+        return peer.PeerId == peerId;
+    });
+    if (it == peers.end()) {
+        return false;
+    }
+    out = *it;
+    return true;
+}
+
+bool TqRouterRuntime::CreatePeer(const TqPeerConfig& peer, std::string& err) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    if (FindPeerConfig(config.Peers, peer.PeerId) != config.Peers.end()) {
+        err = "peer already exists";
+        return false;
+    }
+    config.Peers.push_back(peer);
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::ReplacePeer(const std::string& peerId, const TqPeerConfig& peer, std::string& err) {
+    if (peer.PeerId != peerId) {
+        err = "peer_id does not match path";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    auto it = FindPeerConfig(config.Peers, peerId);
+    if (it == config.Peers.end()) {
+        err = "not found";
+        return false;
+    }
+    *it = peer;
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::PatchPeer(const std::string& peerId, const std::string& body, std::string& err) {
+    TqPeerPatch patch;
+    if (!ParsePeerPatchBody(body, patch, err)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    auto it = FindPeerConfig(config.Peers, peerId);
+    if (it == config.Peers.end()) {
+        err = "not found";
+        return false;
+    }
+    ApplyPeerPatch(*it, patch);
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::DeletePeer(const std::string& peerId, const std::string& mode, std::string& err) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    auto it = FindPeerConfig(config.Peers, peerId);
+    if (it == config.Peers.end()) {
+        err = "not found";
+        return false;
+    }
+    if (it->Enabled && !DeleteModeAllowsEnabledPeer(mode)) {
+        err = "delete enabled peer requires mode drain or abort";
+        return false;
+    }
+    config.Peers.erase(it);
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::EnablePeer(const std::string& peerId, std::string& err) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    if (!SetPeerEnabled(config, peerId, true)) {
+        err = "not found";
+        return false;
+    }
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::DisablePeer(const std::string& peerId, std::string& err) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqRouterConfig config = Config;
+    if (!SetPeerEnabled(config, peerId, false)) {
+        err = "not found";
+        return false;
+    }
+    return ApplyConfigLocked(config, err);
+}
+
+bool TqRouterRuntime::DrainPeer(const std::string& peerId, uint32_t graceSeconds, std::string& err) {
+    TqPeerMetrics peer;
+    if (!GetPeer(peerId, peer)) {
+        err = "not found";
+        return false;
+    }
+    if (Adapter != nullptr) {
+        Adapter->DrainPeer(peerId, graceSeconds == 0 ? kDefaultPeerDrainGraceSeconds : graceSeconds);
+    }
+    return true;
+}
+
+bool TqRouterRuntime::AbortPeerTunnels(const std::string& peerId, std::string& err) {
+    TqPeerMetrics peer;
+    if (!GetPeer(peerId, peer)) {
+        err = "not found";
+        return false;
+    }
+    if (Adapter != nullptr) {
+        Adapter->AbortPeerTunnels(peerId);
+    }
+    return true;
+}
+
 std::string TqRouterRuntime::ConfigJson() const {
     const TqRouterConfig config = SnapshotConfig();
     std::ostringstream out;
@@ -709,27 +1057,112 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
         return TqJsonResponse(200, ConfigJson());
     }
 
-    constexpr const char* PeerPrefix = "/peers/";
-    constexpr const char* EnableSuffix = "/enable";
-    constexpr const char* DisableSuffix = "/disable";
-    if (req.Method == "POST" && req.Path.compare(0, std::char_traits<char>::length(PeerPrefix), PeerPrefix) == 0) {
-        const bool enable = req.Path.size() > std::char_traits<char>::length(EnableSuffix) &&
-            req.Path.compare(req.Path.size() - std::char_traits<char>::length(EnableSuffix), std::char_traits<char>::length(EnableSuffix), EnableSuffix) == 0;
-        const bool disable = req.Path.size() > std::char_traits<char>::length(DisableSuffix) &&
-            req.Path.compare(req.Path.size() - std::char_traits<char>::length(DisableSuffix), std::char_traits<char>::length(DisableSuffix), DisableSuffix) == 0;
-        if (enable || disable) {
-            const size_t idStart = std::char_traits<char>::length(PeerPrefix);
-            const size_t idEnd = req.Path.size() - std::char_traits<char>::length(enable ? EnableSuffix : DisableSuffix);
-            TqRouterConfig config = SnapshotConfig();
-            if (!SetPeerEnabled(config, req.Path.substr(idStart, idEnd - idStart), enable)) {
-                return TqJsonResponse(404, ErrorJson("not found"));
+    TqPeerAdminPath peerPath;
+    if (ParsePeerAdminPath(req.Path, peerPath)) {
+        if (peerPath.Collection) {
+            if (req.Method == "GET") {
+                return TqJsonResponse(200, PeersJson(ListPeers()));
             }
-            std::string err;
-            if (!ApplyConfig(config, err)) {
+            if (req.Method == "POST") {
+                TqPeerConfig peer;
+                std::string err;
+                if (!ParsePeerConfigBody(req.Body, peer, err)) {
+                    return TqJsonResponse(400, ErrorJson(err));
+                }
+                if (!CreatePeer(peer, err)) {
+                    return TqJsonResponse(err.find("already exists") != std::string::npos ? 409 : 400, ErrorJson(err));
+                }
+                TqPeerMetrics created;
+                return TqJsonResponse(GetPeer(peer.PeerId, created) ? 201 : 200,
+                    GetPeer(peer.PeerId, created) ? PeerMetricsJson(created) : ConfigJson());
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+
+        if (peerPath.Action.empty()) {
+            if (req.Method == "GET") {
+                TqPeerMetrics peer;
+                if (!GetPeer(peerPath.PeerId, peer)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(200, PeerMetricsJson(peer));
+            }
+            if (req.Method == "PUT") {
+                TqPeerConfig peer;
+                std::string err;
+                if (!ParsePeerConfigBody(req.Body, peer, err)) {
+                    return TqJsonResponse(400, ErrorJson(err));
+                }
+                if (!ReplacePeer(peerPath.PeerId, peer, err)) {
+                    return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+                }
+                TqPeerMetrics replaced;
+                return TqJsonResponse(GetPeer(peerPath.PeerId, replaced) ? 200 : 404,
+                    GetPeer(peerPath.PeerId, replaced) ? PeerMetricsJson(replaced) : ErrorJson("not found"));
+            }
+            if (req.Method == "PATCH") {
+                std::string err;
+                if (!PatchPeer(peerPath.PeerId, req.Body, err)) {
+                    return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+                }
+                TqPeerMetrics patched;
+                return TqJsonResponse(GetPeer(peerPath.PeerId, patched) ? 200 : 404,
+                    GetPeer(peerPath.PeerId, patched) ? PeerMetricsJson(patched) : ErrorJson("not found"));
+            }
+            if (req.Method == "DELETE") {
+                std::string err;
+                TqPeerActionBody body;
+                if (!ParsePeerActionBodyText(req.Body, body, err)) {
+                    return TqJsonResponse(400, ErrorJson(err));
+                }
+                if (!DeletePeer(peerPath.PeerId, body.Mode, err)) {
+                    if (err == "not found") {
+                        return TqJsonResponse(404, ErrorJson(err));
+                    }
+                    return TqJsonResponse(err.find("requires mode") != std::string::npos ? 409 : 400, ErrorJson(err));
+                }
+                return TqJsonResponse(200, PeersJson(ListPeers()));
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+
+        if (req.Method != "POST") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        std::string err;
+        if (peerPath.Action == "enable") {
+            if (!EnablePeer(peerPath.PeerId, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            TqPeerMetrics peer;
+            return TqJsonResponse(GetPeer(peerPath.PeerId, peer) ? 200 : 404,
+                GetPeer(peerPath.PeerId, peer) ? PeerMetricsJson(peer) : ErrorJson("not found"));
+        }
+        if (peerPath.Action == "disable") {
+            if (!DisablePeer(peerPath.PeerId, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            TqPeerMetrics peer;
+            return TqJsonResponse(GetPeer(peerPath.PeerId, peer) ? 200 : 404,
+                GetPeer(peerPath.PeerId, peer) ? PeerMetricsJson(peer) : ErrorJson("not found"));
+        }
+        if (peerPath.Action == "drain") {
+            TqPeerActionBody body;
+            if (!ParsePeerActionBodyText(req.Body, body, err)) {
                 return TqJsonResponse(400, ErrorJson(err));
             }
-            return TqJsonResponse(200, ConfigJson());
+            if (!DrainPeer(peerPath.PeerId, body.GraceSeconds, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            return TqJsonResponse(202, "{\"status\":\"draining\"}");
         }
+        if (peerPath.Action == "abort-tunnels") {
+            if (!AbortPeerTunnels(peerPath.PeerId, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+        }
+        return TqJsonResponse(404, ErrorJson("not found"));
     }
 
     return TqJsonResponse(404, ErrorJson("not found"));

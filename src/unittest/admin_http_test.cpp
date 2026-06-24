@@ -446,6 +446,9 @@ int main() {
         options.TokenFile = TqSecureTokenFile("v1-peers").string();
         std::string err;
         TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "POST" && req.Path == "/peers/agent-d:enable") {
+                return TqJsonResponse(202, "{\"right_v1_shape\":true}");
+            }
             if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
                 return TqJsonResponse(200, "{\"wrong_v1_shape\":true}");
             }
@@ -463,8 +466,18 @@ int main() {
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 124;
         TqCloseSocket(fd);
-        server.Stop();
         if (!TqHttpStatusIs(response, 404)) return 125;
+
+        TqSocketHandle rightFd = TqConnectLocal(port);
+        if (!TqSocketValid(rightFd)) return 129;
+        const std::string rightRequest = "POST /api/v1/peers/agent-d:enable HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(rightFd, rightRequest)) return 130;
+        std::string rightResponse;
+        if (!TqRecvUntilClosed(rightFd, rightResponse)) return 131;
+        TqCloseSocket(rightFd);
+        server.Stop();
+        if (!TqHttpStatusIs(rightResponse, 202)) return 132;
     }
     {
         TqAdminHttpServerOptions options;
@@ -489,6 +502,41 @@ int main() {
         server.Stop();
         if (!TqHttpStatusIs(response, 200)) return 110;
         if (response.find("\"legacy\":true") == std::string::npos) return 111;
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.TokenFile = TqSecureTokenFile("legacy-peer-scope").string();
+        options.AllowUnauthenticatedLegacy = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
+                return TqJsonResponse(200, "{\"legacy_enable\":true}");
+            }
+            if (req.Path.compare(0, 7, "/peers/") == 0) {
+                return TqJsonResponse(200, "{\"legacy_exposed\":true}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 133;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 134;
+
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 135;
+        if (!TqSendAll(fd, "PATCH /peers/agent-d HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}")) return 136;
+        std::string patchResponse;
+        if (!TqRecvUntilClosed(fd, patchResponse)) return 137;
+        TqCloseSocket(fd);
+        if (!TqHttpStatusIs(patchResponse, 404)) return 138;
+
+        TqSocketHandle legacyFd = TqConnectLocal(port);
+        if (!TqSocketValid(legacyFd)) return 139;
+        if (!TqSendAll(legacyFd, "POST /peers/agent-d/enable HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")) return 140;
+        std::string legacyResponse;
+        if (!TqRecvUntilClosed(legacyFd, legacyResponse)) return 141;
+        TqCloseSocket(legacyFd);
+        server.Stop();
+        if (!TqHttpStatusIs(legacyResponse, 200)) return 142;
     }
     return 0;
 }
