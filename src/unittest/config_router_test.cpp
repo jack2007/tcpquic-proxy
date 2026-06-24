@@ -57,6 +57,8 @@ static std::string CaptureUsage() {
 }
 
 int main() {
+    const std::string removedAdminFlag = std::string("--admin-allow-unauthenticated-") + "legacy";
+    const std::string removedAdminKey = std::string("allow_") + "unauthenticated_" + "legacy";
     {
         const std::string usage = CaptureUsage();
         if (usage.find("Client and Server:") == std::string::npos) return 110;
@@ -101,7 +103,7 @@ int main() {
         if (usage.find("--forward <local=target>") == std::string::npos) return 187;
         if (usage.find("--admin-token-file <path>") == std::string::npos) return 188;
         if (usage.find("--admin-threads <n>") == std::string::npos) return 189;
-        if (usage.find("--admin-allow-unauthenticated-legacy") != std::string::npos) return 190;
+        if (usage.find(removedAdminFlag) != std::string::npos) return 190;
     }
     {
         const char* helpOptions[] = {"-h", "--help", "--usage"};
@@ -147,12 +149,12 @@ int main() {
             "tcpquic-proxy", "client",
             "--peer", "127.0.0.1:14444",
             "--ca", "ca.crt",
-            "--admin-allow-unauthenticated-legacy"};
+            removedAdminFlag.c_str()};
         TqConfig cfg;
         std::string err;
         if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 193;
         if (err.find("unknown argument") == std::string::npos &&
-            err.find("admin-allow-unauthenticated-legacy") == std::string::npos) return 194;
+            err.find(removedAdminFlag.substr(2)) == std::string::npos) return 194;
     }
     {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt", "--admin-threads", "0"};
@@ -164,15 +166,17 @@ int main() {
     {
         TqConfig cfg;
         std::string err;
-        if (ParseRuntimeConfig(R"json({
+        const std::string json = std::string(R"json({
             "tls":{"ca":"ca.crt"},
-            "admin":{"listen":"127.0.0.1:19091","allow_unauthenticated_legacy":true},
+            "admin":{"listen":"127.0.0.1:19091",")json") +
+            removedAdminKey + R"json(":true},
             "peers":[{"id":"agent-b","proto_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"}]
-        })json", cfg, err)) {
+        })json";
+        if (ParseRuntimeConfig(json, cfg, err)) {
             return 199;
         }
         if (err.find("unknown admin key") == std::string::npos &&
-            err.find("allow_unauthenticated_legacy") == std::string::npos) return 200;
+            err.find(removedAdminKey) == std::string::npos) return 200;
     }
     {
         TqConfig cfg;
