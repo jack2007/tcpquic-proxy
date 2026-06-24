@@ -111,6 +111,23 @@ void TqUnregisterConnectionTunnel(MsQuicConnection* connection, void* tunnelCont
     }
 }
 
+uint32_t TqCountConnectionTunnels(MsQuicConnection* connection) {
+    if (connection == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(g_tunnelRegistryLock);
+    auto found = g_tunnelRegistry.find(connection);
+    if (found == g_tunnelRegistry.end()) {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::count_if(
+        found->second.begin(),
+        found->second.end(),
+        [](const TqRegisteredTunnel& tunnel) {
+            return !tunnel.Aborting;
+        }));
+}
+
 uint32_t TqAbortConnectionTunnels(MsQuicConnection* connection) {
     if (connection == nullptr) {
         return 0;

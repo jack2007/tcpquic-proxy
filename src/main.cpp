@@ -45,6 +45,35 @@ public:
         return Manager.SnapshotPeerMetrics(peerId, out);
     }
 
+    std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) override {
+        return Manager.SnapshotConnections(peerId);
+    }
+
+    bool SetDesiredConnectionCount(const std::string& peerId, uint32_t desired, std::string& err) override {
+        return Manager.SetDesiredConnectionCount(peerId, desired, err);
+    }
+
+    bool StopHighestConnection(
+        const std::string& peerId,
+        const std::string& connectionId,
+        std::string& err) override {
+        return Manager.StopHighestConnection(peerId, connectionId, err);
+    }
+
+    bool ReconnectConnection(
+        const std::string& peerId,
+        const std::string& connectionId,
+        std::string& err) override {
+        return Manager.ReconnectConnection(peerId, connectionId, err);
+    }
+
+    bool AbortConnectionTunnels(
+        const std::string& peerId,
+        const std::string& connectionId,
+        std::string& err) override {
+        return Manager.AbortConnectionTunnels(peerId, connectionId, err);
+    }
+
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds) override {
         Manager.DrainPeer(peerId, graceSeconds);
     }

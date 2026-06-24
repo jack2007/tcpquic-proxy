@@ -10,6 +10,7 @@ namespace {
 
 constexpr size_t kMaxPortForwardTargetHostLength = 255;
 constexpr uint32_t kDefaultPeerDrainGraceSeconds = 10;
+constexpr uint32_t kMaxQuicConnections = 128;
 
 struct TqPeerPatch {
     bool HasQuicPeer{false};
@@ -31,6 +32,13 @@ struct TqPeerPatch {
 struct TqPeerAdminPath {
     bool Collection{false};
     std::string PeerId;
+    std::string Action;
+};
+
+struct TqConnectionAdminPath {
+    std::string PeerId;
+    bool Collection{false};
+    std::string ConnectionId;
     std::string Action;
 };
 
@@ -184,6 +192,40 @@ std::string PeersJson(const std::vector<TqPeerMetrics>& peers) {
             out << ',';
         }
         AppendPeerMetricsJson(out, peers[i]);
+    }
+    out << "]}";
+    return out.str();
+}
+
+void AppendConnectionJson(std::ostringstream& out, const TqConnectionSnapshot& connection) {
+    out << '{';
+    AppendJsonString(out, "connection_id", connection.ConnectionId);
+    out << ",\"slot_index\":" << connection.SlotIndex;
+    out << ",\"generation\":" << connection.Generation;
+    out << ",\"connected\":" << (connection.Connected ? "true" : "false");
+    out << ",\"retry_scheduled\":" << (connection.RetryScheduled ? "true" : "false");
+    out << ',';
+    AppendJsonString(out, "state", connection.State);
+    out << ",\"active_tunnels\":" << connection.ActiveTunnels;
+    out << ',';
+    AppendJsonString(out, "last_error", connection.LastError);
+    out << '}';
+}
+
+std::string ConnectionJson(const TqConnectionSnapshot& connection) {
+    std::ostringstream out;
+    AppendConnectionJson(out, connection);
+    return out.str();
+}
+
+std::string ConnectionsJson(const std::vector<TqConnectionSnapshot>& connections) {
+    std::ostringstream out;
+    out << "{\"connections\":[";
+    for (size_t i = 0; i < connections.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        AppendConnectionJson(out, connections[i]);
     }
     out << "]}";
     return out.str();
@@ -633,6 +675,48 @@ bool ParsePeerAdminPath(const std::string& path, TqPeerAdminPath& out) {
     return DecodePathSegment(tail, out.PeerId);
 }
 
+bool ParseConnectionAdminPath(const std::string& path, TqConnectionAdminPath& out) {
+    out = TqConnectionAdminPath{};
+    constexpr const char* PeerPrefix = "/peers/";
+    constexpr size_t peerPrefixLen = std::char_traits<char>::length(PeerPrefix);
+    if (path.compare(0, peerPrefixLen, PeerPrefix) != 0) {
+        return false;
+    }
+
+    const size_t connectionMarker = path.find("/connections", peerPrefixLen);
+    if (connectionMarker == std::string::npos) {
+        return false;
+    }
+    if (path.compare(connectionMarker, 12, "/connections") != 0) {
+        return false;
+    }
+
+    const std::string encodedPeer = path.substr(peerPrefixLen, connectionMarker - peerPrefixLen);
+    if (!DecodePathSegment(encodedPeer, out.PeerId)) {
+        return false;
+    }
+
+    const size_t afterConnections = connectionMarker + 12;
+    if (afterConnections == path.size()) {
+        out.Collection = true;
+        return true;
+    }
+    if (afterConnections >= path.size() || path[afterConnections] != '/') {
+        return false;
+    }
+
+    std::string tail = path.substr(afterConnections + 1);
+    if (tail.empty() || tail.find('/') != std::string::npos) {
+        return false;
+    }
+    const size_t actionPos = tail.find(':');
+    if (actionPos != std::string::npos) {
+        out.Action = tail.substr(actionPos + 1);
+        tail.resize(actionPos);
+    }
+    return DecodePathSegment(tail, out.ConnectionId);
+}
+
 bool ParsePeerConfigBody(const std::string& body, TqPeerConfig& peer, std::string& err) {
     TqRouterConfig wrapper;
     const std::string wrapped = std::string("{\"version\":1,\"peers\":[") + body + "]}";
@@ -735,6 +819,15 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
         !SamePortForwards(a.PortForwards, b.PortForwards) ||
         a.QuicConnections != b.QuicConnections ||
         a.Compress != b.Compress;
+}
+
+bool UpdatePeerConnectionCount(TqRouterConfig& config, const std::string& peerId, uint32_t desired) {
+    auto it = FindPeerConfig(config.Peers, peerId);
+    if (it == config.Peers.end()) {
+        return false;
+    }
+    it->QuicConnections = desired;
+    return true;
 }
 
 } // namespace
@@ -993,6 +1086,159 @@ bool TqRouterRuntime::AbortPeerTunnels(const std::string& peerId, std::string& e
     return true;
 }
 
+std::vector<TqConnectionSnapshot> TqRouterRuntime::ListConnections(const std::string& peerId) const {
+    TqPeerMetrics peer;
+    if (!GetPeer(peerId, peer)) {
+        return {};
+    }
+    if (Adapter == nullptr) {
+        return {};
+    }
+    auto connections = Adapter->SnapshotConnections(peerId);
+    std::sort(connections.begin(), connections.end(), [](const auto& a, const auto& b) {
+        return a.SlotIndex < b.SlotIndex;
+    });
+    return connections;
+}
+
+bool TqRouterRuntime::GetConnection(
+    const std::string& peerId,
+    const std::string& connectionId,
+    TqConnectionSnapshot& out) const {
+    const auto connections = ListConnections(peerId);
+    auto it = std::find_if(connections.begin(), connections.end(), [&connectionId](const TqConnectionSnapshot& item) {
+        return item.ConnectionId == connectionId;
+    });
+    if (it == connections.end()) {
+        return false;
+    }
+    out = *it;
+    return true;
+}
+
+bool TqRouterRuntime::AddConnection(const std::string& peerId, std::string& err) {
+    std::lock_guard<std::mutex> controlLock(ConnectionControlMutex);
+    uint32_t current = 0;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = FindPeerConfig(Config.Peers, peerId);
+        if (it == Config.Peers.end()) {
+            err = "not found";
+            return false;
+        }
+        current = it->QuicConnections;
+    }
+    if (Adapter != nullptr) {
+        const auto liveConnections = Adapter->SnapshotConnections(peerId);
+        if (!liveConnections.empty() || current == 0) {
+            current = static_cast<uint32_t>(liveConnections.size());
+        }
+    }
+    if (current >= kMaxQuicConnections) {
+        err = "quic_connections out of range";
+        return false;
+    }
+
+    const uint32_t desired = current + 1;
+    if (Adapter != nullptr && !Adapter->SetDesiredConnectionCount(peerId, desired, err)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(Mutex);
+    if (!UpdatePeerConnectionCount(Config, peerId, desired)) {
+        err = "not found";
+        return false;
+    }
+    auto running = RunningPeers.find(peerId);
+    if (running != RunningPeers.end()) {
+        running->second.QuicConnections = desired;
+    }
+    auto metrics = Metrics.find(peerId);
+    if (metrics != Metrics.end()) {
+        metrics->second.ConnectionCount = desired;
+    }
+    return true;
+}
+
+bool TqRouterRuntime::DeleteConnection(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    std::lock_guard<std::mutex> controlLock(ConnectionControlMutex);
+    uint32_t current = 0;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        auto it = FindPeerConfig(Config.Peers, peerId);
+        if (it == Config.Peers.end()) {
+            err = "not found";
+            return false;
+        }
+        current = it->QuicConnections;
+    }
+    if (Adapter != nullptr) {
+        const auto liveConnections = Adapter->SnapshotConnections(peerId);
+        if (!liveConnections.empty() || current == 0) {
+            current = static_cast<uint32_t>(liveConnections.size());
+        }
+    }
+    if (current <= 1) {
+        err = "cannot delete the last connection";
+        return false;
+    }
+
+    const uint32_t desired = current - 1;
+    if (Adapter != nullptr && !Adapter->StopHighestConnection(peerId, connectionId, err)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(Mutex);
+    if (!UpdatePeerConnectionCount(Config, peerId, desired)) {
+        err = "not found";
+        return false;
+    }
+    auto running = RunningPeers.find(peerId);
+    if (running != RunningPeers.end()) {
+        running->second.QuicConnections = desired;
+    }
+    auto metrics = Metrics.find(peerId);
+    if (metrics != Metrics.end()) {
+        metrics->second.ConnectionCount = desired;
+    }
+    return true;
+}
+
+bool TqRouterRuntime::ReconnectConnection(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    TqPeerMetrics peer;
+    if (!GetPeer(peerId, peer)) {
+        err = "not found";
+        return false;
+    }
+    if (Adapter == nullptr) {
+        err = "connection control is not available";
+        return false;
+    }
+    return Adapter->ReconnectConnection(peerId, connectionId, err);
+}
+
+bool TqRouterRuntime::AbortConnectionTunnels(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    TqPeerMetrics peer;
+    if (!GetPeer(peerId, peer)) {
+        err = "not found";
+        return false;
+    }
+    if (Adapter == nullptr) {
+        err = "connection control is not available";
+        return false;
+    }
+    return Adapter->AbortConnectionTunnels(peerId, connectionId, err);
+}
+
 std::string TqRouterRuntime::ConfigJson() const {
     const TqRouterConfig config = SnapshotConfig();
     std::ostringstream out;
@@ -1055,6 +1301,69 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
             return TqJsonResponse(400, ErrorJson(err));
         }
         return TqJsonResponse(200, ConfigJson());
+    }
+
+    TqConnectionAdminPath connectionPath;
+    if (ParseConnectionAdminPath(req.Path, connectionPath)) {
+        if (connectionPath.Collection) {
+            if (req.Method == "GET") {
+                TqPeerMetrics peer;
+                if (!GetPeer(connectionPath.PeerId, peer)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(200, ConnectionsJson(ListConnections(connectionPath.PeerId)));
+            }
+            if (req.Method == "POST") {
+                std::string err;
+                if (!AddConnection(connectionPath.PeerId, err)) {
+                    return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+                }
+                return TqJsonResponse(201, ConnectionsJson(ListConnections(connectionPath.PeerId)));
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+
+        if (connectionPath.Action.empty()) {
+            if (req.Method == "GET") {
+                TqConnectionSnapshot connection;
+                if (!GetConnection(connectionPath.PeerId, connectionPath.ConnectionId, connection)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(200, ConnectionJson(connection));
+            }
+            if (req.Method == "DELETE") {
+                std::string err;
+                if (!DeleteConnection(connectionPath.PeerId, connectionPath.ConnectionId, err)) {
+                    if (err == "not found") {
+                        return TqJsonResponse(404, ErrorJson(err));
+                    }
+                    if (err.find("highest") != std::string::npos || err.find("last connection") != std::string::npos) {
+                        return TqJsonResponse(409, ErrorJson(err));
+                    }
+                    return TqJsonResponse(400, ErrorJson(err));
+                }
+                return TqJsonResponse(200, ConnectionsJson(ListConnections(connectionPath.PeerId)));
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+
+        if (req.Method != "POST") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        std::string err;
+        if (connectionPath.Action == "reconnect") {
+            if (!ReconnectConnection(connectionPath.PeerId, connectionPath.ConnectionId, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            return TqJsonResponse(202, "{\"status\":\"reconnecting\"}");
+        }
+        if (connectionPath.Action == "abort-tunnels") {
+            if (!AbortConnectionTunnels(connectionPath.PeerId, connectionPath.ConnectionId, err)) {
+                return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
+            }
+            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+        }
+        return TqJsonResponse(404, ErrorJson("not found"));
     }
 
     TqPeerAdminPath peerPath;

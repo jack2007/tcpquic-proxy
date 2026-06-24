@@ -347,9 +347,35 @@ bool TqIsV1PeerPath(const std::string& path) {
         return false;
     }
     const std::string tail = path.substr(kPeersLen + 1);
-    if (tail.empty() || tail.find('/') != std::string::npos) {
+    if (tail.empty()) {
         return false;
     }
+
+    const size_t firstSlash = tail.find('/');
+    if (firstSlash != std::string::npos) {
+        const std::string peer = tail.substr(0, firstSlash);
+        const std::string rest = tail.substr(firstSlash + 1);
+        const bool connectionsCollection = rest == "connections";
+        const bool connectionsItem = rest.compare(0, 12, "connections/") == 0;
+        if (peer.empty() || (!connectionsCollection && !connectionsItem)) {
+            return false;
+        }
+        if (connectionsCollection) {
+            return true;
+        }
+        std::string connection = rest.substr(12);
+        if (connection.empty() || connection.find('/') != std::string::npos) {
+            return false;
+        }
+        const size_t connectionAction = connection.find(':');
+        if (connectionAction == std::string::npos) {
+            return true;
+        }
+        const std::string name = connection.substr(connectionAction + 1);
+        return !connection.substr(0, connectionAction).empty() &&
+            (name == "reconnect" || name == "abort-tunnels");
+    }
+
     const size_t action = tail.find(':');
     if (action == std::string::npos) {
         return true;

@@ -13,4 +13,5 @@ void TqRegisterConnectionTunnel(
 
 void TqUnregisterConnectionTunnel(MsQuicConnection* connection, void* tunnelContext);
 
+uint32_t TqCountConnectionTunnels(MsQuicConnection* connection);
 uint32_t TqAbortConnectionTunnels(MsQuicConnection* connection);

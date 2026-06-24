@@ -62,6 +62,11 @@ public:
     void AbortTunnels();
     TqPeerMetrics SnapshotPeerMetrics() const;
     TqClientMetrics SnapshotClientMetrics() const;
+    std::vector<TqConnectionSnapshot> SnapshotConnections() const;
+    bool SetDesiredConnectionCount(uint32_t desired, std::string& err);
+    bool StopHighestConnection(const std::string& connectionId, std::string& err);
+    bool ReconnectConnection(const std::string& connectionId, std::string& err);
+    bool AbortConnectionTunnels(const std::string& connectionId, std::string& err);
     MsQuicConnection* PickConnection();
     bool EnsureAnyConnected(std::chrono::milliseconds timeout);
     bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected);
@@ -104,6 +109,11 @@ public:
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds);
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const;
     bool SnapshotClientMetrics(const std::string& peerId, TqClientMetrics& out) const;
+    std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) const;
+    bool SetDesiredConnectionCount(const std::string& peerId, uint32_t desired, std::string& err);
+    bool StopHighestConnection(const std::string& peerId, const std::string& connectionId, std::string& err);
+    bool ReconnectConnection(const std::string& peerId, const std::string& connectionId, std::string& err);
+    bool AbortConnectionTunnels(const std::string& peerId, const std::string& connectionId, std::string& err);
     MsQuicConnection* PickConnection(const std::string& peerId);
     bool EnsureAnyConnected(const std::string& peerId, std::chrono::milliseconds timeout);
     bool EnableAcceptingAndApplyCurrentConnectionState(

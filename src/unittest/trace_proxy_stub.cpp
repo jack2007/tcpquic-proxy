@@ -112,4 +112,5 @@ void TqTraceRelayFatalError(
 
 const MsQuicApi* MsQuic = nullptr;
 
+uint32_t TqCountConnectionTunnels(MsQuicConnection*) { return 0; }
 uint32_t TqAbortConnectionTunnels(MsQuicConnection*) { return 0; }

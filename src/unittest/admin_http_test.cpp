@@ -452,6 +452,12 @@ int main() {
             if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
                 return TqJsonResponse(200, "{\"wrong_v1_shape\":true}");
             }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/connections/conn-1:reconnect") {
+                return TqJsonResponse(202, "{\"connection_action\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/connections/conn-1/reconnect") {
+                return TqJsonResponse(200, "{\"wrong_connection_shape\":true}");
+            }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 120;
@@ -476,8 +482,30 @@ int main() {
         std::string rightResponse;
         if (!TqRecvUntilClosed(rightFd, rightResponse)) return 131;
         TqCloseSocket(rightFd);
-        server.Stop();
         if (!TqHttpStatusIs(rightResponse, 202)) return 132;
+
+        TqSocketHandle connectionFd = TqConnectLocal(port);
+        if (!TqSocketValid(connectionFd)) return 133;
+        const std::string connectionRequest =
+            "POST /api/v1/peers/agent-d/connections/conn-1:reconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(connectionFd, connectionRequest)) return 134;
+        std::string connectionResponse;
+        if (!TqRecvUntilClosed(connectionFd, connectionResponse)) return 135;
+        TqCloseSocket(connectionFd);
+        if (!TqHttpStatusIs(connectionResponse, 202)) return 136;
+
+        TqSocketHandle wrongConnectionFd = TqConnectLocal(port);
+        if (!TqSocketValid(wrongConnectionFd)) return 137;
+        const std::string wrongConnectionRequest =
+            "POST /api/v1/peers/agent-d/connections/conn-1/reconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(wrongConnectionFd, wrongConnectionRequest)) return 138;
+        std::string wrongConnectionResponse;
+        if (!TqRecvUntilClosed(wrongConnectionFd, wrongConnectionResponse)) return 139;
+        TqCloseSocket(wrongConnectionFd);
+        server.Stop();
+        if (!TqHttpStatusIs(wrongConnectionResponse, 404)) return 140;
     }
     {
         TqAdminHttpServerOptions options;

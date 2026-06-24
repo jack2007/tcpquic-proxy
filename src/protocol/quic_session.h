@@ -13,6 +13,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // Server-side: assign stable conn_id per accepted QUIC connection (OPEN_OK field).
@@ -21,6 +22,18 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
 void TqUnregisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);
 MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server);
+
+struct TqConnectionSnapshot {
+    std::string ConnectionId;
+    uint32_t SlotIndex{0};
+    uint64_t Generation{0};
+    bool Connected{false};
+    bool RetryScheduled{false};
+    std::string State;
+    uint64_t ActiveTunnels{0};
+    uint64_t TotalTunnels{0};
+    std::string LastError;
+};
 
 #if defined(TQ_UNIT_TESTING)
 struct TqCredentialConfigSnapshot {
@@ -54,6 +67,11 @@ public:
     void SetConnectionStateHandler(ConnectionStateHandler h);
     void SetDelayedTaskScheduler(DelayedTaskScheduler scheduler);
     void AbortAllTunnels();
+    std::vector<TqConnectionSnapshot> SnapshotConnections() const;
+    bool SetDesiredConnectionCount(uint32_t desired, std::string& err);
+    bool StopHighestConnection(const std::string& connectionId, std::string& err);
+    bool ReconnectConnection(const std::string& connectionId, std::string& err);
+    bool AbortConnectionTunnels(const std::string& connectionId, std::string& err);
     uint32_t ConnectionCount() const;
     uint32_t ConnectedConnectionCount() const;
 
@@ -75,13 +93,17 @@ private:
         std::shared_ptr<ClientSessionGate> Gate;
         std::shared_ptr<ClientSharedState> State;
         size_t SlotIndex{0};
+        uint64_t Generation{0};
     };
 
     struct ConnectionSlot {
         ClientConnContext* Context{nullptr};
         std::unique_ptr<MsQuicConnection> Connection;
+        std::string ConnectionId;
+        uint64_t Generation{0};
         bool Connected{false};
         bool RetryScheduled{false};
+        std::string LastError;
     };
 
     struct ConnectionStateNotification {
@@ -125,7 +147,8 @@ private:
     void ScheduleStartRetry(size_t index);
     void RestartSlotAfterShutdownComplete(
         const std::shared_ptr<ClientSharedState>& state,
-        size_t slotIndex);
+        size_t slotIndex,
+        uint64_t generation);
     static QuicClientSession* AcquireLiveSession(
         const std::shared_ptr<ClientSessionGate>& gate);
     static void ReleaseLiveSession(const std::shared_ptr<ClientSessionGate>& gate);
@@ -135,6 +158,9 @@ private:
     static ConnectionStateNotification OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);
     static void WaitForOrphanedConnectionsDrain(const std::shared_ptr<ClientSharedState>& state, std::chrono::milliseconds timeout);
+    static std::string MakeConnectionId(size_t index);
+    static bool ParseConnectionId(const std::string& connectionId, size_t& index);
+    bool ReconnectSlot(size_t index, std::string& err);
 
     TqConfig Config;
     std::string PeerHost;
