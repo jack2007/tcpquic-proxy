@@ -1,5 +1,8 @@
 #include "router_runtime.h"
 
+#include "relay_metrics.h"
+#include "tunnel_registry.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -39,6 +42,12 @@ struct TqConnectionAdminPath {
     std::string PeerId;
     bool Collection{false};
     std::string ConnectionId;
+    std::string Action;
+};
+
+struct TqTunnelAdminPath {
+    bool Collection{false};
+    std::string TunnelId;
     std::string Action;
 };
 
@@ -228,6 +237,99 @@ std::string ConnectionsJson(const std::vector<TqConnectionSnapshot>& connections
         AppendConnectionJson(out, connections[i]);
     }
     out << "]}";
+    return out.str();
+}
+
+void AppendTunnelJson(std::ostringstream& out, const TqTunnelSnapshot& tunnel) {
+    out << '{';
+    AppendJsonString(out, "tunnel_id", tunnel.TunnelId);
+    out << ',';
+    AppendJsonString(out, "peer_id", tunnel.PeerId);
+    out << ',';
+    AppendJsonString(out, "connection_id", tunnel.ConnectionId);
+    out << ',';
+    AppendJsonString(out, "state", tunnel.State);
+    out << ',';
+    AppendJsonString(out, "target", tunnel.Target);
+    out << ',';
+    AppendJsonString(out, "role", tunnel.Role);
+    out << ',';
+    AppendJsonString(out, "ingress", tunnel.Ingress);
+    out << ',';
+    AppendJsonString(out, "compress", tunnel.Compress);
+    out << ',';
+    AppendJsonString(out, "created_at", tunnel.CreatedAt);
+    out << ",\"duration_ms\":" << tunnel.DurationMs;
+    out << ",\"tcp_read_bytes\":" << tunnel.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << tunnel.TcpWriteBytes;
+    out << ",\"pending_bytes\":" << tunnel.PendingBytes;
+    out << ',';
+    AppendJsonString(out, "relay_backend", tunnel.RelayBackend);
+    out << ",\"worker_index\":" << tunnel.WorkerIndex;
+    out << ',';
+    AppendJsonString(out, "last_error", tunnel.LastError);
+    out << '}';
+}
+
+std::string TunnelJson(const TqTunnelSnapshot& tunnel) {
+    std::ostringstream out;
+    AppendTunnelJson(out, tunnel);
+    return out.str();
+}
+
+std::string TunnelsJson(const std::vector<TqTunnelSnapshot>& tunnels) {
+    std::ostringstream out;
+    out << "{\"tunnels\":[";
+    for (size_t i = 0; i < tunnels.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        AppendTunnelJson(out, tunnels[i]);
+    }
+    out << "]}";
+    return out.str();
+}
+
+std::string RelayMetricsJson() {
+    std::ostringstream out;
+    out << '{';
+    const auto metrics = TqSnapshotRelayMetrics();
+    AppendJsonString(out, "backend", metrics.Backend);
+    out << ",\"active_relays\":" << metrics.ActiveRelays;
+    out << ",\"pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << ",\"errors\":" << metrics.Errors;
+    TqAppendRelayMetricsJson(out, metrics);
+    out << '}';
+    return out.str();
+}
+
+std::string RelayWorkersJson() {
+    const auto metrics = TqSnapshotRelayMetrics();
+    std::ostringstream out;
+    out << "{\"workers\":[{\"worker_id\":\"aggregate\",";
+    AppendJsonString(out, "backend", metrics.Backend);
+    out << ",\"active_relays\":" << metrics.ActiveRelays;
+    out << ",\"pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << "}]}";
+    return out.str();
+}
+
+std::string RelayWorkerJson(const std::string& workerId) {
+    const auto metrics = TqSnapshotRelayMetrics();
+    std::ostringstream out;
+    out << '{';
+    AppendJsonString(out, "worker_id", workerId);
+    out << ',';
+    AppendJsonString(out, "backend", metrics.Backend);
+    out << ",\"active_relays\":" << metrics.ActiveRelays;
+    out << ",\"pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << '}';
     return out.str();
 }
 
@@ -715,6 +817,29 @@ bool ParseConnectionAdminPath(const std::string& path, TqConnectionAdminPath& ou
         tail.resize(actionPos);
     }
     return DecodePathSegment(tail, out.ConnectionId);
+}
+
+bool ParseTunnelAdminPath(const std::string& path, TqTunnelAdminPath& out) {
+    out = TqTunnelAdminPath{};
+    constexpr const char* TunnelPrefix = "/tunnels";
+    constexpr size_t tunnelPrefixLen = std::char_traits<char>::length(TunnelPrefix);
+    if (path == TunnelPrefix) {
+        out.Collection = true;
+        return true;
+    }
+    if (path.compare(0, tunnelPrefixLen + 1, "/tunnels/") != 0) {
+        return false;
+    }
+    std::string tail = path.substr(tunnelPrefixLen + 1);
+    if (tail.empty() || tail.find('/') != std::string::npos) {
+        return false;
+    }
+    const size_t actionPos = tail.find(':');
+    if (actionPos != std::string::npos) {
+        out.Action = tail.substr(actionPos + 1);
+        tail.resize(actionPos);
+    }
+    return DecodePathSegment(tail, out.TunnelId);
 }
 
 bool ParsePeerConfigBody(const std::string& body, TqPeerConfig& peer, std::string& err) {
@@ -1293,6 +1418,19 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
     if (req.Method == "GET" && req.Path == "/config") {
         return TqJsonResponse(200, ConfigJson());
     }
+    if (req.Method == "GET" && req.Path == "/relay/metrics") {
+        return TqJsonResponse(200, RelayMetricsJson());
+    }
+    if (req.Method == "GET" && req.Path == "/relay/workers") {
+        return TqJsonResponse(200, RelayWorkersJson());
+    }
+    if (req.Method == "GET" && req.Path.compare(0, 15, "/relay/workers/") == 0) {
+        std::string workerId;
+        if (!DecodePathSegment(req.Path.substr(15), workerId) || workerId != "aggregate") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        return TqJsonResponse(200, RelayWorkerJson(workerId));
+    }
     if (req.Method == "PUT" && req.Path == "/config") {
         TqRouterConfig config;
         std::string err;
@@ -1301,6 +1439,48 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
             return TqJsonResponse(400, ErrorJson(err));
         }
         return TqJsonResponse(200, ConfigJson());
+    }
+
+    TqTunnelAdminPath tunnelPath;
+    if (ParseTunnelAdminPath(req.Path, tunnelPath)) {
+        if (tunnelPath.Collection) {
+            if (req.Method == "GET") {
+                return TqJsonResponse(200, TunnelsJson(TqSnapshotTunnels()));
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (tunnelPath.Action.empty()) {
+            if (req.Method == "GET") {
+                TqTunnelSnapshot tunnel;
+                if (!TqGetTunnelSnapshot(tunnelPath.TunnelId, tunnel)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(200, TunnelJson(tunnel));
+            }
+            if (req.Method == "DELETE") {
+                if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (req.Method != "POST") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (tunnelPath.Action == "abort") {
+            if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
+                return TqJsonResponse(404, ErrorJson("not found"));
+            }
+            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+        }
+        if (tunnelPath.Action == "drain") {
+            if (!TqDrainTunnelById(tunnelPath.TunnelId)) {
+                return TqJsonResponse(404, ErrorJson("not found"));
+            }
+            return TqJsonResponse(202, "{\"status\":\"draining\"}");
+        }
+        return TqJsonResponse(404, ErrorJson("not found"));
     }
 
     TqConnectionAdminPath connectionPath;

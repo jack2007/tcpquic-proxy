@@ -1,6 +1,7 @@
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "trace.h"
+#include "tunnel_registry.h"
 
 #include <atomic>
 #include <string>
@@ -9,6 +10,12 @@
 
 bool TqTraceEnabled() {
     return false;
+}
+
+std::atomic<unsigned> g_adminTunnelAbortCalls{0};
+
+void AdminTunnelAbort(void*) {
+    g_adminTunnelAbortCalls.fetch_add(1);
 }
 
 void TqTraceLogLine(const char* line) {
@@ -671,6 +678,57 @@ int main() {
         if (deleteHighestResp.find("HTTP/1.1 200 OK") == std::string::npos) return 301;
         if (adapter.DeletedConnections.empty() || adapter.DeletedConnections.back() != "conn-2") return 302;
         if (adminRuntime.SnapshotConfig().Peers[0].QuicConnections != 2) return 303;
+    }
+    {
+        TqRouterRuntime adminRuntime;
+        auto* connection = reinterpret_cast<MsQuicConnection*>(0x11);
+        int context = 0;
+        TqRegisterConnectionTunnel(connection, &context, &AdminTunnelAbort);
+        TqTunnelRegistryMetadata metadata;
+        metadata.PeerId = "agent-tunnel";
+        metadata.ConnectionId = "conn-0";
+        metadata.Target = "127.0.0.1:8080";
+        metadata.Role = "client";
+        metadata.Ingress = "http";
+        metadata.Compress = "none";
+        metadata.RelayBackend = "linux";
+        TqUpdateConnectionTunnelMetadata(connection, &context, metadata);
+
+        TqHttpRequest list = Request("GET", "/tunnels", "");
+        std::string listResp = adminRuntime.HandleAdmin(list);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 304;
+        if (listResp.find("\"peer_id\":\"agent-tunnel\"") == std::string::npos) return 305;
+        if (listResp.find("\"target\":\"127.0.0.1:8080\"") == std::string::npos) return 306;
+        const auto tunnels = TqSnapshotTunnels();
+        if (tunnels.empty()) return 307;
+
+        TqHttpRequest get = Request("GET", "/tunnels/" + tunnels[0].TunnelId, "");
+        std::string getResp = adminRuntime.HandleAdmin(get);
+        if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 308;
+        if (getResp.find("\"connection_id\":\"conn-0\"") == std::string::npos) return 309;
+
+        TqHttpRequest drain = Request("POST", "/tunnels/" + tunnels[0].TunnelId + ":drain", "");
+        std::string drainResp = adminRuntime.HandleAdmin(drain);
+        if (drainResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 310;
+        TqTunnelSnapshot drained;
+        if (!TqGetTunnelSnapshot(tunnels[0].TunnelId, drained) || drained.State != "draining") return 311;
+
+        TqHttpRequest relayMetrics = Request("GET", "/relay/metrics", "");
+        std::string relayMetricsResp = adminRuntime.HandleAdmin(relayMetrics);
+        if (relayMetricsResp.find("HTTP/1.1 200 OK") == std::string::npos) return 312;
+        if (relayMetricsResp.find("\"active_relays\":") == std::string::npos) return 313;
+
+        TqHttpRequest relayWorkers = Request("GET", "/relay/workers", "");
+        std::string relayWorkersResp = adminRuntime.HandleAdmin(relayWorkers);
+        if (relayWorkersResp.find("HTTP/1.1 200 OK") == std::string::npos) return 314;
+        if (relayWorkersResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 315;
+
+        TqHttpRequest abort = Request("POST", "/tunnels/" + tunnels[0].TunnelId + ":abort", "");
+        std::string abortResp = adminRuntime.HandleAdmin(abort);
+        if (abortResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 316;
+        if (g_adminTunnelAbortCalls.load() == 0) return 317;
+
+        TqUnregisterConnectionTunnel(connection, &context);
     }
     {
         TqRouterRuntime unicodeRuntime;

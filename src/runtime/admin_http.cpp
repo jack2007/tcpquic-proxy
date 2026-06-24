@@ -389,6 +389,11 @@ bool TqIsV1AdminPath(const std::string& path) {
     return path == "/api/v1/health" ||
         path == "/api/v1/metrics" ||
         path == "/api/v1/config" ||
+        path == "/api/v1/tunnels" ||
+        path.compare(0, 16, "/api/v1/tunnels/") == 0 ||
+        path == "/api/v1/relay/metrics" ||
+        path == "/api/v1/relay/workers" ||
+        path.compare(0, 22, "/api/v1/relay/workers/") == 0 ||
         TqIsV1PeerPath(path);
 }
 

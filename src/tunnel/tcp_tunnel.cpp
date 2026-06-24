@@ -86,6 +86,24 @@ TqCompressAlgo TqAlgoFromFlags(uint8_t flags) {
     return TqCompressAlgo::Zstd;
 }
 
+std::string TqRelayBackendName(const TqRelayHandle& handle) {
+    switch (handle.Backend) {
+    case TqRelayBackendType::LinuxWorker:
+        return "linux";
+    case TqRelayBackendType::WindowsWorker:
+        return "windows";
+    case TqRelayBackendType::DarwinWorker:
+        return "darwin";
+    case TqRelayBackendType::None:
+    default:
+        return "";
+    }
+}
+
+std::string TqCompressName(TqCompressAlgo algo) {
+    return algo == TqCompressAlgo::Zstd ? "zstd" : "none";
+}
+
 uint8_t TqFlagsFromConfig(const TunnelRequest& req, const TqConfig& cfg) {
     uint8_t flags = req.CompressFlags;
     flags &= static_cast<uint8_t>(~TQ_FLAG_COMPRESS);
@@ -459,6 +477,7 @@ public:
             }
             RelayStarted = true;
         }
+        UpdateRegistryMetadata(algo);
         TqTunnelReaper::Instance().Register(this);
         StateChanged.notify_all();
         if (TraceTunnelId != 0) {
@@ -821,9 +840,26 @@ public:
 
     void RegisterWithConnectionIfNeeded() {
         if (QuicConn != nullptr && !RegisteredWithConnection) {
-            TqRegisterConnectionTunnel(QuicConn, this, &TqTunnelContext::AbortFromRegistry);
+            TqRegisterConnectionTunnel(
+                QuicConn,
+                this,
+                &TqTunnelContext::AbortFromRegistry,
+                &TqTunnelContext::DrainFromRegistry);
             RegisteredWithConnection = true;
         }
+    }
+
+    void UpdateRegistryMetadata(TqCompressAlgo algo) {
+        if (QuicConn == nullptr || !RegisteredWithConnection) {
+            return;
+        }
+        TqTunnelRegistryMetadata metadata;
+        metadata.Target = TraceTarget;
+        metadata.Role = Role == TqTunnelRole::ClientOpen ? "client" : "server";
+        metadata.Ingress = TraceIngressProto == 2 ? "http" : (TraceIngressProto == 1 ? "socks" : "");
+        metadata.Compress = TqCompressName(algo);
+        metadata.RelayBackend = TqRelayBackendName(RelayHandle);
+        TqUpdateConnectionTunnelMetadata(QuicConn, this, metadata);
     }
 
     void UnregisterFromConnection() {
@@ -835,6 +871,10 @@ public:
 
     static void AbortFromRegistry(void* context) {
         static_cast<TqTunnelContext*>(context)->AbortForConnectionShutdown();
+    }
+
+    static void DrainFromRegistry(void* context) {
+        static_cast<TqTunnelContext*>(context)->DrainFromAdmin();
     }
 
     void AbortForConnectionShutdown() {
@@ -870,6 +910,26 @@ public:
 
         if (shutdownStream) {
             (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        }
+    }
+
+    void DrainFromAdmin() {
+        MsQuicStream* stream = nullptr;
+        auto streamOpLock = StreamOpLock;
+        std::lock_guard<std::mutex> streamGuard(*streamOpLock);
+        {
+            std::lock_guard<std::mutex> guard(Lock);
+            if (ShutdownComplete || StreamShutdownQueued) {
+                return;
+            }
+            stream = Stream;
+            StreamShutdownQueued = true;
+            if (TcpFd != TqInvalidSocket) {
+                (void)TqShutdownSend(TcpFd);
+            }
+        }
+        if (stream != nullptr) {
+            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
         }
     }
 

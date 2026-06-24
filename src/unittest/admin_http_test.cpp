@@ -458,6 +458,15 @@ int main() {
             if (req.Method == "POST" && req.Path == "/peers/agent-d/connections/conn-1/reconnect") {
                 return TqJsonResponse(200, "{\"wrong_connection_shape\":true}");
             }
+            if (req.Method == "GET" && req.Path == "/tunnels") {
+                return TqJsonResponse(200, "{\"tunnels\":[]}");
+            }
+            if (req.Method == "POST" && req.Path == "/tunnels/tun-1:abort") {
+                return TqJsonResponse(202, "{\"tunnel_abort\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/workers/aggregate") {
+                return TqJsonResponse(200, "{\"worker_id\":\"aggregate\"}");
+            }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 120;
@@ -504,8 +513,41 @@ int main() {
         std::string wrongConnectionResponse;
         if (!TqRecvUntilClosed(wrongConnectionFd, wrongConnectionResponse)) return 139;
         TqCloseSocket(wrongConnectionFd);
-        server.Stop();
         if (!TqHttpStatusIs(wrongConnectionResponse, 404)) return 140;
+
+        TqSocketHandle tunnelsFd = TqConnectLocal(port);
+        if (!TqSocketValid(tunnelsFd)) return 141;
+        const std::string tunnelsRequest =
+            "GET /api/v1/tunnels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(tunnelsFd, tunnelsRequest)) return 142;
+        std::string tunnelsResponse;
+        if (!TqRecvUntilClosed(tunnelsFd, tunnelsResponse)) return 143;
+        TqCloseSocket(tunnelsFd);
+        if (!TqHttpStatusIs(tunnelsResponse, 200)) return 144;
+
+        TqSocketHandle tunnelAbortFd = TqConnectLocal(port);
+        if (!TqSocketValid(tunnelAbortFd)) return 145;
+        const std::string tunnelAbortRequest =
+            "POST /api/v1/tunnels/tun-1:abort HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(tunnelAbortFd, tunnelAbortRequest)) return 146;
+        std::string tunnelAbortResponse;
+        if (!TqRecvUntilClosed(tunnelAbortFd, tunnelAbortResponse)) return 147;
+        TqCloseSocket(tunnelAbortFd);
+        if (!TqHttpStatusIs(tunnelAbortResponse, 202)) return 148;
+
+        TqSocketHandle relayWorkerFd = TqConnectLocal(port);
+        if (!TqSocketValid(relayWorkerFd)) return 149;
+        const std::string relayWorkerRequest =
+            "GET /api/v1/relay/workers/aggregate HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(relayWorkerFd, relayWorkerRequest)) return 150;
+        std::string relayWorkerResponse;
+        if (!TqRecvUntilClosed(relayWorkerFd, relayWorkerResponse)) return 151;
+        TqCloseSocket(relayWorkerFd);
+        server.Stop();
+        if (!TqHttpStatusIs(relayWorkerResponse, 200)) return 152;
     }
     {
         TqAdminHttpServerOptions options;
