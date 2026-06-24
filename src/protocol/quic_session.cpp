@@ -33,9 +33,9 @@ struct TqCredentialConfig {
 
     TqCredentialConfig(const TqConfig& cfg, bool server, QUIC_CREDENTIAL_FLAGS flags) {
         Config.Flags = flags;
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
         if (!server) {
-            // Darwin msquic validates via SecTrust (system roots) unless this flag
+            // Non-Linux msquic validates via platform trust store unless this flag
             // is set; --ca PEM must use OpenSSL chain verify like Linux.
             Config.Flags |= QUIC_CREDENTIAL_FLAG_USE_TLS_BUILTIN_CERTIFICATE_VALIDATION;
         }
