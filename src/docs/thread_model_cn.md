@@ -481,7 +481,7 @@ thread apply all bt
 | `src/protocol/quic_session.cpp` | MsQuic API/registration/configuration、callback-driven client reconnect、connection/stream callback |
 | `src/ingress/client_ingress_reactor.cpp` | client SOCKS5/HTTP listen、accept、handshake、OPEN completion 回投和 delayed retry |
 | `src/ingress/client_ingress_state.cpp` | SOCKS5 / HTTP CONNECT 握手状态机 |
-| `src/runtime/admin_http.cpp` | admin HTTP accept/client threads |
+| `src/runtime/admin_http.cpp` | admin HTTP cpp-httplib listen thread、固定 worker pool、token/v1/legacy route gate |
 | `src/runtime/router_runtime.cpp` | multi-peer config/admin runtime |
 | `src/runtime/speed_test.cpp` | 内置 upload/download speed-test 控制、HTTP CONNECT ingress data path 和 pump worker |
 | `src/runtime/trace.cpp` | 可选 trace 日志和周期 snapshot |

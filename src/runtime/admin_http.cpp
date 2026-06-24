@@ -7,25 +7,14 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <cstring>
 #include <limits>
 #include <sstream>
 #include <string>
 
-#if !defined(_WIN32)
-#include <netdb.h>
-#endif
-
 namespace {
 
 constexpr size_t TqMaxAdminHttpBytes = 64 * 1024;
-
-enum class TqRequestReadState {
-    Incomplete,
-    Complete,
-    Malformed
-};
 
 struct TqHostPort {
     std::string Host;
@@ -124,99 +113,6 @@ const char* TqReasonPhrase(int status) {
     }
 }
 
-bool TqSendAll(TqSocketHandle fd, const std::string& data) {
-    size_t sent = 0;
-    while (sent < data.size()) {
-        const int result = TqSend(fd, data.data() + sent, data.size() - sent, TqSendFlags::NoSignal);
-        if (result < 0) {
-            if (TqSocketInterrupted(TqLastSocketError())) {
-                continue;
-            }
-            return false;
-        }
-        if (result == 0) {
-            return false;
-        }
-        sent += static_cast<size_t>(result);
-    }
-    return true;
-}
-
-[[maybe_unused]] bool TqCreateListenSocket(const std::string& listen, TqSocketHandle& listenFd, std::string& err) {
-    TqHostPort hostPort{};
-    if (!TqParseHostPort(listen, hostPort, true)) {
-        err = "admin listen must be host:port";
-        return false;
-    }
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    addrinfo* result = nullptr;
-    const std::string port = std::to_string(hostPort.Port);
-    const int status = getaddrinfo(hostPort.Host.c_str(), port.c_str(), &hints, &result);
-    if (status != 0) {
-        err = gai_strerror(status);
-        return false;
-    }
-
-    for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (!TqSocketValid(fd)) {
-            continue;
-        }
-
-        (void)TqSetReuseAddr(fd);
-
-        if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
-            ::listen(fd, SOMAXCONN) == 0) {
-            listenFd = fd;
-            freeaddrinfo(result);
-            return true;
-        }
-
-        TqCloseSocket(fd);
-    }
-
-    freeaddrinfo(result);
-#if defined(_WIN32)
-    err = "bind failed";
-#else
-    err = std::strerror(errno);
-#endif
-    return false;
-}
-
-[[maybe_unused]] std::string TqGetBoundListenAddress(TqSocketHandle fd, const std::string& fallbackHost) {
-    sockaddr_storage storage{};
-    socklen_t storageLen = sizeof(storage);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &storageLen) != 0) {
-        return {};
-    }
-
-    if (storage.ss_family == AF_INET) {
-        const auto* addr = reinterpret_cast<const sockaddr_in*>(&storage);
-        char host[INET_ADDRSTRLEN]{};
-        if (TqInetNtop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        return std::string(host) + ":" + std::to_string(ntohs(addr->sin_port));
-    }
-
-    if (storage.ss_family == AF_INET6) {
-        const auto* addr = reinterpret_cast<const sockaddr_in6*>(&storage);
-        char host[INET6_ADDRSTRLEN]{};
-        if (TqInetNtop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        return std::string(host) + ":" + std::to_string(ntohs(addr->sin6_port));
-    }
-
-    return fallbackHost;
-}
-
 bool TqValidateAdminBindListen(const std::string& listen, std::string& err) {
     TqHostPort hostPort{};
     if (!TqParseHostPort(listen, hostPort, true)) {
@@ -228,95 +124,6 @@ bool TqValidateAdminBindListen(const std::string& listen, std::string& err) {
     }
     err = "admin listen must bind loopback in this stage";
     return false;
-}
-
-TqRequestReadState TqRequestReadStateFor(const std::string& raw, size_t& total) {
-    const size_t headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
-        return TqRequestReadState::Incomplete;
-    }
-
-    total = headerEnd + 4;
-    bool hasContentLength = false;
-    size_t contentLength = 0;
-    size_t lineStart = raw.find("\r\n") + 2;
-    while (lineStart < headerEnd) {
-        const size_t lineEnd = raw.find("\r\n", lineStart);
-        if (lineEnd == std::string::npos || lineEnd > headerEnd) {
-            return TqRequestReadState::Malformed;
-        }
-        const std::string line = raw.substr(lineStart, lineEnd - lineStart);
-        const size_t colon = line.find(':');
-        if (colon == std::string::npos) {
-            return TqRequestReadState::Malformed;
-        }
-        const std::string name = TqAsciiLower(line.substr(0, colon));
-        const std::string value = TqTrim(line.substr(colon + 1));
-        if (name == "content-length") {
-            if (hasContentLength || !TqParseSize(value, contentLength)) {
-                return TqRequestReadState::Malformed;
-            }
-            hasContentLength = true;
-        } else if (name == "transfer-encoding") {
-            return TqRequestReadState::Malformed;
-        }
-        lineStart = lineEnd + 2;
-    }
-
-    if (hasContentLength) {
-        if (total > TqMaxAdminHttpBytes || contentLength > TqMaxAdminHttpBytes - total) {
-            return TqRequestReadState::Malformed;
-        }
-        total += contentLength;
-        return raw.size() >= total ? TqRequestReadState::Complete : TqRequestReadState::Incomplete;
-    }
-
-    return TqRequestReadState::Complete;
-}
-
-[[maybe_unused]] void TqHandleAdminClient(TqSocketHandle clientFd, const TqHttpHandler& handler) {
-    std::string raw;
-    raw.reserve(1024);
-
-    char buffer[1024];
-    for (;;) {
-        size_t total = 0;
-        const TqRequestReadState state = TqRequestReadStateFor(raw, total);
-        if (state == TqRequestReadState::Complete) {
-            raw.resize(total);
-            break;
-        }
-        if (state == TqRequestReadState::Malformed) {
-            (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
-            return;
-        }
-        if (raw.size() >= TqMaxAdminHttpBytes) {
-            (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
-            return;
-        }
-
-        const int received = TqRecv(clientFd, buffer, sizeof(buffer), TqRecvFlags::None);
-        if (received < 0) {
-            if (TqSocketInterrupted(TqLastSocketError())) {
-                continue;
-            }
-            return;
-        }
-        if (received == 0) {
-            return;
-        }
-        raw.append(buffer, static_cast<size_t>(received));
-    }
-
-    TqHttpRequest req{};
-    std::string err;
-    if (!TqParseHttpRequest(raw, req, err)) {
-        (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
-        return;
-    }
-
-    const std::string response = handler ? handler(req) : TqJsonResponse(500, "{\"error\":\"no handler\"}");
-    (void)TqSendAll(clientFd, response);
 }
 
 std::string TqLowerHeaderName(std::string text) {
