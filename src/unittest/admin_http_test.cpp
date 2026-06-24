@@ -166,6 +166,7 @@ int main() {
         if (!auth.WriteTokenFile(tokenFile.string(), "127.0.0.1:19091", err)) return 87;
         std::ifstream in(tokenFile);
         std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
         if (body.find("\"token\":\"" + auth.Token() + "\"") == std::string::npos) return 88;
         if (body.find("\"listen\":\"127.0.0.1:19091\"") == std::string::npos) return 89;
 #if !defined(_WIN32)

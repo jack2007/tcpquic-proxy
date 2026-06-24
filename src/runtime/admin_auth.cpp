@@ -11,6 +11,10 @@
 #include <vector>
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #include <process.h>
 #else
 #include <fcntl.h>
@@ -180,6 +184,7 @@ bool TqEnsureSecureTokenParentDir(const std::filesystem::path& parent, bool pare
     }
 #else
     (void)parentExisted;
+    (void)err;
 #endif
     return true;
 }
@@ -324,8 +329,9 @@ bool TqAdminAuth::CleanupTokenFile(const std::string& path) const {
 std::string TqAdminAuth::DefaultTokenFilePath() {
     std::filesystem::path base;
 #if defined(_WIN32)
-    const char* localAppData = std::getenv("LOCALAPPDATA");
-    base = localAppData != nullptr && localAppData[0] != '\0'
+    char localAppData[MAX_PATH]{};
+    const DWORD envLen = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+    base = envLen > 0 && envLen < MAX_PATH
         ? std::filesystem::path(localAppData) / "tcpquic-proxy"
         : std::filesystem::temp_directory_path() / "tcpquic-proxy";
 #else

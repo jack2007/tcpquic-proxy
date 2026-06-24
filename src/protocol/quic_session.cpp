@@ -4,6 +4,7 @@
 #include "tunnel_registry.h"
 #include "tuning.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
