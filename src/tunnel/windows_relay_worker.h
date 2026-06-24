@@ -96,6 +96,8 @@ public:
     bool TestLateReceiveViewCompletionIgnored(uint64_t relayId, DWORD bytes, uint64_t postedLength);
     bool TestBufferedTcpSendZeroCompletion(uint64_t relayId);
     bool TestCloseRelayTcpSocketForPostRecvFailure(uint64_t relayId);
+    bool TestMarkTcpRecvInFlightForRetirement(uint64_t relayId);
+    bool TestCompleteTcpRecvInFlightForRetirement(uint64_t relayId);
 #endif
 
     void StopRelay(uint64_t relayId);
@@ -114,7 +116,9 @@ private:
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
+    bool HandleTcpReadClosed(std::unique_ptr<IoOperation> op);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
+    void TryRetireRelay(const std::shared_ptr<RelayContext>& relay);
     void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
     void HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op);
     bool QueueDeferredQuicReceive(
@@ -156,7 +160,16 @@ private:
     void CloseRelay(const std::shared_ptr<RelayContext>& relay, TqRelayCloseMode mode);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
-    void RecordTcpHardErrorAndFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
+    void RecordTcpHardErrorAndFail(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* reason,
+        uint64_t tcpError = 0);
+    bool HandleTcpPostFailure(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* reason,
+        int error);
+    bool IsTcpTeardownError(int error) const;
+    bool IsIocpTeardownError(DWORD error) const;
     bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
     bool IsQuicSendTeardownStatus(QUIC_STATUS status) const;
 

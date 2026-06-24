@@ -172,11 +172,13 @@ void TqRelayStop(TqRelayHandle* handle) {
 
 #if defined(_WIN32)
     if (handle->Backend == TqRelayBackendType::WindowsWorker) {
-        TqWindowsRelayRuntime::Instance().StopRelay(handle);
+        if (!handle->Stop.load(std::memory_order_acquire)) {
+            TqWindowsRelayRuntime::Instance().StopRelay(handle);
+            return;
+        }
         handle->Backend = TqRelayBackendType::None;
         handle->WindowsWorker = nullptr;
         handle->WindowsRelayId = 0;
-        handle->Stop.store(true);
         TqRelayUnregisterActive();
         return;
     }

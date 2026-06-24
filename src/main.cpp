@@ -1,6 +1,7 @@
 #include "config.h"
 #include "admin_http.h"
 #include "admin_auth.h"
+#include "crash_dump.h"
 #include "platform_socket.h"
 #include "client_peer_runtime.h"
 #include "acl.h"
@@ -342,6 +343,8 @@ int RunServer(const TqConfig& cfg) {
 } // namespace
 
 int main(int argc, char** argv) {
+    TqInstallCrashDumpHandler();
+
     TqSocketStartup socketStartup;
     if (!socketStartup.Ok()) {
         std::fprintf(stderr, "tcpquic-proxy: failed to initialize socket runtime\n");
