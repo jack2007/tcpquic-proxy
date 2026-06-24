@@ -29,6 +29,13 @@ inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     return peer;
 }
 
+inline TqRouterConfig TqMakeSinglePeerRouterConfig(const TqConfig& cfg) {
+    TqRouterConfig router;
+    router.ProxyAuth = cfg.Router.ProxyAuth;
+    router.Peers.push_back(TqMakePrimaryPeerConfig(cfg));
+    return router;
+}
+
 inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeerConfig& peer) {
     TqConfig cfg = baseConfig;
     cfg.ClientConfigPath.clear();

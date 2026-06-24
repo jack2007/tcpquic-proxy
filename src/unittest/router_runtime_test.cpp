@@ -1,3 +1,4 @@
+#include "client_peer_runtime.h"
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "trace.h"
@@ -421,6 +422,25 @@ int main() {
         if (err.find("multiple enabled peers") == std::string::npos) return 51;
         cfg.Peers[1].Enabled = false;
         if (!TqValidateSinglePeerStartupBridge(cfg, err)) return 52;
+    }
+    {
+        TqConfig single;
+        single.QuicPeer = "127.0.0.1:14444";
+        single.SocksListen = "127.0.0.1:11001";
+        single.HttpListen = "127.0.0.1:18001";
+        single.QuicConnections = 4;
+        single.Compress = "zstd";
+        single.Router.ProxyAuth.push_back({"alice", "secret"});
+
+        TqRouterConfig router = TqMakeSinglePeerRouterConfig(single);
+        if (router.Peers.size() != 1) return 63;
+        if (router.Peers[0].PeerId != "primary") return 64;
+        if (router.Peers[0].QuicPeer != "127.0.0.1:14444") return 65;
+        if (router.Peers[0].SocksListen != "127.0.0.1:11001") return 66;
+        if (router.Peers[0].HttpListen != "127.0.0.1:18001") return 67;
+        if (router.Peers[0].QuicConnections != 4) return 68;
+        if (router.Peers[0].Compress != "zstd") return 69;
+        if (router.ProxyAuth.size() != 1 || router.ProxyAuth[0].Username != "alice") return 70;
     }
     {
         std::string json = runtime.ConfigJson();
