@@ -96,30 +96,24 @@ TqAdminHttpServerOptions TqMakeAdminOptions(const TqConfig& cfg) {
     options.AdminThreads = cfg.AdminThreads;
     options.TokenFile = cfg.AdminTokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath() : cfg.AdminTokenFile;
     options.EnableTokenAuth = true;
-    options.AllowUnauthenticatedLegacy = cfg.AdminAllowUnauthenticatedLegacy;
     return options;
 }
 
 void TqPrintAdminStarted(const TqAdminHttpServer& admin, const TqAdminHttpServerOptions& options) {
     std::fprintf(stderr, "tcpquic-proxy: admin listening on %s\n", admin.ListenAddress().c_str());
     std::fprintf(stderr, "tcpquic-proxy: admin token file %s\n", options.TokenFile.c_str());
-    if (options.AllowUnauthenticatedLegacy) {
-        std::fprintf(stderr,
-            "tcpquic-proxy: WARNING admin legacy unauthenticated paths enabled on loopback\n");
-    }
 }
 
 int RunSinglePeerClient(const TqConfig& cfg) {
-    const auto started = std::chrono::steady_clock::now();
-    TqClientRuntimeManager manager(cfg, TqClientPeerLogMode::Primary);
     std::string err;
     const TqPeerConfig primary = TqMakePrimaryPeerConfig(cfg);
-    if (!manager.StartPeer(primary, err)) {
-        std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
-        return 1;
-    }
 
     if (cfg.SpeedTestMode != TqSpeedTestMode::None) {
+        TqClientRuntimeManager manager(cfg, TqClientPeerLogMode::Primary);
+        if (!manager.StartPeer(primary, err)) {
+            std::fprintf(stderr, "tcpquic-proxy: %s\n", err.c_str());
+            return 1;
+        }
         if (!manager.EnsureAnyConnected("primary", std::chrono::seconds(10))) {
             std::fprintf(stderr, "tcpquic-proxy: speed test could not connect to QUIC peer\n");
             manager.StopAll();
@@ -141,10 +135,17 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         return ok ? 0 : 1;
     }
 
-    TqClientMetrics startupMetrics;
-    if (!manager.SnapshotClientMetrics("primary", startupMetrics)) {
+    const TqRouterConfig router = TqMakeSinglePeerRouterConfig(cfg);
+    TqMultiPeerRuntimeAdapter adapter(cfg);
+    TqRouterRuntime runtime(&adapter);
+    if (!runtime.ApplyConfig(router, err)) {
+        std::fprintf(stderr, "tcpquic-proxy: invalid router config: %s\n", err.c_str());
+        return 1;
+    }
+
+    TqPeerMetrics startupMetrics;
+    if (!runtime.GetPeer(primary.PeerId, startupMetrics)) {
         std::fprintf(stderr, "tcpquic-proxy: client runtime unavailable\n");
-        manager.StopAll();
         return 1;
     }
     std::fprintf(stderr, "tcpquic-proxy: QUIC peer %s (%u connections)\n",
@@ -154,28 +155,14 @@ int RunSinglePeerClient(const TqConfig& cfg) {
     if (!cfg.AdminListen.empty()) {
         if (!TqValidateAdminListen(cfg.AdminListen, err)) {
             std::fprintf(stderr, "tcpquic-proxy: invalid admin listen: %s\n", err.c_str());
-            manager.StopAll();
             return 1;
         }
         const TqAdminHttpServerOptions adminOptions = TqMakeAdminOptions(cfg);
-        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [&manager, started](const TqHttpRequest& req) {
-            const uint64_t uptimeSeconds = static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
-            TqClientMetrics metrics;
-            if (!manager.SnapshotClientMetrics("primary", metrics)) {
-                return TqJsonResponse(503, "{\"error\":\"client runtime unavailable\"}");
-            }
-            if (req.Method == "GET" && req.Path == "/health") {
-                return TqJsonResponse(200, TqClientHealthJson(metrics, uptimeSeconds));
-            }
-            if (req.Method == "GET" && req.Path == "/metrics") {
-                return TqJsonResponse(200, TqClientMetricsJson(metrics, uptimeSeconds));
-            }
-            return TqJsonResponse(404, "{\"error\":\"not found\"}");
+        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [&runtime](const TqHttpRequest& req) {
+            return runtime.HandleAdmin(req);
         }, adminOptions));
         if (!admin->Start(err)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());
-            manager.StopAll();
             return 1;
         }
         TqPrintAdminStarted(*admin, adminOptions);
