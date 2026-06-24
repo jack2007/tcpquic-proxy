@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,6 +41,44 @@ constexpr auto TqOpenTimeout = std::chrono::seconds(10);
 constexpr int TqTcpDialTimeoutMs = 10 * 1000;
 
 std::atomic<TqServerDialReactor*> g_serverDialReactor{nullptr};
+
+bool TqTunnelDebugEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("TQ_TUNNEL_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+void TqTunnelDebugLog(const char* fmt, ...) {
+    if (!TqTunnelDebugEnabled()) {
+        return;
+    }
+    char buffer[1200];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    std::fprintf(stderr, "tcpquic-proxy tunnel-debug: %s\n", buffer);
+}
+
+const char* TqOpenErrorName(TqOpenError error) {
+    switch (error) {
+    case TqOpenError::Ok:
+        return "ok";
+    case TqOpenError::AclDenied:
+        return "acl_denied";
+    case TqOpenError::DnsFailed:
+        return "dns_failed";
+    case TqOpenError::TcpTimeout:
+        return "tcp_timeout";
+    case TqOpenError::TcpRefused:
+        return "tcp_refused";
+    case TqOpenError::Internal:
+    default:
+        return "internal";
+    }
+}
 
 TqServerDialReactor* TqGetServerDialReactor() {
     return g_serverDialReactor.load(std::memory_order_acquire);
@@ -299,6 +338,24 @@ struct TqClientTunnelOpenHandle final {
     std::atomic<unsigned> RefCount{1};
 };
 
+const char* TqClientOpenStateName(TqClientTunnelOpenHandle::State state) {
+    switch (state) {
+    case TqClientTunnelOpenHandle::State::Opening:
+        return "opening";
+    case TqClientTunnelOpenHandle::State::OpenSucceeded:
+        return "open_succeeded";
+    case TqClientTunnelOpenHandle::State::OpenFailed:
+        return "open_failed";
+    case TqClientTunnelOpenHandle::State::Accepted:
+        return "accepted";
+    case TqClientTunnelOpenHandle::State::Rejected:
+        return "rejected";
+    case TqClientTunnelOpenHandle::State::Cancelled:
+        return "cancelled";
+    }
+    return "unknown";
+}
+
 void TqRetainClientTunnelOpenHandle(TqClientTunnelOpenHandle* handle) {
     if (handle == nullptr) {
         return;
@@ -335,6 +392,12 @@ void TqNotifyClientTunnelOpenComplete(
         onComplete = std::move(handle->OnComplete);
     }
 
+    TqTunnelDebugLog(
+        "event=client_open_notify handle=%p tunnel_id=%llu ok=%d error=%s",
+        static_cast<void*>(handle),
+        static_cast<unsigned long long>(result.TraceTunnelId),
+        result.Ok ? 1 : 0,
+        TqOpenErrorName(result.Error));
     if (onComplete) {
         onComplete(handle, result);
     }
@@ -409,6 +472,11 @@ public:
     bool SendOpenRequest(const TqOpenRequest& req) {
         std::vector<uint8_t> encoded;
         if (!TqEncodeOpenRequest(req, encoded)) {
+            TqTunnelDebugLog(
+                "event=open_request_encode_failed role=%s tunnel_id=%llu target=%s",
+                Role == TqTunnelRole::ClientOpen ? "client" : "server",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str());
             return false;
         }
         if (TqTraceEnabled()) {
@@ -420,7 +488,16 @@ public:
             }
             TqTraceIncOpenTx(connId);
         }
-        return SendBytes(encoded, QUIC_SEND_FLAG_START);
+        const bool sent = SendBytes(encoded, QUIC_SEND_FLAG_START);
+        TqTunnelDebugLog(
+            "event=open_request_send role=%s tunnel_id=%llu target=%s bytes=%zu sent=%d flags=0x%x",
+            Role == TqTunnelRole::ClientOpen ? "client" : "server",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            encoded.size(),
+            sent ? 1 : 0,
+            static_cast<unsigned>(req.Flags));
+        return sent;
     }
 
     bool WaitForOpenResponse(TqOpenResponse& response) {
@@ -466,6 +543,12 @@ public:
                   Config.Tuning,
                   algo);
         if (!relayStarted) {
+            TqTunnelDebugLog(
+                "event=relay_start_failed role=%s tunnel_id=%llu target=%s flags=0x%x",
+                Role == TqTunnelRole::ClientOpen ? "client" : "server",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                static_cast<unsigned>(flags));
             return false;
         }
 
@@ -476,6 +559,7 @@ public:
                 return false;
             }
             RelayStarted = true;
+            TcpFd = TqInvalidSocket;
         }
         UpdateRegistryMetadata(algo);
         TqTunnelReaper::Instance().Register(this);
@@ -484,6 +568,29 @@ public:
             TqTraceRelayStarted(TraceTunnelId);
             TraceRelayStarted = true;
         }
+        const std::string relayBackend = TqRelayBackendName(RelayHandle);
+        uint64_t relayId = 0;
+        const void* relayWorker = nullptr;
+        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
+            relayId = RelayHandle.LinuxRelayId;
+            relayWorker = RelayHandle.LinuxWorker;
+        } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
+            relayId = RelayHandle.WindowsRelayId;
+            relayWorker = RelayHandle.WindowsWorker;
+        } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
+            relayId = RelayHandle.DarwinRelayId;
+            relayWorker = RelayHandle.DarwinWorker;
+        }
+        TqTunnelDebugLog(
+            "event=relay_started role=%s tunnel_id=%llu target=%s backend=%s relay_id=%llu worker=%p fd=%lld flags=0x%x",
+            Role == TqTunnelRole::ClientOpen ? "client" : "server",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            relayBackend.c_str(),
+            static_cast<unsigned long long>(relayId),
+            relayWorker,
+            static_cast<long long>(tcpFd),
+            static_cast<unsigned>(flags));
         DispatchPendingRelayRx(stream);
         return true;
     }
@@ -629,6 +736,11 @@ public:
             if (AsyncClientOpenHandle != handle) {
                 return false;
             }
+            TqTunnelDebugLog(
+                "event=client_open_cancel tunnel_id=%llu handle=%p target=%s",
+                static_cast<unsigned long long>(TraceTunnelId),
+                static_cast<void*>(handle),
+                TraceTarget.c_str());
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             ClientOpenOwnerActive = false;
@@ -661,6 +773,11 @@ public:
             if (AsyncClientOpenHandle != handle) {
                 return false;
             }
+            TqTunnelDebugLog(
+                "event=client_open_abandon tunnel_id=%llu handle=%p target=%s",
+                static_cast<unsigned long long>(TraceTunnelId),
+                static_cast<void*>(handle),
+                TraceTarget.c_str());
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             ClientOpenOwnerActive = false;
@@ -688,6 +805,11 @@ public:
             if (AsyncClientOpenHandle != handle) {
                 return false;
             }
+            TqTunnelDebugLog(
+                "event=client_open_accept tunnel_id=%llu handle=%p target=%s",
+                static_cast<unsigned long long>(TraceTunnelId),
+                static_cast<void*>(handle),
+                TraceTarget.c_str());
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             AsyncClientOpenAccepted = true;
@@ -726,6 +848,11 @@ public:
             if (AsyncClientOpenHandle != handle) {
                 return false;
             }
+            TqTunnelDebugLog(
+                "event=client_open_reject tunnel_id=%llu handle=%p target=%s",
+                static_cast<unsigned long long>(TraceTunnelId),
+                static_cast<void*>(handle),
+                TraceTarget.c_str());
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             ClientOpenOwnerActive = false;
@@ -1049,6 +1176,16 @@ private:
                 OpeningRx.begin() + static_cast<std::ptrdiff_t>(TQ_OPEN_RESPONSE_SIZE),
                 OpeningRx.end());
         }
+        TqTunnelDebugLog(
+            "event=open_response_rx role=client tunnel_id=%llu target=%s decoded=%d ok=%d error=%s conn_id=%u bytes=%zu extra_relay_bytes=%zu",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            ok ? 1 : 0,
+            response.Ok ? 1 : 0,
+            TqOpenErrorName(response.Error),
+            response.ConnId,
+            OpeningRx.size(),
+            OpeningRx.size() > TQ_OPEN_RESPONSE_SIZE ? OpeningRx.size() - TQ_OPEN_RESPONSE_SIZE : 0);
         CompleteOpen(ok && response.Ok, response);
     }
 
@@ -1175,6 +1312,11 @@ private:
         TqOpenRequest req{};
         if (!TqDecodeOpenRequest(OpeningRx.data(), expectedLen, req)) {
             ServerOpenDispatched.store(true, std::memory_order_release);
+            TqTunnelDebugLog(
+                "event=open_request_decode_failed role=server tunnel_id=%llu bytes=%zu expected=%zu",
+                static_cast<unsigned long long>(TraceTunnelId),
+                OpeningRx.size(),
+                expectedLen);
             SendOpenFailure(TqOpenError::Internal);
             return;
         }
@@ -1197,6 +1339,14 @@ private:
             TraceTunnelId = TqTraceStreamStarted(QuicConn, connId, "server", TraceTarget.c_str(), req.Flags);
             TqTraceIncOpenRx(connId);
         }
+        TqTunnelDebugLog(
+            "event=open_request_rx role=server tunnel_id=%llu target=%s addr_type=%u flags=0x%x bytes=%zu extra_relay_bytes=%zu",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            static_cast<unsigned>(req.AddrType),
+            static_cast<unsigned>(req.Flags),
+            expectedLen,
+            OpeningRx.size() > expectedLen ? OpeningRx.size() - expectedLen : 0);
 
         if (TqServerDialReactor* reactor = TqGetServerDialReactor()) {
             TryHandleServerOpenWithReactor(req, host, reactor);
@@ -1207,6 +1357,11 @@ private:
         TqOpenError error = TqOpenError::Internal;
         if (Acl == nullptr || !TqResolveAllowedTarget(req, *Acl, Authorizer, addrs, error)) {
             ServerOpenDispatched.store(true, std::memory_order_release);
+            TqTunnelDebugLog(
+                "event=target_resolve_failed tunnel_id=%llu target=%s error=%s",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                TqOpenErrorName(error));
             if (error == TqOpenError::AclDenied && OnAclDenied) {
                 OnAclDenied();
             }
@@ -1243,6 +1398,13 @@ private:
         if (!result.Done || result.Error != TqOpenError::Ok ||
             !TqSocketValid(result.Fd)) {
             const TqOpenError error = result.Done ? result.Error : TqOpenError::Internal;
+            TqTunnelDebugLog(
+                "event=target_dial_failed mode=reactor tunnel_id=%llu target=%s done=%d error=%s fd=%lld",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                result.Done ? 1 : 0,
+                TqOpenErrorName(error),
+                static_cast<long long>(result.Fd));
             if (TraceTunnelId != 0) {
                 TqTraceTargetTcpFailed(TraceTunnelId, error);
             }
@@ -1264,6 +1426,11 @@ private:
                 TraceTargetTcpOpen = true;
                 TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
             }
+            TqTunnelDebugLog(
+                "event=target_dial_ok mode=reactor tunnel_id=%llu target=%s fd=%lld",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                static_cast<long long>(TcpFd));
         }
 
         if (IsAbortedOrShutdown()) {
@@ -1282,6 +1449,13 @@ private:
             TqOpenResponse{true, TqOpenError::Ok, connId},
             encoded);
         const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
+        TqTunnelDebugLog(
+            "event=open_response_tx role=server tunnel_id=%llu target=%s ok=1 encoded=%d sent=%d conn_id=%u",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            encodedOk ? 1 : 0,
+            sendOk ? 1 : 0,
+            connId);
         if (!sendOk) {
             if (!IsAbortedOrShutdown()) {
                 SendOpenFailure(TqOpenError::Internal);
@@ -1312,6 +1486,12 @@ private:
         const TqDialResult dial = TqDialTcp(addrs, TqTcpDialTimeoutMs);
         if (!TqSocketValid(dial.Fd)) {
             const TqOpenError err = dial.Refused ? TqOpenError::TcpRefused : TqOpenError::TcpTimeout;
+            TqTunnelDebugLog(
+                "event=target_dial_failed mode=thread tunnel_id=%llu target=%s error=%s refused=%d",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                TqOpenErrorName(err),
+                dial.Refused ? 1 : 0);
             if (TraceTunnelId != 0) {
                 TqTraceTargetTcpFailed(TraceTunnelId, err);
             }
@@ -1329,6 +1509,11 @@ private:
                 TraceTargetTcpOpen = true;
                 TqTraceTargetTcpConnected(TraceTunnelId, TcpFd);
             }
+            TqTunnelDebugLog(
+                "event=target_dial_ok mode=thread tunnel_id=%llu target=%s fd=%lld",
+                static_cast<unsigned long long>(TraceTunnelId),
+                TraceTarget.c_str(),
+                static_cast<long long>(TcpFd));
         }
 
         if (IsAbortedOrShutdown()) {
@@ -1345,6 +1530,13 @@ private:
         }
         const bool encodedOk = TqEncodeOpenResponse(TqOpenResponse{true, TqOpenError::Ok, connId}, encoded);
         const bool sendOk = encodedOk && SendBytes(encoded, QUIC_SEND_FLAG_NONE);
+        TqTunnelDebugLog(
+            "event=open_response_tx role=server tunnel_id=%llu target=%s ok=1 encoded=%d sent=%d conn_id=%u",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            encodedOk ? 1 : 0,
+            sendOk ? 1 : 0,
+            connId);
         if (!sendOk) {
             if (!IsAbortedOrShutdown()) {
                 SendOpenFailure(TqOpenError::Internal);
@@ -1383,6 +1575,11 @@ private:
     }
 
     void SendOpenFailure(TqOpenError error) {
+        TqTunnelDebugLog(
+            "event=open_response_tx role=server tunnel_id=%llu target=%s ok=0 error=%s",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            TqOpenErrorName(error));
         CloseTcp();
         if (IsAbortedOrShutdown()) {
             ArmSelfDeleteOnShutdown();
@@ -1460,6 +1657,15 @@ private:
         if (TraceTunnelId != 0) {
             TqTraceOpenResult(TraceTunnelId, ok && response.Ok, response.Error, response.ConnId);
         }
+        TqTunnelDebugLog(
+            "event=open_complete role=%s tunnel_id=%llu target=%s ok=%d response_ok=%d error=%s conn_id=%u",
+            Role == TqTunnelRole::ClientOpen ? "client" : "server",
+            static_cast<unsigned long long>(TraceTunnelId),
+            TraceTarget.c_str(),
+            ok ? 1 : 0,
+            response.Ok ? 1 : 0,
+            TqOpenErrorName(response.Error),
+            response.ConnId);
         StateChanged.notify_all();
         CompleteAsyncClientOpenIfNeeded(ok, response);
     }
@@ -1731,21 +1937,35 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
     TqClientTunnelOpenComplete onComplete) {
+    const std::string requestedTarget = std::string(req.Host) + ":" + std::to_string(req.Port);
     if (!TqSocketValid(clientTcpFd)) {
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=invalid_client_fd fd=%lld",
+            requestedTarget.c_str(),
+            static_cast<long long>(clientTcpFd));
         return nullptr;
     }
 
     if (conn == nullptr || !conn->IsValid()) {
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=invalid_quic_conn",
+            requestedTarget.c_str());
         return nullptr;
     }
 
     TqOpenRequest openReq{};
     if (!TqBuildOpenRequest(req, cfg, openReq)) {
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=build_open_request",
+            requestedTarget.c_str());
         return nullptr;
     }
 
     auto* handle = new (std::nothrow) TqClientTunnelOpenHandle();
     if (handle == nullptr) {
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=handle_alloc",
+            requestedTarget.c_str());
         return nullptr;
     }
     handle->OnComplete = std::move(onComplete);
@@ -1762,6 +1982,9 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         nullptr);
     if (context == nullptr) {
         delete handle;
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=context_alloc",
+            requestedTarget.c_str());
         return nullptr;
     }
 
@@ -1775,6 +1998,9 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         delete stream;
         delete context;
         delete handle;
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed target=%s reason=stream_open",
+            requestedTarget.c_str());
         return nullptr;
     }
 
@@ -1787,6 +2013,14 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
     context->AssignTrace(tunnelId, target);
     context->SetIngressTraceProto(req.IngressTraceProto);
+    TqTunnelDebugLog(
+        "event=client_tunnel_async_start tunnel_id=%llu target=%s conn_id=%u fd=%lld handle=%p ingress_proto=%u",
+        static_cast<unsigned long long>(tunnelId),
+        target.c_str(),
+        connId,
+        static_cast<long long>(clientTcpFd),
+        static_cast<void*>(handle),
+        static_cast<unsigned>(req.IngressTraceProto));
 
     {
         std::lock_guard<std::mutex> guard(handle->Lock);
@@ -1796,6 +2030,10 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
 
     if (!context->SendOpenRequest(openReq)) {
         std::fprintf(stderr, "tcpquic-proxy: async client tunnel failed to send open request\n");
+        TqTunnelDebugLog(
+            "event=client_tunnel_async_start_failed tunnel_id=%llu target=%s reason=send_open_request",
+            static_cast<unsigned long long>(tunnelId),
+            target.c_str());
         bool deleteContext = false;
         {
             std::lock_guard<std::mutex> guard(handle->Lock);
@@ -1838,6 +2076,11 @@ void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
     if (context != nullptr && context->CancelAsyncClientOpen(handle)) {
         delete context;
     }
+    TqTunnelDebugLog(
+        "event=client_tunnel_cancel handle=%p context=%p release_user=%d",
+        static_cast<void*>(handle),
+        static_cast<void*>(context),
+        releaseUser ? 1 : 0);
     if (releaseUser) {
         TqReleaseClientTunnelOpenHandle(handle);
     }
@@ -1853,6 +2096,11 @@ bool TqAcceptClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
         std::lock_guard<std::mutex> guard(handle->Lock);
         if (handle->OpenState != TqClientTunnelOpenHandle::State::OpenSucceeded ||
             handle->Context == nullptr) {
+            TqTunnelDebugLog(
+                "event=client_tunnel_accept_rejected handle=%p state=%s context=%p",
+                static_cast<void*>(handle),
+                TqClientOpenStateName(handle->OpenState),
+                static_cast<void*>(handle->Context));
             return false;
         }
         handle->OpenState = TqClientTunnelOpenHandle::State::Accepted;
@@ -1861,6 +2109,10 @@ bool TqAcceptClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
     }
 
     const bool accepted = context->AcceptAsyncClientOpen(handle);
+    TqTunnelDebugLog(
+        "event=client_tunnel_accept handle=%p accepted=%d",
+        static_cast<void*>(handle),
+        accepted ? 1 : 0);
     TqReleaseClientTunnelOpenHandle(handle);
     return accepted;
 }
@@ -1888,6 +2140,11 @@ void TqRejectClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
     if (context != nullptr) {
         (void)context->RejectAsyncClientOpen(handle);
     }
+    TqTunnelDebugLog(
+        "event=client_tunnel_reject handle=%p context=%p release_user=%d",
+        static_cast<void*>(handle),
+        static_cast<void*>(context),
+        releaseUser ? 1 : 0);
     if (releaseUser) {
         TqReleaseClientTunnelOpenHandle(handle);
     }

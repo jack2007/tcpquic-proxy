@@ -561,6 +561,10 @@ void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) 
         relay->QuicReceiveClosed = true;
         relay->TcpReadArmed = false;
         relay->TcpWriteArmed = false;
+        if (TqSocketValid(relay->TcpFd)) {
+            TqCloseSocket(relay->TcpFd);
+            relay->TcpFd = TqInvalidSocket;
+        }
         relay->PendingQuicSends.clear();
         static constexpr uint32_t kMaxSubmittingYields = 100000;
         uint32_t submittingYields = 0;

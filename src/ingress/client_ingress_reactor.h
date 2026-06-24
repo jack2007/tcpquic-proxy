@@ -187,6 +187,8 @@ private:
     void CloseClientOwnedByTunnelLocked(TqSocketHandle clientFd);
     void RemovePeerLocked(const std::string& peerId);
     void CloseAllLocked();
+    static const char* ListenProtoName(ListenProto proto);
+    static const char* ClientPhaseName(ClientPhase phase);
 
     mutable std::mutex LifecycleMutex;
     std::condition_variable LifecycleCv;

@@ -178,6 +178,44 @@ int main() {
 
     {
         TqLinuxRelayWorkerConfig config{};
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+        int relayFds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, relayFds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = relayFds[0];
+        registration.Stream = nullptr;
+        registration.Handle = nullptr;
+        registration.EnableQuicSends = false;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(relayFds[0]);
+            ::close(relayFds[1]);
+            return 1;
+        }
+
+        worker.UnregisterRelay(registered.RelayId);
+        errno = 0;
+        if (::fcntl(relayFds[0], F_GETFD) != -1 || errno != EBADF) {
+            std::fprintf(stderr, "expected relay fd to be closed by unregister\n");
+            worker.Stop();
+            ::close(relayFds[0]);
+            ::close(relayFds[1]);
+            return 1;
+        }
+        worker.Stop();
+        ::close(relayFds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;

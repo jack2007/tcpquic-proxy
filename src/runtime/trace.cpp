@@ -843,7 +843,8 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         "relay_buffer_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu "
         "quic_send_ops=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu "
         "ideal_send_threshold_bytes=%llu tcp_read_disabled_relays=%llu pending_tcp_write_bytes=%llu "
-        "hot_relay=%llu hot_worker=%u hot_tcp_read_bytes=%llu hot_tcp_write_bytes=%llu "
+        "hot_relay=%llu hot_worker=%u hot_tcp_fd=%d hot_local=%s hot_peer=%s "
+        "hot_tcp_read_bytes=%llu hot_tcp_write_bytes=%llu "
         "hot_outstanding_quic_sends=%llu hot_outstanding_quic_send_bytes=%llu "
         "hot_pending_quic_send_retries=%llu hot_ideal_send_bytes=%llu "
         "hot_pending_quic_receive_bytes=%llu hot_tcp_read_armed=%d hot_tcp_write_armed=%d "
@@ -868,6 +869,9 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         static_cast<unsigned long long>(metrics.PendingTcpWriteBytes),
         static_cast<unsigned long long>(metrics.HotRelayId),
         metrics.HotRelayWorkerIndex,
+        metrics.HotRelayTcpFd,
+        metrics.HotRelayLocalAddress.empty() ? "-" : metrics.HotRelayLocalAddress.c_str(),
+        metrics.HotRelayPeerAddress.empty() ? "-" : metrics.HotRelayPeerAddress.c_str(),
         static_cast<unsigned long long>(metrics.HotRelayTcpReadBytes),
         static_cast<unsigned long long>(metrics.HotRelayTcpWriteBytes),
         static_cast<unsigned long long>(metrics.HotRelayOutstandingQuicSends),

@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <future>
 #include <memory>
 #include <vector>
@@ -24,6 +27,48 @@ namespace {
 constexpr int TqMaxIngressAcceptsPerEvent = 64;
 // Avoid reading past the SOCKS/HTTP handshake boundary; payload must remain queued for relay.
 constexpr size_t TqIngressReadBufferSize = 1;
+
+bool TqTunnelDebugEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("TQ_TUNNEL_DEBUG");
+        return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+void TqTunnelDebugLog(const char* fmt, ...) {
+    if (!TqTunnelDebugEnabled()) {
+        return;
+    }
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    std::fprintf(stderr, "tcpquic-proxy tunnel-debug: %s\n", buffer);
+}
+
+const char* TqOpenErrorName(TqOpenError error) {
+    switch (error) {
+    case TqOpenError::Ok:
+        return "ok";
+    case TqOpenError::AclDenied:
+        return "acl_denied";
+    case TqOpenError::DnsFailed:
+        return "dns_failed";
+    case TqOpenError::TcpTimeout:
+        return "tcp_timeout";
+    case TqOpenError::TcpRefused:
+        return "tcp_refused";
+    case TqOpenError::Internal:
+    default:
+        return "internal";
+    }
+}
+
+std::string TqRequestTarget(const TunnelRequest& request) {
+    return std::string(request.Host) + ":" + std::to_string(request.Port);
+}
 
 void TqCloseFd(TqSocketHandle& fd) {
     if (TqSocketValid(fd)) {
@@ -186,6 +231,30 @@ TqClientIngressReactor::TqClientIngressReactor() {
 
 TqClientIngressReactor::~TqClientIngressReactor() {
     Stop();
+}
+
+const char* TqClientIngressReactor::ListenProtoName(ListenProto proto) {
+    switch (proto) {
+    case ListenProto::Socks5:
+        return "socks5";
+    case ListenProto::HttpConnect:
+        return "http";
+    case ListenProto::PortForward:
+        return "port_forward";
+    }
+    return "unknown";
+}
+
+const char* TqClientIngressReactor::ClientPhaseName(ClientPhase phase) {
+    switch (phase) {
+    case ClientPhase::Handshake:
+        return "handshake";
+    case ClientPhase::Opening:
+        return "opening";
+    case ClientPhase::WritingOpenResponse:
+        return "writing_open_response";
+    }
+    return "unknown";
 }
 
 bool TqClientIngressReactor::Start() {
@@ -657,6 +726,12 @@ void TqClientIngressReactor::AcceptLoop(TqSocketHandle listenFd) {
                     continue;
                 }
                 Clients.emplace(clientFd, std::move(client));
+                TqTunnelDebugLog(
+                    "event=ingress_accept fd=%lld listen_fd=%lld peer=%s proto=%s",
+                    static_cast<long long>(clientFd),
+                    static_cast<long long>(listenFd),
+                    peerId.c_str(),
+                    ListenProtoName(proto));
             }
             if (startDirectOpen) {
                 StartClientOpen(clientFd);
@@ -770,6 +845,16 @@ void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
             } else {
                 const int sent = TqSend(clientFd, pending.data(), pending.size(), TqSendFlags::NoSignal);
                 if (sent > 0) {
+                    if (!handshakeWrite && sent > 0) {
+                        TqTunnelDebugLog(
+                            "event=ingress_open_response_write fd=%lld proto=%s phase=%s bytes=%d remaining_before=%zu open_ok=%d",
+                            static_cast<long long>(clientFd),
+                            ListenProtoName(client.Proto),
+                            ClientPhaseName(client.Phase),
+                            sent,
+                            pending.size(),
+                            client.OpenSucceeded ? 1 : 0);
+                    }
                     if (handshakeWrite) {
                         client.State.MarkWriteComplete(static_cast<size_t>(sent));
                         feedAfterHandshakeWrite = client.State.PendingWrite().empty();
@@ -823,6 +908,10 @@ void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
                 if (terminalReserved && acceptTunnel) {
                     accepted = acceptTunnel(completedHandle);
                 }
+                TqTunnelDebugLog(
+                    "event=ingress_tunnel_accept fd=%lld accepted=%d",
+                    static_cast<long long>(clientFd),
+                    accepted ? 1 : 0);
                 if (!accepted) {
                     if (terminalReserved && completedState) {
                         std::lock_guard<std::mutex> completionLock(completedState->Mutex);
@@ -831,6 +920,9 @@ void TqClientIngressReactor::HandleClientWrite(TqSocketHandle clientFd) {
                     RejectOpenHandleOnce(completedHandle, rejectTunnel, completedState);
                 }
             } else {
+                TqTunnelDebugLog(
+                    "event=ingress_tunnel_reject fd=%lld reason=open_failed",
+                    static_cast<long long>(clientFd));
                 RejectOpenHandleOnce(completedHandle, rejectTunnel, completedState);
             }
         }
@@ -894,9 +986,19 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         client.OpenCompletion = completionState;
         client.Phase = ClientPhase::Opening;
         (void)Reactor.Modify(clientFd, TqReactorEvents::Error);
+        TqTunnelDebugLog(
+            "event=ingress_open_start fd=%lld peer=%s proto=%s target=%s",
+            static_cast<long long>(clientFd),
+            client.PeerId.c_str(),
+            ListenProtoName(client.Proto),
+            TqRequestTarget(request).c_str());
     }
 
     if (!startTunnel) {
+        TqTunnelDebugLog(
+            "event=ingress_open_start_failed fd=%lld target=%s reason=no_start_tunnel",
+            static_cast<long long>(clientFd),
+            TqRequestTarget(request).c_str());
         CompleteClientOpen(clientFd, nullptr, TqTunnelStartResult{false, TqOpenError::Internal, 0});
         return;
     }
@@ -942,6 +1044,10 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         });
 
     if (handle == nullptr) {
+        TqTunnelDebugLog(
+            "event=ingress_open_start_failed fd=%lld target=%s reason=null_handle",
+            static_cast<long long>(clientFd),
+            TqRequestTarget(request).c_str());
         CompleteClientOpen(clientFd, nullptr, TqTunnelStartResult{false, TqOpenError::Internal, 0});
         return;
     }
@@ -951,6 +1057,10 @@ void TqClientIngressReactor::StartClientOpen(TqSocketHandle clientFd) {
         std::lock_guard<std::mutex> lock(Mutex);
         auto it = Clients.find(clientFd);
         if (it == Clients.end()) {
+            TqTunnelDebugLog(
+                "event=ingress_open_orphaned fd=%lld target=%s",
+                static_cast<long long>(clientFd),
+                TqRequestTarget(request).c_str());
             RejectOpenHandleOnce(handle, rejectTunnel, completionState);
             return;
         }
@@ -980,6 +1090,10 @@ void TqClientIngressReactor::TimeoutClientOpen(
         if (client.Phase != ClientPhase::Opening || client.OpenCompletion != completionState) {
             return;
         }
+        TqTunnelDebugLog(
+            "event=ingress_open_timeout fd=%lld proto=%s",
+            static_cast<long long>(clientFd),
+            ListenProtoName(client.Proto));
         handle = client.OpenHandle;
         cancelTunnel = client.CancelTunnel;
         client.OpenHandle = nullptr;
@@ -1038,15 +1152,34 @@ void TqClientIngressReactor::CompleteClientOpen(
         std::lock_guard<std::mutex> lock(Mutex);
         auto it = Clients.find(clientFd);
         if (it == Clients.end()) {
+            TqTunnelDebugLog(
+                "event=ingress_open_complete_orphaned fd=%lld tunnel_id=%llu ok=%d error=%s",
+                static_cast<long long>(clientFd),
+                static_cast<unsigned long long>(result.TraceTunnelId),
+                result.Ok ? 1 : 0,
+                TqOpenErrorName(result.Error));
             RejectOpenHandleOnce(handle, rejectTunnel, completionState);
             return;
         }
         ClientEntry& client = it->second;
         if (client.Phase != ClientPhase::Opening) {
+            TqTunnelDebugLog(
+                "event=ingress_open_complete_wrong_phase fd=%lld tunnel_id=%llu phase=%s ok=%d error=%s",
+                static_cast<long long>(clientFd),
+                static_cast<unsigned long long>(result.TraceTunnelId),
+                ClientPhaseName(client.Phase),
+                result.Ok ? 1 : 0,
+                TqOpenErrorName(result.Error));
             RejectOpenHandleOnce(handle, rejectTunnel, completionState);
             return;
         }
         if (client.OpenHandle != nullptr && handle != nullptr && client.OpenHandle != handle) {
+            TqTunnelDebugLog(
+                "event=ingress_open_complete_handle_mismatch fd=%lld tunnel_id=%llu ok=%d error=%s",
+                static_cast<long long>(clientFd),
+                static_cast<unsigned long long>(result.TraceTunnelId),
+                result.Ok ? 1 : 0,
+                TqOpenErrorName(result.Error));
             RejectOpenHandleOnce(handle, rejectTunnel, completionState);
             return;
         }
@@ -1057,6 +1190,14 @@ void TqClientIngressReactor::CompleteClientOpen(
         const TqOpenError error = result.Ok ? TqOpenError::Ok : result.Error;
         client.OpenCompletion = completionState;
         client.OpenSucceeded = result.Ok;
+        TqTunnelDebugLog(
+            "event=ingress_open_complete fd=%lld proto=%s tunnel_id=%llu ok=%d error=%s response_error=%s",
+            static_cast<long long>(clientFd),
+            ListenProtoName(client.Proto),
+            static_cast<unsigned long long>(result.TraceTunnelId),
+            result.Ok ? 1 : 0,
+            TqOpenErrorName(result.Error),
+            TqOpenErrorName(error));
         if (client.Proto == ListenProto::PortForward) {
             client.PendingWrite.clear();
         } else {
@@ -1079,6 +1220,13 @@ void TqClientIngressReactor::CloseClientLocked(TqSocketHandle clientFd, bool clo
     ClientEntry client = std::move(it->second);
     Clients.erase(it);
     (void)Reactor.Remove(clientFd);
+    TqTunnelDebugLog(
+        "event=ingress_close fd=%lld proto=%s phase=%s close_fd=%d open_handle=%d",
+        static_cast<long long>(clientFd),
+        ListenProtoName(client.Proto),
+        ClientPhaseName(client.Phase),
+        closeFd ? 1 : 0,
+        client.OpenHandle != nullptr ? 1 : 0);
     if (client.OpenHandle != nullptr) {
         CancelOpenHandleOnce(client.OpenHandle, client.CancelTunnel, client.OpenCompletion);
         return;
@@ -1094,6 +1242,10 @@ void TqClientIngressReactor::CloseClientOwnedByTunnelLocked(TqSocketHandle clien
     if (it == Clients.end()) {
         return;
     }
+    TqTunnelDebugLog(
+        "event=ingress_owned_by_tunnel fd=%lld proto=%s",
+        static_cast<long long>(clientFd),
+        ListenProtoName(it->second.Proto));
     Clients.erase(it);
     (void)Reactor.Remove(clientFd);
 }
