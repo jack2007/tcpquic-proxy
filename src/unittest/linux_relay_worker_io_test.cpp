@@ -38,6 +38,10 @@ QUIC_STATUS QUIC_API FakeStreamSend(
 void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t) {
 }
 
+QUIC_STATUS QUIC_API FakeStreamShutdown(HQUIC, QUIC_STREAM_SHUTDOWN_FLAGS, QUIC_UINT62) {
+    return QUIC_STATUS_SUCCESS;
+}
+
 QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
     return QUIC_STATUS_SUCCESS;
 }
@@ -45,6 +49,7 @@ QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
 void InstallFakeMsQuicForSend(QUIC_API_TABLE& table) {
     std::memset(&table, 0, sizeof(table));
     table.StreamSend = FakeStreamSend;
+    table.StreamShutdown = FakeStreamShutdown;
     table.StreamReceiveComplete = FakeStreamReceiveComplete;
     table.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
     MsQuic = reinterpret_cast<const MsQuicApi*>(&table);
@@ -62,7 +67,11 @@ void CompleteFakeSends(TqLinuxRelayWorker& worker, MsQuicStream* stream) {
         QUIC_STREAM_EVENT complete{};
         complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
         complete.SEND_COMPLETE.ClientContext = context;
-        (void)worker.DispatchStreamEventForTest(stream, &complete);
+        if (stream != nullptr && stream->Callback != nullptr) {
+            (void)stream->Callback(stream, stream->Context, &complete);
+        } else {
+            (void)worker.DispatchStreamEventForTest(stream, &complete);
+        }
     }
 }
 
@@ -244,19 +253,79 @@ int main() {
         (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &resetLinger, sizeof(resetLinger));
         ::close(fds[1]);
 
-        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN | EPOLLERR | EPOLLRDHUP)) {
+        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN | EPOLLRDHUP)) {
             worker.Stop();
             return 1;
         }
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        if (snapshot.TcpReadHardErrors != 0 || snapshot.FatalRelayResets != 0 ||
-            snapshot.TcpReadClosedRelays != 1) {
+        if (snapshot.TcpReadHardErrors == 0 ||
+            snapshot.FatalRelayResets == 0 ||
+            snapshot.TcpReadClosedRelays != 0) {
             std::fprintf(stderr,
-                "expected tcp reset during read to close input gracefully, read_errors=%llu "
+                "expected tcp reset during read to fatal-reset relay, read_errors=%llu "
                 "resets=%llu read_closed=%llu errno=%llu\n",
                 static_cast<unsigned long long>(snapshot.TcpReadHardErrors),
                 static_cast<unsigned long long>(snapshot.FatalRelayResets),
                 static_cast<unsigned long long>(snapshot.TcpReadClosedRelays),
+                static_cast<unsigned long long>(snapshot.LastTcpReadErrno));
+            worker.Stop();
+            return 1;
+        }
+
+        worker.Stop();
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+        config.MaxPendingBufferBytes = 64 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+        int fds[2]{-1, -1};
+        if (!MakeTcpLoopbackPair(fds)) {
+            worker.Stop();
+            return 1;
+        }
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = nullptr;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        linger resetLinger{};
+        resetLinger.l_onoff = 1;
+        resetLinger.l_linger = 0;
+        (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &resetLinger, sizeof(resetLinger));
+        ::close(fds[1]);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLERR)) {
+            worker.Stop();
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.FatalRelayResets == 0 ||
+            (snapshot.LastTcpWriteErrno == 0 && snapshot.LastTcpReadErrno == 0)) {
+            std::fprintf(stderr,
+                "expected EPOLLERR/SO_ERROR to fatal-reset relay, stop=%d resets=%llu write_errno=%llu read_errno=%llu\n",
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
+                static_cast<unsigned long long>(snapshot.FatalRelayResets),
+                static_cast<unsigned long long>(snapshot.LastTcpWriteErrno),
                 static_cast<unsigned long long>(snapshot.LastTcpReadErrno));
             worker.Stop();
             return 1;
@@ -812,38 +881,16 @@ int main() {
         }
         (void)worker.DrainForTest(config.EventBudget);
 
-        std::vector<uint8_t> output;
-        output.reserve(plain.size());
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
-        uint8_t buffer[8192];
-        while (std::chrono::steady_clock::now() < deadline && output.size() < plain.size()) {
-            const ssize_t received = ::recv(fds[1], buffer, sizeof(buffer), MSG_DONTWAIT);
-            if (received > 0) {
-                output.insert(output.end(), buffer, buffer + received);
-                continue;
-            }
-            if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                TqLinuxRelayEvent writable{};
-                writable.Type = TqLinuxRelayEventType::TcpWritable;
-                writable.RelayId = registered.RelayId;
-                (void)worker.EnqueueForTest(std::move(writable));
-                (void)worker.DrainForTest(config.EventBudget);
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                continue;
-            }
-            break;
-        }
-
         const TqLinuxRelayWorkerSnapshot completed = worker.Snapshot();
-        if (output != plain ||
+        if (!handle.Stop.load(std::memory_order_acquire) ||
             completed.PendingBytes != 0 ||
-            !handle.Stop.load(std::memory_order_acquire)) {
+            completed.FatalRelayResets == 0) {
             std::fprintf(stderr,
-                "expected deferred stream shutdown to drain then stop, output=%zu pending=%llu stop=%d active=%llu\n",
-                output.size(),
+                "expected deferred stream shutdown with pending data to reset relay, pending=%llu stop=%d active=%llu resets=%llu\n",
                 static_cast<unsigned long long>(completed.PendingBytes),
                 handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
-                static_cast<unsigned long long>(completed.ActiveRelays));
+                static_cast<unsigned long long>(completed.ActiveRelays),
+                static_cast<unsigned long long>(completed.FatalRelayResets));
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;
@@ -1721,10 +1768,18 @@ int main() {
         }
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        if (!handle.Stop.load()) {
-            std::fprintf(stderr, "expected TCP hard error to stop relay, stop=%d pending=%llu\n",
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.FatalRelayResets == 0 ||
+            snapshot.PendingBytes != 0 ||
+            snapshot.DeferredReceiveCompleteBytes != plain.size() ||
+            snapshot.LastTcpWriteErrno == 0) {
+            std::fprintf(stderr,
+                "expected TCP hard write error to fatal-reset and complete pending receive, stop=%d pending=%llu resets=%llu complete=%llu errno=%llu\n",
                 handle.Stop.load() ? 1 : 0,
-                static_cast<unsigned long long>(snapshot.PendingBytes));
+                static_cast<unsigned long long>(snapshot.PendingBytes),
+                static_cast<unsigned long long>(snapshot.FatalRelayResets),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompleteBytes),
+                static_cast<unsigned long long>(snapshot.LastTcpWriteErrno));
             worker.Stop();
             return 1;
         }
@@ -1880,17 +1935,15 @@ int main() {
         (void)worker.DrainForTest(config.EventBudget);
 
         const TqLinuxRelayWorkerSnapshot afterShutdown = worker.Snapshot();
-        if (afterShutdown.PendingBytes != beforeShutdown.PendingBytes ||
-            afterShutdown.ActiveRelays != 1 ||
-            afterShutdown.ClosingRelays != 0 ||
-            !afterShutdown.HotRelayTcpWriteArmed) {
+        if (afterShutdown.PendingBytes != 0 ||
+            afterShutdown.FatalRelayResets == 0) {
             std::fprintf(stderr,
-                "stream shutdown should not discard pending TCP writes, before_pending=%llu after_pending=%llu active=%llu closing=%llu armed=%d\n",
+                "expected shutdown_complete with pending data to reset relay, before_pending=%llu after_pending=%llu active=%llu closing=%llu resets=%llu\n",
                 static_cast<unsigned long long>(beforeShutdown.PendingBytes),
                 static_cast<unsigned long long>(afterShutdown.PendingBytes),
                 static_cast<unsigned long long>(afterShutdown.ActiveRelays),
                 static_cast<unsigned long long>(afterShutdown.ClosingRelays),
-                afterShutdown.HotRelayTcpWriteArmed ? 1 : 0);
+                static_cast<unsigned long long>(afterShutdown.FatalRelayResets));
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -2773,7 +2826,7 @@ int main() {
         }
 
         ::close(fds[0]);
-        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN | EPOLLERR)) {
+        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN)) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -2795,6 +2848,104 @@ int main() {
         }
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 1;
+        }
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 1;
+        }
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = true;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        const std::vector<uint8_t> payload(4096, 0x4B);
+        if (::write(fds[1], payload.data(), payload.size()) !=
+            static_cast<ssize_t>(payload.size()) ||
+            !worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN)) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot beforeAbort = worker.Snapshot();
+        if (beforeAbort.OutstandingQuicSends == 0 || beforeAbort.PendingBytes == 0) {
+            std::fprintf(stderr,
+                "expected outstanding QUIC send before abort, sends=%llu pending=%llu\n",
+                static_cast<unsigned long long>(beforeAbort.OutstandingQuicSends),
+                static_cast<unsigned long long>(beforeAbort.PendingBytes));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        QUIC_STREAM_EVENT aborted{};
+        aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+        if (worker.DispatchStreamEventForTest(fakeStream, &aborted) != QUIC_STATUS_SUCCESS) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        worker.UnregisterRelay(registered.RelayId);
+        CompleteFakeSends(worker, fakeStream);
+        (void)worker.DrainForTest(config.EventBudget);
+        const TqLinuxRelayWorkerSnapshot afterComplete = worker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            afterComplete.FatalRelayResets == 0 ||
+            afterComplete.OutstandingQuicSends != 0 ||
+            afterComplete.PendingBytes != 0 ||
+            afterComplete.ActiveRelays != 0) {
+            std::fprintf(stderr,
+                "expected unregistered aborted relay to release outstanding send on SEND_COMPLETE, stop=%d resets=%llu sends=%llu pending=%llu active=%llu\n",
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
+                static_cast<unsigned long long>(afterComplete.FatalRelayResets),
+                static_cast<unsigned long long>(afterComplete.OutstandingQuicSends),
+                static_cast<unsigned long long>(afterComplete.PendingBytes),
+                static_cast<unsigned long long>(afterComplete.ActiveRelays));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 1;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
     }
 
     {
@@ -2833,6 +2984,52 @@ int main() {
         if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
             std::fprintf(stderr,
                 "expected peer send abort fatal reset, stop=%d resets=%llu\n",
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
+                static_cast<unsigned long long>(snapshot.FatalRelayResets));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        QUIC_STREAM_EVENT aborted{};
+        aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+        if (worker.DispatchStreamEventForTest(fakeStream, &aborted) != QUIC_STATUS_SUCCESS) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
+            std::fprintf(stderr,
+                "expected peer receive abort fatal reset, stop=%d resets=%llu\n",
                 handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
                 static_cast<unsigned long long>(snapshot.FatalRelayResets));
             worker.Stop();
