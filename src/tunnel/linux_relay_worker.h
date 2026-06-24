@@ -346,6 +346,9 @@ private:
     void SetQuicReceiveEnabled(RelayState* relay, bool enabled);
     void ArmTcpReadable(RelayState* relay, bool enabled);
     void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
+    void ProcessQuicPeerSendAborted(uint64_t relayId, uint64_t errorCode);
+    void ProcessQuicPeerReceiveAborted(uint64_t relayId, uint64_t errorCode);
+    void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void ProcessQuicReceiveEvent(TqLinuxRelayEvent& event);
     void PurgeRetiredRelaysIfIdle();
     bool EnqueueQuicReceive(RelayState* relay, const uint8_t* data, size_t length, bool fin);

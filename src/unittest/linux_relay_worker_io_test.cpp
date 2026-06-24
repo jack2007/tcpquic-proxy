@@ -2958,6 +2958,7 @@ int main() {
             MsQuic = nullptr;
             return 1;
         }
+        (void)worker.DrainForTest(config.EventBudget);
 
         worker.UnregisterRelay(registered.RelayId);
         CompleteFakeSends(worker, fakeStream);
@@ -3018,12 +3019,109 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
+        (void)worker.DrainForTest(config.EventBudget);
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
             std::fprintf(stderr,
                 "expected peer send abort fatal reset, stop=%d resets=%llu\n",
                 handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
                 static_cast<unsigned long long>(snapshot.FatalRelayResets));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.TcpWriteMaxBytes = 1;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 1;
+        }
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 1;
+        }
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const std::vector<uint8_t> plain(4096, 0x5a);
+        QUIC_BUFFER quicBuffer{};
+        quicBuffer.Buffer = const_cast<uint8_t*>(plain.data());
+        quicBuffer.Length = static_cast<uint32_t>(plain.size());
+
+        QUIC_STREAM_EVENT receiveEvent{};
+        receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.BufferCount = 1;
+        receiveEvent.RECEIVE.Buffers = &quicBuffer;
+
+        if (worker.DispatchStreamEventForTest(fakeStream, &receiveEvent) != QUIC_STATUS_PENDING ||
+            worker.DrainForTest(config.EventBudget) != 1) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot beforeShutdown = worker.Snapshot();
+        if (beforeShutdown.PendingBytes == 0 ||
+            beforeShutdown.CurrentPendingQuicReceiveQueue == 0) {
+            std::fprintf(stderr,
+                "expected pending receive before shutdown callback, pending=%llu queue=%llu\n",
+                static_cast<unsigned long long>(beforeShutdown.PendingBytes),
+                static_cast<unsigned long long>(beforeShutdown.CurrentPendingQuicReceiveQueue));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        QUIC_STREAM_EVENT shutdownEvent{};
+        shutdownEvent.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &shutdownEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        const TqLinuxRelayWorkerSnapshot queuedShutdown = worker.Snapshot();
+        if (queuedShutdown.PendingBytes == 0 ||
+            queuedShutdown.CurrentPendingQuicReceiveQueue == 0 ||
+            queuedShutdown.FatalRelayResets != beforeShutdown.FatalRelayResets ||
+            handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr,
+                "shutdown callback must not mutate pending relay state before worker drain, pending=%llu queue=%llu resets=%llu stop=%d\n",
+                static_cast<unsigned long long>(queuedShutdown.PendingBytes),
+                static_cast<unsigned long long>(queuedShutdown.CurrentPendingQuicReceiveQueue),
+                static_cast<unsigned long long>(queuedShutdown.FatalRelayResets),
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0);
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        (void)worker.DrainForTest(config.EventBudget);
+        const TqLinuxRelayWorkerSnapshot afterDrain = worker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            afterDrain.PendingBytes != 0 ||
+            afterDrain.FatalRelayResets == beforeShutdown.FatalRelayResets) {
+            std::fprintf(stderr,
+                "expected queued shutdown to reset relay on worker drain, pending=%llu resets=%llu stop=%d\n",
+                static_cast<unsigned long long>(afterDrain.PendingBytes),
+                static_cast<unsigned long long>(afterDrain.FatalRelayResets),
+                handle.Stop.load(std::memory_order_acquire) ? 1 : 0);
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -3064,6 +3162,7 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
+        (void)worker.DrainForTest(config.EventBudget);
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (!handle.Stop.load(std::memory_order_acquire) || snapshot.FatalRelayResets == 0) {
             std::fprintf(stderr,

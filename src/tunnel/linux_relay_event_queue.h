@@ -34,6 +34,9 @@ enum class TqLinuxRelayEventType {
     QuicReceiveView,
     QuicSendComplete,
     QuicIdealSendBuffer,
+    QuicPeerSendAborted,
+    QuicPeerReceiveAborted,
+    QuicShutdownComplete,
     Shutdown,
 };
 

@@ -779,9 +779,10 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
     RelayState* relay,
     const char* trigger,
     bool abortStream) {
-    if (relay == nullptr || relay->Closing) {
+    if (relay == nullptr) {
         return;
     }
+    const bool alreadyClosing = relay->Closing;
     SetRelayStop(relay, trigger);
     relay->Closing = true;
     if (EpollFd >= 0 && relay->TcpFd >= 0) {
@@ -792,7 +793,7 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
         relay->TcpFd = -1;
     }
     auto* binding = relay->StreamBinding;
-    if (abortStream && relay->Stream != nullptr && relay->Stream->Handle != nullptr) {
+    if (!alreadyClosing && abortStream && relay->Stream != nullptr && relay->Stream->Handle != nullptr) {
         (void)relay->Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
     }
     if (binding != nullptr) {
@@ -970,6 +971,18 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             break;
         case TqLinuxRelayEventType::QuicIdealSendBuffer:
             HandleQuicIdealSendBuffer(event.RelayId, event.Value);
+            break;
+        case TqLinuxRelayEventType::QuicPeerSendAborted:
+            ProcessQuicPeerSendAborted(event.RelayId, event.Value);
+            break;
+        case TqLinuxRelayEventType::QuicPeerReceiveAborted:
+            ProcessQuicPeerReceiveAborted(event.RelayId, event.Value);
+            break;
+        case TqLinuxRelayEventType::QuicShutdownComplete:
+            ProcessQuicShutdownComplete(
+                event.RelayId,
+                event.Value,
+                static_cast<uint32_t>(event.Length));
             break;
         case TqLinuxRelayEventType::TcpWritable: {
             auto relay = FindRelayById(event.RelayId);
@@ -1844,6 +1857,101 @@ void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* 
     shutdown.Type = TqLinuxRelayEventType::Shutdown;
     shutdown.RelayId = relayId;
     (void)Enqueue(std::move(shutdown));
+}
+
+void TqLinuxRelayWorker::ProcessQuicPeerSendAborted(uint64_t relayId, uint64_t errorCode) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    TraceRelayStreamEvent(
+        relay.get(),
+        "peer_send_aborted",
+        errorCode,
+        0,
+        0,
+        0,
+        0,
+        0,
+        false);
+    FailRelayFatal(relay.get(), "stream_peer_send_aborted", false);
+}
+
+void TqLinuxRelayWorker::ProcessQuicPeerReceiveAborted(uint64_t relayId, uint64_t errorCode) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    TraceRelayStreamEvent(
+        relay.get(),
+        "peer_receive_aborted",
+        errorCode,
+        0,
+        0,
+        0,
+        0,
+        0,
+        false);
+    FailRelayFatal(relay.get(), "stream_peer_receive_aborted", false);
+}
+
+void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
+    uint64_t relayId,
+    uint64_t errorCode,
+    uint32_t status) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    TraceRelayStreamEvent(
+        relay.get(),
+        "shutdown_complete",
+        errorCode,
+        status,
+        0,
+        0,
+        0,
+        0,
+        false);
+#if defined(__GNUC__)
+    if (TqTraceLinuxRelayStreamShutdownEvent != nullptr) {
+        TqTraceLinuxRelayStreamShutdownEvent(
+            Config.WorkerIndex,
+            relay->Id,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes,
+            relay->PendingTcpWrites.size(),
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->TcpReadBytes,
+            relay->TcpWriteBytes,
+            relay->LastTcpWriteErrno,
+            relay->TcpReadClosed,
+            relay->TcpWriteClosed,
+            relay->QuicSendFinSubmitted,
+            relay->QuicSendFinCompleted,
+            relay->TcpWriteShutdownQueued,
+            false);
+    }
+#endif
+    const bool hasPending = HasPendingAfterStreamShutdown(relay.get());
+    if (hasPending) {
+        FatalRelayResets.fetch_add(1);
+        LogLinuxRelayError(
+            "stream_shutdown_complete_with_pending",
+            relay->Id,
+            relay->TcpFd,
+            LastQuicSendStatus.load(),
+            relay->LastTcpWriteErrno,
+            PendingTcpWriteBytes(relay->PendingTcpWrites),
+            relay->PendingQuicReceiveBytes,
+            relay->OutstandingQuicSends,
+            relay->OutstandingQuicSendBytes);
+        AbortRelayAndRelease(relay.get(), "stream_shutdown_complete_with_pending", false);
+    } else {
+        DetachRelayStreamBinding(relay.get(), relay->Stream, relay->StreamBinding);
+        MaybeStopFullyClosedRelay(relay.get(), "stream_shutdown_complete");
+    }
 }
 
 bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
@@ -3037,83 +3145,34 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
-        TraceRelayStreamEvent(
-            relay,
-            "peer_send_aborted",
-            event->PEER_SEND_ABORTED.ErrorCode,
-            0,
-            0,
-            0,
-            0,
-            0,
-            false);
-        FailRelayFatal(relay, "stream_peer_send_aborted", false);
+        TqLinuxRelayEvent queued{};
+        queued.Type = TqLinuxRelayEventType::QuicPeerSendAborted;
+        queued.RelayId = relayId;
+        queued.Value = event->PEER_SEND_ABORTED.ErrorCode;
+        if (!Enqueue(std::move(queued))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-        TraceRelayStreamEvent(
-            relay,
-            "shutdown_complete",
-            event->SHUTDOWN_COMPLETE.ConnectionErrorCode,
-            static_cast<uint32_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus),
-            0,
-            0,
-            0,
-            0,
-            false);
-#if defined(__GNUC__)
-        if (TqTraceLinuxRelayStreamShutdownEvent != nullptr) {
-            TqTraceLinuxRelayStreamShutdownEvent(
-                Config.WorkerIndex,
-                relay->Id,
-                relay->OutstandingQuicSends,
-                relay->OutstandingQuicSendBytes,
-                relay->PendingTcpWrites.size(),
-                PendingTcpWriteBytes(relay->PendingTcpWrites),
-                relay->PendingQuicReceiveBytes,
-                relay->TcpReadBytes,
-                relay->TcpWriteBytes,
-                relay->LastTcpWriteErrno,
-                relay->TcpReadClosed,
-                relay->TcpWriteClosed,
-                relay->QuicSendFinSubmitted,
-                relay->QuicSendFinCompleted,
-                relay->TcpWriteShutdownQueued,
-                false);
-        }
-#endif
-        const bool hasPending = HasPendingAfterStreamShutdown(relay);
-        if (hasPending) {
-            FatalRelayResets.fetch_add(1);
-            LogLinuxRelayError(
-                "stream_shutdown_complete_with_pending",
-                relay->Id,
-                relay->TcpFd,
-                LastQuicSendStatus.load(),
-                relay->LastTcpWriteErrno,
-                PendingTcpWriteBytes(relay->PendingTcpWrites),
-                relay->PendingQuicReceiveBytes,
-                relay->OutstandingQuicSends,
-                relay->OutstandingQuicSendBytes);
-            AbortRelayAndRelease(relay, "stream_shutdown_complete_with_pending", false);
-        } else {
-            DetachRelayStreamBinding(relay, stream, binding);
-            MaybeStopFullyClosedRelay(relay, "stream_shutdown_complete");
+        TqLinuxRelayEvent queued{};
+        queued.Type = TqLinuxRelayEventType::QuicShutdownComplete;
+        queued.RelayId = relayId;
+        queued.Value = event->SHUTDOWN_COMPLETE.ConnectionErrorCode;
+        queued.Length = static_cast<size_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus);
+        if (!Enqueue(std::move(queued))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
         }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
-        TraceRelayStreamEvent(
-            relay,
-            "peer_receive_aborted",
-            event->PEER_RECEIVE_ABORTED.ErrorCode,
-            0,
-            0,
-            0,
-            0,
-            0,
-            false);
-        FailRelayFatal(relay, "stream_peer_receive_aborted", false);
+        TqLinuxRelayEvent queued{};
+        queued.Type = TqLinuxRelayEventType::QuicPeerReceiveAborted;
+        queued.RelayId = relayId;
+        queued.Value = event->PEER_RECEIVE_ABORTED.ErrorCode;
+        if (!Enqueue(std::move(queued))) {
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        }
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;
