@@ -30,8 +30,19 @@ constexpr size_t TqIngressReadBufferSize = 1;
 
 bool TqTunnelDebugEnabled() {
     static const bool enabled = []() {
+#if defined(_WIN32)
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, "TQ_TUNNEL_DEBUG") != 0 || value == nullptr) {
+            return false;
+        }
+        const bool on = len > 1 && std::strcmp(value, "0") != 0;
+        std::free(value);
+        return on;
+#else
         const char* value = std::getenv("TQ_TUNNEL_DEBUG");
         return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+#endif
     }();
     return enabled;
 }
