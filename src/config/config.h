@@ -58,7 +58,6 @@ struct TqConfig {
     std::string AdminListen;
     std::string AdminTokenFile;
     uint32_t AdminThreads{2};
-    bool AdminAllowUnauthenticatedLegacy{false};
     TqRouterConfig Router{};
     std::string QuicListen;
     std::string QuicCert;

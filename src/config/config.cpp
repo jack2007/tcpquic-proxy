@@ -355,8 +355,6 @@ private:
                 if (!ParseString(cfg.AdminTokenFile)) return Error("invalid admin.token_file");
             } else if (key == "threads") {
                 if (!ParseUint32InRange(1, 32, cfg.AdminThreads)) return Error("invalid admin.threads");
-            } else if (key == "allow_unauthenticated_legacy") {
-                if (!ParseBool(cfg.AdminAllowUnauthenticatedLegacy)) return Error("invalid admin.allow_unauthenticated_legacy");
             } else {
                 return Error(("unknown admin key: " + key).c_str());
             }
@@ -1034,8 +1032,6 @@ void TqPrintUsage(FILE* out) {
         "  --admin-listen <addr>        Admin HTTP listen address for /health and /metrics\n"
         "  --admin-token-file <path>    Admin bearer token JSON file path\n"
         "  --admin-threads <n>          Admin HTTP worker threads (default 2, 1..32)\n"
-        "  --admin-allow-unauthenticated-legacy\n"
-        "                              Allow old /health /metrics /config without token on loopback\n"
         "  --compress <mode>            auto|zstd|off (default off)\n"
         "  --compress-level <n>         Compression level (default 1)\n"
         "\n"
@@ -1227,8 +1223,6 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 err = "invalid value for --admin-threads (must be 1..32)";
                 return false;
             }
-        } else if (std::strcmp(arg, "--admin-allow-unauthenticated-legacy") == 0) {
-            cfg.AdminAllowUnauthenticatedLegacy = true;
         } else if (GetOptionValue(arg, "--listen", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--listen", err);

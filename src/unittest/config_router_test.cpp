@@ -101,7 +101,7 @@ int main() {
         if (usage.find("--forward <local=target>") == std::string::npos) return 187;
         if (usage.find("--admin-token-file <path>") == std::string::npos) return 188;
         if (usage.find("--admin-threads <n>") == std::string::npos) return 189;
-        if (usage.find("--admin-allow-unauthenticated-legacy") == std::string::npos) return 190;
+        if (usage.find("--admin-allow-unauthenticated-legacy") != std::string::npos) return 190;
     }
     {
         const char* helpOptions[] = {"-h", "--help", "--usage"};
@@ -141,23 +141,18 @@ int main() {
         if (!cfg.QuicCert.empty()) return 178;
         if (!cfg.QuicKey.empty()) return 179;
         if (cfg.AdminThreads != 2) return 191;
-        if (cfg.AdminAllowUnauthenticatedLegacy) return 192;
     }
     {
         const char* args[] = {
             "tcpquic-proxy", "client",
             "--peer", "127.0.0.1:14444",
             "--ca", "ca.crt",
-            "--admin-listen", "127.0.0.1:19091",
-            "--admin-token-file", "/tmp/tcpquic-admin-token.json",
-            "--admin-threads", "4",
             "--admin-allow-unauthenticated-legacy"};
         TqConfig cfg;
         std::string err;
-        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 193;
-        if (cfg.AdminTokenFile != "/tmp/tcpquic-admin-token.json") return 194;
-        if (cfg.AdminThreads != 4) return 195;
-        if (!cfg.AdminAllowUnauthenticatedLegacy) return 196;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 193;
+        if (err.find("unknown argument") == std::string::npos &&
+            err.find("admin-allow-unauthenticated-legacy") == std::string::npos) return 194;
     }
     {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt", "--admin-threads", "0"};
@@ -169,18 +164,30 @@ int main() {
     {
         TqConfig cfg;
         std::string err;
+        if (ParseRuntimeConfig(R"json({
+            "tls":{"ca":"ca.crt"},
+            "admin":{"listen":"127.0.0.1:19091","allow_unauthenticated_legacy":true},
+            "peers":[{"id":"agent-b","proto_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"}]
+        })json", cfg, err)) {
+            return 199;
+        }
+        if (err.find("unknown admin key") == std::string::npos &&
+            err.find("allow_unauthenticated_legacy") == std::string::npos) return 200;
+    }
+    {
+        TqConfig cfg;
+        std::string err;
         if (!ParseRuntimeConfig(R"json({
             "tls":{"ca":"ca.crt"},
-            "admin":{"listen":"127.0.0.1:19091","token_file":"/tmp/tq-admin.json","threads":3,"allow_unauthenticated_legacy":true},
+            "admin":{"listen":"127.0.0.1:19091","token_file":"/tmp/tq-admin.json","threads":3},
             "peers":[{"id":"agent-b","proto_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"}]
         })json", cfg, err)) {
             std::fprintf(stderr, "runtime admin config parse failed: %s\n", err.c_str());
-            return 199;
+            return 201;
         }
-        if (cfg.AdminListen != "127.0.0.1:19091") return 200;
-        if (cfg.AdminTokenFile != "/tmp/tq-admin.json") return 201;
-        if (cfg.AdminThreads != 3) return 202;
-        if (!cfg.AdminAllowUnauthenticatedLegacy) return 203;
+        if (cfg.AdminListen != "127.0.0.1:19091") return 202;
+        if (cfg.AdminTokenFile != "/tmp/tq-admin.json") return 203;
+        if (cfg.AdminThreads != 3) return 204;
     }
     {
         TqRouterConfig router;
