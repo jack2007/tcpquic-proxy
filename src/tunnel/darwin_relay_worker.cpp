@@ -1015,6 +1015,11 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
                         return false;
                     }
                 }
+                if (relay->CompressionOutput.empty() &&
+                    !relay->Compressor->Flush(relay->CompressionOutput)) {
+                    Errors.fetch_add(1, std::memory_order_relaxed);
+                    return false;
+                }
                 size_t offset = 0;
                 while (offset < relay->CompressionOutput.size()) {
                     TqBufferAcquireFailure failure = TqBufferAcquireFailure::None;

@@ -5,6 +5,8 @@
 
 #include <sys/socket.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <zstd.h>
 
 #include <algorithm>
@@ -56,6 +58,26 @@ struct FailingDecompressor final : ITqDecompressor {
     }
 
     void Reset() override {}
+};
+
+struct FlushOnlyCompressor final : ITqCompressor {
+    bool Compress(const uint8_t*, size_t inLen, std::vector<uint8_t>&, bool) override {
+        InputBytes.fetch_add(inLen, std::memory_order_relaxed);
+        CompressCalls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool Flush(std::vector<uint8_t>& out) override {
+        FlushCalls.fetch_add(1, std::memory_order_relaxed);
+        out.push_back(0x5a);
+        return true;
+    }
+
+    void Reset() override {}
+
+    std::atomic<uint64_t> InputBytes{0};
+    std::atomic<uint64_t> CompressCalls{0};
+    std::atomic<uint64_t> FlushCalls{0};
 };
 
 struct ZstdTestDecompressor final : ITqDecompressor {
@@ -294,13 +316,24 @@ void CheckImpl(bool condition, int line) {
     }
 }
 
+void CloseSocketPairBoth(int fds[2]) {
+    CHECK(close(fds[0]) == 0);
+    CHECK(close(fds[1]) == 0);
+}
+
+void CloseSocketPairAfterRelayOwned(int relayTcpFd, int fds[2]) {
+    errno = 0;
+    CHECK(fcntl(relayTcpFd, F_GETFD) == -1 && errno == EBADF);
+    const int peerFd = relayTcpFd == fds[0] ? fds[1] : fds[0];
+    CHECK(close(peerFd) == 0);
+}
+
 void SocketPairEnvironmentWorks() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     CHECK(fds[0] != TqInvalidSocket);
     CHECK(fds[1] != TqInvalidSocket);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairBoth(fds);
 }
 
 void WorkerStartsAndStopsCleanly() {
@@ -373,8 +406,7 @@ void WorkerRegistersTcpReadinessShell() {
     CHECK(handle.DarwinRelayId == 0);
 
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void WorkerObservesTcpReadBytes() {
@@ -417,8 +449,7 @@ void WorkerObservesTcpReadBytes() {
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void WorkerObservesTcpReadWithSmallByteBudget() {
@@ -462,8 +493,57 @@ void WorkerObservesTcpReadWithSmallByteBudget() {
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void CompressedTcpReadFlushesWhenCompressorBuffersInput() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxIov = 1;
+    config.MaxBufferedQuicSendBytes = 1024 * 1024;
+
+    FlushOnlyCompressor compressor;
+    TqDarwinRelayWorker worker(config);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.CompressAlgo = TqCompressAlgo::Zstd;
+    registration.Compressor = &compressor;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "z";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (compressor.FlushCalls.load(std::memory_order_acquire) != 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    CHECK(compressor.CompressCalls.load(std::memory_order_acquire) >= 1);
+    CHECK(compressor.InputBytes.load(std::memory_order_acquire) >= sizeof(payload) - 1);
+    CHECK(compressor.FlushCalls.load(std::memory_order_acquire) >= 1);
+    CHECK(worker.Snapshot().Errors == 0);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void TransientSendFailureQueuesWithoutSelfRetry() {
@@ -510,8 +590,7 @@ void TransientSendFailureQueuesWithoutSelfRetry() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void SendCompleteAfterUnregisterReleasesOperation() {
@@ -566,8 +645,7 @@ void SendCompleteAfterUnregisterReleasesOperation() {
 
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease() {
@@ -615,8 +693,7 @@ void SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void SynchronousSendCompleteBeforeSuccessDoesNotLeak() {
@@ -664,8 +741,7 @@ void SynchronousSendCompleteBeforeSuccessDoesNotLeak() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void MagicMismatchKnownOperationCleansAccounting() {
@@ -719,8 +795,7 @@ void MagicMismatchKnownOperationCleansAccounting() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopThenLateCompletionDoesNotUseDanglingWorker() {
@@ -775,8 +850,7 @@ void StopThenLateCompletionDoesNotUseDanglingWorker() {
     worker.Stop();
     CHECK(worker.KnownSendOperationCountForTest() == 0);
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void UnknownSendCompleteContextIsIgnoredWithoutFreeing() {
@@ -815,8 +889,7 @@ void UnknownSendCompleteContextIsIgnoredWithoutFreeing() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopReturnedLateCompletionUsesCurrentStreamCallback() {
@@ -879,8 +952,7 @@ void StopReturnedLateCompletionUsesCurrentStreamCallback() {
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopReturnedLateCompletionClearsProductionStreamContextWithoutExternalOwner() {
@@ -941,8 +1013,7 @@ void StopReturnedLateCompletionClearsProductionStreamContextWithoutExternalOwner
     CHECK(stream->Context == nullptr);
 
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void RetireWithoutKnownOperationsClearsCurrentStreamCallback() {
@@ -973,8 +1044,7 @@ void RetireWithoutKnownOperationsClearsCurrentStreamCallback() {
     CHECK(stream->Context == nullptr);
 
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopReturnedLateCompletionReleasesKnownOperation() {
@@ -1031,8 +1101,7 @@ void StopReturnedLateCompletionReleasesKnownOperation() {
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void DestroyedWorkerLateCompletionUsesSharedOwner() {
@@ -1087,8 +1156,7 @@ void DestroyedWorkerLateCompletionUsesSharedOwner() {
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
 
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(fds[1], fds);
 }
 
 void UnknownSendCompleteAfterStopIsIgnored() {
@@ -1119,8 +1187,7 @@ void UnknownSendCompleteAfterStopIsIgnored() {
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopThenLateTcpEventIgnoresRetiredRelay() {
@@ -1177,8 +1244,7 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
 
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void TcpErrorEventClosesAndRetiresRelay() {
@@ -1208,14 +1274,13 @@ void TcpErrorEventClosesAndRetiresRelay() {
     CHECK(handle.DarwinRelayId == 0);
 
     const char payload[] = "after-error-close";
-    (void)write(fds[0], payload, sizeof(payload) - 1);
+    (void)send(fds[0], payload, sizeof(payload) - 1, MSG_NOSIGNAL);
     CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
     snapshot = worker.Snapshot();
     CHECK(snapshot.ActiveRelays == 0);
 
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void StopAfterCompletionLeavesNoKnownOperations() {
@@ -1242,8 +1307,7 @@ void StopAfterCompletionLeavesNoKnownOperations() {
     CHECK(handle.DarwinWorker == nullptr);
     CHECK(handle.DarwinRelayId == 0);
 
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void RegisterFilterFailureRollsBackRelayAndHandle() {
@@ -1270,8 +1334,7 @@ void RegisterFilterFailureRollsBackRelayAndHandle() {
     CHECK(handle.DarwinRelayId == 0);
 
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairBoth(fds);
 }
 
 void RegisterAfterStopFailsWithoutPublishingHandle() {
@@ -1297,8 +1360,7 @@ void RegisterAfterStopFailsWithoutPublishingHandle() {
     CHECK(handle.DarwinWorker == nullptr);
     CHECK(handle.DarwinRelayId == 0);
 
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairBoth(fds);
 }
 
 void QuicReceiveCallbackReturnsPending() {
@@ -1364,8 +1426,7 @@ void QuicReceiveCallbackReturnsPending() {
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
@@ -1451,8 +1512,7 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
@@ -1508,8 +1568,7 @@ void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
     worker.SetSendMsgForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
@@ -1579,8 +1638,7 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
@@ -1671,8 +1729,7 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void MissingRelayQuicReceiveCompletesAndReleases() {
@@ -1776,8 +1833,7 @@ void CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceivePauseFailureRollsBackAndCompletesReceive() {
@@ -1842,8 +1898,7 @@ void QuicReceivePauseFailureRollsBackAndCompletesReceive() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics() {
@@ -1911,8 +1966,7 @@ void QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
@@ -1973,8 +2027,7 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
     worker.SetReceiveCompleteForTest(nullptr);
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
-    CHECK(close(fds[0]) == 0);
-    CHECK(close(fds[1]) == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 } // namespace
@@ -1985,6 +2038,7 @@ int main() {
     WorkerRegistersTcpReadinessShell();
     WorkerObservesTcpReadBytes();
     WorkerObservesTcpReadWithSmallByteBudget();
+    CompressedTcpReadFlushesWhenCompressorBuffersInput();
     TransientSendFailureQueuesWithoutSelfRetry();
     SendCompleteAfterUnregisterReleasesOperation();
     SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease();
