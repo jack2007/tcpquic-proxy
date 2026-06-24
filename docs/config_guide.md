@@ -20,14 +20,12 @@ Client config uses `peers` for all destinations. A single remote server is repre
     "ca": "certs/ca.crt"
   },
   "admin": {
-    // Optional admin HTTP endpoint for /health, /metrics, and router APIs.
+    // Optional admin HTTP endpoint. Public Admin APIs are under /api/v1/*.
     "listen": "127.0.0.1:18080",
     // Optional token JSON path. If omitted, a pid-scoped runtime path is used.
     "token_file": "/tmp/tcpquic-proxy-admin/admin-token.json",
     // Fixed Admin HTTP worker thread pool size, range 1..32.
-    "threads": 2,
-    // Compatibility only: old /health, /metrics, /config without Bearer token.
-    "allow_unauthenticated_legacy": false
+    "threads": 2
   },
   "proto": {
     // QUIC execution profile. Use max-throughput for bandwidth tests.
@@ -134,7 +132,7 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
     "key": "certs/server.key"
   },
   "admin": {
-    // Optional admin HTTP endpoint for /health and /metrics.
+    // Optional admin HTTP endpoint. Public Admin APIs are under /api/v1/*.
     "listen": "127.0.0.1:18081"
   },
   "server": {
@@ -184,7 +182,6 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
 | `admin.listen` | client/server | Admin HTTP listen address. |
 | `admin.token_file` | client/server | Admin Bearer token JSON file path. |
 | `admin.threads` | client/server | Fixed Admin HTTP worker threads, range 1..32, default 2. |
-| `admin.allow_unauthenticated_legacy` | client/server | Allow old Admin paths without token on loopback. `/api/v1/*` still requires token. |
 | `proto.profile` | client/server | `max-throughput` or `low-latency`. |
 | `proto.disable_1rtt_encryption` | client/server | Insecure lab-only QUIC 1-RTT encryption disable switch. Defaults to `true`; set `false` to enable packet encryption. |
 | `proto.connections` | client | Default QUIC connection count inherited by peers. |

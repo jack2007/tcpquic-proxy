@@ -97,7 +97,7 @@ main thread
 
 adapter 持有一个共享 `TqClientIngressReactor`。每个 peer 的 SOCKS5 / HTTP CONNECT listen fd 按 connected count 注册到这个共享 reactor。它不是每个 peer 或每条 connection 一个重连线程，也不是每个 peer 一个 listener 线程。
 
-admin `/config` 更新会由 router runtime 调用 adapter start/stop/drain peer。单个 peer 的 QUIC 断开只关闭该 peer 的 listener，不影响其它 peer。
+admin `/api/v1/config` 更新会由 router runtime 调用 adapter start/stop/drain peer。单个 peer 的 QUIC 断开只关闭该 peer 的 listener，不影响其它 peer。
 
 ### 3.3 本地 SOCKS5 / HTTP CONNECT
 
