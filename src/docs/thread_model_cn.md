@@ -50,8 +50,8 @@ TqToMsQuicProfile(cfg.QuicProfile)
 |------|--------|--------|--------|------|
 | 主线程 | 有 | 有 | `main()` | 初始化 socket、配置、tuning、trace、reaper，然后进入 client/server run loop |
 | client ingress reactor | 有 | 无 | `TqClientIngressReactor::Start()` | 共享线程处理 SOCKS5/HTTP listen、accept、握手状态机、OPEN 完成回投和同步 start 失败 delayed retry |
-| admin accept thread | 可选 | 可选 | `TqAdminHttpServer::Start()` | `/health`、`/metrics`、multi-peer `/config` 等 admin HTTP |
-| admin client thread | 可选 | 可选 | `TqAdminHttpServer::Run()` | 每个 admin HTTP client 一个短生命周期 detached thread |
+| admin listen thread | 可选 | 可选 | `TqAdminHttpServer::Start()` | `cpp-httplib` listen loop，接收 `/api/v1/*` 和兼容旧 admin HTTP |
+| admin worker pool | 可选 | 可选 | `TqAdminHttpServer::Start()` | 固定大小 worker pool，默认 2，受 `--admin-threads` 限制 |
 | server dial reactor | 无 | 有 | `TqServerDialReactor::Start()` | 单线程处理普通 OPEN 的 ACL、c-ares DNS 和 non-blocking TCP connect |
 | speed-test accept/worker | speed-test client/server 时 | 有 | `TqServerSpeedTestController` / speed client runner | 内置上传/下载测试的临时 loopback TCP server 和 pump worker；client 数据连接通过 `cfg.HttpListen` 的 HTTP CONNECT ingress 路径 |
 | trace periodic thread | 可选 | 可选 | `TqTraceInit()` | `--trace` 开启后周期输出统计快照 |
@@ -345,7 +345,7 @@ QUIC connection shutdown 时，`QuicClientSession` / server callback 会调用 `
 N = 逻辑 CPU 数 / MsQuic worker 数量近似
 P = client-config 中 active peer 数
 W = relay worker 数
-A = admin 并发 HTTP client 数
+A = admin HTTP worker pool 大小，默认 2
 S = speed-test 临时 worker 数
 ```
 
@@ -357,8 +357,8 @@ S = speed-test 临时 worker 数
 + N quic_worker
 + MsQuic auxiliary threads
 + 1 TqClientIngressReactor worker
-+ 0/1 admin accept thread
-+ A admin client threads
++ 0/1 admin listen thread
++ A admin worker pool threads
 + 1 tunnel reaper
 + W platform relay workers
 + optional trace thread
@@ -388,8 +388,8 @@ single process common threads
 + N cxplat_worker
 + N quic_worker
 + MsQuic auxiliary threads
-+ 0/1 admin accept thread
-+ A admin client threads
++ 0/1 admin listen thread
++ A admin worker pool threads
 + 1 tunnel reaper
 + W platform relay workers
 + 1 TqServerDialReactor worker
@@ -442,7 +442,7 @@ server 普通 OPEN 通过 `TqServerDialReactor` 处理。高 OPEN rate 下，DNS
 
 ### 10.5 admin 与 speed-test
 
-admin 每个 client 一个 detached thread；speed-test 会创建临时 accept/pump worker。它们不是常规 relay 热路径，但压测时会影响线程观测。
+admin 使用 `cpp-httplib` 阻塞 HTTP/1.1 server 和固定大小 worker pool，不再为每个 client 创建 detached thread。speed-test 会创建临时 accept/pump worker。它们不是常规 relay 热路径，但压测时会影响线程观测。
 
 ## 11. 调试线程角色
 
@@ -461,8 +461,8 @@ thread apply all bt
 | `QuicWorkerThread` | MsQuic QUIC worker / 应用 callback |
 | `TqClientIngressReactor::Run` | client ingress reactor，处理 SOCKS5/HTTP accept、握手、OPEN completion 和 delayed retry |
 | `TqServerDialReactor::Run` | server dial reactor，处理 ACL、c-ares DNS 和 non-blocking TCP connect |
-| `TqAdminHttpServer::Run` | admin accept thread |
-| `TqAdminHttpServer::HandleClient` | admin client thread |
+| `TqAdminHttpServer::Run` | admin listen thread |
+| `httplib::ThreadPool` worker | admin worker pool |
 | `StatsThreadMain` / `DumpPeriodicStats` trace snapshot 栈 | trace periodic thread |
 | `TqRunAcceptLoop` / `TqRunUploadWorker` / `TqRunDownloadWorker` | speed-test server temporary workers |
 | `TqRunUploadPump` / `TqRunDownloadPump` | speed-test client pump workers |
@@ -481,7 +481,7 @@ thread apply all bt
 | `src/protocol/quic_session.cpp` | MsQuic API/registration/configuration、callback-driven client reconnect、connection/stream callback |
 | `src/ingress/client_ingress_reactor.cpp` | client SOCKS5/HTTP listen、accept、handshake、OPEN completion 回投和 delayed retry |
 | `src/ingress/client_ingress_state.cpp` | SOCKS5 / HTTP CONNECT 握手状态机 |
-| `src/runtime/admin_http.cpp` | admin HTTP accept/client threads |
+| `src/runtime/admin_http.cpp` | admin HTTP cpp-httplib listen thread、固定 worker pool、token/v1/legacy route gate |
 | `src/runtime/router_runtime.cpp` | multi-peer config/admin runtime |
 | `src/runtime/speed_test.cpp` | 内置 upload/download speed-test 控制、HTTP CONNECT ingress data path 和 pump worker |
 | `src/runtime/trace.cpp` | 可选 trace 日志和周期 snapshot |

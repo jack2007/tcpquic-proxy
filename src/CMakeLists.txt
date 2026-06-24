@@ -41,6 +41,10 @@ endfunction()
 
 find_package(Threads REQUIRED)
 
+add_library(cpp_httplib INTERFACE)
+target_include_directories(cpp_httplib INTERFACE
+    ${CMAKE_SOURCE_DIR}/third_party/cpp-httplib)
+
 set(CARES_STATIC ON CACHE BOOL "" FORCE)
 set(CARES_SHARED OFF CACHE BOOL "" FORCE)
 set(CARES_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
@@ -108,10 +112,12 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/thread_pool.cpp
     runtime/listen_socket.cpp
     tunnel/tunnel_reaper.cpp
+    runtime/admin_auth.cpp
     runtime/admin_http.cpp
     runtime/client_peer_runtime.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
+    runtime/server_admin.cpp
     runtime/server_metrics.cpp
     runtime/speed_test.cpp
     runtime/trace.cpp
@@ -171,7 +177,7 @@ if(WIN32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET})
+target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()
@@ -935,11 +941,12 @@ set_property(TARGET tcpquic_client_ingress_state_test APPEND PROPERTY BUILD_RPAT
 
 add_executable(tcpquic_admin_http_test
     unittest/admin_http_test.cpp
+    runtime/admin_auth.cpp
     runtime/admin_http.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_admin_http_test)
-target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads)
+target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads cpp_httplib)
 if(WIN32)
     target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(tcpquic_admin_http_test PRIVATE ws2_32)
@@ -952,7 +959,9 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
+    runtime/admin_auth.cpp
     runtime/admin_http.cpp
+    tunnel/tunnel_registry.cpp
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
@@ -983,7 +992,7 @@ if(WIN32)
 endif()
 add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES})
 tcpquic_target_include_dirs(tcpquic_router_runtime_test)
-target_link_libraries(tcpquic_router_runtime_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog)
+target_link_libraries(tcpquic_router_runtime_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog cpp_httplib)
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_router_runtime_test PRIVATE msquic_platform)
 endif()
@@ -995,6 +1004,24 @@ endif()
 if(WIN32)
     tcpquic_link_mimalloc(tcpquic_router_runtime_test)
 endif()
+
+add_executable(tcpquic_tunnel_registry_test
+    unittest/tunnel_registry_test.cpp
+    tunnel/tunnel_registry.cpp
+)
+tcpquic_target_include_dirs(tcpquic_tunnel_registry_test)
+target_link_libraries(tcpquic_tunnel_registry_test PRIVATE Threads::Threads inc warnings)
+set_property(TARGET tcpquic_tunnel_registry_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_server_admin_test
+    unittest/server_admin_test.cpp
+    runtime/server_admin.cpp
+)
+tcpquic_target_include_dirs(tcpquic_server_admin_test)
+target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic)
+set_property(TARGET tcpquic_server_admin_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_server_admin_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_client_peer_runtime_test
     unittest/client_peer_runtime_test.cpp
@@ -1085,6 +1112,8 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_quic_settings_test
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
+    tcpquic_tunnel_registry_test
+    tcpquic_server_admin_test
     tcpquic_control_test
     tcpquic_ares_dns_resolver_test
     tcpquic_speed_test_test

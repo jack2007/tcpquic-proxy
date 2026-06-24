@@ -1,7 +1,10 @@
 #include "admin_http.h"
+#include "admin_auth.h"
 #include "platform_socket.h"
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -51,12 +54,26 @@ bool TqRecvUntilClosed(TqSocketHandle fd, std::string& data) {
     for (;;) {
         const int result = TqRecv(fd, buffer, sizeof(buffer), TqRecvFlags::None);
         if (result < 0) {
-            return false;
+            return data.find("\r\n\r\n") != std::string::npos;
         }
         if (result == 0) {
             return true;
         }
         data.append(buffer, static_cast<size_t>(result));
+        const size_t headerEnd = data.find("\r\n\r\n");
+        if (headerEnd != std::string::npos) {
+            size_t contentLength = 0;
+            const std::string marker = "Content-Length: ";
+            const size_t contentLengthPos = data.find(marker);
+            if (contentLengthPos != std::string::npos && contentLengthPos < headerEnd) {
+                const size_t valueStart = contentLengthPos + marker.size();
+                const size_t valueEnd = data.find("\r\n", valueStart);
+                contentLength = static_cast<size_t>(std::stoul(data.substr(valueStart, valueEnd - valueStart)));
+                if (data.size() >= headerEnd + 4 + contentLength) {
+                    return true;
+                }
+            }
+        }
     }
 }
 
@@ -66,6 +83,22 @@ uint16_t TqPortFromListenAddress(const std::string& listen) {
         return 0;
     }
     return static_cast<uint16_t>(std::stoul(listen.substr(colon + 1)));
+}
+
+bool TqHttpStatusIs(const std::string& response, int status) {
+    const std::string prefix = "HTTP/1.1 " + std::to_string(status) + " ";
+    return response.find(prefix) == 0;
+}
+
+std::filesystem::path TqSecureTokenFile(const std::string& name) {
+    static unsigned counter = 0;
+    std::filesystem::path dir = std::filesystem::temp_directory_path() /
+        ("tcpquic-admin-secure-" + name + "-" + std::to_string(counter++));
+    std::filesystem::create_directories(dir);
+    std::filesystem::permissions(dir,
+        std::filesystem::perms::owner_all,
+        std::filesystem::perm_options::replace);
+    return dir / "admin-token.json";
 }
 
 } // namespace
@@ -101,9 +134,73 @@ int main() {
     }
     {
         if (TqJsonResponse(400, "{}").find("HTTP/1.1 400 Bad Request\r\n") != 0) return 16;
+        if (TqJsonResponse(401, "{}").find("HTTP/1.1 401 Unauthorized\r\n") != 0) return 78;
+        if (TqJsonResponse(201, "{}").find("HTTP/1.1 201 Created\r\n") != 0) return 114;
+        if (TqJsonResponse(202, "{}").find("HTTP/1.1 202 Accepted\r\n") != 0) return 115;
+        if (TqJsonResponse(204, "{}").find("HTTP/1.1 204 No Content\r\n") != 0) return 116;
+        if (TqJsonResponse(409, "{}").find("HTTP/1.1 409 Conflict\r\n") != 0) return 117;
+        if (TqJsonResponse(413, "{}").find("HTTP/1.1 413 Payload Too Large\r\n") != 0) return 79;
         if (TqJsonResponse(404, "{}").find("HTTP/1.1 404 Not Found\r\n") != 0) return 17;
+        if (TqJsonResponse(503, "{}").find("HTTP/1.1 503 Service Unavailable\r\n") != 0) return 80;
         if (TqJsonResponse(500, "{}").find("HTTP/1.1 500 Internal Server Error\r\n") != 0) return 18;
     }
+    {
+        TqAdminAuth auth;
+        if (!auth.InitializeToken()) return 81;
+        if (auth.Token().size() < 64) return 82;
+        TqHttpRequest req;
+        req.Headers["authorization"] = "Bearer " + auth.Token();
+        if (!auth.Authorize(req)) return 83;
+        req.Headers["authorization"] = "Bearer wrong";
+        if (auth.Authorize(req)) return 84;
+        req.Headers["authorization"] = "Basic " + auth.Token();
+        if (auth.Authorize(req)) return 85;
+    }
+    {
+        TqAdminAuth auth;
+        if (!auth.InitializeToken()) return 86;
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "tcpquic-admin-auth-test";
+        std::filesystem::create_directories(dir);
+        const std::filesystem::path tokenFile = dir / "admin-token.json";
+        std::string err;
+        if (!auth.WriteTokenFile(tokenFile.string(), "127.0.0.1:19091", err)) return 87;
+        std::ifstream in(tokenFile);
+        std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (body.find("\"token\":\"" + auth.Token() + "\"") == std::string::npos) return 88;
+        if (body.find("\"listen\":\"127.0.0.1:19091\"") == std::string::npos) return 89;
+#if !defined(_WIN32)
+        const auto perms = std::filesystem::status(tokenFile).permissions();
+        if ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) return 90;
+        if ((perms & std::filesystem::perms::others_read) != std::filesystem::perms::none) return 91;
+#endif
+        if (!auth.CleanupTokenFile(tokenFile.string())) return 92;
+        if (std::filesystem::exists(tokenFile)) return 93;
+    }
+#if !defined(_WIN32)
+    {
+        TqAdminAuth auth;
+        if (!auth.InitializeToken()) return 118;
+        const std::filesystem::path rootTokenFile = std::filesystem::path("/") / "tcpquic-admin-auth-root-token.json";
+        std::string err;
+        if (auth.WriteTokenFile(rootTokenFile.string(), "127.0.0.1:19091", err)) return 119;
+
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "tcpquic-admin-auth-fix-perms";
+        std::filesystem::create_directories(dir);
+        std::filesystem::permissions(dir,
+            std::filesystem::perms::owner_all | std::filesystem::perms::group_read | std::filesystem::perms::group_exec,
+            std::filesystem::perm_options::replace);
+        const std::filesystem::path tokenFile = dir / "admin-token.json";
+        if (!auth.WriteTokenFile(tokenFile.string(), "127.0.0.1:19091", err)) return 126;
+        const auto dirPerms = std::filesystem::status(dir).permissions();
+        if ((dirPerms & std::filesystem::perms::group_all) != std::filesystem::perms::none) return 127;
+        if ((dirPerms & std::filesystem::perms::others_all) != std::filesystem::perms::none) return 128;
+        std::filesystem::permissions(dir,
+            std::filesystem::perms::owner_all,
+            std::filesystem::perm_options::replace);
+        std::filesystem::remove(tokenFile);
+        std::filesystem::remove(dir);
+    }
+#endif
     {
         TqHttpRequest req;
         std::string err;
@@ -151,7 +248,8 @@ int main() {
         if (!TqRecvUntilClosed(fd, response)) return 29;
         TqCloseSocket(fd);
         server.Stop();
-        if (response != expected) return 30;
+        if (!TqHttpStatusIs(response, 200)) return 30;
+        if (response.find("\"ok\":true") == std::string::npos) return 112;
     }
     {
         const std::string expected = TqJsonResponse(200, "{\"second\":true}");
@@ -175,7 +273,8 @@ int main() {
         TqCloseSocket(fd);
         TqCloseSocket(stalledFd);
         server.Stop();
-        if (response != expected) return 40;
+        if (!TqHttpStatusIs(response, 200)) return 40;
+        if (response.find("\"second\":true") == std::string::npos) return 113;
     }
     {
         std::string err;
@@ -193,22 +292,26 @@ int main() {
     }
     {
         std::string err;
+        TqAdminHttpServerOptions options;
+        options.MaxBodyBytes = 1024;
         TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest&) {
             return TqJsonResponse(200, "{}");
-        });
+        }, options);
         if (!server.Start(err)) return 44;
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 45;
 
         TqSocketHandle fd = TqConnectLocal(port);
         if (!TqSocketValid(fd)) return 46;
-        if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 200000\r\n\r\n")) return 47;
+        const std::string body(2048, 'x');
+        if (!TqSendAll(fd, "PUT /config HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: " +
+                std::to_string(body.size()) + "\r\n\r\n" + body)) return 47;
 
         std::string response;
         if (!TqRecvUntilClosed(fd, response)) return 48;
         TqCloseSocket(fd);
         server.Stop();
-        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 49;
+        if (!TqHttpStatusIs(response, 413)) return 49;
     }
     {
         std::string err;
@@ -227,7 +330,7 @@ int main() {
         if (!TqRecvUntilClosed(fd, response)) return 70;
         TqCloseSocket(fd);
         server.Stop();
-        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 71;
+        if (!TqHttpStatusIs(response, 400)) return 71;
     }
     {
         std::string err;
@@ -246,7 +349,7 @@ int main() {
         if (!TqRecvUntilClosed(fd, response)) return 76;
         TqCloseSocket(fd);
         server.Stop();
-        if (response.find("HTTP/1.1 400 Bad Request\r\n") != 0) return 77;
+        if (!TqHttpStatusIs(response, 400)) return 77;
     }
     {
         std::string err;
@@ -275,7 +378,7 @@ int main() {
         TqCloseSocket(fd);
         TqCloseSocket(stalledFd2);
         server.Stop();
-        if (response.find("HTTP/1.1 200 OK\r\n") != 0) return 58;
+        if (!TqHttpStatusIs(response, 200)) return 58;
     }
     {
         std::string err;
@@ -293,7 +396,7 @@ int main() {
             std::string response;
             if (!TqRecvUntilClosed(fd, response)) return 63;
             TqCloseSocket(fd);
-            if (response.find("HTTP/1.1 200 OK\r\n") != 0) return 64;
+            if (!TqHttpStatusIs(response, 200)) return 64;
         }
 
         TqSocketHandle stalledFd = TqConnectLocal(port);
@@ -301,6 +404,237 @@ int main() {
         std::thread stopper([&server]() { server.Stop(); });
         stopper.join();
         TqCloseSocket(stalledFd);
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 2;
+        options.TokenFile = TqSecureTokenFile("auth").string();
+        options.AllowUnauthenticatedLegacy = false;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "GET" && req.Path == "/health") {
+                return TqJsonResponse(200, "{\"ok\":true}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 94;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 95;
+
+        TqSocketHandle unauthFd = TqConnectLocal(port);
+        if (!TqSocketValid(unauthFd)) return 96;
+        if (!TqSendAll(unauthFd, "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 97;
+        std::string unauthResponse;
+        if (!TqRecvUntilClosed(unauthFd, unauthResponse)) return 98;
+        TqCloseSocket(unauthFd);
+        if (!TqHttpStatusIs(unauthResponse, 401)) return 99;
+
+        TqSocketHandle authFd = TqConnectLocal(port);
+        if (!TqSocketValid(authFd)) return 100;
+        const std::string request = "GET /api/v1/health HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(authFd, request)) return 101;
+        std::string authResponse;
+        if (!TqRecvUntilClosed(authFd, authResponse)) return 102;
+        TqCloseSocket(authFd);
+        server.Stop();
+        if (!TqHttpStatusIs(authResponse, 200)) return 103;
+        if (authResponse.find("\"ok\":true") == std::string::npos) return 104;
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.TokenFile = TqSecureTokenFile("v1-peers").string();
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "POST" && req.Path == "/peers/agent-d:enable") {
+                return TqJsonResponse(202, "{\"right_v1_shape\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
+                return TqJsonResponse(200, "{\"wrong_v1_shape\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/connections/conn-1:reconnect") {
+                return TqJsonResponse(202, "{\"connection_action\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/connections/conn-1/reconnect") {
+                return TqJsonResponse(200, "{\"wrong_connection_shape\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/tunnels") {
+                return TqJsonResponse(200, "{\"tunnels\":[]}");
+            }
+            if (req.Method == "POST" && req.Path == "/tunnels/tun-1:abort") {
+                return TqJsonResponse(202, "{\"tunnel_abort\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/workers/aggregate") {
+                return TqJsonResponse(200, "{\"worker_id\":\"aggregate\"}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/connections") {
+                return TqJsonResponse(200, "{\"connections\":[]}");
+            }
+            if (req.Method == "POST" && req.Path == "/server/connections/srv-1:abort-tunnels") {
+                return TqJsonResponse(202, "{\"server_abort\":true}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 120;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 121;
+
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 122;
+        const std::string request = "POST /api/v1/peers/agent-d/enable HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(fd, request)) return 123;
+        std::string response;
+        if (!TqRecvUntilClosed(fd, response)) return 124;
+        TqCloseSocket(fd);
+        if (!TqHttpStatusIs(response, 404)) return 125;
+
+        TqSocketHandle rightFd = TqConnectLocal(port);
+        if (!TqSocketValid(rightFd)) return 129;
+        const std::string rightRequest = "POST /api/v1/peers/agent-d:enable HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(rightFd, rightRequest)) return 130;
+        std::string rightResponse;
+        if (!TqRecvUntilClosed(rightFd, rightResponse)) return 131;
+        TqCloseSocket(rightFd);
+        if (!TqHttpStatusIs(rightResponse, 202)) return 132;
+
+        TqSocketHandle connectionFd = TqConnectLocal(port);
+        if (!TqSocketValid(connectionFd)) return 133;
+        const std::string connectionRequest =
+            "POST /api/v1/peers/agent-d/connections/conn-1:reconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(connectionFd, connectionRequest)) return 134;
+        std::string connectionResponse;
+        if (!TqRecvUntilClosed(connectionFd, connectionResponse)) return 135;
+        TqCloseSocket(connectionFd);
+        if (!TqHttpStatusIs(connectionResponse, 202)) return 136;
+
+        TqSocketHandle wrongConnectionFd = TqConnectLocal(port);
+        if (!TqSocketValid(wrongConnectionFd)) return 137;
+        const std::string wrongConnectionRequest =
+            "POST /api/v1/peers/agent-d/connections/conn-1/reconnect HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(wrongConnectionFd, wrongConnectionRequest)) return 138;
+        std::string wrongConnectionResponse;
+        if (!TqRecvUntilClosed(wrongConnectionFd, wrongConnectionResponse)) return 139;
+        TqCloseSocket(wrongConnectionFd);
+        if (!TqHttpStatusIs(wrongConnectionResponse, 404)) return 140;
+
+        TqSocketHandle tunnelsFd = TqConnectLocal(port);
+        if (!TqSocketValid(tunnelsFd)) return 141;
+        const std::string tunnelsRequest =
+            "GET /api/v1/tunnels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(tunnelsFd, tunnelsRequest)) return 142;
+        std::string tunnelsResponse;
+        if (!TqRecvUntilClosed(tunnelsFd, tunnelsResponse)) return 143;
+        TqCloseSocket(tunnelsFd);
+        if (!TqHttpStatusIs(tunnelsResponse, 200)) return 144;
+
+        TqSocketHandle tunnelAbortFd = TqConnectLocal(port);
+        if (!TqSocketValid(tunnelAbortFd)) return 145;
+        const std::string tunnelAbortRequest =
+            "POST /api/v1/tunnels/tun-1:abort HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(tunnelAbortFd, tunnelAbortRequest)) return 146;
+        std::string tunnelAbortResponse;
+        if (!TqRecvUntilClosed(tunnelAbortFd, tunnelAbortResponse)) return 147;
+        TqCloseSocket(tunnelAbortFd);
+        if (!TqHttpStatusIs(tunnelAbortResponse, 202)) return 148;
+
+        TqSocketHandle relayWorkerFd = TqConnectLocal(port);
+        if (!TqSocketValid(relayWorkerFd)) return 149;
+        const std::string relayWorkerRequest =
+            "GET /api/v1/relay/workers/aggregate HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(relayWorkerFd, relayWorkerRequest)) return 150;
+        std::string relayWorkerResponse;
+        if (!TqRecvUntilClosed(relayWorkerFd, relayWorkerResponse)) return 151;
+        TqCloseSocket(relayWorkerFd);
+        if (!TqHttpStatusIs(relayWorkerResponse, 200)) return 152;
+
+        TqSocketHandle serverConnectionsFd = TqConnectLocal(port);
+        if (!TqSocketValid(serverConnectionsFd)) return 153;
+        const std::string serverConnectionsRequest =
+            "GET /api/v1/server/connections HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(serverConnectionsFd, serverConnectionsRequest)) return 154;
+        std::string serverConnectionsResponse;
+        if (!TqRecvUntilClosed(serverConnectionsFd, serverConnectionsResponse)) return 155;
+        TqCloseSocket(serverConnectionsFd);
+        if (!TqHttpStatusIs(serverConnectionsResponse, 200)) return 156;
+
+        TqSocketHandle serverAbortFd = TqConnectLocal(port);
+        if (!TqSocketValid(serverAbortFd)) return 157;
+        const std::string serverAbortRequest =
+            "POST /api/v1/server/connections/srv-1:abort-tunnels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(serverAbortFd, serverAbortRequest)) return 158;
+        std::string serverAbortResponse;
+        if (!TqRecvUntilClosed(serverAbortFd, serverAbortResponse)) return 159;
+        TqCloseSocket(serverAbortFd);
+        server.Stop();
+        if (!TqHttpStatusIs(serverAbortResponse, 202)) return 160;
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.TokenFile = TqSecureTokenFile("legacy").string();
+        options.AllowUnauthenticatedLegacy = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "GET" && req.Path == "/health") {
+                return TqJsonResponse(200, "{\"legacy\":true}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 105;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 106;
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 107;
+        if (!TqSendAll(fd, "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 108;
+        std::string response;
+        if (!TqRecvUntilClosed(fd, response)) return 109;
+        TqCloseSocket(fd);
+        server.Stop();
+        if (!TqHttpStatusIs(response, 200)) return 110;
+        if (response.find("\"legacy\":true") == std::string::npos) return 111;
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.TokenFile = TqSecureTokenFile("legacy-peer-scope").string();
+        options.AllowUnauthenticatedLegacy = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "POST" && req.Path == "/peers/agent-d/enable") {
+                return TqJsonResponse(200, "{\"legacy_enable\":true}");
+            }
+            if (req.Path.compare(0, 7, "/peers/") == 0) {
+                return TqJsonResponse(200, "{\"legacy_exposed\":true}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 133;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 134;
+
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 135;
+        if (!TqSendAll(fd, "PATCH /peers/agent-d HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}")) return 136;
+        std::string patchResponse;
+        if (!TqRecvUntilClosed(fd, patchResponse)) return 137;
+        TqCloseSocket(fd);
+        if (!TqHttpStatusIs(patchResponse, 404)) return 138;
+
+        TqSocketHandle legacyFd = TqConnectLocal(port);
+        if (!TqSocketValid(legacyFd)) return 139;
+        if (!TqSendAll(legacyFd, "POST /peers/agent-d/enable HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")) return 140;
+        std::string legacyResponse;
+        if (!TqRecvUntilClosed(legacyFd, legacyResponse)) return 141;
+        TqCloseSocket(legacyFd);
+        server.Stop();
+        if (!TqHttpStatusIs(legacyResponse, 200)) return 142;
     }
     return 0;
 }

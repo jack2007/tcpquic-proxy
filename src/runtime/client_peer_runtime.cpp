@@ -68,19 +68,25 @@ void TqClientPeerRuntime::StopAccepting() {
 
 void TqClientPeerRuntime::StopAll() {
     DisableAccepting();
-    if (Quic) {
-        Quic->Stop();
-        Quic.reset();
+    std::unique_ptr<QuicClientSession> quic;
+    {
+        std::lock_guard<std::mutex> guard(TunnelStartMutex);
+        quic = std::move(Quic);
+    }
+    if (quic) {
+        quic->Stop();
     }
 }
 
 void TqClientPeerRuntime::AbortTunnels() {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
     if (Quic) {
         Quic->AbortAllTunnels();
     }
 }
 
 TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
     TqPeerMetrics metrics;
     metrics.PeerId = PeerId;
     metrics.QuicPeer = Config.QuicPeer;
@@ -94,6 +100,7 @@ TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
 }
 
 TqClientMetrics TqClientPeerRuntime::SnapshotClientMetrics() const {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
     TqClientMetrics metrics;
     metrics.QuicPeer = Config.QuicPeer;
     metrics.SocksListen = Config.SocksListen;
@@ -102,6 +109,53 @@ TqClientMetrics TqClientPeerRuntime::SnapshotClientMetrics() const {
     metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     return metrics;
+}
+
+std::vector<TqConnectionSnapshot> TqClientPeerRuntime::SnapshotConnections() const {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    return Quic ? Quic->SnapshotConnections() : std::vector<TqConnectionSnapshot>{};
+}
+
+bool TqClientPeerRuntime::SetDesiredConnectionCount(uint32_t desired, std::string& err) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    if (!Quic) {
+        err = "QUIC session is not running";
+        return false;
+    }
+    if (!Quic->SetDesiredConnectionCount(desired, err)) {
+        return false;
+    }
+    return true;
+}
+
+bool TqClientPeerRuntime::StopHighestConnection(const std::string& connectionId, std::string& err) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    if (!Quic) {
+        err = "QUIC session is not running";
+        return false;
+    }
+    if (!Quic->StopHighestConnection(connectionId, err)) {
+        return false;
+    }
+    return true;
+}
+
+bool TqClientPeerRuntime::ReconnectConnection(const std::string& connectionId, std::string& err) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    if (!Quic) {
+        err = "QUIC session is not running";
+        return false;
+    }
+    return Quic->ReconnectConnection(connectionId, err);
+}
+
+bool TqClientPeerRuntime::AbortConnectionTunnels(const std::string& connectionId, std::string& err) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    if (!Quic) {
+        err = "QUIC session is not running";
+        return false;
+    }
+    return Quic->AbortConnectionTunnels(connectionId, err);
 }
 
 MsQuicConnection* TqClientPeerRuntime::PickConnection() {
@@ -418,6 +472,59 @@ bool TqClientRuntimeManager::SnapshotClientMetrics(const std::string& peerId, Tq
     }
     out = runtime->SnapshotClientMetrics();
     return true;
+}
+
+std::vector<TqConnectionSnapshot> TqClientRuntimeManager::SnapshotConnections(const std::string& peerId) const {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    return runtime ? runtime->SnapshotConnections() : std::vector<TqConnectionSnapshot>{};
+}
+
+bool TqClientRuntimeManager::SetDesiredConnectionCount(
+    const std::string& peerId,
+    uint32_t desired,
+    std::string& err) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        err = "not found";
+        return false;
+    }
+    return runtime->SetDesiredConnectionCount(desired, err);
+}
+
+bool TqClientRuntimeManager::StopHighestConnection(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        err = "not found";
+        return false;
+    }
+    return runtime->StopHighestConnection(connectionId, err);
+}
+
+bool TqClientRuntimeManager::ReconnectConnection(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        err = "not found";
+        return false;
+    }
+    return runtime->ReconnectConnection(connectionId, err);
+}
+
+bool TqClientRuntimeManager::AbortConnectionTunnels(
+    const std::string& peerId,
+    const std::string& connectionId,
+    std::string& err) {
+    std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
+    if (!runtime) {
+        err = "not found";
+        return false;
+    }
+    return runtime->AbortConnectionTunnels(connectionId, err);
 }
 
 MsQuicConnection* TqClientRuntimeManager::PickConnection(const std::string& peerId) {

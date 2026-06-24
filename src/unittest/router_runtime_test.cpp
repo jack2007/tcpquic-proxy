@@ -1,12 +1,21 @@
 #include "router_runtime.h"
 #include "server_metrics.h"
 #include "trace.h"
+#include "tunnel_registry.h"
 
+#include <atomic>
 #include <string>
+#include <thread>
 #include <vector>
 
 bool TqTraceEnabled() {
     return false;
+}
+
+std::atomic<unsigned> g_adminTunnelAbortCalls{0};
+
+void AdminTunnelAbort(void*) {
+    g_adminTunnelAbortCalls.fetch_add(1);
 }
 
 void TqTraceLogLine(const char* line) {
@@ -112,10 +121,16 @@ public:
     std::vector<std::string> Started;
     std::vector<std::string> Stopped;
     std::vector<std::string> Drained;
+    std::vector<uint32_t> DrainGraces;
     std::vector<std::string> AbortAll;
     TqPeerConfig LastStartedPeer;
     uint32_t FailStarts{0};
     uint32_t ConnectedConnections{0};
+    std::vector<TqConnectionSnapshot> Connections;
+    std::vector<uint32_t> DesiredConnectionCounts;
+    std::vector<std::string> ReconnectedConnections;
+    std::vector<std::string> DeletedConnections;
+    std::vector<std::string> AbortedConnectionTunnels;
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
@@ -132,8 +147,9 @@ public:
         Stopped.push_back(peerId);
     }
 
-    void DrainPeer(const std::string& peerId, uint32_t) override {
+    void DrainPeer(const std::string& peerId, uint32_t graceSeconds) override {
         Drained.push_back(peerId);
+        DrainGraces.push_back(graceSeconds);
     }
 
     void AbortPeerTunnels(const std::string& peerId) override {
@@ -145,6 +161,46 @@ public:
         out.ConnectionCount = 4;
         out.ConnectedConnections = ConnectedConnections;
         out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
+        return true;
+    }
+
+    std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) override {
+        (void)peerId;
+        return Connections;
+    }
+
+    bool SetDesiredConnectionCount(const std::string& peerId, uint32_t desired, std::string&) override {
+        (void)peerId;
+        DesiredConnectionCounts.push_back(desired);
+        Connections.resize(desired);
+        for (uint32_t i = 0; i < desired; ++i) {
+            Connections[i].ConnectionId = "conn-" + std::to_string(i);
+            Connections[i].SlotIndex = i;
+            Connections[i].State = "connecting";
+        }
+        return true;
+    }
+
+    bool ReconnectConnection(const std::string& peerId, const std::string& connectionId, std::string&) override {
+        (void)peerId;
+        ReconnectedConnections.push_back(connectionId);
+        return true;
+    }
+
+    bool StopHighestConnection(const std::string& peerId, const std::string& connectionId, std::string& err) override {
+        (void)peerId;
+        if (Connections.empty() || Connections.back().ConnectionId != connectionId) {
+            err = "only highest connection slot can be removed";
+            return false;
+        }
+        DeletedConnections.push_back(connectionId);
+        Connections.pop_back();
+        return true;
+    }
+
+    bool AbortConnectionTunnels(const std::string& peerId, const std::string& connectionId, std::string&) override {
+        (void)peerId;
+        AbortedConnectionTunnels.push_back(connectionId);
         return true;
     }
 };
@@ -421,6 +477,98 @@ int main() {
         if (leadingZeroResp.find("HTTP/1.1 400") == std::string::npos) return 73;
     }
     {
+        FakeAdapter adapter;
+        TqRouterRuntime adminRuntime(&adapter);
+        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"agent-crud\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"quic_connections\":2,\"compress\":\"auto\",\"enabled\":true}");
+        std::string createResp = adminRuntime.HandleAdmin(create);
+        if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 260;
+        if (adapter.Started.size() != 1 || adapter.Started[0] != "agent-crud") return 261;
+
+        TqHttpRequest duplicate = Request("POST", "/peers", create.Body);
+        std::string duplicateResp = adminRuntime.HandleAdmin(duplicate);
+        if (duplicateResp.find("HTTP/1.1 409 Conflict") == std::string::npos) return 262;
+
+        TqHttpRequest list = Request("GET", "/peers", "");
+        std::string listResp = adminRuntime.HandleAdmin(list);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 263;
+        if (listResp.find("\"peer_id\":\"agent-crud\"") == std::string::npos) return 264;
+        if (listResp.find("\"state\":\"connecting\"") == std::string::npos) return 265;
+
+        TqHttpRequest get = Request("GET", "/peers/agent-crud", "");
+        std::string getResp = adminRuntime.HandleAdmin(get);
+        if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 266;
+        if (getResp.find("\"quic_peer\":\"127.0.0.1:14460\"") == std::string::npos) return 267;
+
+        TqHttpRequest replace = Request("PUT", "/peers/agent-crud", "{\"peer_id\":\"agent-crud\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11061\",\"quic_connections\":3,\"compress\":\"auto\",\"enabled\":true}");
+        std::string replaceResp = adminRuntime.HandleAdmin(replace);
+        if (replaceResp.find("HTTP/1.1 200 OK") == std::string::npos) return 268;
+        if (adapter.Stopped.empty() || adapter.Stopped.back() != "agent-crud") return 269;
+        if (adapter.Started.size() != 2 || adapter.LastStartedPeer.SocksListen != "127.0.0.1:11061") return 270;
+
+        TqHttpRequest patch = Request("PATCH", "/peers/agent-crud", "{\"socks_listen\":\"127.0.0.1:11062\"}");
+        std::string patchResp = adminRuntime.HandleAdmin(patch);
+        if (patchResp.find("HTTP/1.1 200 OK") == std::string::npos) return 271;
+        if (adapter.Started.size() != 3 || adapter.LastStartedPeer.SocksListen != "127.0.0.1:11062") return 272;
+
+        TqHttpRequest disable = Request("POST", "/peers/agent-crud:disable", "");
+        std::string disableResp = adminRuntime.HandleAdmin(disable);
+        if (disableResp.find("HTTP/1.1 200 OK") == std::string::npos) return 273;
+        if (disableResp.find("\"enabled\":false") == std::string::npos) return 274;
+
+        TqHttpRequest enable = Request("POST", "/peers/agent-crud:enable", "");
+        std::string enableResp = adminRuntime.HandleAdmin(enable);
+        if (enableResp.find("HTTP/1.1 200 OK") == std::string::npos) return 275;
+        if (enableResp.find("\"enabled\":true") == std::string::npos) return 276;
+
+        TqHttpRequest drain = Request("POST", "/peers/agent-crud:drain", "{\"grace_seconds\":1}");
+        std::string drainResp = adminRuntime.HandleAdmin(drain);
+        if (drainResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 277;
+        if (adapter.Drained.empty() || adapter.Drained.back() != "agent-crud") return 278;
+        if (adapter.DrainGraces.empty() || adapter.DrainGraces.back() != 1) return 284;
+
+        TqHttpRequest abort = Request("POST", "/peers/agent-crud:abort-tunnels", "");
+        std::string abortResp = adminRuntime.HandleAdmin(abort);
+        if (abortResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 279;
+        if (adapter.AbortAll.empty() || adapter.AbortAll.back() != "agent-crud") return 280;
+
+        TqHttpRequest rejectDelete = Request("DELETE", "/peers/agent-crud", "");
+        std::string rejectDeleteResp = adminRuntime.HandleAdmin(rejectDelete);
+        if (rejectDeleteResp.find("HTTP/1.1 409 Conflict") == std::string::npos) return 281;
+
+        TqHttpRequest deletePeer = Request("DELETE", "/peers/agent-crud", "{\"mode\": \"abort\"}");
+        std::string deleteResp = adminRuntime.HandleAdmin(deletePeer);
+        if (deleteResp.find("HTTP/1.1 200 OK") == std::string::npos) return 282;
+        if (adminRuntime.SnapshotConfig().Peers.size() != 0) return 283;
+    }
+    {
+        TqRouterRuntime adminRuntime;
+        std::atomic<bool> start{false};
+        std::atomic<uint32_t> failures{0};
+        std::vector<std::thread> threads;
+        for (uint32_t i = 0; i < 16; ++i) {
+            threads.emplace_back([&adminRuntime, &start, &failures, i]() {
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                const std::string peerId = "agent-race-" + std::to_string(i);
+                const std::string body = "{\"peer_id\":\"" + peerId +
+                    "\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:" +
+                    std::to_string(11100 + i) + "\",\"enabled\":false}";
+                TqHttpRequest create = Request("POST", "/peers", body);
+                const std::string createResp = adminRuntime.HandleAdmin(create);
+                if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) {
+                    failures.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+        }
+        start.store(true, std::memory_order_release);
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        if (failures.load(std::memory_order_relaxed) != 0) return 285;
+        if (adminRuntime.SnapshotConfig().Peers.size() != 16) return 286;
+    }
+    {
         TqRouterRuntime adminRuntime;
         const std::string validConfig =
             "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-forward-admin\","
@@ -475,6 +623,112 @@ int main() {
             if (afterReject.Peers[0].PortForwards[1].TargetHost != "2001:db8::10") return 213;
             if (afterReject.Peers[0].PortForwards[1].TargetPort != 443) return 214;
         }
+    }
+    {
+        FakeAdapter adapter;
+        adapter.Connections.resize(2);
+        adapter.Connections[0].ConnectionId = "conn-0";
+        adapter.Connections[0].SlotIndex = 0;
+        adapter.Connections[0].State = "connected";
+        adapter.Connections[0].Connected = true;
+        adapter.Connections[1].ConnectionId = "conn-1";
+        adapter.Connections[1].SlotIndex = 1;
+        adapter.Connections[1].State = "connecting";
+
+        TqRouterRuntime adminRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-conn", "127.0.0.1:11200"));
+        cfg.Peers[0].QuicConnections = 0;
+        std::string err;
+        if (!adminRuntime.ApplyConfig(cfg, err)) return 287;
+
+        TqHttpRequest list = Request("GET", "/peers/agent-conn/connections", "");
+        std::string listResp = adminRuntime.HandleAdmin(list);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 288;
+        if (listResp.find("\"connection_id\":\"conn-0\"") == std::string::npos) return 289;
+        if (listResp.find("\"state\":\"connected\"") == std::string::npos) return 290;
+
+        TqHttpRequest get = Request("GET", "/peers/agent-conn/connections/conn-1", "");
+        std::string getResp = adminRuntime.HandleAdmin(get);
+        if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 291;
+        if (getResp.find("\"slot_index\":1") == std::string::npos) return 292;
+
+        TqHttpRequest add = Request("POST", "/peers/agent-conn/connections", "");
+        std::string addResp = adminRuntime.HandleAdmin(add);
+        if (addResp.find("HTTP/1.1 201 Created") == std::string::npos) return 293;
+        if (adapter.DesiredConnectionCounts.empty() || adapter.DesiredConnectionCounts.back() != 3) return 294;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicConnections != 3) return 295;
+
+        TqHttpRequest deleteMiddle = Request("DELETE", "/peers/agent-conn/connections/conn-0", "");
+        std::string deleteMiddleResp = adminRuntime.HandleAdmin(deleteMiddle);
+        if (deleteMiddleResp.find("HTTP/1.1 409 Conflict") == std::string::npos) return 296;
+
+        TqHttpRequest reconnect = Request("POST", "/peers/agent-conn/connections/conn-1:reconnect", "");
+        std::string reconnectResp = adminRuntime.HandleAdmin(reconnect);
+        if (reconnectResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 297;
+        if (adapter.ReconnectedConnections.empty() || adapter.ReconnectedConnections.back() != "conn-1") return 298;
+
+        TqHttpRequest abort = Request("POST", "/peers/agent-conn/connections/conn-1:abort-tunnels", "");
+        std::string abortResp = adminRuntime.HandleAdmin(abort);
+        if (abortResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 299;
+        if (adapter.AbortedConnectionTunnels.empty() || adapter.AbortedConnectionTunnels.back() != "conn-1") return 300;
+
+        TqHttpRequest deleteHighest = Request("DELETE", "/peers/agent-conn/connections/conn-2", "");
+        std::string deleteHighestResp = adminRuntime.HandleAdmin(deleteHighest);
+        if (deleteHighestResp.find("HTTP/1.1 200 OK") == std::string::npos) return 301;
+        if (adapter.DeletedConnections.empty() || adapter.DeletedConnections.back() != "conn-2") return 302;
+        if (adminRuntime.SnapshotConfig().Peers[0].QuicConnections != 2) return 303;
+    }
+    {
+        TqRouterRuntime adminRuntime;
+        auto* connection = reinterpret_cast<MsQuicConnection*>(0x11);
+        int context = 0;
+        TqRegisterConnectionTunnel(connection, &context, &AdminTunnelAbort);
+        TqTunnelRegistryMetadata metadata;
+        metadata.PeerId = "agent-tunnel";
+        metadata.ConnectionId = "conn-0";
+        metadata.Target = "127.0.0.1:8080";
+        metadata.Role = "client";
+        metadata.Ingress = "http";
+        metadata.Compress = "none";
+        metadata.RelayBackend = "linux";
+        TqUpdateConnectionTunnelMetadata(connection, &context, metadata);
+
+        TqHttpRequest list = Request("GET", "/tunnels", "");
+        std::string listResp = adminRuntime.HandleAdmin(list);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 304;
+        if (listResp.find("\"peer_id\":\"agent-tunnel\"") == std::string::npos) return 305;
+        if (listResp.find("\"target\":\"127.0.0.1:8080\"") == std::string::npos) return 306;
+        const auto tunnels = TqSnapshotTunnels();
+        if (tunnels.empty()) return 307;
+
+        TqHttpRequest get = Request("GET", "/tunnels/" + tunnels[0].TunnelId, "");
+        std::string getResp = adminRuntime.HandleAdmin(get);
+        if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 308;
+        if (getResp.find("\"connection_id\":\"conn-0\"") == std::string::npos) return 309;
+
+        TqHttpRequest drain = Request("POST", "/tunnels/" + tunnels[0].TunnelId + ":drain", "");
+        std::string drainResp = adminRuntime.HandleAdmin(drain);
+        if (drainResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 310;
+        TqTunnelSnapshot drained;
+        if (!TqGetTunnelSnapshot(tunnels[0].TunnelId, drained) || drained.State != "draining") return 311;
+
+        TqHttpRequest relayMetrics = Request("GET", "/relay/metrics", "");
+        std::string relayMetricsResp = adminRuntime.HandleAdmin(relayMetrics);
+        if (relayMetricsResp.find("HTTP/1.1 200 OK") == std::string::npos) return 312;
+        if (relayMetricsResp.find("\"active_relays\":") == std::string::npos) return 313;
+
+        TqHttpRequest relayWorkers = Request("GET", "/relay/workers", "");
+        std::string relayWorkersResp = adminRuntime.HandleAdmin(relayWorkers);
+        if (relayWorkersResp.find("HTTP/1.1 200 OK") == std::string::npos) return 314;
+        if (relayWorkersResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 315;
+
+        TqHttpRequest abort = Request("POST", "/tunnels/" + tunnels[0].TunnelId + ":abort", "");
+        std::string abortResp = adminRuntime.HandleAdmin(abort);
+        if (abortResp.find("HTTP/1.1 202 Accepted") == std::string::npos) return 316;
+        if (g_adminTunnelAbortCalls.load() == 0) return 317;
+
+        TqUnregisterConnectionTunnel(connection, &context);
     }
     {
         TqRouterRuntime unicodeRuntime;

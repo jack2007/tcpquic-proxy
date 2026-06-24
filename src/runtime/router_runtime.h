@@ -2,6 +2,7 @@
 
 #include "admin_http.h"
 #include "config.h"
+#include "quic_session.h"
 
 #include <chrono>
 #include <mutex>
@@ -45,6 +46,34 @@ public:
         (void)out;
         return false;
     }
+    virtual std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) {
+        (void)peerId;
+        return {};
+    }
+    virtual bool SetDesiredConnectionCount(const std::string& peerId, uint32_t desired, std::string& err) {
+        (void)peerId;
+        (void)desired;
+        err = "connection control is not available";
+        return false;
+    }
+    virtual bool StopHighestConnection(const std::string& peerId, const std::string& connectionId, std::string& err) {
+        (void)peerId;
+        (void)connectionId;
+        err = "connection control is not available";
+        return false;
+    }
+    virtual bool ReconnectConnection(const std::string& peerId, const std::string& connectionId, std::string& err) {
+        (void)peerId;
+        (void)connectionId;
+        err = "connection control is not available";
+        return false;
+    }
+    virtual bool AbortConnectionTunnels(const std::string& peerId, const std::string& connectionId, std::string& err) {
+        (void)peerId;
+        (void)connectionId;
+        err = "connection control is not available";
+        return false;
+    }
 };
 
 class TqRouterRuntime {
@@ -55,6 +84,22 @@ public:
     bool ApplyConfig(const TqRouterConfig& config, std::string& err);
     TqRouterConfig SnapshotConfig() const;
     TqRouterMetrics SnapshotMetrics() const;
+    std::vector<TqPeerMetrics> ListPeers() const;
+    bool GetPeer(const std::string& peerId, TqPeerMetrics& out) const;
+    bool CreatePeer(const TqPeerConfig& peer, std::string& err);
+    bool ReplacePeer(const std::string& peerId, const TqPeerConfig& peer, std::string& err);
+    bool PatchPeer(const std::string& peerId, const std::string& body, std::string& err);
+    bool DeletePeer(const std::string& peerId, const std::string& mode, std::string& err);
+    bool EnablePeer(const std::string& peerId, std::string& err);
+    bool DisablePeer(const std::string& peerId, std::string& err);
+    bool DrainPeer(const std::string& peerId, uint32_t graceSeconds, std::string& err);
+    bool AbortPeerTunnels(const std::string& peerId, std::string& err);
+    std::vector<TqConnectionSnapshot> ListConnections(const std::string& peerId) const;
+    bool GetConnection(const std::string& peerId, const std::string& connectionId, TqConnectionSnapshot& out) const;
+    bool AddConnection(const std::string& peerId, std::string& err);
+    bool DeleteConnection(const std::string& peerId, const std::string& connectionId, std::string& err);
+    bool ReconnectConnection(const std::string& peerId, const std::string& connectionId, std::string& err);
+    bool AbortConnectionTunnels(const std::string& peerId, const std::string& connectionId, std::string& err);
     std::string ConfigJson() const;
     std::string MetricsJson() const;
     std::string HealthJson() const;
@@ -62,6 +107,7 @@ public:
 
 private:
     mutable std::mutex Mutex;
+    std::mutex ConnectionControlMutex;
     TqRouterConfig Config;
     std::unordered_map<std::string, TqPeerMetrics> Metrics;
     std::unordered_map<std::string, TqPeerConfig> RunningPeers;
@@ -70,6 +116,8 @@ private:
     bool BridgeValidationMode{false};
     bool BridgeStartupCaptured{false};
     TqPeerConfig BridgeActivePeer;
+
+    bool ApplyConfigLocked(const TqRouterConfig& config, std::string& err);
 };
 
 bool TqValidateSinglePeerStartupBridge(const TqRouterConfig& config, std::string& err);

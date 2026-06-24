@@ -146,7 +146,7 @@ server dial reactor 还支持 speed-test 使用的 ephemeral authorizer：正常
 
 - **MsQuic 内部线程**：由 MsQuic 创建，负责 QUIC datapath、worker 和 cleanup 等内部工作；应用 stream callback 运行在 MsQuic worker 上。
 - **client reconnect 回调/延迟任务**：不创建独立线程。异步断开由 MsQuic connection callback 在 `SHUTDOWN_COMPLETE` 后重建 slot；同步 start 失败由 `TqClientIngressReactor` delayed task 重试。
-- **admin HTTP 线程**：启用 `--admin-listen` 时，admin server 有 accept 线程，并为 admin client 使用短生命周期处理线程。
+- **admin HTTP 线程**：启用 `--admin-listen` 时，admin 使用 `cpp-httplib` 阻塞 HTTP/1.1 server，一个 listen 线程加固定 worker pool；worker 数由 `--admin-threads` 控制，默认 2，不再为每个 client 创建 detached 处理线程。
 - **trace periodic thread**：启用 `--trace` 后周期输出统计快照。
 - **tunnel reaper thread**：进程级 `TqTunnelReaper` 单线程统一回收停止后的 tunnel context。
 - **speed-test 临时线程**：内置 upload/download speed-test 会创建临时 loopback TCP server 和 pump worker；client speedtest 启动遵循普通 client ingress gating，数据连接通过 `cfg.HttpListen` 的 HTTP CONNECT ingress 路径，控制面仍使用既有 speed control stream。

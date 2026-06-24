@@ -147,6 +147,48 @@ static int TestConnectionStartPendingIsAccepted() {
     return 0;
 }
 
+static int TestConnectionSnapshotAndSlotControls() {
+    QuicClientSession session;
+    std::atomic<int> startCalls{0};
+    session.MarkReconnectStartedForTest(2);
+    session.SetReconnectTestHooks(QuicClientSession::ReconnectTestHooks{
+        [&](size_t) {
+            startCalls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }});
+
+    auto snapshots = session.SnapshotConnections();
+    if (snapshots.size() != 2) return 80;
+    if (snapshots[0].ConnectionId != "conn-0") return 81;
+    if (snapshots[1].ConnectionId != "conn-1") return 82;
+    if (snapshots[0].SlotIndex != 0 || snapshots[1].SlotIndex != 1) return 83;
+    if (snapshots[0].Generation != 0) return 84;
+    if (snapshots[0].State != "connecting") return 85;
+
+    std::string err;
+    if (!session.SetDesiredConnectionCount(3, err)) return 86;
+    if (startCalls.load(std::memory_order_relaxed) != 1) return 96;
+    snapshots = session.SnapshotConnections();
+    if (snapshots.size() != 3) return 87;
+    if (snapshots[2].ConnectionId != "conn-2") return 88;
+
+    if (session.StopHighestConnection("conn-0", err)) return 89;
+    if (err.find("highest") == std::string::npos) return 90;
+
+    if (!session.ReconnectConnection("conn-1", err)) return 91;
+    if (startCalls.load(std::memory_order_relaxed) != 2) return 97;
+    snapshots = session.SnapshotConnections();
+    if (snapshots[1].Generation != 1) return 92;
+
+    if (!session.StopHighestConnection("conn-2", err)) return 93;
+    snapshots = session.SnapshotConnections();
+    if (snapshots.size() != 2) return 94;
+
+    if (!session.AbortConnectionTunnels("conn-1", err)) return 95;
+    session.Stop();
+    return 0;
+}
+
 static int TestScheme2CredentialConfig() {
     TqConfig client;
     client.QuicCa = "ca.crt";
@@ -203,6 +245,7 @@ int main() {
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
+    if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

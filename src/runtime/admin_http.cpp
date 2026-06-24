@@ -1,27 +1,20 @@
 #include "admin_http.h"
 
+#include "admin_auth.h"
 #include "platform_socket.h"
+
+#include "httplib.h"
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #include <string>
-
-#if !defined(_WIN32)
-#include <netdb.h>
-#endif
 
 namespace {
 
 constexpr size_t TqMaxAdminHttpBytes = 64 * 1024;
-
-enum class TqRequestReadState {
-    Incomplete,
-    Complete,
-    Malformed
-};
 
 struct TqHostPort {
     std::string Host;
@@ -96,107 +89,28 @@ const char* TqReasonPhrase(int status) {
     switch (status) {
     case 200:
         return "OK";
+    case 201:
+        return "Created";
+    case 202:
+        return "Accepted";
+    case 204:
+        return "No Content";
     case 400:
         return "Bad Request";
+    case 401:
+        return "Unauthorized";
     case 404:
         return "Not Found";
+    case 409:
+        return "Conflict";
+    case 413:
+        return "Payload Too Large";
+    case 503:
+        return "Service Unavailable";
     case 500:
     default:
         return "Internal Server Error";
     }
-}
-
-bool TqSendAll(TqSocketHandle fd, const std::string& data) {
-    size_t sent = 0;
-    while (sent < data.size()) {
-        const int result = TqSend(fd, data.data() + sent, data.size() - sent, TqSendFlags::NoSignal);
-        if (result < 0) {
-            if (TqSocketInterrupted(TqLastSocketError())) {
-                continue;
-            }
-            return false;
-        }
-        if (result == 0) {
-            return false;
-        }
-        sent += static_cast<size_t>(result);
-    }
-    return true;
-}
-
-bool TqCreateListenSocket(const std::string& listen, TqSocketHandle& listenFd, std::string& err) {
-    TqHostPort hostPort{};
-    if (!TqParseHostPort(listen, hostPort, true)) {
-        err = "admin listen must be host:port";
-        return false;
-    }
-
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    addrinfo* result = nullptr;
-    const std::string port = std::to_string(hostPort.Port);
-    const int status = getaddrinfo(hostPort.Host.c_str(), port.c_str(), &hints, &result);
-    if (status != 0) {
-        err = gai_strerror(status);
-        return false;
-    }
-
-    for (addrinfo* ai = result; ai != nullptr; ai = ai->ai_next) {
-        TqSocketHandle fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (!TqSocketValid(fd)) {
-            continue;
-        }
-
-        (void)TqSetReuseAddr(fd);
-
-        if (::bind(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
-            ::listen(fd, SOMAXCONN) == 0) {
-            listenFd = fd;
-            freeaddrinfo(result);
-            return true;
-        }
-
-        TqCloseSocket(fd);
-    }
-
-    freeaddrinfo(result);
-#if defined(_WIN32)
-    err = "bind failed";
-#else
-    err = std::strerror(errno);
-#endif
-    return false;
-}
-
-std::string TqGetBoundListenAddress(TqSocketHandle fd, const std::string& fallbackHost) {
-    sockaddr_storage storage{};
-    socklen_t storageLen = sizeof(storage);
-    if (::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &storageLen) != 0) {
-        return {};
-    }
-
-    if (storage.ss_family == AF_INET) {
-        const auto* addr = reinterpret_cast<const sockaddr_in*>(&storage);
-        char host[INET_ADDRSTRLEN]{};
-        if (TqInetNtop(AF_INET, &addr->sin_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        return std::string(host) + ":" + std::to_string(ntohs(addr->sin_port));
-    }
-
-    if (storage.ss_family == AF_INET6) {
-        const auto* addr = reinterpret_cast<const sockaddr_in6*>(&storage);
-        char host[INET6_ADDRSTRLEN]{};
-        if (TqInetNtop(AF_INET6, &addr->sin6_addr, host, sizeof(host)) == nullptr) {
-            return {};
-        }
-        return std::string(host) + ":" + std::to_string(ntohs(addr->sin6_port));
-    }
-
-    return fallbackHost;
 }
 
 bool TqValidateAdminBindListen(const std::string& listen, std::string& err) {
@@ -212,93 +126,137 @@ bool TqValidateAdminBindListen(const std::string& listen, std::string& err) {
     return false;
 }
 
-TqRequestReadState TqRequestReadStateFor(const std::string& raw, size_t& total) {
-    const size_t headerEnd = raw.find("\r\n\r\n");
-    if (headerEnd == std::string::npos) {
-        return TqRequestReadState::Incomplete;
-    }
-
-    total = headerEnd + 4;
-    bool hasContentLength = false;
-    size_t contentLength = 0;
-    size_t lineStart = raw.find("\r\n") + 2;
-    while (lineStart < headerEnd) {
-        const size_t lineEnd = raw.find("\r\n", lineStart);
-        if (lineEnd == std::string::npos || lineEnd > headerEnd) {
-            return TqRequestReadState::Malformed;
-        }
-        const std::string line = raw.substr(lineStart, lineEnd - lineStart);
-        const size_t colon = line.find(':');
-        if (colon == std::string::npos) {
-            return TqRequestReadState::Malformed;
-        }
-        const std::string name = TqAsciiLower(line.substr(0, colon));
-        const std::string value = TqTrim(line.substr(colon + 1));
-        if (name == "content-length") {
-            if (hasContentLength || !TqParseSize(value, contentLength)) {
-                return TqRequestReadState::Malformed;
-            }
-            hasContentLength = true;
-        } else if (name == "transfer-encoding") {
-            return TqRequestReadState::Malformed;
-        }
-        lineStart = lineEnd + 2;
-    }
-
-    if (hasContentLength) {
-        if (total > TqMaxAdminHttpBytes || contentLength > TqMaxAdminHttpBytes - total) {
-            return TqRequestReadState::Malformed;
-        }
-        total += contentLength;
-        return raw.size() >= total ? TqRequestReadState::Complete : TqRequestReadState::Incomplete;
-    }
-
-    return TqRequestReadState::Complete;
+std::string TqLowerHeaderName(std::string text) {
+    return TqAsciiLower(std::move(text));
 }
 
-void TqHandleAdminClient(TqSocketHandle clientFd, const TqHttpHandler& handler) {
-    std::string raw;
-    raw.reserve(1024);
+bool TqIsLegacyAdminPath(const std::string& path) {
+    auto isLegacyPeerAction = [&path](const char* suffix) {
+        const size_t suffixLen = std::strlen(suffix);
+        return path.compare(0, 7, "/peers/") == 0 &&
+            path.size() > 7 + suffixLen &&
+            path.compare(path.size() - suffixLen, suffixLen, suffix) == 0;
+    };
+    return path == "/health" ||
+        path == "/metrics" ||
+        path == "/config" ||
+        isLegacyPeerAction("/enable") ||
+        isLegacyPeerAction("/disable");
+}
 
-    char buffer[1024];
-    for (;;) {
-        size_t total = 0;
-        const TqRequestReadState state = TqRequestReadStateFor(raw, total);
-        if (state == TqRequestReadState::Complete) {
-            raw.resize(total);
-            break;
-        }
-        if (state == TqRequestReadState::Malformed) {
-            (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
-            return;
-        }
-        if (raw.size() >= TqMaxAdminHttpBytes) {
-            (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
-            return;
-        }
-
-        const int received = TqRecv(clientFd, buffer, sizeof(buffer), TqRecvFlags::None);
-        if (received < 0) {
-            if (TqSocketInterrupted(TqLastSocketError())) {
-                continue;
-            }
-            return;
-        }
-        if (received == 0) {
-            return;
-        }
-        raw.append(buffer, static_cast<size_t>(received));
+bool TqIsV1PeerPath(const std::string& path) {
+    constexpr const char* kPeers = "/api/v1/peers";
+    constexpr size_t kPeersLen = std::char_traits<char>::length(kPeers);
+    if (path == kPeers) {
+        return true;
+    }
+    if (path.compare(0, kPeersLen + 1, "/api/v1/peers/") != 0) {
+        return false;
+    }
+    const std::string tail = path.substr(kPeersLen + 1);
+    if (tail.empty()) {
+        return false;
     }
 
-    TqHttpRequest req{};
-    std::string err;
-    if (!TqParseHttpRequest(raw, req, err)) {
-        (void)TqSendAll(clientFd, TqJsonResponse(400, "{\"error\":\"bad request\"}"));
+    const size_t firstSlash = tail.find('/');
+    if (firstSlash != std::string::npos) {
+        const std::string peer = tail.substr(0, firstSlash);
+        const std::string rest = tail.substr(firstSlash + 1);
+        const bool connectionsCollection = rest == "connections";
+        const bool connectionsItem = rest.compare(0, 12, "connections/") == 0;
+        if (peer.empty() || (!connectionsCollection && !connectionsItem)) {
+            return false;
+        }
+        if (connectionsCollection) {
+            return true;
+        }
+        std::string connection = rest.substr(12);
+        if (connection.empty() || connection.find('/') != std::string::npos) {
+            return false;
+        }
+        const size_t connectionAction = connection.find(':');
+        if (connectionAction == std::string::npos) {
+            return true;
+        }
+        const std::string name = connection.substr(connectionAction + 1);
+        return !connection.substr(0, connectionAction).empty() &&
+            (name == "reconnect" || name == "abort-tunnels");
+    }
+
+    const size_t action = tail.find(':');
+    if (action == std::string::npos) {
+        return true;
+    }
+    const std::string name = tail.substr(action + 1);
+    return !tail.substr(0, action).empty() &&
+        (name == "enable" || name == "disable" || name == "drain" || name == "abort-tunnels");
+}
+
+bool TqIsV1AdminPath(const std::string& path) {
+    return path == "/api/v1/health" ||
+        path == "/api/v1/metrics" ||
+        path == "/api/v1/config" ||
+        path == "/api/v1/tunnels" ||
+        path.compare(0, 16, "/api/v1/tunnels/") == 0 ||
+        path == "/api/v1/relay/metrics" ||
+        path == "/api/v1/relay/workers" ||
+        path.compare(0, 22, "/api/v1/relay/workers/") == 0 ||
+        path == "/api/v1/server" ||
+        path == "/api/v1/server/metrics" ||
+        path == "/api/v1/server/connections" ||
+        path.compare(0, 27, "/api/v1/server/connections/") == 0 ||
+        path == "/api/v1/server/tunnels" ||
+        TqIsV1PeerPath(path);
+}
+
+bool TqIsV1Prefix(const std::string& path) {
+    return path == "/api/v1" || path.compare(0, 8, "/api/v1/") == 0;
+}
+
+std::string TqV1ToLegacyPath(const std::string& path) {
+    if (path.compare(0, 7, "/api/v1") == 0) {
+        const std::string stripped = path.substr(7);
+        return stripped.empty() ? "/" : stripped;
+    }
+    return path;
+}
+
+TqHttpRequest TqMakeAdminRequest(const httplib::Request& req) {
+    TqHttpRequest out;
+    out.Method = req.method;
+    out.Path = TqV1ToLegacyPath(req.path);
+    out.Body = req.body;
+    for (const auto& header : req.headers) {
+        out.Headers[TqLowerHeaderName(header.first)] = header.second;
+    }
+    return out;
+}
+
+void TqSetJson(httplib::Response& res, int status, const std::string& body) {
+    res.status = status;
+    res.set_header("Connection", "close");
+    res.set_content(body, "application/json");
+}
+
+void TqSetLegacyResponse(httplib::Response& res, const std::string& raw) {
+    const size_t lineEnd = raw.find("\r\n");
+    if (lineEnd == std::string::npos || raw.compare(0, 9, "HTTP/1.1 ") != 0) {
+        TqSetJson(res, 500, "{\"error\":\"bad handler response\"}");
         return;
     }
+    int status = 500;
+    try {
+        status = std::stoi(raw.substr(9, 3));
+    } catch (...) {
+        status = 500;
+    }
+    const size_t bodyStart = raw.find("\r\n\r\n");
+    const std::string body = bodyStart == std::string::npos ? std::string{} : raw.substr(bodyStart + 4);
+    TqSetJson(res, status, body);
+}
 
-    const std::string response = handler ? handler(req) : TqJsonResponse(500, "{\"error\":\"no handler\"}");
-    (void)TqSendAll(clientFd, response);
+std::string TqUnauthorizedJson() {
+    return "{\"error\":{\"code\":\"unauthorized\",\"message\":\"unauthorized\"}}";
 }
 
 } // namespace
@@ -387,7 +345,17 @@ bool TqParseHttpRequest(const std::string& raw, TqHttpRequest& req, std::string&
 }
 
 std::string TqJsonResponse(int status, const std::string& json) {
-    if (status != 200 && status != 400 && status != 404 && status != 500) {
+    if (status != 200 &&
+        status != 201 &&
+        status != 202 &&
+        status != 204 &&
+        status != 400 &&
+        status != 401 &&
+        status != 404 &&
+        status != 409 &&
+        status != 413 &&
+        status != 500 &&
+        status != 503) {
         status = 500;
     }
 
@@ -418,8 +386,13 @@ bool TqValidateAdminListen(const std::string& listen, std::string& err) {
 }
 
 TqAdminHttpServer::TqAdminHttpServer(std::string listen, TqHttpHandler handler) :
+    TqAdminHttpServer(std::move(listen), std::move(handler), TqAdminHttpServerOptions{}) {
+}
+
+TqAdminHttpServer::TqAdminHttpServer(std::string listen, TqHttpHandler handler, TqAdminHttpServerOptions options) :
     Listen(std::move(listen)),
-    Handler(std::move(handler)) {
+    Handler(std::move(handler)),
+    Options(std::move(options)) {
 }
 
 TqAdminHttpServer::~TqAdminHttpServer() {
@@ -430,44 +403,95 @@ bool TqAdminHttpServer::Start(std::string& err) {
     if (!TqValidateAdminBindListen(Listen, err)) {
         return false;
     }
-    TqSocketHandle listenFd = TqInvalidSocket;
-    if (!TqCreateListenSocket(Listen, listenFd, err)) {
+
+    TqHostPort hostPort{};
+    if (!TqParseHostPort(Listen, hostPort, true)) {
+        err = "admin listen must be host:port";
+        return false;
+    }
+    if (Options.AdminThreads == 0 || Options.AdminThreads > 32) {
+        err = "admin threads must be in range 1..32";
         return false;
     }
 
-    ListenFd.store(listenFd);
-    BoundListen = TqGetBoundListenAddress(listenFd, Listen);
+    Server.reset(new httplib::Server());
+    Server->new_task_queue = [threads = Options.AdminThreads]() {
+        return new httplib::ThreadPool(threads);
+    };
+    Server->set_read_timeout(5, 0);
+    Server->set_write_timeout(5, 0);
+    Server->set_keep_alive_max_count(1);
+    Server->set_keep_alive_timeout(1);
+    Server->set_payload_max_length(Options.MaxBodyBytes);
+    Server->set_error_handler([](const httplib::Request&, httplib::Response& res) {
+        if (res.status == 413) {
+            TqSetJson(res, 413, "{\"error\":{\"code\":\"payload_too_large\",\"message\":\"payload too large\"}}");
+        } else if (res.status == 400) {
+            TqSetJson(res, 400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"bad request\"}}");
+        } else {
+            TqSetJson(res, res.status == 0 ? 404 : res.status, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+        }
+    });
+    ConfigureRoutes();
 
-    Stopping = false;
-    Thread = std::thread(&TqAdminHttpServer::Run, this, listenFd);
+    const bool tokenAuthEnabled = Options.EnableTokenAuth || !Options.TokenFile.empty();
+    if (tokenAuthEnabled) {
+        Auth.reset(new TqAdminAuth());
+        if (!Auth->InitializeToken()) {
+            err = "failed to generate admin token";
+            Server.reset();
+            return false;
+        }
+        TokenFilePath = Options.TokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath() : Options.TokenFile;
+    }
+
+    int boundPort = 0;
+    if (hostPort.Port == 0) {
+        boundPort = Server->bind_to_any_port(hostPort.Host);
+        if (boundPort <= 0) {
+            err = "bind failed";
+            Server.reset();
+            Auth.reset();
+            return false;
+        }
+    } else {
+        if (!Server->bind_to_port(hostPort.Host, hostPort.Port)) {
+            err = "bind failed";
+            Server.reset();
+            Auth.reset();
+            return false;
+        }
+        boundPort = hostPort.Port;
+    }
+    BoundListen = hostPort.Host + ":" + std::to_string(boundPort);
+
+    Thread = std::thread(&TqAdminHttpServer::Run, this);
+    Server->wait_until_ready();
+    if (!Server->is_running()) {
+        err = "listen failed";
+        Stop();
+        return false;
+    }
+
+    if (Auth && !Auth->WriteTokenFile(TokenFilePath, BoundListen, err)) {
+        Stop();
+        return false;
+    }
+    Started = true;
     return true;
 }
 
 void TqAdminHttpServer::Stop() {
-    Stopping = true;
-    const TqSocketHandle listenFd = ListenFd.exchange(TqInvalidSocket);
-    if (TqSocketValid(listenFd)) {
-        (void)TqShutdownBoth(listenFd);
-        TqCloseSocket(listenFd);
-    }
-    {
-        std::lock_guard<std::mutex> guard(Lock);
-        for (const ActiveClient& client : ActiveClients) {
-            (void)TqShutdownBoth(client.Fd);
-        }
+    if (Server) {
+        Server->stop();
     }
     if (Thread.joinable()) {
         Thread.join();
     }
-
-    {
-        std::unique_lock<std::mutex> guard(Lock);
-        for (const ActiveClient& client : ActiveClients) {
-            (void)TqShutdownBoth(client.Fd);
-        }
-        ActiveClientsDrained.wait(guard, [this]() { return ActiveClients.empty(); });
-        ClientThreadsDrained.wait(guard, [this]() { return ActiveClientThreads == 0; });
+    if (Auth && !TokenFilePath.empty()) {
+        (void)Auth->CleanupTokenFile(TokenFilePath);
     }
+    Started = false;
 }
 
 std::string TqAdminHttpServer::ListenAddress() const {
@@ -475,51 +499,35 @@ std::string TqAdminHttpServer::ListenAddress() const {
     return BoundListen;
 }
 
-void TqAdminHttpServer::Run(TqSocketHandle listenFd) {
-    while (!Stopping) {
-        TqSocketHandle clientFd = ::accept(listenFd, nullptr, nullptr);
-        if (!TqSocketValid(clientFd)) {
-            if (TqSocketInterrupted(TqLastSocketError())) {
-                continue;
-            }
-            break;
-        }
-        if (Stopping) {
-            TqCloseSocket(clientFd);
-            break;
-        }
-        const uint64_t clientId = NextClientId.fetch_add(1);
-        TqHttpHandler handler;
-        {
-            std::lock_guard<std::mutex> guard(Lock);
-            ActiveClients.push_back({clientId, clientFd});
-            ++ActiveClientThreads;
-            handler = Handler;
-        }
-        std::thread([this, clientId, clientFd, handler]() { HandleClient(clientId, clientFd, handler); }).detach();
-    }
+std::string TqAdminHttpServer::AuthTokenForTesting() const {
+    return Auth ? Auth->Token() : std::string{};
 }
 
-void TqAdminHttpServer::HandleClient(uint64_t clientId, TqSocketHandle clientFd, TqHttpHandler handler) {
-    TqHandleAdminClient(clientFd, handler);
-    {
-        std::lock_guard<std::mutex> guard(Lock);
-        RemoveActiveClientLocked(clientId);
-    }
-    TqCloseSocket(clientFd);
+void TqAdminHttpServer::ConfigureRoutes() {
+    auto dispatch = [this](const httplib::Request& req, httplib::Response& res) {
+        const bool isLegacy = TqIsLegacyAdminPath(req.path);
+        const bool isV1 = TqIsV1AdminPath(req.path);
+        TqHttpRequest adminReq = TqMakeAdminRequest(req);
+        if (Auth && (TqIsV1Prefix(req.path) || (isLegacy && !Options.AllowUnauthenticatedLegacy)) && !Auth->Authorize(adminReq)) {
+            TqSetJson(res, 401, TqUnauthorizedJson());
+            return;
+        }
+        if (!isLegacy && !isV1) {
+            TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+            return;
+        }
+        TqSetLegacyResponse(res, Handler ? Handler(adminReq) : TqJsonResponse(500, "{\"error\":\"no handler\"}"));
+    };
 
-    std::lock_guard<std::mutex> guard(Lock);
-    --ActiveClientThreads;
-    if (ActiveClientThreads == 0) {
-        ClientThreadsDrained.notify_all();
-    }
+    Server->Get(R"(.*)", dispatch);
+    Server->Put(R"(.*)", dispatch);
+    Server->Post(R"(.*)", dispatch);
+    Server->Patch(R"(.*)", dispatch);
+    Server->Delete(R"(.*)", dispatch);
 }
 
-void TqAdminHttpServer::RemoveActiveClientLocked(uint64_t clientId) {
-    ActiveClients.erase(std::remove_if(ActiveClients.begin(), ActiveClients.end(), [clientId](const ActiveClient& client) {
-        return client.Id == clientId;
-    }), ActiveClients.end());
-    if (ActiveClients.empty()) {
-        ActiveClientsDrained.notify_all();
+void TqAdminHttpServer::Run() {
+    if (Server) {
+        (void)Server->listen_after_bind();
     }
 }
