@@ -856,6 +856,12 @@ public:
         TqTunnelRegistryMetadata metadata;
         metadata.Target = TraceTarget;
         metadata.Role = Role == TqTunnelRole::ClientOpen ? "client" : "server";
+        if (Role == TqTunnelRole::ServerOpen) {
+            const uint32_t serverConnId = TqLookupServerConnectionId(QuicConn);
+            if (serverConnId != 0) {
+                metadata.ConnectionId = "srv-" + std::to_string(serverConnId);
+            }
+        }
         metadata.Ingress = TraceIngressProto == 2 ? "http" : (TraceIngressProto == 1 ? "socks" : "");
         metadata.Compress = TqCompressName(algo);
         metadata.RelayBackend = TqRelayBackendName(RelayHandle);

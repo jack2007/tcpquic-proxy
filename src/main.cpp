@@ -6,6 +6,7 @@
 #include "acl.h"
 #include "server_dial_reactor.h"
 #include "router_runtime.h"
+#include "server_admin.h"
 #include "server_metrics.h"
 #include "speed_test.h"
 #include "tuning.h"
@@ -302,7 +303,10 @@ int RunServer(const TqConfig& cfg) {
             TqServerMetricsStreamFinished(*metrics);
             return;
         }
-        TqHandleServerIncomingStream(conn, stream, acl, cfg, speed.get(), [metrics]() {
+        TqServerConnectionStreamStarted(conn);
+        const uint32_t serverConnId = TqLookupServerConnectionId(conn);
+        TqHandleServerIncomingStream(conn, stream, acl, cfg, speed.get(), [metrics, serverConnId]() {
+            TqServerConnectionStreamFinishedById(serverConnId);
             TqServerMetricsStreamFinished(*metrics);
         }, [metrics]() {
             metrics->AclDenied.fetch_add(1);
@@ -333,7 +337,7 @@ int RunServer(const TqConfig& cfg) {
             if (req.Method == "GET" && req.Path == "/metrics") {
                 return TqJsonResponse(200, TqServerMetricsJson(*metrics, uptimeSeconds));
             }
-            return TqJsonResponse(404, "{\"error\":\"not found\"}");
+            return TqHandleServerAdmin(req, *metrics, uptimeSeconds);
         }, adminOptions));
         if (!admin->Start(err)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());

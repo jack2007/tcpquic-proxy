@@ -117,6 +117,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/client_peer_runtime.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
+    runtime/server_admin.cpp
     runtime/server_metrics.cpp
     runtime/speed_test.cpp
     runtime/trace.cpp
@@ -1013,6 +1014,15 @@ target_link_libraries(tcpquic_tunnel_registry_test PRIVATE Threads::Threads inc 
 set_property(TARGET tcpquic_tunnel_registry_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+add_executable(tcpquic_server_admin_test
+    unittest/server_admin_test.cpp
+    runtime/server_admin.cpp
+)
+tcpquic_target_include_dirs(tcpquic_server_admin_test)
+target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic)
+set_property(TARGET tcpquic_server_admin_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_server_admin_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_executable(tcpquic_client_peer_runtime_test
     unittest/client_peer_runtime_test.cpp
 )
@@ -1103,6 +1113,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_thread_pool_test
     tcpquic_tunnel_reaper_test
     tcpquic_tunnel_registry_test
+    tcpquic_server_admin_test
     tcpquic_control_test
     tcpquic_ares_dns_resolver_test
     tcpquic_speed_test_test

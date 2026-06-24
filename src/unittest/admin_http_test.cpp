@@ -467,6 +467,12 @@ int main() {
             if (req.Method == "GET" && req.Path == "/relay/workers/aggregate") {
                 return TqJsonResponse(200, "{\"worker_id\":\"aggregate\"}");
             }
+            if (req.Method == "GET" && req.Path == "/server/connections") {
+                return TqJsonResponse(200, "{\"connections\":[]}");
+            }
+            if (req.Method == "POST" && req.Path == "/server/connections/srv-1:abort-tunnels") {
+                return TqJsonResponse(202, "{\"server_abort\":true}");
+            }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 120;
@@ -546,8 +552,30 @@ int main() {
         std::string relayWorkerResponse;
         if (!TqRecvUntilClosed(relayWorkerFd, relayWorkerResponse)) return 151;
         TqCloseSocket(relayWorkerFd);
-        server.Stop();
         if (!TqHttpStatusIs(relayWorkerResponse, 200)) return 152;
+
+        TqSocketHandle serverConnectionsFd = TqConnectLocal(port);
+        if (!TqSocketValid(serverConnectionsFd)) return 153;
+        const std::string serverConnectionsRequest =
+            "GET /api/v1/server/connections HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(serverConnectionsFd, serverConnectionsRequest)) return 154;
+        std::string serverConnectionsResponse;
+        if (!TqRecvUntilClosed(serverConnectionsFd, serverConnectionsResponse)) return 155;
+        TqCloseSocket(serverConnectionsFd);
+        if (!TqHttpStatusIs(serverConnectionsResponse, 200)) return 156;
+
+        TqSocketHandle serverAbortFd = TqConnectLocal(port);
+        if (!TqSocketValid(serverAbortFd)) return 157;
+        const std::string serverAbortRequest =
+            "POST /api/v1/server/connections/srv-1:abort-tunnels HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(serverAbortFd, serverAbortRequest)) return 158;
+        std::string serverAbortResponse;
+        if (!TqRecvUntilClosed(serverAbortFd, serverAbortResponse)) return 159;
+        TqCloseSocket(serverAbortFd);
+        server.Stop();
+        if (!TqHttpStatusIs(serverAbortResponse, 202)) return 160;
     }
     {
         TqAdminHttpServerOptions options;

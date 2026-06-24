@@ -289,7 +289,16 @@ bool TqSetDisable1RttEncryption(MsQuicConnection* connection, const char* role) 
 }
 
 std::mutex g_serverConnIdLock;
-std::unordered_map<HQUIC, uint32_t> g_serverConnIds;
+struct TqServerConnectionRecord {
+    uint32_t Id{0};
+    MsQuicConnection* Connection{nullptr};
+    std::string RemoteAddress;
+    std::string State{"connected"};
+    uint64_t ActiveStreams{0};
+    uint64_t TotalStreams{0};
+    std::string LastError;
+};
+std::unordered_map<HQUIC, TqServerConnectionRecord> g_serverConnIds;
 std::atomic<uint32_t> g_nextServerConnId{1};
 
 std::mutex g_clientTraceConnLock;
@@ -343,7 +352,11 @@ uint32_t TqRegisterServerConnection(MsQuicConnection* connection) {
     }
     const uint32_t id = g_nextServerConnId.fetch_add(1);
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
-    g_serverConnIds[connection->Handle] = id;
+    TqServerConnectionRecord record;
+    record.Id = id;
+    record.Connection = connection;
+    record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
+    g_serverConnIds[connection->Handle] = std::move(record);
     return id;
 }
 
@@ -353,7 +366,7 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     }
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     const auto it = g_serverConnIds.find(connection->Handle);
-    return it == g_serverConnIds.end() ? 0 : it->second;
+    return it == g_serverConnIds.end() ? 0 : it->second.Id;
 }
 
 void TqUnregisterServerConnection(MsQuicConnection* connection) {
@@ -362,6 +375,93 @@ void TqUnregisterServerConnection(MsQuicConnection* connection) {
     }
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     g_serverConnIds.erase(connection->Handle);
+}
+
+std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
+    std::vector<TqServerConnectionSnapshot> snapshots;
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    snapshots.reserve(g_serverConnIds.size());
+    for (const auto& item : g_serverConnIds) {
+        TqServerConnectionSnapshot snapshot;
+        snapshot.ConnectionId = "srv-" + std::to_string(item.second.Id);
+        snapshot.RemoteAddress = item.second.RemoteAddress;
+        snapshot.State = item.second.State;
+        snapshot.ActiveStreams = item.second.ActiveStreams;
+        snapshot.TotalStreams = item.second.TotalStreams;
+        snapshot.ActiveTunnels = TqCountConnectionTunnels(item.second.Connection);
+        snapshot.LastError = item.second.LastError;
+        snapshots.push_back(std::move(snapshot));
+    }
+    std::sort(snapshots.begin(), snapshots.end(), [](const auto& a, const auto& b) {
+        return a.ConnectionId < b.ConnectionId;
+    });
+    return snapshots;
+}
+
+bool TqGetServerConnectionSnapshot(const std::string& connectionId, TqServerConnectionSnapshot& out) {
+    const auto snapshots = TqSnapshotServerConnections();
+    auto it = std::find_if(snapshots.begin(), snapshots.end(), [&connectionId](const auto& snapshot) {
+        return snapshot.ConnectionId == connectionId;
+    });
+    if (it == snapshots.end()) {
+        return false;
+    }
+    out = *it;
+    return true;
+}
+
+bool TqAbortServerConnectionTunnels(const std::string& connectionId) {
+    MsQuicConnection* connection = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+        for (const auto& item : g_serverConnIds) {
+            if (connectionId == "srv-" + std::to_string(item.second.Id)) {
+                connection = item.second.Connection;
+                break;
+            }
+        }
+    }
+    if (connection == nullptr) {
+        return false;
+    }
+    (void)TqAbortConnectionTunnels(connection);
+    return true;
+}
+
+void TqServerConnectionStreamStarted(MsQuicConnection* connection) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    auto it = g_serverConnIds.find(connection->Handle);
+    if (it == g_serverConnIds.end()) {
+        return;
+    }
+    ++it->second.ActiveStreams;
+    ++it->second.TotalStreams;
+}
+
+void TqServerConnectionStreamFinished(MsQuicConnection* connection) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return;
+    }
+    const uint32_t connectionId = TqLookupServerConnectionId(connection);
+    TqServerConnectionStreamFinishedById(connectionId);
+}
+
+void TqServerConnectionStreamFinishedById(uint32_t connectionId) {
+    if (connectionId == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    for (auto& item : g_serverConnIds) {
+        if (item.second.Id == connectionId) {
+            if (item.second.ActiveStreams != 0) {
+                --item.second.ActiveStreams;
+            }
+            return;
+        }
+    }
 }
 
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {

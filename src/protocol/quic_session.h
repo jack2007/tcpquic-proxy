@@ -35,6 +35,23 @@ struct TqConnectionSnapshot {
     std::string LastError;
 };
 
+struct TqServerConnectionSnapshot {
+    std::string ConnectionId;
+    std::string RemoteAddress;
+    std::string State;
+    uint64_t ActiveStreams{0};
+    uint64_t TotalStreams{0};
+    uint64_t ActiveTunnels{0};
+    std::string LastError;
+};
+
+std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections();
+bool TqGetServerConnectionSnapshot(const std::string& connectionId, TqServerConnectionSnapshot& out);
+bool TqAbortServerConnectionTunnels(const std::string& connectionId);
+void TqServerConnectionStreamStarted(MsQuicConnection* connection);
+void TqServerConnectionStreamFinished(MsQuicConnection* connection);
+void TqServerConnectionStreamFinishedById(uint32_t connectionId);
+
 #if defined(TQ_UNIT_TESTING)
 struct TqCredentialConfigSnapshot {
     QUIC_CREDENTIAL_TYPE Type{};
