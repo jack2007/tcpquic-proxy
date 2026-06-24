@@ -109,6 +109,27 @@ bool WaitForTcpBytes(TqSocketHandle socket, std::vector<uint8_t>& output, size_t
     return output.size() >= expected;
 }
 
+class FlushOnlyCompressor final : public ITqCompressor {
+public:
+    bool Compress(const uint8_t*, size_t inLen, std::vector<uint8_t>&, bool) override {
+        InputBytes.fetch_add(inLen, std::memory_order_relaxed);
+        CompressCalls.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    bool Flush(std::vector<uint8_t>& out) override {
+        FlushCalls.fetch_add(1, std::memory_order_relaxed);
+        out.push_back(0x5a);
+        return true;
+    }
+
+    void Reset() override {}
+
+    std::atomic<uint64_t> InputBytes{0};
+    std::atomic<uint64_t> CompressCalls{0};
+    std::atomic<uint64_t> FlushCalls{0};
+};
+
 class EmptyOutputCompressor final : public ITqCompressor {
 public:
     TqWindowsRelayWorker* Worker{nullptr};
@@ -1347,6 +1368,94 @@ int main() {
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
             return 100;
+        }
+
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+    }
+    {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamSend = FakeStreamSend;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+        g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+        ResetFakeStreamSends();
+
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            MsQuic = nullptr;
+            return 190;
+        }
+
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 191;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        FlushOnlyCompressor compressor;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!receiveWorker.RegisterRelay(pair[0], stream, &compressor, nullptr, &handle, tuning, TqCompressAlgo::Zstd)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 192;
+        }
+
+        const char payload[] = "z";
+        if (TqSend(pair[1], payload, sizeof(payload) - 1, TqSendFlags::None) !=
+            static_cast<int>(sizeof(payload) - 1)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 193;
+        }
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        do {
+            if (compressor.FlushCalls.load(std::memory_order_acquire) != 0) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        if (compressor.CompressCalls.load(std::memory_order_acquire) < 1 ||
+            compressor.InputBytes.load(std::memory_order_acquire) < sizeof(payload) - 1 ||
+            compressor.FlushCalls.load(std::memory_order_acquire) < 1) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 194;
+        }
+        if (!WaitForFakeStreamSendCount(1, 2000)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 195;
+        }
+        {
+            std::lock_guard<std::mutex> guard(g_StreamSendMutex);
+            if (g_StreamSendPayloads.size() != 1 || g_StreamSendPayloads[0].size() != 1 ||
+                g_StreamSendPayloads[0][0] != 0x5a) {
+                receiveWorker.Stop();
+                TqCloseSocket(pair[1]);
+                MsQuic = nullptr;
+                return 196;
+            }
+        }
+        if (receiveWorker.Snapshot().Errors != 0) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 197;
         }
 
         receiveWorker.Stop();
