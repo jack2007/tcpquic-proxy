@@ -151,26 +151,6 @@ void TqRelayDebugLog(const char* fmt, ...) {
     }
 }
 
-const char* TqEpollEventsString(uint32_t events, char* buffer, size_t size) {
-    if (buffer == nullptr || size == 0) {
-        return "";
-    }
-    buffer[0] = '\0';
-    auto append = [&](const char* name) {
-        if (buffer[0] != '\0') {
-            std::strncat(buffer, "|", size - std::strlen(buffer) - 1);
-        }
-        std::strncat(buffer, name, size - std::strlen(buffer) - 1);
-    };
-    if ((events & EPOLLIN) != 0) append("IN");
-    if ((events & EPOLLOUT) != 0) append("OUT");
-    if ((events & EPOLLRDHUP) != 0) append("RDHUP");
-    if ((events & EPOLLHUP) != 0) append("HUP");
-    if ((events & EPOLLERR) != 0) append("ERR");
-    if (buffer[0] == '\0') append("none");
-    return buffer;
-}
-
 QUIC_STATUS TqLinuxRelayStreamSend(
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
@@ -214,11 +194,6 @@ uint64_t PendingTcpWriteBytes(const std::deque<TqBufferView>& writes) {
         bytes += view.Len;
     }
     return bytes;
-}
-
-bool IsTcpReadGracefulCloseError(int error) {
-    (void)error;
-    return false;
 }
 
 void ConfigureRelayTcpLiveness(
@@ -1286,15 +1261,6 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
 
         const ssize_t received = ::readv(relay->TcpFd, iov.data(), static_cast<int>(iov.size()));
         if (received > 0) {
-            TqRelayDebugLog(
-                "event=linux_relay_tcp_read worker=%u relay=%llu fd=%d result=bytes bytes=%zd total_tcp_read_before=%llu tcp_read_closed=%d tcp_write_closed=%d",
-                Config.WorkerIndex,
-                static_cast<unsigned long long>(relay->Id),
-                relay->TcpFd,
-                received,
-                static_cast<unsigned long long>(relay->TcpReadBytes),
-                relay->TcpReadClosed ? 1 : 0,
-                relay->TcpWriteClosed ? 1 : 0);
             size_t remaining = static_cast<size_t>(received);
             std::vector<TqBufferView> views;
             views.reserve(refs.size());
@@ -1353,35 +1319,6 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            TqRelayDebugLog(
-                "event=linux_relay_tcp_read worker=%u relay=%llu fd=%d result=eagain errno=%d tcp_read_closed=%d tcp_write_closed=%d tcp_read_armed=%d tcp_write_armed=%d read_bytes_this_drain=%llu",
-                Config.WorkerIndex,
-                static_cast<unsigned long long>(relay->Id),
-                relay->TcpFd,
-                errno,
-                relay->TcpReadClosed ? 1 : 0,
-                relay->TcpWriteClosed ? 1 : 0,
-                relay->TcpReadArmed ? 1 : 0,
-                relay->TcpWriteArmed ? 1 : 0,
-                static_cast<unsigned long long>(readBytes));
-            break;
-        }
-        if (IsTcpReadGracefulCloseError(errno)) {
-            TqRelayDebugLog(
-                "event=linux_relay_tcp_read worker=%u relay=%llu fd=%d result=graceful_error errno=%d tcp_read_closed=%d tcp_write_closed=%d",
-                Config.WorkerIndex,
-                static_cast<unsigned long long>(relay->Id),
-                relay->TcpFd,
-                errno,
-                relay->TcpReadClosed ? 1 : 0,
-                relay->TcpWriteClosed ? 1 : 0);
-            if (!relay->TcpReadClosed) {
-                relay->TcpReadClosed = true;
-                ArmTcpReadable(relay, false);
-                if (!FinishTcpToQuic(relay)) {
-                    SetRelayStop(relay, "tcp_read_reset_quic_fin_failed");
-                }
-            }
             break;
         }
         const uint64_t savedErrno = static_cast<uint64_t>(errno);
@@ -2707,34 +2644,8 @@ void TqLinuxRelayWorker::UpdateTcpInterest(RelayState* relay) {
 void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
     auto relay = FindRelayById(relayId);
     if (relay == nullptr || relay->Closing) {
-        char eventNames[64];
-        TqRelayDebugLog(
-            "event=linux_relay_tcp_event_orphan worker=%u relay=%llu events=0x%x event_names=%s found=%d closing=%d",
-            Config.WorkerIndex,
-            static_cast<unsigned long long>(relayId),
-            events,
-            TqEpollEventsString(events, eventNames, sizeof(eventNames)),
-            relay != nullptr ? 1 : 0,
-            relay != nullptr && relay->Closing ? 1 : 0);
         return;
     }
-    char eventNames[64];
-    TqRelayDebugLog(
-        "event=linux_relay_tcp_event worker=%u relay=%llu fd=%d events=0x%x event_names=%s local=%s peer=%s tcp_read_closed=%d tcp_write_closed=%d tcp_read_armed=%d tcp_write_armed=%d outstanding_quic_sends=%llu pending_quic_receive_bytes=%llu pending_tcp_write_bytes=%llu",
-        Config.WorkerIndex,
-        static_cast<unsigned long long>(relayId),
-        relay->TcpFd,
-        events,
-        TqEpollEventsString(events, eventNames, sizeof(eventNames)),
-        relay->TcpFd >= 0 ? GetSocketNameString(relay->TcpFd, false).c_str() : "none",
-        relay->TcpFd >= 0 ? GetSocketNameString(relay->TcpFd, true).c_str() : "none",
-        relay->TcpReadClosed ? 1 : 0,
-        relay->TcpWriteClosed ? 1 : 0,
-        relay->TcpReadArmed ? 1 : 0,
-        relay->TcpWriteArmed ? 1 : 0,
-        static_cast<unsigned long long>(relay->OutstandingQuicSends),
-        static_cast<unsigned long long>(relay->PendingQuicReceiveBytes),
-        static_cast<unsigned long long>(PendingTcpWriteBytes(relay->PendingTcpWrites)));
     if ((events & EPOLLERR) != 0) {
         const int socketError = GetSocketError(relay->TcpFd);
         TqRelayDebugLog(
