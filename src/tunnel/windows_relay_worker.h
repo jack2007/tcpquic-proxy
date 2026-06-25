@@ -139,6 +139,12 @@ public:
     bool TestMarkTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestCompleteTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
+    bool TestMarkTcpSendInFlightForTest(uint64_t relayId);
+    bool TestHandleTcpPostFailureForTest(uint64_t relayId, int error);
+    bool TestGetRelayDrainFlagsForTest(
+        uint64_t relayId,
+        bool* closeAfterDrained,
+        bool* tcpRecvClosed) const;
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
     bool MaybePostTcpRecvForTest(uint64_t relayId);
@@ -167,6 +173,8 @@ private:
     void ProcessRelayTask(TqWindowsRelayTask& task);
     void ProcessQuicReceiveViewTask(TqWindowsRelayTask& task);
     void ProcessQuicSendCompleteTask(TqWindowsRelayTask& task);
+    void ProcessQuicPeerAborted(uint64_t relayId, const char* reason, uint64_t errorCode);
+    void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
     void DrainCallbackPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
     void DrainCallbackPendingQuicSendCompletions();
@@ -233,6 +241,7 @@ private:
         const char* reason = nullptr);
     void MarkRelayCloseReason(const std::shared_ptr<RelayContext>& relay, const char* reason);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
+    bool HasPendingAfterStreamShutdown(const std::shared_ptr<RelayContext>& relay) const;
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void RecordTcpHardErrorAndFail(
         const std::shared_ptr<RelayContext>& relay,
@@ -283,6 +292,7 @@ private:
     std::atomic<uint64_t> ZstdDecompressFailures_{0};
     std::atomic<uint64_t> FatalRelayResets_{0};
     std::atomic<uint64_t> GracefulRelayDrains_{0};
+    std::atomic<uint64_t> LateTeardownDowngradedCount_{0};
     std::atomic<uint64_t> TcpHardErrors_{0};
     std::atomic<uint64_t> QuicSendBackpressureEvents_{0};
     std::atomic<uint64_t> QuicSendFatalErrors_{0};
