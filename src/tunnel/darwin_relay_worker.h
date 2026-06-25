@@ -206,8 +206,8 @@ private:
     bool SetQuicReceiveEnabled(const std::shared_ptr<RelayState>& relay, bool enabled);
     void MaybePauseQuicReceive(const std::shared_ptr<RelayState>& relay);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayState>& relay);
-    void RetireRelay(const std::shared_ptr<RelayState>& relay);
-    void CloseRelay(const std::shared_ptr<RelayState>& relay);
+    void RetireRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
+    void CloseRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
     void PurgeRetiredRelaysIfSafe();
     bool WaitForKnownOperationsToDrain();
     void DetachRetiredBindingsForDestruction();

@@ -547,7 +547,9 @@ void TqDarwinRelayWorker::ClearPublicHandle(const std::shared_ptr<RelayState>& r
     }
 }
 
-void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) {
+void TqDarwinRelayWorker::RetireRelay(
+    const std::shared_ptr<RelayState>& relay,
+    uint32_t retainedCallbackRefs) {
     if (relay == nullptr) {
         return;
     }
@@ -608,11 +610,12 @@ void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) 
         binding->Active.store(false, std::memory_order_release);
         static constexpr uint32_t kMaxCallbackRefYields = 100000;
         uint32_t callbackRefYields = 0;
-        while (binding->CallbackRefs.load(std::memory_order_acquire) != 0 && callbackRefYields < kMaxCallbackRefYields) {
+        while (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs &&
+               callbackRefYields < kMaxCallbackRefYields) {
             ++callbackRefYields;
             std::this_thread::yield();
         }
-        if (binding->CallbackRefs.load(std::memory_order_acquire) != 0) {
+        if (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs) {
             Errors.fetch_add(1, std::memory_order_relaxed);
         }
         const auto completions = binding->Completions;
@@ -635,7 +638,9 @@ void TqDarwinRelayWorker::RetireRelay(const std::shared_ptr<RelayState>& relay) 
     }
 }
 
-void TqDarwinRelayWorker::CloseRelay(const std::shared_ptr<RelayState>& relay) {
+void TqDarwinRelayWorker::CloseRelay(
+    const std::shared_ptr<RelayState>& relay,
+    uint32_t retainedCallbackRefs) {
     if (relay == nullptr) {
         return;
     }
@@ -649,7 +654,7 @@ void TqDarwinRelayWorker::CloseRelay(const std::shared_ptr<RelayState>& relay) {
         Relays.erase(it);
     }
     RemoveTcpFilters(relay);
-    RetireRelay(relay);
+    RetireRelay(relay, retainedCallbackRefs);
     PurgeRetiredRelaysIfSafe();
 }
 
@@ -2113,6 +2118,17 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         if (worker != nullptr) {
             worker->Errors.fetch_add(1, std::memory_order_relaxed);
         }
+    }
+    if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
+        event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED ||
+        event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+        TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
+        if (worker != nullptr) {
+            if (auto relay = worker->FindRelay(binding->RelayId)) {
+                worker->CloseRelay(relay, 1);
+            }
+        }
+        return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
