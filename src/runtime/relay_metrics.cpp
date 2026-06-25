@@ -25,7 +25,6 @@ TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnap
     active.InFlightTcpRecvs = relay.InFlightTcpRecvs;
     active.InFlightTcpSends = relay.InFlightTcpSends;
     active.InFlightQuicSends = relay.InFlightQuicSends;
-    active.QueuedQuicReceives = relay.QueuedQuicReceives;
     active.PendingQuicReceiveBytes = relay.PendingQuicReceiveBytes;
     active.PendingQuicReceiveQueueDepth = relay.PendingQuicReceiveQueueDepth;
     active.CallbackPendingQuicReceiveDepth = relay.CallbackPendingQuicReceiveDepth;
@@ -35,6 +34,10 @@ TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnap
     active.TcpReadBytes = relay.TcpReadBytes;
     active.TcpWriteBytes = relay.TcpWriteBytes;
     active.LastTcpWriteErrno = relay.LastTcpWriteErrno;
+    active.LastTcpRecvErrno = relay.LastTcpRecvErrno;
+    active.LastTcpSendErrno = relay.LastTcpSendErrno;
+    active.LastIocpCompletionErrno = relay.LastIocpCompletionErrno;
+    active.LastIocpOperation = relay.LastIocpOperation;
     active.Closing = relay.Closing;
     active.TcpReadClosed = relay.TcpReadClosed;
     active.TcpReadPausedByQuicBacklog = relay.TcpReadPausedByQuicBacklog;
@@ -266,7 +269,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     uint64_t tcpWriteBytes = 0;
     uint64_t outstandingQuicSends = 0;
     uint64_t inflightTcpSends = 0;
-    uint64_t queuedQuicReceives = 0;
     uint64_t closingRelays = 0;
     uint64_t tcpReadClosedRelays = 0;
     uint64_t closeAfterDrainedRelays = 0;
@@ -278,7 +280,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         tcpWriteBytes += active.TcpWriteBytes;
         outstandingQuicSends += active.InFlightQuicSends;
         inflightTcpSends += active.InFlightTcpSends;
-        queuedQuicReceives += active.QueuedQuicReceives;
         if (active.Closing) {
             ++closingRelays;
         }
@@ -290,7 +291,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         }
         const uint64_t score =
             active.PendingQuicReceiveBytes + active.PendingQuicReceiveQueueDepth +
-            active.InFlightTcpSends + active.InFlightQuicSends + active.QueuedQuicReceives;
+            active.InFlightTcpSends + active.InFlightQuicSends;
         if (hotRelay == nullptr || score > hotScore) {
             hotRelay = &relay;
             hotScore = score;
@@ -314,7 +315,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.PendingTcpWriteQueue = snapshot.PendingQuicReceiveQueueDepth;
     metrics.PendingTcpWriteBytes = snapshot.PendingQuicReceiveBytes;
     metrics.TcpWriteArmedRelays = inflightTcpSends;
-    metrics.QuicReceiveViewCount = queuedQuicReceives;
+    metrics.QuicReceiveViewCount = snapshot.DeferredReceiveQueued;
     if (hotRelay != nullptr) {
         metrics.HotRelayId = hotRelay->RelayId;
         metrics.HotRelayWorkerIndex = hotRelay->WorkerIndex;

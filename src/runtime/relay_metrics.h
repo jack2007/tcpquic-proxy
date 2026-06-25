@@ -150,7 +150,6 @@ struct TqRelayActiveSnapshot {
     uint32_t InFlightTcpRecvs{0};
     uint32_t InFlightTcpSends{0};
     uint32_t InFlightQuicSends{0};
-    uint32_t QueuedQuicReceives{0};
     uint64_t PendingQuicReceiveBytes{0};
     uint64_t PendingQuicReceiveQueueDepth{0};
     uint64_t CallbackPendingQuicReceiveDepth{0};
@@ -160,6 +159,10 @@ struct TqRelayActiveSnapshot {
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
+    uint64_t LastTcpRecvErrno{0};
+    uint64_t LastTcpSendErrno{0};
+    uint64_t LastIocpCompletionErrno{0};
+    uint32_t LastIocpOperation{0};
     bool Closing{false};
     bool TcpReadClosed{false};
     bool TcpReadPausedByQuicBacklog{false};

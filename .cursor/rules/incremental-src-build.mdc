@@ -1,0 +1,23 @@
+---
+description: Use target-level incremental builds for src-only changes
+alwaysApply: true
+---
+
+## Incremental Build For Src-Only Changes
+
+When code changes are limited to `src/**` and no dependency/library/build-system files changed, use a target-level incremental build instead of a full rebuild.
+
+Treat these as **not src-only** changes:
+
+- `CMakeLists.txt`, `cmake/**`, toolchain files, presets, or generated project configuration
+- `third_party/**`, dependency submodules, vendored libraries, or generated dependency outputs
+- build directory regeneration, clean builds, or changes that require CMake configure
+
+For src-only changes, prefer commands like:
+
+```powershell
+cmake --build build-x64 --config Release --target tcpquic-proxy -- /m:1 /p:BuildProjectReferences=false
+cmake --build build-x64 --config Release --target tcpquic_windows_relay_worker_test -- /m:1 /p:BuildProjectReferences=false
+```
+
+Choose the narrowest target that validates the change. Do not run `clean`, delete build directories, reconfigure CMake, or build unrelated dependency targets unless the touched files require it or the incremental build fails in a way that indicates stale generated state.

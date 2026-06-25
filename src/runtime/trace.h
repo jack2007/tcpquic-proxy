@@ -59,6 +59,10 @@ struct TqTraceLinuxRelayStreamState {
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t TcpWriteErrno{0};
+    uint64_t TcpRecvErrno{0};
+    uint64_t TcpSendErrno{0};
+    uint64_t IocpCompletionErrno{0};
+    uint32_t IocpOperation{0};
     bool TcpReadClosed{false};
     bool TcpWriteClosed{false};
     bool QuicSendFinSubmitted{false};

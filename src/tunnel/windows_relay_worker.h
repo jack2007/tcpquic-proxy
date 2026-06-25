@@ -41,7 +41,6 @@ struct TqWindowsRelayActiveSnapshot {
     uint32_t InFlightTcpRecvs{0};
     uint32_t InFlightTcpSends{0};
     uint32_t InFlightQuicSends{0};
-    uint32_t QueuedQuicReceives{0};
     uint64_t PendingQuicReceiveBytes{0};
     uint64_t PendingQuicReceiveQueueDepth{0};
     uint64_t CallbackPendingQuicReceiveDepth{0};
@@ -51,6 +50,10 @@ struct TqWindowsRelayActiveSnapshot {
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
+    uint64_t LastTcpRecvErrno{0};
+    uint64_t LastTcpSendErrno{0};
+    uint64_t LastIocpCompletionErrno{0};
+    uint32_t LastIocpOperation{0};
     bool Closing{false};
     bool TcpReadClosed{false};
     bool TcpReadPausedByQuicBacklog{false};
@@ -150,6 +153,7 @@ public:
     bool TestCompleteTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestMarkTcpSendInFlightForTest(uint64_t relayId);
+    bool TestRecordIocpCompletionErrorForTest(uint64_t relayId, bool tcpSend, DWORD error);
     bool TestHandleTcpPostFailureForTest(uint64_t relayId, int error);
     bool TestGetRelayDrainFlagsForTest(
         uint64_t relayId,
@@ -264,6 +268,12 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,
         uint64_t tcpError = 0);
+    void StoreTcpRecvErrno(const std::shared_ptr<RelayContext>& relay, uint64_t error);
+    void StoreTcpSendErrno(const std::shared_ptr<RelayContext>& relay, uint64_t error);
+    void StoreIocpCompletionErrno(
+        const std::shared_ptr<RelayContext>& relay,
+        uint32_t operation,
+        uint64_t error);
     bool HandleTcpPostFailure(
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,

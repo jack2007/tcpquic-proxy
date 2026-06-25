@@ -279,3 +279,146 @@ if (!relay->ReceiveDrainScheduled.exchange(true)) {
 1. 让 Windows `quic -> tcp` 更贴近 Linux 的 `FlushDeferredQuicReceives` 模型。
 2. 将 `EventQueue_` 主要用于跨线程控制事件，而不是承载每个 receive view 的细粒度数据调度。
 3. 收敛 Windows/Linux/Darwin 三端 receive 生命周期语义，减少平台差异导致的竞态。
+
+## 8. 后续观测修复计划
+
+本节记录 2026-06-25 新版本连续多次手工验证后发现的两个次要观测问题：
+
+1. `github.com:443` 曾出现一次 `trigger=iocp_completion_error`，错误码为 `121`。
+2. `stats_active_relay` 中多次出现 `queued_quic_receives=4294967295/4294967294`。
+
+这两个问题不属于前文的 receive view 重复 `WSASend` 根因，但会影响后续判断日志，因此需要单独修复 observability。
+
+### 8.1 `QueuedQuicReceives` 的引用结论
+
+`queued_quic_receives` 不是计算值，也不是 `QueuedQuicReceives - ActiveHandlers`。
+
+修复前，日志字段来自 active snapshot：
+
+```cpp
+active.QueuedQuicReceives = relay->QueuedQuicReceives.load(std::memory_order_relaxed);
+```
+
+`ActiveHandlers` 是 worker 正在处理某个 relay completion/task 的通用计数，包括 TCP recv completion、TCP send completion、QUIC send complete、close 等，不是 QUIC receive 专用计数，因此不能用于计算 QUIC receive 队列长度。
+
+修复前，`QueuedQuicReceives` 的增减路径是：
+
+- `QueueDeferredQuicReceive()`：成功创建并入队一个 `TqWindowsPendingQuicReceive` 后 `fetch_add(1)`。
+- `FinishReceiveView()`：从 `relay->PendingReceives` 中 erase 一个 view 后 `fetch_sub(1)`。
+- `CompleteAllPendingQuicReceives()`：关闭时 swap 出 pending list，对每个 view `fetch_sub(1)`。
+- `HandleQuicReceiveQueued()`：旧 IOCP receive buffer 路径中也有 `fetch_sub(1)`，但当前代码搜索不到新的投递点，疑似迁移到 event queue 后的遗留路径。
+
+因此，`4294967295/4294967294` 更像是 `QueuedQuicReceives.fetch_sub(1)` 次数多于 `fetch_add(1)`，导致 `uint32_t` 下溢，而不是队列真的很大。
+
+源码引用梳理后确认：`QueuedQuicReceives` 不只是日志字段，还参与过以下业务判断：
+
+- `HasPendingRelayDrainWork()`
+- `HasPendingAfterStreamShutdown()`
+- `ShouldDowngradeTcpSendZeroBytes()`
+- `quic_send_fin_completed` 后触发 `CloseAfterDrained` 的判断
+- active relay metrics 和 hot relay scoring
+
+但这些用途都可以用已有的 `PendingQuicReceiveQueueDepth`、`PendingQuicReceiveBytes`、`PendingReceives.empty()` 和 `CallbackPendingQuicReceives.empty()` 表达，而且 `PendingQuicReceiveQueueDepth` 已经使用饱和减法维护。因此保留 `QueuedQuicReceives` 只会形成重复状态，并带来下溢风险。
+
+### 8.2 `QueuedQuicReceives` 的处理结果
+
+处理策略：删除 `QueuedQuicReceives`，统一使用 `PendingQuicReceiveQueueDepth` 作为 receive view 队列深度观测和 drain 判断依据。
+
+已做的代码调整：
+
+1. 从 `RelayContext`、`TqWindowsRelayActiveSnapshot` 和 `TqRelayActiveSnapshot` 删除 `QueuedQuicReceives` 字段。
+2. 删除 `QueueDeferredQuicReceive()`、`FinishReceiveView()`、`CompleteAllPendingQuicReceives()` 和旧 `HandleQuicReceiveQueued()` 中对 `QueuedQuicReceives` 的 add/sub。
+3. 将原来依赖 `QueuedQuicReceives == 0` 的 close/drain 判断改为使用 `PendingQuicReceiveQueueDepth == 0`。
+4. 从 `stats_active_relay` 日志中删除 `queued_quic_receives` 字段。
+5. 从 relay metrics 聚合和 hot relay scoring 中删除 `QueuedQuicReceives`，hot score 继续基于 `PendingQuicReceiveBytes`、`PendingQuicReceiveQueueDepth`、`InFlightTcpSends` 和 `InFlightQuicSends`。
+
+重点检查位置：
+
+- `HasPendingRelayDrainWork()`
+- `HasPendingAfterStreamShutdown()`
+- `ShouldDowngradeTcpSendZeroBytes()`
+- `quic_send_fin_completed` 后触发 `CloseAfterDrained` 的判断
+
+删除后，`queued_quic_receives=4294967295/4294967294` 这类日志字段不会再出现；receive backlog 统一看 `pending_quic_receive_queue` 和 `pending_quic_receive_bytes`。
+
+### 8.3 IOCP completion error 的处理结果
+
+目标：`ERROR_SEM_TIMEOUT(121)` 仍然按异常结束 relay，但日志字段要能区分错误来自 TCP recv completion 还是 TCP send completion。
+
+当前 `GetQueuedCompletionStatus()` 返回 `FALSE` 且 `overlapped != nullptr` 时，表示之前提交成功的 overlapped I/O 已完成，但完成结果是错误。当前代码会先尝试 teardown/downgrade 分流；如果错误码不属于 teardown，且 relay 未 closing，则走：
+
+```cpp
+RecordTcpHardErrorAndFail(relay, "iocp_completion_error", completionError);
+```
+
+`121` 当前不在 `IsIocpTeardownError()` 中，也不应该加入。它应保持 hard error / fatal relay reset 语义。
+
+已做的代码调整：
+
+1. 在 `RelayContext`、`TqWindowsRelayActiveSnapshot`、`TqRelayActiveSnapshot` 和 trace state 中新增更精确字段：
+
+```cpp
+std::atomic<uint64_t> LastTcpRecvErrno{0};
+std::atomic<uint64_t> LastTcpSendErrno{0};
+std::atomic<uint64_t> LastIocpCompletionErrno{0};
+std::atomic<uint32_t> LastIocpOperation{0};
+```
+
+2. 在 IOCP `!ok` 分支中按 op 类型写入：
+   - `TcpRecv` completion error：写 `LastTcpRecvErrno` 和 `LastIocpCompletionErrno`。
+   - `TcpSend` completion error：写 `LastTcpSendErrno` 和 `LastIocpCompletionErrno`。
+   - 记录 `LastIocpOperation`，用于日志区分 recv/send。
+3. `RecordTcpHardErrorAndFail()` 不再通用写 `LastTcpWriteErrno`；具体 errno 字段由调用点先按 recv/send/iocp 类型写入。
+4. `HandleTcpPostFailure()` 按 reason 区分：
+   - `wsa_recv*` 写入 `LastTcpRecvErrno`。
+   - 其他 send/write post failure 写入 `LastTcpSendErrno` 和兼容字段 `LastTcpWriteErrno`。
+5. `DowngradeIocpCompletion()` 不再把 completion error 写入 `LastTcpWriteErrno`，只写 `LastIocpCompletionErrno`。
+6. 更新 `stats_active_relay` 和 relay state trace 日志字段：
+
+```text
+tcp_recv_errno=<...>
+tcp_send_errno=<...>
+iocp_errno=<...>
+iocp_op=<...>
+```
+
+7. 为兼容已有日志解析，短期保留 `tcp_write_errno`，但它现在只代表 send/write 侧错误。
+8. 不修改 `IsIocpTeardownError()` 对 `121` 的判断：
+   - 不把 `ERROR_SEM_TIMEOUT(121)` 加入 teardown 列表。
+   - 如果 `121` 不是 stale/closing/downgrade completion，继续走 fatal。
+
+测试 helper 中将 trigger 从通用 `iocp_completion_error` 细分为：
+
+- `iocp_tcp_recv_completion_error`
+- `iocp_tcp_send_completion_error`
+
+最终语义仍是 hard error，不降级为 graceful teardown。
+
+### 8.4 测试计划
+
+新增或扩展 `src/unittest/windows_relay_worker_test.cpp`：
+
+1. 关闭路径清理：
+   - 构造 `CompleteAllPendingQuicReceives()` 对 pending list 清理的场景。
+   - 验证 `PendingQuicReceiveQueueDepth` 归零。
+2. 旧 `QuicReceiveQueued` 路径：
+   - 后续如果继续确认无 producer，可删除 handler；当前已删除其中对重复计数的维护。
+3. IOCP `121` 保持 fatal：
+   - 构造 `TcpSend` completion error `121`，验证 `FatalRelayResets` / `TcpHardErrors` 增加。
+   - 验证 `LastTcpSendErrno == 121`、`LastTcpWriteErrno == 121`、`LastIocpCompletionErrno == 121`、`LastTcpRecvErrno == 0`。
+   - 构造 `TcpRecv` completion error `121`，验证 `LastTcpRecvErrno == 121`、`LastIocpCompletionErrno == 121`、`LastTcpSendErrno == 0`、`LastTcpWriteErrno == 0`。
+
+### 8.5 验证命令
+
+```powershell
+cmake --build build-x64 --config Release --target tcpquic_windows_relay_worker_test -- /m:1
+.\build-x64\bin\Release\tcpquic_windows_relay_worker_test.exe
+```
+
+手工运行新版 proxy 后检查日志：
+
+- 不再出现 `queued_quic_receives` 字段。
+- receive backlog 改看 `pending_quic_receive_queue`。
+- 如果再出现 `121`，日志能区分是 recv completion 还是 send completion。
+- `121` 仍然导致对应 relay fatal 结束。
+- 不回归前文核心问题：没有 `completed/accounted > total`，没有 `finish_already_drained`。

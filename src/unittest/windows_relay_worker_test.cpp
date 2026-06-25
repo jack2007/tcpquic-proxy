@@ -645,6 +645,64 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         }
         receiveWorker.Stop();
     }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 242;
+        }
+        const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+        if (!receiveWorker.TestRecordIocpCompletionErrorForTest(
+                handle.WindowsRelayId, true, ERROR_SEM_TIMEOUT)) {
+            receiveWorker.Stop();
+            return 243;
+        }
+        const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            after.FatalRelayResets <= before.FatalRelayResets ||
+            after.TcpHardErrors <= before.TcpHardErrors) {
+            receiveWorker.Stop();
+            return 244;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 245;
+        }
+        const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+        if (!receiveWorker.TestRecordIocpCompletionErrorForTest(
+                handle.WindowsRelayId, false, ERROR_SEM_TIMEOUT)) {
+            receiveWorker.Stop();
+            return 246;
+        }
+        const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            after.FatalRelayResets <= before.FatalRelayResets ||
+            after.TcpHardErrors <= before.TcpHardErrors) {
+            receiveWorker.Stop();
+            return 247;
+        }
+        receiveWorker.Stop();
+    }
     return 0;
 }
 

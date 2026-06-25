@@ -389,7 +389,7 @@ void DumpPeriodicStats() {
                 }
 
                 LogInfo(
-                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u queued_quic_receives=%u tcp_write_errno=%llu closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d event_queue_depth=%llu callback_pending_quic_receives=%llu tcp_read_paused_by_quic_backlog=%d outstanding_quic_send_bytes=%llu",
+                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u tcp_write_errno=%llu tcp_recv_errno=%llu tcp_send_errno=%llu iocp_errno=%llu iocp_op=%u closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d event_queue_depth=%llu callback_pending_quic_receives=%llu tcp_read_paused_by_quic_backlog=%d outstanding_quic_send_bytes=%llu",
                     static_cast<unsigned long long>(tunnel.tunnelId),
                     relay->WorkerIndex,
                     static_cast<unsigned long long>(relay->RelayId),
@@ -403,8 +403,11 @@ void DumpPeriodicStats() {
                     relay->InFlightTcpRecvs,
                     relay->InFlightTcpSends,
                     relay->InFlightQuicSends,
-                    relay->QueuedQuicReceives,
                     static_cast<unsigned long long>(relay->LastTcpWriteErrno),
+                    static_cast<unsigned long long>(relay->LastTcpRecvErrno),
+                    static_cast<unsigned long long>(relay->LastTcpSendErrno),
+                    static_cast<unsigned long long>(relay->LastIocpCompletionErrno),
+                    relay->LastIocpOperation,
                     relay->Closing ? 1 : 0,
                     relay->TcpReadClosed ? 1 : 0,
                     relay->TcpWriteClosed ? 1 : 0,
@@ -855,11 +858,11 @@ bool TqDiagStatsEnabled() {
 std::string FormatTraceLinuxRelayStateLine(
     const char* eventName,
     const TqTraceLinuxRelayStreamState& state) {
-    char buffer[1024];
+    char buffer[1408];
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_write_errno=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d tunnel=%llu target=%s",
+        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_write_errno=%llu tcp_recv_errno=%llu tcp_send_errno=%llu iocp_errno=%llu iocp_op=%u tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d tunnel=%llu target=%s",
         eventName != nullptr ? eventName : "linux_relay_state",
         state.WorkerIndex,
         static_cast<unsigned long long>(state.RelayId),
@@ -871,6 +874,10 @@ std::string FormatTraceLinuxRelayStateLine(
         static_cast<unsigned long long>(state.TcpReadBytes),
         static_cast<unsigned long long>(state.TcpWriteBytes),
         static_cast<unsigned long long>(state.TcpWriteErrno),
+        static_cast<unsigned long long>(state.TcpRecvErrno),
+        static_cast<unsigned long long>(state.TcpSendErrno),
+        static_cast<unsigned long long>(state.IocpCompletionErrno),
+        state.IocpOperation,
         state.TcpReadClosed ? 1 : 0,
         state.TcpWriteClosed ? 1 : 0,
         state.QuicSendFinSubmitted ? 1 : 0,
@@ -891,7 +898,7 @@ std::string TqFormatTraceRelayStateLine(
     const char* eventName,
     const char* backend,
     const TqTraceLinuxRelayStreamState& state) {
-    char buffer[1152];
+    char buffer[1536];
     std::snprintf(
         buffer,
         sizeof(buffer),
