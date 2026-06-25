@@ -153,6 +153,8 @@ private:
     size_t DrainEvents(size_t budget);
     void DrainPerRelayMaintenance();
     void ProcessRelayTask(TqWindowsRelayTask& task);
+    void ProcessQuicReceiveViewTask(TqWindowsRelayTask& task);
+    void DrainCallbackPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
