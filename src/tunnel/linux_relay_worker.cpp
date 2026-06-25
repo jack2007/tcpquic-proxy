@@ -249,6 +249,7 @@ void LogLinuxRelayError(
     uint64_t outstandingQuicSendBytes) {
     TqTraceRelayFatalError(
         "linux",
+        workerIndex,
         reason,
         relayId,
         static_cast<uint64_t>(tcpFd),

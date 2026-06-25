@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <vector>
 
 struct TqRelayMetricsSnapshot {
     const char* Backend{"unsupported"};
@@ -140,6 +141,32 @@ struct TqRelayMetricsSnapshot {
     int64_t LastQuicSendStatus{0};
 };
 
+struct TqRelayActiveSnapshot {
+    const char* Backend{"unsupported"};
+    uint32_t WorkerIndex{0};
+    uint64_t RelayId{0};
+    uint32_t ActiveHandlers{0};
+    uint32_t QueuedWorkerOps{0};
+    uint32_t InFlightTcpRecvs{0};
+    uint32_t InFlightTcpSends{0};
+    uint32_t InFlightQuicSends{0};
+    uint32_t QueuedQuicReceives{0};
+    uint64_t PendingQuicReceiveBytes{0};
+    uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t LastTcpWriteErrno{0};
+    bool Closing{false};
+    bool TcpReadClosed{false};
+    bool TcpWriteClosed{false};
+    bool CloseAfterDrained{false};
+    bool QuicSendFinSubmitted{false};
+    bool QuicSendFinCompleted{false};
+    bool StopPublished{false};
+    bool StreamDetached{false};
+};
+
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();
+std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays();
 void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics);
 void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value);

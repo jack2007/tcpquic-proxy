@@ -14,6 +14,35 @@
 
 namespace {
 
+#if defined(_WIN32)
+TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnapshot& relay) {
+    TqRelayActiveSnapshot active{};
+    active.Backend = "windows";
+    active.WorkerIndex = relay.WorkerIndex;
+    active.RelayId = relay.RelayId;
+    active.ActiveHandlers = relay.ActiveHandlers;
+    active.QueuedWorkerOps = relay.QueuedWorkerOps;
+    active.InFlightTcpRecvs = relay.InFlightTcpRecvs;
+    active.InFlightTcpSends = relay.InFlightTcpSends;
+    active.InFlightQuicSends = relay.InFlightQuicSends;
+    active.QueuedQuicReceives = relay.QueuedQuicReceives;
+    active.PendingQuicReceiveBytes = relay.PendingQuicReceiveBytes;
+    active.PendingQuicReceiveQueueDepth = relay.PendingQuicReceiveQueueDepth;
+    active.TcpReadBytes = relay.TcpReadBytes;
+    active.TcpWriteBytes = relay.TcpWriteBytes;
+    active.LastTcpWriteErrno = relay.LastTcpWriteErrno;
+    active.Closing = relay.Closing;
+    active.TcpReadClosed = relay.TcpReadClosed;
+    active.TcpWriteClosed = relay.TcpWriteClosed;
+    active.CloseAfterDrained = relay.CloseAfterDrained;
+    active.QuicSendFinSubmitted = relay.QuicSendFinSubmitted;
+    active.QuicSendFinCompleted = relay.QuicSendFinCompleted;
+    active.StopPublished = relay.StopPublished;
+    active.StreamDetached = relay.StreamDetached;
+    return active;
+}
+#endif
+
 std::string TqJsonEscape(const std::string& value) {
     std::string out;
     out.reserve(value.size() + 2);
@@ -46,6 +75,18 @@ std::string TqJsonEscape(const std::string& value) {
 
 void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
     out << '"' << name << "\":\"" << TqJsonEscape(value) << '"';
+}
+
+std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
+    std::vector<TqRelayActiveSnapshot> active;
+#if defined(_WIN32)
+    const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
+    active.reserve(snapshot.ActiveRelayStates.size());
+    for (const auto& relay : snapshot.ActiveRelayStates) {
+        active.push_back(ConvertWindowsRelaySnapshot(relay));
+    }
+#endif
+    return active;
 }
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
@@ -216,14 +257,68 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
+    uint64_t tcpReadBytes = 0;
+    uint64_t tcpWriteBytes = 0;
+    uint64_t outstandingQuicSends = 0;
+    uint64_t inflightTcpSends = 0;
+    uint64_t queuedQuicReceives = 0;
+    uint64_t closingRelays = 0;
+    uint64_t tcpReadClosedRelays = 0;
+    uint64_t closeAfterDrainedRelays = 0;
+    uint64_t hotScore = 0;
+    const TqWindowsRelayActiveSnapshot* hotRelay = nullptr;
+    for (const auto& relay : snapshot.ActiveRelayStates) {
+        const TqRelayActiveSnapshot active = ConvertWindowsRelaySnapshot(relay);
+        tcpReadBytes += active.TcpReadBytes;
+        tcpWriteBytes += active.TcpWriteBytes;
+        outstandingQuicSends += active.InFlightQuicSends;
+        inflightTcpSends += active.InFlightTcpSends;
+        queuedQuicReceives += active.QueuedQuicReceives;
+        if (active.Closing) {
+            ++closingRelays;
+        }
+        if (active.TcpReadClosed) {
+            ++tcpReadClosedRelays;
+        }
+        if (active.CloseAfterDrained) {
+            ++closeAfterDrainedRelays;
+        }
+        const uint64_t score =
+            active.PendingQuicReceiveBytes + active.PendingQuicReceiveQueueDepth +
+            active.InFlightTcpSends + active.InFlightQuicSends + active.QueuedQuicReceives;
+        if (hotRelay == nullptr || score > hotScore) {
+            hotRelay = &relay;
+            hotScore = score;
+        }
+    }
     metrics.Backend = "worker";
     metrics.ActiveRelays = snapshot.ActiveRelays;
     metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
     metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;
     metrics.CurrentPendingQuicReceiveBytes = snapshot.PendingQuicReceiveBytes;
     metrics.CurrentPendingQuicReceiveQueue = snapshot.PendingQuicReceiveQueueDepth;
-    metrics.TcpReadBytes = snapshot.TcpSendBytes;
-    metrics.TcpWriteBytes = snapshot.TcpSendBytes;
+    metrics.TcpReadBytes = tcpReadBytes;
+    metrics.TcpWriteBytes = tcpWriteBytes;
+    metrics.ClosingRelays = closingRelays;
+    metrics.TcpReadClosedRelays = tcpReadClosedRelays;
+    metrics.TcpWriteShutdownQueuedRelays = closeAfterDrainedRelays;
+    metrics.OutstandingQuicSends = outstandingQuicSends;
+    metrics.PendingTcpWriteQueue = snapshot.PendingQuicReceiveQueueDepth;
+    metrics.PendingTcpWriteBytes = snapshot.PendingQuicReceiveBytes;
+    metrics.TcpWriteArmedRelays = inflightTcpSends;
+    metrics.QuicReceiveViewCount = queuedQuicReceives;
+    if (hotRelay != nullptr) {
+        metrics.HotRelayId = hotRelay->RelayId;
+        metrics.HotRelayWorkerIndex = hotRelay->WorkerIndex;
+        metrics.HotRelayPendingQuicReceiveBytes = hotRelay->PendingQuicReceiveBytes;
+        metrics.HotRelayPendingQuicReceiveQueue = hotRelay->PendingQuicReceiveQueueDepth;
+        metrics.HotRelayTcpReadBytes = hotRelay->TcpReadBytes;
+        metrics.HotRelayTcpWriteBytes = hotRelay->TcpWriteBytes;
+        metrics.HotRelayOutstandingQuicSends = hotRelay->InFlightQuicSends;
+        metrics.LastTcpWriteErrno = hotRelay->LastTcpWriteErrno;
+        metrics.HotRelayTcpReadArmed = hotRelay->InFlightTcpRecvs != 0;
+        metrics.HotRelayTcpWriteArmed = hotRelay->InFlightTcpSends != 0;
+    }
     metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;
     metrics.ZstdDecompressOutputBytes = snapshot.ZstdDecompressOutputBytes;
     metrics.ZstdDecompressCalls = snapshot.ZstdDecompressCalls;

@@ -26,6 +26,7 @@ struct TqRelayHandle {
     uint64_t LinuxRelayId{0};
     TqWindowsRelayWorker* WindowsWorker{nullptr};
     uint64_t WindowsRelayId{0};
+    uint32_t WindowsWorkerIndex{0};
     TqDarwinRelayWorker* DarwinWorker{nullptr};
     uint64_t DarwinRelayId{0};
 };

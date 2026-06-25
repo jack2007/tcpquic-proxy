@@ -31,6 +31,30 @@ struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 
+struct TqWindowsRelayActiveSnapshot {
+    uint32_t WorkerIndex{0};
+    uint64_t RelayId{0};
+    uint32_t ActiveHandlers{0};
+    uint32_t QueuedWorkerOps{0};
+    uint32_t InFlightTcpRecvs{0};
+    uint32_t InFlightTcpSends{0};
+    uint32_t InFlightQuicSends{0};
+    uint32_t QueuedQuicReceives{0};
+    uint64_t PendingQuicReceiveBytes{0};
+    uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t LastTcpWriteErrno{0};
+    bool Closing{false};
+    bool TcpReadClosed{false};
+    bool TcpWriteClosed{false};
+    bool CloseAfterDrained{false};
+    bool QuicSendFinSubmitted{false};
+    bool QuicSendFinCompleted{false};
+    bool StopPublished{false};
+    bool StreamDetached{false};
+};
+
 struct TqWindowsRelayWorkerSnapshot {
     uint64_t DeferredReceiveQueued{0};
     uint64_t DeferredReceiveBytesQueued{0};
@@ -64,11 +88,15 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t QuicSendFatalErrors{0};
     uint64_t Errors{0};
     uint64_t ActiveRelays{0};
+    uint64_t IocpCompletionDowngraded{0};
+    uint64_t IocpStaleCompletionDropped{0};
+    uint64_t TcpSendZeroBytesGraceful{0};
+    std::vector<TqWindowsRelayActiveSnapshot> ActiveRelayStates;
 };
 
 class TqWindowsRelayWorker {
 public:
-    TqWindowsRelayWorker();
+    explicit TqWindowsRelayWorker(uint32_t workerIndex = 0);
     ~TqWindowsRelayWorker();
 
     bool Start();
@@ -98,6 +126,9 @@ public:
     bool TestCloseRelayTcpSocketForPostRecvFailure(uint64_t relayId);
     bool TestMarkTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestCompleteTcpRecvInFlightForRetirement(uint64_t relayId);
+    bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
+    bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
+    bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
 #endif
 
     void StopRelay(uint64_t relayId);
@@ -146,6 +177,7 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
     void CompleteAllPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
+    void FinalizeQuicSendAccountingOnClose(const std::shared_ptr<RelayContext>& relay);
     void SetQuicReceiveEnabled(const std::shared_ptr<RelayContext>& relay, bool enabled);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);
@@ -157,7 +189,11 @@ private:
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
     bool PostQuicSend(std::unique_ptr<IoOperation> op, QUIC_SEND_FLAGS flags, bool repostOnBackpressure);
     void RetryPendingQuicSends(const std::shared_ptr<RelayContext>& relay);
-    void CloseRelay(const std::shared_ptr<RelayContext>& relay, TqRelayCloseMode mode);
+    void CloseRelay(
+        const std::shared_ptr<RelayContext>& relay,
+        TqRelayCloseMode mode,
+        const char* reason = nullptr);
+    void MarkRelayCloseReason(const std::shared_ptr<RelayContext>& relay, const char* reason);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void RecordTcpHardErrorAndFail(
@@ -172,6 +208,15 @@ private:
     bool IsIocpTeardownError(DWORD error) const;
     bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
     bool IsQuicSendTeardownStatus(QUIC_STATUS status) const;
+    bool ShouldDowngradeTcpRecvCompletion(const RelayContext* relay, DWORD error) const;
+    bool ShouldDowngradeTcpSendCompletion(const RelayContext* relay, DWORD error) const;
+    bool ShouldDowngradeTcpSendZeroBytes(const RelayContext& relay) const;
+    bool ShouldDowngradePostedWorkerCompletion(const RelayContext* relay, DWORD error) const;
+    void DowngradeIocpCompletion(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* reason,
+        DWORD completionError = 0);
+    void DropStaleCompletionWithoutRelay(DWORD completionError);
 
     void* Iocp_{nullptr};
     std::thread Thread_;
@@ -204,6 +249,10 @@ private:
     std::atomic<uint64_t> QuicSendBackpressureEvents_{0};
     std::atomic<uint64_t> QuicSendFatalErrors_{0};
     std::atomic<uint64_t> Errors_{0};
+    std::atomic<uint64_t> IocpCompletionDowngraded_{0};
+    std::atomic<uint64_t> IocpStaleCompletionDropped_{0};
+    std::atomic<uint64_t> TcpSendZeroBytesGraceful_{0};
+    uint32_t WorkerIndex_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
 #endif

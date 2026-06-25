@@ -582,11 +582,8 @@ public:
         UpdateRegistryMetadata(algo);
         TqTunnelReaper::Instance().Register(this);
         StateChanged.notify_all();
-        if (TraceTunnelId != 0) {
-            TqTraceRelayStarted(TraceTunnelId);
-            TraceRelayStarted = true;
-        }
         const std::string relayBackend = TqRelayBackendName(RelayHandle);
+        uint32_t relayWorkerIndex = 0;
         uint64_t relayId = 0;
         const void* relayWorker = nullptr;
         if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
@@ -594,10 +591,19 @@ public:
             relayWorker = RelayHandle.LinuxWorker;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             relayId = RelayHandle.WindowsRelayId;
+            relayWorkerIndex = RelayHandle.WindowsWorkerIndex;
             relayWorker = RelayHandle.WindowsWorker;
         } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
             relayId = RelayHandle.DarwinRelayId;
             relayWorker = RelayHandle.DarwinWorker;
+        }
+        if (TraceTunnelId != 0) {
+            TqTraceRelayStarted(
+                TraceTunnelId,
+                relayBackend.c_str(),
+                relayWorkerIndex,
+                relayId);
+            TraceRelayStarted = true;
         }
         TqTunnelDebugLog(
             "event=relay_started role=%s tunnel_id=%llu target=%s backend=%s relay_id=%llu worker=%p fd=%lld flags=0x%x",
@@ -695,12 +701,14 @@ public:
             return;
         }
         const char* backend = "none";
+        uint32_t workerIndex = 0;
         uint64_t relayId = 0;
         if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
             backend = "linux";
             relayId = RelayHandle.LinuxRelayId;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             backend = "windows";
+            workerIndex = RelayHandle.WindowsWorkerIndex;
             relayId = RelayHandle.WindowsRelayId;
         }
         TqTraceRelayStopping(
@@ -708,6 +716,7 @@ public:
             Role == TqTunnelRole::ClientOpen ? "client" : "server",
             TraceTarget.c_str(),
             backend,
+            workerIndex,
             relayId,
             reason);
     }
@@ -759,6 +768,9 @@ public:
                 static_cast<unsigned long long>(TraceTunnelId),
                 static_cast<void*>(handle),
                 TraceTarget.c_str());
+            if (!OpenDone && TraceTunnelId != 0) {
+                TqTraceOpenResult(TraceTunnelId, false, TqOpenError::TcpTimeout, 0);
+            }
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             ClientOpenOwnerActive = false;
@@ -796,6 +808,9 @@ public:
                 static_cast<unsigned long long>(TraceTunnelId),
                 static_cast<void*>(handle),
                 TraceTarget.c_str());
+            if (!OpenDone && TraceTunnelId != 0) {
+                TqTraceOpenResult(TraceTunnelId, false, TqOpenError::Internal, 0);
+            }
             releaseHandle = AsyncClientOpenHandle;
             AsyncClientOpenHandle = nullptr;
             ClientOpenOwnerActive = false;

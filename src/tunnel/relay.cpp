@@ -179,6 +179,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->Backend = TqRelayBackendType::None;
         handle->WindowsWorker = nullptr;
         handle->WindowsRelayId = 0;
+        handle->WindowsWorkerIndex = 0;
         TqRelayUnregisterActive();
         return;
     }

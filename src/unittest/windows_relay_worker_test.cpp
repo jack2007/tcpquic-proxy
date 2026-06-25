@@ -459,7 +459,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -485,6 +485,38 @@ int main() {
         receiveWorker.Stop();
         TqCloseSocket(pair[1]);
         MsQuic = nullptr;
+    }
+    {
+        TqWindowsRelayWorker receiveWorker(3);
+        if (!receiveWorker.Start()) {
+            return 225;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 226;
+        }
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (snapshot.ActiveRelayStates.size() != 1) {
+            receiveWorker.Stop();
+            return 227;
+        }
+        const auto& relay = snapshot.ActiveRelayStates.front();
+        if (relay.WorkerIndex != 3 || relay.RelayId != handle.WindowsRelayId ||
+            relay.InFlightTcpRecvs != 0 || relay.InFlightTcpSends != 0 ||
+            relay.InFlightQuicSends != 0 || relay.TcpReadBytes != 0 ||
+            relay.TcpWriteBytes != 0 || relay.Closing || relay.TcpReadClosed ||
+            relay.TcpWriteClosed || relay.CloseAfterDrained || relay.StreamDetached) {
+            receiveWorker.Stop();
+            return 228;
+        }
+        receiveWorker.Stop();
     }
     {
         QUIC_API_TABLE fakeApi{};
@@ -722,6 +754,163 @@ int main() {
         if (!handle.Stop.load(std::memory_order_acquire) || snapshot.ActiveRelays != 0) {
             receiveWorker.Stop();
             return 205;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            return 206;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 207;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        if (!receiveWorker.TestMarkQuicSendInFlightForRetirement(relayId)) {
+            receiveWorker.Stop();
+            return 208;
+        }
+        receiveWorker.StopRelay(relayId);
+        const auto retireDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (!handle.Stop.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < retireDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (!handle.Stop.load(std::memory_order_acquire) || snapshot.ActiveRelays != 0) {
+            receiveWorker.Stop();
+            return 209;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            return 210;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 211;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+        if (!receiveWorker.TestMarkTcpRecvInFlightForRetirement(relayId)) {
+            receiveWorker.Stop();
+            return 215;
+        }
+        receiveWorker.StopRelay(relayId);
+        const auto closeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (stream->Context != nullptr &&
+               std::chrono::steady_clock::now() < closeDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (stream->Context != nullptr) {
+            receiveWorker.Stop();
+            return 212;
+        }
+        if (!receiveWorker.TestBufferedTcpSendZeroCompletion(relayId)) {
+            receiveWorker.Stop();
+            return 213;
+        }
+        const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
+        if (after.FatalRelayResets != before.FatalRelayResets ||
+            after.GracefulRelayDrains <= before.GracefulRelayDrains) {
+            receiveWorker.Stop();
+            return 214;
+        }
+        (void)receiveWorker.TestCompleteTcpRecvInFlightForRetirement(relayId);
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            return 221;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 222;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        if (!receiveWorker.TestCloseRelayAfterTcpHalfCloseDrain(relayId)) {
+            receiveWorker.Stop();
+            return 223;
+        }
+        const auto retireDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        while (!handle.Stop.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < retireDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!handle.Stop.load(std::memory_order_acquire)) {
+            receiveWorker.Stop();
+            return 224;
+        }
+        receiveWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            return 216;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 217;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        void* callbackContext = stream->Context;
+        const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+        if (!receiveWorker.TestArmRelayClosingForLateDiscard(relayId)) {
+            receiveWorker.Stop();
+            return 218;
+        }
+        uint8_t data[] = {'l', 'a', 't', 'e'};
+        QUIC_BUFFER buffer{};
+        buffer.Buffer = data;
+        buffer.Length = sizeof(data);
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_RECEIVE;
+        event.RECEIVE.BufferCount = 1;
+        event.RECEIVE.Buffers = &buffer;
+        event.RECEIVE.Flags = static_cast<QUIC_RECEIVE_FLAGS>(0);
+        if (TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event) !=
+            QUIC_STATUS_SUCCESS) {
+            receiveWorker.Stop();
+            return 219;
+        }
+        const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
+        if (after.DeferredReceiveQueued != before.DeferredReceiveQueued ||
+            after.Errors != before.Errors ||
+            after.FatalRelayResets != before.FatalRelayResets) {
+            receiveWorker.Stop();
+            return 220;
         }
         receiveWorker.Stop();
     }

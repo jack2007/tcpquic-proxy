@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstdarg>
 #include <cstdio>
@@ -79,8 +80,15 @@ struct TqTunnelTraceState {
     std::string target;
     std::string role;
     uint32_t connId{0};
+    std::string relayBackend;
+    uint32_t relayWorkerIndex{0};
+    uint64_t relayId{0};
     std::chrono::steady_clock::time_point openedAt{};
+    std::chrono::steady_clock::time_point lastRelayProgressAt{};
+    uint64_t lastObservedRelayBytes{0};
     bool relayStarted{false};
+    bool firstByteTimeoutLogged{false};
+    bool relayIdleTimeoutLogged{false};
     TqOpenError lastOpenError{TqOpenError::Ok};
     bool openDone{false};
     bool openOk{false};
@@ -263,6 +271,21 @@ struct TqQuicConnTraceSnapshot {
     TqTraceNetworkStats netStats;
 };
 
+struct TqActiveTunnelTraceSnapshot {
+    uint64_t tunnelId{0};
+    uint32_t connId{0};
+    std::string role;
+    std::string target;
+    std::string relayBackend;
+    uint32_t relayWorkerIndex{0};
+    uint64_t relayId{0};
+    double ageSec{0.0};
+    bool relayStarted{false};
+    bool openDone{false};
+    bool openOk{false};
+    TqOpenError lastOpenError{TqOpenError::Ok};
+};
+
 void DumpPeriodicStats() {
     if (!g_traceEnabled.load(std::memory_order_relaxed)) {
         return;
@@ -273,7 +296,11 @@ void DumpPeriodicStats() {
     const TqRelayMetricsSnapshot relayMetrics = TqSnapshotRelayMetrics();
     LogInfo("event=stats_relay %s", TqFormatRelayMetricsSnapshotLine(relayMetrics).c_str());
 
+    const std::vector<TqRelayActiveSnapshot> activeRelays = TqSnapshotActiveRelays();
+
     std::vector<TqQuicConnTraceSnapshot> conns;
+    std::vector<TqActiveTunnelTraceSnapshot> activeTunnels;
+    const auto now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> guard(g_stateMu);
         conns.reserve(g_quicConnsById.size());
@@ -296,6 +323,173 @@ void DumpPeriodicStats() {
             snap.hasNetStats = conn.hasNetStats;
             snap.netStats = conn.netStats;
             conns.push_back(std::move(snap));
+        }
+        activeTunnels.reserve(g_tunnels.size());
+        for (const auto& entry : g_tunnels) {
+            const auto& tunnel = entry.second;
+            TqActiveTunnelTraceSnapshot snap;
+            snap.tunnelId = tunnel.tunnelId;
+            snap.connId = tunnel.connId;
+            snap.role = tunnel.role;
+            snap.target = tunnel.target;
+            snap.relayBackend = tunnel.relayBackend;
+            snap.relayWorkerIndex = tunnel.relayWorkerIndex;
+            snap.relayId = tunnel.relayId;
+            snap.ageSec = std::chrono::duration<double>(now - tunnel.openedAt).count();
+            snap.relayStarted = tunnel.relayStarted;
+            snap.openDone = tunnel.openDone;
+            snap.openOk = tunnel.openOk;
+            snap.lastOpenError = tunnel.lastOpenError;
+            activeTunnels.push_back(std::move(snap));
+        }
+    }
+
+    if (!activeTunnels.empty()) {
+        std::sort(
+            activeTunnels.begin(),
+            activeTunnels.end(),
+            [](const auto& lhs, const auto& rhs) {
+                return lhs.ageSec > rhs.ageSec;
+            });
+        constexpr size_t kMaxActiveTunnelTraceLines = 12;
+        const size_t limit = std::min(activeTunnels.size(), kMaxActiveTunnelTraceLines);
+        for (size_t i = 0; i < limit; ++i) {
+            const auto& tunnel = activeTunnels[i];
+            LogInfo(
+                "event=stats_active_tunnel tunnel=%llu conn=%u role=%s target=%s age=%.1fs relay=%d backend=%s worker=%u relay_id=%llu open_done=%d open_ok=%d open_error=%s",
+                static_cast<unsigned long long>(tunnel.tunnelId),
+                tunnel.connId,
+                tunnel.role.c_str(),
+                tunnel.target.c_str(),
+                tunnel.ageSec,
+                tunnel.relayStarted ? 1 : 0,
+                tunnel.relayBackend.empty() ? "none" : tunnel.relayBackend.c_str(),
+                tunnel.relayWorkerIndex,
+                static_cast<unsigned long long>(tunnel.relayId),
+                tunnel.openDone ? 1 : 0,
+                tunnel.openOk ? 1 : 0,
+                OpenErrorName(tunnel.lastOpenError));
+            if (tunnel.relayBackend == "windows" && tunnel.relayId != 0) {
+                const TqRelayActiveSnapshot* relay = nullptr;
+                for (const auto& candidate : activeRelays) {
+                    if (candidate.WorkerIndex == tunnel.relayWorkerIndex &&
+                        candidate.RelayId == tunnel.relayId) {
+                        relay = &candidate;
+                        break;
+                    }
+                }
+                if (relay == nullptr) {
+                    LogInfo(
+                        "event=stats_active_relay_missing tunnel=%llu worker=%u relay_id=%llu age=%.1fs",
+                        static_cast<unsigned long long>(tunnel.tunnelId),
+                        tunnel.relayWorkerIndex,
+                        static_cast<unsigned long long>(tunnel.relayId),
+                        tunnel.ageSec);
+                    continue;
+                }
+
+                LogInfo(
+                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u queued_quic_receives=%u tcp_write_errno=%llu closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d",
+                    static_cast<unsigned long long>(tunnel.tunnelId),
+                    relay->WorkerIndex,
+                    static_cast<unsigned long long>(relay->RelayId),
+                    tunnel.ageSec,
+                    static_cast<unsigned long long>(relay->TcpReadBytes),
+                    static_cast<unsigned long long>(relay->TcpWriteBytes),
+                    static_cast<unsigned long long>(relay->PendingQuicReceiveBytes),
+                    static_cast<unsigned long long>(relay->PendingQuicReceiveQueueDepth),
+                    relay->ActiveHandlers,
+                    relay->QueuedWorkerOps,
+                    relay->InFlightTcpRecvs,
+                    relay->InFlightTcpSends,
+                    relay->InFlightQuicSends,
+                    relay->QueuedQuicReceives,
+                    static_cast<unsigned long long>(relay->LastTcpWriteErrno),
+                    relay->Closing ? 1 : 0,
+                    relay->TcpReadClosed ? 1 : 0,
+                    relay->TcpWriteClosed ? 1 : 0,
+                    relay->CloseAfterDrained ? 1 : 0,
+                    relay->QuicSendFinSubmitted ? 1 : 0,
+                    relay->QuicSendFinCompleted ? 1 : 0,
+                    relay->StopPublished ? 1 : 0,
+                    relay->StreamDetached ? 1 : 0);
+
+                constexpr double kRelayFirstByteTimeoutSec = 30.0;
+                constexpr double kRelayIdleTimeoutSec = 60.0;
+                const uint64_t observedBytes = relay->TcpReadBytes + relay->TcpWriteBytes;
+                bool logFirstByteTimeout = false;
+                bool logRelayIdleTimeout = false;
+                double idleSec = 0.0;
+                {
+                    std::lock_guard<std::mutex> guard(g_stateMu);
+                    auto it = g_tunnels.find(tunnel.tunnelId);
+                    if (it != g_tunnels.end()) {
+                        auto& state = it->second;
+                        if (state.lastRelayProgressAt == std::chrono::steady_clock::time_point{}) {
+                            state.lastRelayProgressAt = state.openedAt;
+                        }
+                        if (observedBytes != state.lastObservedRelayBytes) {
+                            state.lastObservedRelayBytes = observedBytes;
+                            state.lastRelayProgressAt = now;
+                            state.relayIdleTimeoutLogged = false;
+                            if (observedBytes != 0) {
+                                state.firstByteTimeoutLogged = false;
+                            }
+                        } else {
+                            idleSec =
+                                std::chrono::duration<double>(now - state.lastRelayProgressAt).count();
+                            if (observedBytes == 0 && tunnel.ageSec >= kRelayFirstByteTimeoutSec &&
+                                !state.firstByteTimeoutLogged) {
+                                state.firstByteTimeoutLogged = true;
+                                logFirstByteTimeout = true;
+                            } else if (observedBytes != 0 && idleSec >= kRelayIdleTimeoutSec &&
+                                       !state.relayIdleTimeoutLogged) {
+                                state.relayIdleTimeoutLogged = true;
+                                logRelayIdleTimeout = true;
+                            }
+                        }
+                    }
+                }
+                if (logFirstByteTimeout) {
+                    LogInfo(
+                        "event=relay_first_byte_timeout tunnel=%llu backend=windows worker=%u relay_id=%llu target=%s age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d",
+                        static_cast<unsigned long long>(tunnel.tunnelId),
+                        relay->WorkerIndex,
+                        static_cast<unsigned long long>(relay->RelayId),
+                        tunnel.target.c_str(),
+                        tunnel.ageSec,
+                        static_cast<unsigned long long>(relay->TcpReadBytes),
+                        static_cast<unsigned long long>(relay->TcpWriteBytes),
+                        relay->InFlightTcpRecvs,
+                        relay->InFlightTcpSends,
+                        relay->InFlightQuicSends,
+                        static_cast<unsigned long long>(relay->PendingQuicReceiveBytes),
+                        static_cast<unsigned long long>(relay->PendingQuicReceiveQueueDepth),
+                        relay->TcpReadClosed ? 1 : 0,
+                        relay->TcpWriteClosed ? 1 : 0,
+                        relay->CloseAfterDrained ? 1 : 0);
+                }
+                if (logRelayIdleTimeout) {
+                    LogInfo(
+                        "event=relay_idle_timeout tunnel=%llu backend=windows worker=%u relay_id=%llu target=%s age=%.1fs idle=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d",
+                        static_cast<unsigned long long>(tunnel.tunnelId),
+                        relay->WorkerIndex,
+                        static_cast<unsigned long long>(relay->RelayId),
+                        tunnel.target.c_str(),
+                        tunnel.ageSec,
+                        idleSec,
+                        static_cast<unsigned long long>(relay->TcpReadBytes),
+                        static_cast<unsigned long long>(relay->TcpWriteBytes),
+                        relay->InFlightTcpRecvs,
+                        relay->InFlightTcpSends,
+                        relay->InFlightQuicSends,
+                        static_cast<unsigned long long>(relay->PendingQuicReceiveBytes),
+                        static_cast<unsigned long long>(relay->PendingQuicReceiveQueueDepth),
+                        relay->TcpReadClosed ? 1 : 0,
+                        relay->TcpWriteClosed ? 1 : 0,
+                        relay->CloseAfterDrained ? 1 : 0);
+                }
+            }
         }
     }
 
@@ -795,6 +989,7 @@ void TqTraceRelayUnregister(
 
 void TqTraceRelayFatalError(
     const char* backend,
+    uint32_t workerIndex,
     const char* reason,
     uint64_t relayId,
     uint64_t socketOrFd,
@@ -804,8 +999,9 @@ void TqTraceRelayFatalError(
     uint64_t inflightQuicSends,
     uint64_t inflightTcpSends) {
     spdlog::error(
-        "{} relay unrecoverable error reason={} relay_id={} socket={} pending_quic_receive_bytes={} pending_quic_receive_queue={} pending_quic_sends={} inflight_quic_sends={} inflight_tcp_sends={}",
+        "{} relay unrecoverable error worker={} reason={} relay_id={} socket={} pending_quic_receive_bytes={} pending_quic_receive_queue={} pending_quic_sends={} inflight_quic_sends={} inflight_tcp_sends={}",
         backend != nullptr ? backend : "relay",
+        workerIndex,
         reason != nullptr ? reason : "unknown",
         relayId,
         socketOrFd,
@@ -821,8 +1017,9 @@ void TqTraceRelayFatalError(
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "event=relay_fatal backend=%s reason=%s relay_id=%llu socket=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu pending_quic_sends=%llu inflight_quic_sends=%llu inflight_tcp_sends=%llu",
+        "event=relay_fatal backend=%s worker=%u reason=%s relay_id=%llu socket=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu pending_quic_sends=%llu inflight_quic_sends=%llu inflight_tcp_sends=%llu",
         backend != nullptr ? backend : "?",
+        workerIndex,
         reason != nullptr ? reason : "unknown",
         static_cast<unsigned long long>(relayId),
         static_cast<unsigned long long>(socketOrFd),
@@ -1391,6 +1588,7 @@ uint64_t TqTraceStreamStarted(
     tunnel.role = role;
     tunnel.connId = connId;
     tunnel.openedAt = std::chrono::steady_clock::now();
+    tunnel.lastRelayProgressAt = tunnel.openedAt;
 
     {
         std::lock_guard<std::mutex> guard(g_stateMu);
@@ -1443,7 +1641,11 @@ void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t c
         TqTraceGlobalSnapshot().c_str());
 }
 
-void TqTraceRelayStarted(uint64_t tunnelId) {
+void TqTraceRelayStarted(
+    uint64_t tunnelId,
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId) {
     if (!TqTraceEnabled() || tunnelId == 0) {
         return;
     }
@@ -1453,13 +1655,20 @@ void TqTraceRelayStarted(uint64_t tunnelId) {
         auto it = g_tunnels.find(tunnelId);
         if (it != g_tunnels.end()) {
             it->second.relayStarted = true;
+            it->second.relayBackend = backend != nullptr ? backend : "none";
+            it->second.relayWorkerIndex = workerIndex;
+            it->second.relayId = relayId;
+            it->second.lastRelayProgressAt = std::chrono::steady_clock::now();
         }
     }
 
     g_global.relaysActive.fetch_add(1);
     LogInfo(
-        "event=relay_started tunnel=%llu %s",
+        "event=relay_started tunnel=%llu backend=%s worker=%u relay_id=%llu %s",
         static_cast<unsigned long long>(tunnelId),
+        backend != nullptr ? backend : "none",
+        workerIndex,
+        static_cast<unsigned long long>(relayId),
         TqTraceGlobalSnapshot().c_str());
 }
 
@@ -1468,6 +1677,7 @@ void TqTraceRelayStopping(
     const char* role,
     const char* target,
     const char* backend,
+    uint32_t workerIndex,
     uint64_t relayId,
     const char* reason) {
     if (!TqTraceEnabled() || tunnelId == 0) {
@@ -1475,11 +1685,12 @@ void TqTraceRelayStopping(
     }
 
     LogInfo(
-        "event=relay_stopping role=%s tunnel=%llu target=%s backend=%s relay_id=%llu reason=%s %s",
+        "event=relay_stopping role=%s tunnel=%llu target=%s backend=%s worker=%u relay_id=%llu reason=%s %s",
         role != nullptr ? role : "?",
         static_cast<unsigned long long>(tunnelId),
         target != nullptr ? target : "?",
         backend != nullptr ? backend : "none",
+        workerIndex,
         static_cast<unsigned long long>(relayId),
         reason != nullptr ? reason : "?",
         TqTraceGlobalSnapshot().c_str());

@@ -144,6 +144,7 @@ void TqTraceRelayUnregister(
     const TqTraceLinuxRelayStreamState& state);
 void TqTraceRelayFatalError(
     const char* backend,
+    uint32_t workerIndex,
     const char* reason,
     uint64_t relayId,
     uint64_t socketOrFd,
@@ -161,12 +162,17 @@ uint64_t TqTraceStreamStarted(
     const char* target,
     uint8_t compressFlags);
 void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField);
-void TqTraceRelayStarted(uint64_t tunnelId);
+void TqTraceRelayStarted(
+    uint64_t tunnelId,
+    const char* backend,
+    uint32_t workerIndex,
+    uint64_t relayId);
 void TqTraceRelayStopping(
     uint64_t tunnelId,
     const char* role,
     const char* target,
     const char* backend,
+    uint32_t workerIndex,
     uint64_t relayId,
     const char* reason);
 void TqTraceStreamClosed(

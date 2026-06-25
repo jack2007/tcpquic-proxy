@@ -6,6 +6,10 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     return metrics;
 }
 
+std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
+    return {};
+}
+
 void TqAppendRelayMetricsJson(std::ostringstream&, const TqRelayMetricsSnapshot&) {
 }
 
