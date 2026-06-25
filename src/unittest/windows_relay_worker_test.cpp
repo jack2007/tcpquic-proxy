@@ -1,5 +1,6 @@
 #include "compress.h"
 #include "platform_socket.h"
+#include "windows_relay_event_queue.h"
 #include "windows_relay_worker.h"
 
 #include <atomic>
@@ -181,6 +182,35 @@ public:
     void Reset() override {}
 };
 
+bool TestWindowsRelayEventQueuePushPop() {
+    TqWindowsRelayEventQueue queue(2);
+    TqWindowsRelayTask first{};
+    first.Type = TqWindowsRelayTaskType::QuicReceiveView;
+    first.RelayId = 7;
+    TqWindowsRelayTask second{};
+    second.Type = TqWindowsRelayTaskType::Shutdown;
+    second.RelayId = 8;
+
+    if (!queue.TryPush(std::move(first))) {
+        return false;
+    }
+    if (!queue.TryPush(std::move(second))) {
+        return false;
+    }
+    if (queue.TryPush(TqWindowsRelayTask{})) {
+        return false;
+    }
+
+    TqWindowsRelayTask out{};
+    if (!queue.TryPop(out) || out.Type != TqWindowsRelayTaskType::QuicReceiveView || out.RelayId != 7) {
+        return false;
+    }
+    if (!queue.TryPop(out) || out.Type != TqWindowsRelayTaskType::Shutdown || out.RelayId != 8) {
+        return false;
+    }
+    return !queue.TryPop(out);
+}
+
 }  // namespace
 #endif
 
@@ -188,6 +218,10 @@ int main() {
 #if defined(_WIN32)
     TqSocketStartup startup;
     assert(startup.Ok());
+
+    if (!TestWindowsRelayEventQueuePushPop()) {
+        return 1;
+    }
 
     TqWindowsRelayWorker worker;
     assert(worker.Start());
