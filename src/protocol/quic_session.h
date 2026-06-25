@@ -99,6 +99,7 @@ public:
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
     void ScheduleStartRetryForTest(size_t index);
+    void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
 #endif
 

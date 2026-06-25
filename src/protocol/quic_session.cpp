@@ -511,7 +511,7 @@ static bool TqClientDebugEnabled() {
     return enabled;
 }
 
-static constexpr std::chrono::milliseconds TqClientStartRetryDelay{100};
+static constexpr std::chrono::milliseconds TqClientStartRetryDelay{3000};
 
 static void TqClientDebugLog(const char* message, size_t slotIndex, const void* connection, QUIC_STATUS status = QUIC_STATUS_SUCCESS) {
     if (!TqClientDebugEnabled()) {
@@ -979,6 +979,10 @@ void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
     ScheduleStartRetry(index);
 }
 
+void QuicClientSession::RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation) {
+    RestartSlotAfterShutdownComplete(State, index, generation);
+}
+
 bool QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS status) {
     return TqConnectionStartAccepted(status);
 }
@@ -1291,7 +1295,7 @@ void QuicClientSession::RestartSlotAfterShutdownComplete(
             return;
         }
     }
-    (void)StartSlot(slotIndex);
+    ScheduleStartRetry(slotIndex);
 }
 
 QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnected(

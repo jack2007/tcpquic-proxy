@@ -22,7 +22,7 @@ static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
         }});
     session.SetDelayedTaskScheduler(
         [&](std::chrono::milliseconds delay, std::function<void()> task) {
-            if (delay != std::chrono::milliseconds(100)) {
+            if (delay != std::chrono::milliseconds(3000)) {
                 return false;
             }
             scheduled.fetch_add(1, std::memory_order_relaxed);
@@ -55,7 +55,7 @@ static int TestDelayedRetryDropsAfterStop() {
         }});
     session.SetDelayedTaskScheduler(
         [&](std::chrono::milliseconds delay, std::function<void()> task) {
-            if (delay != std::chrono::milliseconds(100)) {
+            if (delay != std::chrono::milliseconds(3000)) {
                 return false;
             }
             retryTask = std::move(task);
@@ -144,6 +144,46 @@ static int TestConnectionStartPendingIsAccepted() {
     if (QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_ABORTED)) {
         return 52;
     }
+    return 0;
+}
+
+static int TestShutdownCompleteSchedulesSlotRestart() {
+    QuicClientSession session;
+    std::atomic<int> scheduled{0};
+    std::atomic<int> startCalls{0};
+    std::function<void()> retryTask;
+
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks(QuicClientSession::ReconnectTestHooks{
+        [&](size_t index) {
+            if (index != 0) {
+                return false;
+            }
+            startCalls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }});
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()> task) {
+            if (delay != std::chrono::milliseconds(3000)) {
+                return false;
+            }
+            scheduled.fetch_add(1, std::memory_order_relaxed);
+            retryTask = std::move(task);
+            return true;
+        });
+
+    session.RestartSlotAfterShutdownCompleteForTest(0, 0);
+    if (scheduled.load(std::memory_order_relaxed) != 1 || !retryTask) {
+        return 75;
+    }
+    if (startCalls.load(std::memory_order_relaxed) != 0) {
+        return 76;
+    }
+    retryTask();
+    if (startCalls.load(std::memory_order_relaxed) != 1) {
+        return 77;
+    }
+    session.Stop();
     return 0;
 }
 
@@ -245,6 +285,7 @@ int main() {
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
+    if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
