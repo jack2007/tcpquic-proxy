@@ -44,11 +44,14 @@ struct TqWindowsRelayActiveSnapshot {
     uint32_t QueuedQuicReceives{0};
     uint64_t PendingQuicReceiveBytes{0};
     uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t OutstandingQuicSendBytes{0};
+    uint64_t MaxOutstandingQuicSendBytes{0};
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
     bool Closing{false};
     bool TcpReadClosed{false};
+    bool TcpReadPausedByQuicBacklog{false};
     bool TcpWriteClosed{false};
     bool CloseAfterDrained{false};
     bool QuicSendFinSubmitted{false};
@@ -138,6 +141,10 @@ public:
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
+    bool MaybePostTcpRecvForTest(uint64_t relayId);
+    bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;
+    void TestConfigureQuicSendBacklog(uint64_t relayId, uint64_t maxBufferedBytes, uint64_t outstandingBytes);
+    void TestProcessQuicSendCompleteForTest(uint64_t relayId, uint64_t completedBytes);
 #endif
 
     void StopRelay(uint64_t relayId);
@@ -160,12 +167,16 @@ private:
     void ProcessRelayTask(TqWindowsRelayTask& task);
     void ProcessQuicReceiveViewTask(TqWindowsRelayTask& task);
     void ProcessQuicSendCompleteTask(TqWindowsRelayTask& task);
+    void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
     void DrainCallbackPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
     void DrainCallbackPendingQuicSendCompletions();
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
+    uint64_t CurrentRelayIdealSendBytes(const std::shared_ptr<RelayContext>& relay) const;
+    bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayContext>& relay) const;
+    bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayContext>& relay) const;
     bool MaybePostTcpRecv(const std::shared_ptr<RelayContext>& relay);
     void SetTcpReadBackpressure(
         const std::shared_ptr<RelayContext>& relay,

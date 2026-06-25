@@ -149,7 +149,11 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
     std::deque<std::shared_ptr<TqWindowsPendingQuicReceive>> CallbackPendingQuicReceives;
     std::mutex PendingQuicSendLock;
     std::deque<std::unique_ptr<TqWindowsQuicSendOperation>> PendingQuicSendRetries;
+    std::atomic<bool> TcpRecvPosted{false};
+    std::atomic<bool> TcpReadPausedByQuicBacklog{false};
     std::atomic<uint64_t> OutstandingQuicSendBytes{0};
+    std::atomic<uint64_t> MaxOutstandingQuicSendBytes{0};
+    std::atomic<uint64_t> IdealSendBufferBytes{0};
     std::shared_ptr<CallbackBinding> Callback;
     std::atomic<bool> QuicReceivePaused{false};
 };
@@ -292,6 +296,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
                     relay->QuicSendFinCompleted.load(std::memory_order_relaxed);
                 active.StopPublished = relay->StopPublished.load(std::memory_order_relaxed);
                 active.StreamDetached = relay->Stream == nullptr;
+                active.TcpReadPausedByQuicBacklog =
+                    relay->TcpReadPausedByQuicBacklog.load(std::memory_order_relaxed);
+                active.OutstandingQuicSendBytes =
+                    relay->OutstandingQuicSendBytes.load(std::memory_order_relaxed);
+                active.MaxOutstandingQuicSendBytes =
+                    relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
                 snapshot.ActiveRelayStates.push_back(active);
             }
         }
@@ -361,6 +371,9 @@ void TqWindowsRelayWorker::ProcessRelayTask(TqWindowsRelayTask& task) {
         break;
     case TqWindowsRelayTaskType::QuicSendComplete:
         ProcessQuicSendCompleteTask(task);
+        break;
+    case TqWindowsRelayTaskType::QuicIdealSendBuffer:
+        HandleQuicIdealSendBuffer(task.RelayId, task.Value);
         break;
     case TqWindowsRelayTaskType::Shutdown:
         if (task.RelayId != 0) {
@@ -539,13 +552,83 @@ void TqWindowsRelayWorker::SetTcpReadBackpressure(
     const std::shared_ptr<RelayContext>& relay,
     bool paused,
     const char* reason) {
-    (void)relay;
-    (void)paused;
-    (void)reason;
+    if (!relay) {
+        return;
+    }
+    if (relay->TcpReadPausedByQuicBacklog.exchange(paused, std::memory_order_acq_rel) == paused) {
+        return;
+    }
+    TraceRelayBackpressure(relay, paused ? "pause_tcp_read" : "resume_tcp_read", reason);
+}
+
+uint64_t TqWindowsRelayWorker::CurrentRelayIdealSendBytes(
+    const std::shared_ptr<RelayContext>& relay) const {
+    if (!relay) {
+        return 0;
+    }
+    const uint64_t ideal = relay->IdealSendBufferBytes.load(std::memory_order_acquire);
+    if (ideal != 0) {
+        return ideal;
+    }
+    return relay->Tuning.WindowsRelayMaxBufferedQuicSendBytes;
+}
+
+bool TqWindowsRelayWorker::ShouldPauseTcpReadForQuicBacklog(
+    const std::shared_ptr<RelayContext>& relay) const {
+    const uint64_t threshold = CurrentRelayIdealSendBytes(relay);
+    return relay && threshold != 0 &&
+        relay->OutstandingQuicSendBytes.load(std::memory_order_acquire) >= threshold;
+}
+
+bool TqWindowsRelayWorker::ShouldResumeTcpReadForQuicBacklog(
+    const std::shared_ptr<RelayContext>& relay) const {
+    const uint64_t threshold = CurrentRelayIdealSendBytes(relay);
+    if (!relay || threshold == 0) {
+        return true;
+    }
+    return relay->OutstandingQuicSendBytes.load(std::memory_order_acquire) < threshold / 2;
 }
 
 bool TqWindowsRelayWorker::MaybePostTcpRecv(const std::shared_ptr<RelayContext>& relay) {
-    return PostTcpRecv(relay);
+    if (!relay || relay->Closing.load(std::memory_order_acquire) ||
+        relay->TcpRecvClosed.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (ShouldPauseTcpReadForQuicBacklog(relay)) {
+        SetTcpReadBackpressure(relay, true, "quic_send_backlog");
+        return false;
+    }
+    if (relay->TcpReadPausedByQuicBacklog.load(std::memory_order_acquire) &&
+        !ShouldResumeTcpReadForQuicBacklog(relay)) {
+        return false;
+    }
+    SetTcpReadBackpressure(relay, false, "quic_send_backlog");
+    bool expected = false;
+    if (!relay->TcpRecvPosted.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return true;
+    }
+    if (!PostTcpRecv(relay)) {
+        relay->TcpRecvPosted.store(false, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
+void TqWindowsRelayWorker::HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount) {
+    if (byteCount == 0) {
+        return;
+    }
+    auto relay = FindRelayById(relayId);
+    if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+        return;
+    }
+    uint64_t ideal = relay->IdealSendBufferBytes.load(std::memory_order_relaxed);
+    while (byteCount > ideal &&
+        !relay->IdealSendBufferBytes.compare_exchange_weak(
+            ideal, byteCount, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+    }
+    MaybePostTcpRecv(relay);
 }
 
 void TqWindowsRelayWorker::DrainPerRelayMaintenance() {
@@ -564,6 +647,7 @@ void TqWindowsRelayWorker::DrainPerRelayMaintenance() {
         }
         DrainCallbackPendingQuicReceives(relay);
         RetryPendingQuicSends(relay);
+        MaybePostTcpRecv(relay);
         (void)CloseRelayIfDrained(relay);
         TryRetireRelay(relay);
     }
@@ -751,7 +835,7 @@ bool TqWindowsRelayWorker::RegisterRelay(
     handle->WindowsRelayId = relay->Id;
     handle->WindowsWorkerIndex = WorkerIndex_;
 
-    return PostTcpRecv(relay);
+    return MaybePostTcpRecv(relay);
 }
 
 #if defined(TQ_UNIT_TESTING)
@@ -1012,6 +1096,50 @@ bool TqWindowsRelayWorker::TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId
     relay->CloseAfterDrained.store(true, std::memory_order_release);
     return CloseRelayIfDrained(relay);
 }
+
+bool TqWindowsRelayWorker::MaybePostTcpRecvForTest(uint64_t relayId) {
+    return MaybePostTcpRecv(FindRelayById(relayId));
+}
+
+bool TqWindowsRelayWorker::TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const {
+    std::lock_guard<std::mutex> guard(Lock_);
+    const auto it = Relays_.find(relayId);
+    if (it == Relays_.end() || !it->second) {
+        return false;
+    }
+    return it->second->TcpReadPausedByQuicBacklog.load(std::memory_order_acquire);
+}
+
+void TqWindowsRelayWorker::TestConfigureQuicSendBacklog(
+    uint64_t relayId,
+    uint64_t maxBufferedBytes,
+    uint64_t outstandingBytes) {
+    auto relay = FindRelayById(relayId);
+    if (!relay) {
+        return;
+    }
+    relay->Tuning.WindowsRelayMaxBufferedQuicSendBytes = maxBufferedBytes;
+    relay->IdealSendBufferBytes.store(0, std::memory_order_release);
+    relay->OutstandingQuicSendBytes.store(outstandingBytes, std::memory_order_release);
+}
+
+void TqWindowsRelayWorker::TestProcessQuicSendCompleteForTest(
+    uint64_t relayId,
+    uint64_t completedBytes) {
+    auto relay = FindRelayById(relayId);
+    if (!relay) {
+        return;
+    }
+    auto* operation = new TqWindowsQuicSendOperation();
+    operation->RelayId = relayId;
+    operation->TotalBytes = completedBytes;
+    relay->InFlightQuicSends.fetch_add(1, std::memory_order_acq_rel);
+    TqWindowsRelayTask task{};
+    task.Type = TqWindowsRelayTaskType::QuicSendComplete;
+    task.RelayId = relayId;
+    task.Value = reinterpret_cast<uintptr_t>(operation);
+    ProcessQuicSendCompleteTask(task);
+}
 #endif
 
 bool TqWindowsRelayWorker::PostTcpRecv(const std::shared_ptr<RelayContext>& relay) {
@@ -1152,16 +1280,16 @@ void TqWindowsRelayWorker::TraceRelayBackpressure(
     if (!relay || !TqTraceEnabled()) {
         return;
     }
-    const uint64_t maxPendingBytes = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
+    const uint64_t threshold = CurrentRelayIdealSendBytes(relay);
     TqTraceRelayBackpressureEvent(
         "windows",
         WorkerIndex_,
         relay->Id,
         action,
         reason,
-        relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed),
-        maxPendingBytes,
-        maxPendingBytes == 0 ? 0 : maxPendingBytes / 2,
+        relay->OutstandingQuicSendBytes.load(std::memory_order_relaxed),
+        threshold,
+        threshold == 0 ? 0 : threshold / 2,
         0);
 }
 
@@ -1387,6 +1515,14 @@ bool TqWindowsRelayWorker::TrySubmitQuicSendOperation(
         operation);
     if (!QUIC_FAILED(status)) {
         relay->OutstandingQuicSendBytes.fetch_add(operation->TotalBytes, std::memory_order_acq_rel);
+        uint64_t outstanding =
+            relay->OutstandingQuicSendBytes.load(std::memory_order_acquire);
+        uint64_t maxObserved =
+            relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
+        while (outstanding > maxObserved &&
+            !relay->MaxOutstandingQuicSendBytes.compare_exchange_weak(
+                maxObserved, outstanding, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+        }
         if ((flags & QUIC_SEND_FLAG_FIN) != 0) {
             relay->QuicSendFinSubmitted.store(true, std::memory_order_release);
         }
@@ -1439,6 +1575,7 @@ void TqWindowsRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayCont
                 return;
             }
         }
+        MaybePostTcpRecv(relay);
     }
 }
 
@@ -1537,6 +1674,7 @@ void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD 
         return;
     }
     relay->InFlightTcpRecvs.fetch_sub(1, std::memory_order_acq_rel);
+    relay->TcpRecvPosted.store(false, std::memory_order_release);
     if (bytes == 0) {
         (void)HandleTcpReadClosed(std::move(op));
         return;
@@ -2396,6 +2534,14 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
         return QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE) {
+        TqWindowsRelayTask task{};
+        task.Type = TqWindowsRelayTaskType::QuicIdealSendBuffer;
+        task.RelayId = relay->Id;
+        task.Value = event->IDEAL_SEND_BUFFER_SIZE.ByteCount;
+        (void)worker->EnqueueEvent(std::move(task));
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||

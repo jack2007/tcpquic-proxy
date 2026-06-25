@@ -311,6 +311,48 @@ bool TestWindowsRelayReceiveViewEventQueue() {
     return ok;
 }
 
+bool TestWindowsRelayTcpReadBackpressureWatermarks() {
+    TqWindowsRelayWorker worker;
+    if (!worker.Start()) {
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        return false;
+    }
+
+    const uint64_t relayId = handle.WindowsRelayId;
+    worker.TestConfigureQuicSendBacklog(relayId, 8, 8);
+
+    if (worker.MaybePostTcpRecvForTest(relayId)) {
+        worker.Stop();
+        return false;
+    }
+    if (!worker.TestGetTcpReadPausedByQuicBacklog(relayId)) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.TestProcessQuicSendCompleteForTest(relayId, 5);
+
+    if (worker.TestGetTcpReadPausedByQuicBacklog(relayId)) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.Stop();
+    return true;
+}
+
 bool TestWindowsRelaySendCompleteEventQueue() {
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamSend = FakeStreamSend;
@@ -426,6 +468,10 @@ int main() {
 
     if (!TestWindowsRelaySendCompleteEventQueue()) {
         return 40;
+    }
+
+    if (!TestWindowsRelayTcpReadBackpressureWatermarks()) {
+        return 41;
     }
 
     TqWindowsRelayWorker worker;
