@@ -569,6 +569,7 @@ public:
                 static_cast<unsigned>(flags));
             return false;
         }
+        TqRelaySetTraceContext(&RelayHandle, TraceTunnelId, TraceTarget.c_str());
 
         {
             std::lock_guard<std::mutex> guard(Lock);

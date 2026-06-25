@@ -855,11 +855,11 @@ bool TqDiagStatsEnabled() {
 std::string FormatTraceLinuxRelayStateLine(
     const char* eventName,
     const TqTraceLinuxRelayStreamState& state) {
-    char buffer[768];
+    char buffer[1024];
     std::snprintf(
         buffer,
         sizeof(buffer),
-        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_write_errno=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d",
+        "event=%s worker=%u relay=%llu outstanding_quic_sends=%llu outstanding_quic_send_bytes=%llu pending_tcp_write_queue=%llu pending_tcp_write_bytes=%llu pending_quic_receive_bytes=%llu tcp_read_bytes=%llu tcp_write_bytes=%llu tcp_write_errno=%llu tcp_read_closed=%d tcp_write_closed=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d tcp_write_shutdown_queued=%d stream_detached=%d tunnel=%llu target=%s",
         eventName != nullptr ? eventName : "linux_relay_state",
         state.WorkerIndex,
         static_cast<unsigned long long>(state.RelayId),
@@ -876,7 +876,9 @@ std::string FormatTraceLinuxRelayStateLine(
         state.QuicSendFinSubmitted ? 1 : 0,
         state.QuicSendFinCompleted ? 1 : 0,
         state.TcpWriteShutdownQueued ? 1 : 0,
-        state.StreamDetached ? 1 : 0);
+        state.StreamDetached ? 1 : 0,
+        static_cast<unsigned long long>(state.TunnelId),
+        state.TunnelId != 0 && state.Target != nullptr ? state.Target : "-");
     return buffer;
 }
 
@@ -889,7 +891,7 @@ std::string TqFormatTraceRelayStateLine(
     const char* eventName,
     const char* backend,
     const TqTraceLinuxRelayStreamState& state) {
-    char buffer[832];
+    char buffer[1152];
     std::snprintf(
         buffer,
         sizeof(buffer),
@@ -945,6 +947,44 @@ void TqTraceRelayStopCondition(
         "%s trigger=%s",
         TqFormatTraceRelayStateLine("relay_stop_condition", backend, traceState).c_str(),
         trigger != nullptr ? trigger : "?");
+}
+
+void TqTraceRelayReceiveViewEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* stage,
+    uintptr_t viewId,
+    uint64_t value,
+    uint64_t totalLength,
+    uint64_t completedLength,
+    uint64_t accountedLength,
+    uint64_t pendingCompleteBytes,
+    size_t sliceIndex,
+    size_t sliceCount,
+    size_t sliceOffset,
+    bool fin,
+    bool drained,
+    const TqTraceLinuxRelayStreamState& state) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    TqTraceLinuxRelayStreamState traceState = state;
+    traceState.WorkerIndex = workerIndex;
+    LogInfo(
+        "%s stage=%s view=0x%llx value=%llu total=%llu completed=%llu accounted=%llu pending_complete=%llu slice_index=%llu slice_count=%llu slice_offset=%llu fin=%d drained=%d",
+        TqFormatTraceRelayStateLine("relay_receive_view", backend, traceState).c_str(),
+        stage != nullptr ? stage : "?",
+        static_cast<unsigned long long>(viewId),
+        static_cast<unsigned long long>(value),
+        static_cast<unsigned long long>(totalLength),
+        static_cast<unsigned long long>(completedLength),
+        static_cast<unsigned long long>(accountedLength),
+        static_cast<unsigned long long>(pendingCompleteBytes),
+        static_cast<unsigned long long>(sliceIndex),
+        static_cast<unsigned long long>(sliceCount),
+        static_cast<unsigned long long>(sliceOffset),
+        fin ? 1 : 0,
+        drained ? 1 : 0);
 }
 
 void TqTraceRelayBackpressureEvent(

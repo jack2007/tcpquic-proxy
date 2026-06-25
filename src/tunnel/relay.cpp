@@ -165,6 +165,19 @@ bool TqRelayStartQuicReceiveSink(
 #endif
 }
 
+void TqRelaySetTraceContext(TqRelayHandle* handle, uint64_t tunnelId, const char* target) {
+    if (handle == nullptr || tunnelId == 0) {
+        return;
+    }
+#if defined(_WIN32)
+    if (handle->Backend == TqRelayBackendType::WindowsWorker && handle->WindowsWorker != nullptr) {
+        handle->WindowsWorker->SetRelayTraceContext(handle->WindowsRelayId, tunnelId, target);
+    }
+#else
+    (void)target;
+#endif
+}
+
 void TqRelayStop(TqRelayHandle* handle) {
     if (handle == nullptr) {
         return;

@@ -6,6 +6,7 @@
 
 #include "relay_metrics.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -64,6 +65,8 @@ struct TqTraceLinuxRelayStreamState {
     bool QuicSendFinCompleted{false};
     bool TcpWriteShutdownQueued{false};
     bool StreamDetached{false};
+    uint64_t TunnelId{0};
+    const char* Target{nullptr};
 };
 
 bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec);
@@ -125,6 +128,22 @@ void TqTraceRelayStopCondition(
     const char* backend,
     uint32_t workerIndex,
     const char* trigger,
+    const TqTraceLinuxRelayStreamState& state);
+void TqTraceRelayReceiveViewEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* stage,
+    uintptr_t viewId,
+    uint64_t value,
+    uint64_t totalLength,
+    uint64_t completedLength,
+    uint64_t accountedLength,
+    uint64_t pendingCompleteBytes,
+    size_t sliceIndex,
+    size_t sliceCount,
+    size_t sliceOffset,
+    bool fin,
+    bool drained,
     const TqTraceLinuxRelayStreamState& state);
 void TqTraceRelayBackpressureEvent(
     const char* backend,

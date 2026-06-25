@@ -165,6 +165,7 @@ public:
 #endif
 
     void StopRelay(uint64_t relayId);
+    void SetRelayTraceContext(uint64_t relayId, uint64_t tunnelId, const char* target);
     static QUIC_STATUS QUIC_API StreamCallback(
         MsQuicStream* stream,
         void* context,
@@ -237,6 +238,11 @@ private:
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);
     TqTraceLinuxRelayStreamState BuildRelayTraceState(const std::shared_ptr<RelayContext>& relay) const;
+    void TraceReceiveViewEvent(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view,
+        const char* stage,
+        uint64_t value = 0) const;
     void TraceRelayBackpressure(
         const std::shared_ptr<RelayContext>& relay,
         const char* action,
@@ -262,6 +268,7 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,
         int error);
+    bool HasPendingRelayDrainWork(const std::shared_ptr<RelayContext>& relay) const;
     bool IsTcpTeardownError(int error) const;
     bool IsIocpTeardownError(DWORD error) const;
     bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;

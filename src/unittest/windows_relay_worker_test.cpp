@@ -598,6 +598,53 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         }
         receiveWorker.Stop();
     }
+    {
+        TqWindowsRelayWorker receiveWorker;
+        assert(receiveWorker.Start());
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            return 236;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        receiveWorker.SetRelayTraceContext(relayId, 42, "example.test:443");
+        if (!receiveWorker.TestMarkQuicSendInFlightForRetirement(relayId)) {
+            receiveWorker.Stop();
+            return 237;
+        }
+        const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+        if (!receiveWorker.TestHandleTcpPostFailureForTest(relayId, WSAECONNRESET)) {
+            receiveWorker.Stop();
+            return 238;
+        }
+        bool closeAfterDrained = false;
+        bool tcpRecvClosed = false;
+        if (!receiveWorker.TestGetRelayDrainFlagsForTest(
+                relayId, &closeAfterDrained, &tcpRecvClosed) ||
+            !closeAfterDrained || !tcpRecvClosed) {
+            receiveWorker.Stop();
+            return 239;
+        }
+        if (handle.Stop.load(std::memory_order_acquire)) {
+            receiveWorker.Stop();
+            return 240;
+        }
+        receiveWorker.TestProcessQuicSendCompleteForTest(relayId, 24);
+        (void)receiveWorker.DrainEventsForTest(4096);
+        const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
+        if (after.FatalRelayResets != before.FatalRelayResets ||
+            after.GracefulRelayDrains <= before.GracefulRelayDrains) {
+            receiveWorker.Stop();
+            return 241;
+        }
+        receiveWorker.Stop();
+    }
     return 0;
 }
 

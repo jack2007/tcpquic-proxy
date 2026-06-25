@@ -61,6 +61,39 @@ void TqTraceRelayStopCondition(
     (void)state;
 }
 
+void TqTraceRelayReceiveViewEvent(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* stage,
+    uintptr_t viewId,
+    uint64_t value,
+    uint64_t totalLength,
+    uint64_t completedLength,
+    uint64_t accountedLength,
+    uint64_t pendingCompleteBytes,
+    size_t sliceIndex,
+    size_t sliceCount,
+    size_t sliceOffset,
+    bool fin,
+    bool drained,
+    const TqTraceLinuxRelayStreamState& state) {
+    (void)backend;
+    (void)workerIndex;
+    (void)stage;
+    (void)viewId;
+    (void)value;
+    (void)totalLength;
+    (void)completedLength;
+    (void)accountedLength;
+    (void)pendingCompleteBytes;
+    (void)sliceIndex;
+    (void)sliceCount;
+    (void)sliceOffset;
+    (void)fin;
+    (void)drained;
+    (void)state;
+}
+
 void TqTraceRelayBackpressureEvent(
     const char* backend,
     uint32_t workerIndex,

@@ -47,6 +47,7 @@ bool TqRelayStartQuicReceiveSink(
     std::atomic<uint64_t>* receiveBytes);
 
 void TqRelayStop(TqRelayHandle* handle);
+void TqRelaySetTraceContext(TqRelayHandle* handle, uint64_t tunnelId, const char* target);
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle);
 void TqRelayUpdateQuicReadAheadFromNetworkStats(
     uint64_t bandwidthBytesPerSecond,

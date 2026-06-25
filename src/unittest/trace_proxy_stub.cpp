@@ -80,6 +80,24 @@ void TqTraceRelayStopCondition(
     const char*, uint32_t, const char*, const TqTraceLinuxRelayStreamState&) {
 }
 
+void TqTraceRelayReceiveViewEvent(
+    const char*,
+    uint32_t,
+    const char*,
+    uintptr_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    size_t,
+    size_t,
+    size_t,
+    bool,
+    bool,
+    const TqTraceLinuxRelayStreamState&) {
+}
+
 void TqTraceRelayBackpressureEvent(
     const char*,
     uint32_t,
