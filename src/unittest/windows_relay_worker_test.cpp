@@ -1130,6 +1130,54 @@ int main() {
         MsQuic = nullptr;
     }
     {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+        fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+        TqWindowsRelayWorker receiveWorker;
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            MsQuic = nullptr;
+            return 130;
+        }
+        receiveWorker.SetQuicReceiveViewDrainEnabledForTest(false);
+        if (!receiveWorker.Start()) {
+            MsQuic = nullptr;
+            return 133;
+        }
+
+        uint8_t data[] = {'r', 'e', 'a', 'd', 'y'};
+        QUIC_BUFFER buffer{};
+        buffer.Buffer = data;
+        buffer.Length = sizeof(data);
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_RECEIVE;
+        event.RECEIVE.BufferCount = 1;
+        event.RECEIVE.Buffers = &buffer;
+
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            return 131;
+        }
+        if (!receiveWorker.TestLastPostedCallbackWasReceiveReadyForTest(handle.WindowsRelayId)) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            return 132;
+        }
+        receiveWorker.Stop();
+        MsQuic = nullptr;
+    }
+    {
         TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
         if (!TqSocketPair(pair)) {
             return 44;

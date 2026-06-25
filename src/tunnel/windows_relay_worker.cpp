@@ -42,17 +42,6 @@ uint64_t SaturatingFetchSub(std::atomic<uint64_t>& value, uint64_t delta) {
     }
 }
 
-enum class TqWindowsIocpOperationType : uint32_t {
-    TcpRecv,
-    TcpSend,
-    QuicReceiveQueued,
-    QuicReceiveViewQueued,
-    QuicSendComplete,
-    QuicSendRetry,
-    CloseRelay,
-    StopWorker,
-};
-
 struct TqWindowsQuicReceiveSlice {
     const uint8_t* Data{nullptr};
     uint32_t Length{0};
@@ -99,6 +88,9 @@ struct TqWindowsRelayWorker::IoOperation {
     OVERLAPPED Overlapped{};
     TqWindowsIocpOperationType Event{TqWindowsIocpOperationType::TcpRecv};
     std::shared_ptr<RelayContext> Relay;
+    uint64_t RelayId{0};
+    uint64_t Value{0};
+    size_t Length{0};
     TqBufferRef BufferOwner;
     WSABUF WsaBuffer{};
     QUIC_BUFFER QuicBuffer{};
@@ -967,6 +959,50 @@ bool TqWindowsRelayWorker::TestCompleteReceiveViewForCleanup(uint64_t relayId, u
     view->AccountedLength = completedLength;
     SaturatingFetchSub(relay->PendingQuicReceiveBytes, completedLength);
     return CompletePendingQuicReceive(relay, view);
+}
+
+bool TqWindowsRelayWorker::TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const {
+    std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+    return LastPostedCallbackType_ == TqWindowsIocpOperationType::RelayReceiveReady &&
+        LastPostedCallbackRelayId_ == relayId && !LastPostedCallbackHadReceiveView_;
+}
+
+bool TqWindowsRelayWorker::PostCallbackOperation(
+    TqWindowsIocpOperationType type,
+    const std::shared_ptr<RelayContext>& relay,
+    uint64_t value,
+    size_t length) {
+    if (Iocp_ == nullptr || !relay) {
+        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    auto op = std::make_unique<IoOperation>();
+    op->Event = type;
+    op->Relay = relay;
+    op->RelayId = relay->Id;
+    op->Value = value;
+    op->Length = length;
+
+#if defined(TQ_UNIT_TESTING)
+    {
+        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+        LastPostedCallbackType_ = type;
+        LastPostedCallbackRelayId_ = op->RelayId;
+        LastPostedCallbackHadReceiveView_ = op->ReceiveView != nullptr;
+    }
+#endif
+
+    IoOperation* raw = op.release();
+    relay->QueuedWorkerOps.fetch_add(1, std::memory_order_acq_rel);
+    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+        relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
+        delete raw;
+        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 bool TqWindowsRelayWorker::TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength) {

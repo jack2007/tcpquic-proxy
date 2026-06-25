@@ -33,6 +33,19 @@ struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 
+enum class TqWindowsIocpOperationType : uint32_t {
+    TcpRecv,
+    TcpSend,
+    QuicReceiveQueued,
+    QuicReceiveViewQueued,
+    QuicSendComplete,
+    QuicSendRetry,
+    CloseRelay,
+    StopWorker,
+    RelayReceiveReady,
+    RelayReceiveDrain,
+};
+
 struct TqWindowsRelayActiveSnapshot {
     uint32_t WorkerIndex{0};
     uint64_t RelayId{0};
@@ -144,6 +157,7 @@ public:
         const TqTuningConfig& tuning,
         TqCompressAlgo compressAlgo);
     void SetQuicReceiveViewDrainEnabledForTest(bool enabled);
+    bool TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
     bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
     bool TestLateReceiveViewCompletionIgnored(uint64_t relayId, DWORD bytes, uint64_t postedLength);
@@ -196,6 +210,11 @@ private:
     void DrainCallbackPendingQuicSendCompletions();
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
+    bool PostCallbackOperation(
+        TqWindowsIocpOperationType type,
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t value = 0,
+        size_t length = 0);
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
     uint64_t CurrentRelayIdealSendBytes(const std::shared_ptr<RelayContext>& relay) const;
@@ -344,6 +363,10 @@ private:
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
+    mutable std::mutex LastPostedCallbackLock_;
+    TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};
+    uint64_t LastPostedCallbackRelayId_{0};
+    bool LastPostedCallbackHadReceiveView_{false};
 #endif
     mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;
