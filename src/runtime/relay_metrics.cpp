@@ -28,11 +28,16 @@ TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnap
     active.QueuedQuicReceives = relay.QueuedQuicReceives;
     active.PendingQuicReceiveBytes = relay.PendingQuicReceiveBytes;
     active.PendingQuicReceiveQueueDepth = relay.PendingQuicReceiveQueueDepth;
+    active.CallbackPendingQuicReceiveDepth = relay.CallbackPendingQuicReceiveDepth;
+    active.OutstandingQuicSendBytes = relay.OutstandingQuicSendBytes;
+    active.MaxOutstandingQuicSendBytes = relay.MaxOutstandingQuicSendBytes;
+    active.EventQueueDepth = relay.WindowsEventQueueDepth;
     active.TcpReadBytes = relay.TcpReadBytes;
     active.TcpWriteBytes = relay.TcpWriteBytes;
     active.LastTcpWriteErrno = relay.LastTcpWriteErrno;
     active.Closing = relay.Closing;
     active.TcpReadClosed = relay.TcpReadClosed;
+    active.TcpReadPausedByQuicBacklog = relay.TcpReadPausedByQuicBacklog;
     active.TcpWriteClosed = relay.TcpWriteClosed;
     active.CloseAfterDrained = relay.CloseAfterDrained;
     active.QuicSendFinSubmitted = relay.QuicSendFinSubmitted;
@@ -292,6 +297,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         }
     }
     metrics.Backend = "worker";
+    metrics.EventsProcessed = snapshot.EventsProcessed;
+    metrics.PendingEvents = snapshot.WindowsEventQueueDepth;
+    metrics.EventQueueFullErrors = snapshot.WindowsEventQueueFullCount;
     metrics.ActiveRelays = snapshot.ActiveRelays;
     metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
     metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;

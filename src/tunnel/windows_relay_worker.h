@@ -44,8 +44,10 @@ struct TqWindowsRelayActiveSnapshot {
     uint32_t QueuedQuicReceives{0};
     uint64_t PendingQuicReceiveBytes{0};
     uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t CallbackPendingQuicReceiveDepth{0};
     uint64_t OutstandingQuicSendBytes{0};
     uint64_t MaxOutstandingQuicSendBytes{0};
+    uint64_t WindowsEventQueueDepth{0};
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
@@ -92,6 +94,14 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t QuicSendFatalErrors{0};
     uint64_t QuicSendCompleteEvents{0};
+    uint64_t WindowsEventQueueDepth{0};
+    uint64_t WindowsEventQueueCapacity{0};
+    uint64_t WindowsEventQueueFullCount{0};
+    uint64_t WindowsEventQueueWakeCount{0};
+    uint64_t WindowsEventQueueWakeFailedCount{0};
+    uint64_t EventsProcessed{0};
+    uint64_t TcpReadResumeByBacklogEvents{0};
+    uint64_t LateTeardownDowngradedCount{0};
 #if defined(TQ_UNIT_TESTING)
     uint64_t PostTcpRecvFromSendCompleteCallbackCount{0};
 #endif
@@ -297,6 +307,7 @@ private:
     std::atomic<uint64_t> QuicSendBackpressureEvents_{0};
     std::atomic<uint64_t> QuicSendFatalErrors_{0};
     std::atomic<uint64_t> QuicSendCompleteEvents_{0};
+    std::atomic<uint64_t> TcpReadResumeByBacklogEvents_{0};
     std::atomic<uint64_t> Errors_{0};
     std::mutex CallbackPendingQuicSendCompleteLock_;
     std::deque<TqWindowsQuicSendOperation*> CallbackPendingQuicSendCompletions_;

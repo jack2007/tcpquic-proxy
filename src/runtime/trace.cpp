@@ -389,7 +389,7 @@ void DumpPeriodicStats() {
                 }
 
                 LogInfo(
-                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u queued_quic_receives=%u tcp_write_errno=%llu closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d",
+                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u queued_quic_receives=%u tcp_write_errno=%llu closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d event_queue_depth=%llu callback_pending_quic_receives=%llu tcp_read_paused_by_quic_backlog=%d outstanding_quic_send_bytes=%llu",
                     static_cast<unsigned long long>(tunnel.tunnelId),
                     relay->WorkerIndex,
                     static_cast<unsigned long long>(relay->RelayId),
@@ -412,7 +412,11 @@ void DumpPeriodicStats() {
                     relay->QuicSendFinSubmitted ? 1 : 0,
                     relay->QuicSendFinCompleted ? 1 : 0,
                     relay->StopPublished ? 1 : 0,
-                    relay->StreamDetached ? 1 : 0);
+                    relay->StreamDetached ? 1 : 0,
+                    static_cast<unsigned long long>(relay->EventQueueDepth),
+                    static_cast<unsigned long long>(relay->CallbackPendingQuicReceiveDepth),
+                    relay->TcpReadPausedByQuicBacklog ? 1 : 0,
+                    static_cast<unsigned long long>(relay->OutstandingQuicSendBytes));
 
                 constexpr double kRelayFirstByteTimeoutSec = 30.0;
                 constexpr double kRelayIdleTimeoutSec = 60.0;

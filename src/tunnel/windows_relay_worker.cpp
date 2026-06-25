@@ -241,6 +241,19 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
         QuicSendBackpressureEvents_.load(std::memory_order_relaxed);
     snapshot.QuicSendFatalErrors = QuicSendFatalErrors_.load(std::memory_order_relaxed);
     snapshot.QuicSendCompleteEvents = QuicSendCompleteEvents_.load(std::memory_order_relaxed);
+    snapshot.WindowsEventQueueDepth = EventQueue_.SizeApprox();
+    snapshot.WindowsEventQueueCapacity = EventQueue_.Capacity();
+    snapshot.WindowsEventQueueFullCount =
+        EventQueueFullCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsEventQueueWakeCount =
+        EventQueueWakeCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsEventQueueWakeFailedCount =
+        EventQueueWakeFailedCount_.load(std::memory_order_relaxed);
+    snapshot.EventsProcessed = EventsProcessed_.load(std::memory_order_relaxed);
+    snapshot.TcpReadResumeByBacklogEvents =
+        TcpReadResumeByBacklogEvents_.load(std::memory_order_relaxed);
+    snapshot.LateTeardownDowngradedCount =
+        LateTeardownDowngradedCount_.load(std::memory_order_relaxed);
 #if defined(TQ_UNIT_TESTING)
     snapshot.PostTcpRecvFromSendCompleteCallbackCount =
         PostTcpRecvFromSendCompleteCallbackCount_.load(std::memory_order_relaxed);
@@ -252,6 +265,7 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
         IocpStaleCompletionDropped_.load(std::memory_order_relaxed);
     snapshot.TcpSendZeroBytesGraceful =
         TcpSendZeroBytesGraceful_.load(std::memory_order_relaxed);
+    const uint64_t eventQueueDepth = EventQueue_.SizeApprox();
     {
         std::lock_guard<std::mutex> guard(Lock_);
         snapshot.ActiveRelays = Relays_.size();
@@ -302,6 +316,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
                     relay->OutstandingQuicSendBytes.load(std::memory_order_relaxed);
                 active.MaxOutstandingQuicSendBytes =
                     relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
+                active.WindowsEventQueueDepth = eventQueueDepth;
+                {
+                    std::lock_guard<std::mutex> pendingGuard(relay->CallbackPendingQuicReceiveLock);
+                    active.CallbackPendingQuicReceiveDepth =
+                        relay->CallbackPendingQuicReceives.size();
+                }
                 snapshot.ActiveRelayStates.push_back(active);
             }
         }
@@ -569,6 +589,9 @@ void TqWindowsRelayWorker::SetTcpReadBackpressure(
     }
     if (relay->TcpReadPausedByQuicBacklog.exchange(paused, std::memory_order_acq_rel) == paused) {
         return;
+    }
+    if (!paused) {
+        TcpReadResumeByBacklogEvents_.fetch_add(1, std::memory_order_relaxed);
     }
     TraceRelayBackpressure(relay, paused ? "pause_tcp_read" : "resume_tcp_read", reason);
 }
@@ -2779,6 +2802,16 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.QuicSendBackpressureEvents += snapshot.QuicSendBackpressureEvents;
         total.QuicSendFatalErrors += snapshot.QuicSendFatalErrors;
         total.QuicSendCompleteEvents += snapshot.QuicSendCompleteEvents;
+        total.WindowsEventQueueDepth += snapshot.WindowsEventQueueDepth;
+        total.WindowsEventQueueCapacity = std::max(
+            total.WindowsEventQueueCapacity,
+            snapshot.WindowsEventQueueCapacity);
+        total.WindowsEventQueueFullCount += snapshot.WindowsEventQueueFullCount;
+        total.WindowsEventQueueWakeCount += snapshot.WindowsEventQueueWakeCount;
+        total.WindowsEventQueueWakeFailedCount += snapshot.WindowsEventQueueWakeFailedCount;
+        total.EventsProcessed += snapshot.EventsProcessed;
+        total.TcpReadResumeByBacklogEvents += snapshot.TcpReadResumeByBacklogEvents;
+        total.LateTeardownDowngradedCount += snapshot.LateTeardownDowngradedCount;
         total.ActiveRelays += snapshot.ActiveRelays;
         total.Errors += snapshot.Errors;
         total.IocpCompletionDowngraded += snapshot.IocpCompletionDowngraded;

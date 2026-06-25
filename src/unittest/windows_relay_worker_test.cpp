@@ -353,6 +353,65 @@ bool TestWindowsRelayTcpReadBackpressureWatermarks() {
     return true;
 }
 
+bool TestWindowsRelaySnapshotObservability() {
+    TqWindowsRelayWorker worker;
+    if (!worker.Start()) {
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        return false;
+    }
+
+    const uint64_t relayId = handle.WindowsRelayId;
+    TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
+    if (snapshot.WindowsEventQueueCapacity == 0 ||
+        snapshot.WindowsEventQueueDepth != 0 ||
+        snapshot.ActiveRelayStates.size() != 1) {
+        worker.Stop();
+        return false;
+    }
+
+    const TqWindowsRelayActiveSnapshot& active = snapshot.ActiveRelayStates.front();
+    if (active.RelayId != relayId ||
+        active.CallbackPendingQuicReceiveDepth != 0 ||
+        active.WindowsEventQueueDepth != snapshot.WindowsEventQueueDepth) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.TestConfigureQuicSendBacklog(relayId, 8, 8);
+    (void)worker.MaybePostTcpRecvForTest(relayId);
+    snapshot = worker.Snapshot();
+    if (snapshot.ActiveRelayStates.empty() ||
+        !snapshot.ActiveRelayStates.front().TcpReadPausedByQuicBacklog ||
+        snapshot.ActiveRelayStates.front().OutstandingQuicSendBytes != 8) {
+        worker.Stop();
+        return false;
+    }
+
+    const uint64_t resumeBefore = snapshot.TcpReadResumeByBacklogEvents;
+    worker.TestProcessQuicSendCompleteForTest(relayId, 5);
+    snapshot = worker.Snapshot();
+    if (snapshot.TcpReadResumeByBacklogEvents <= resumeBefore ||
+        snapshot.ActiveRelayStates.front().TcpReadPausedByQuicBacklog) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.Stop();
+    return true;
+}
+
 int TestWindowsRelayQuicTeardownOnWorker() {
     {
         TqWindowsRelayWorker receiveWorker;
@@ -656,6 +715,10 @@ int main() {
         return 41;
     }
 
+    if (!TestWindowsRelaySnapshotObservability()) {
+        return 42;
+    }
+
     {
         const int teardown = TestWindowsRelayQuicTeardownOnWorker();
         if (teardown != 0) {
@@ -675,6 +738,8 @@ int main() {
         assert(snapshot.DeferredReceiveQueued == 0);
         assert(snapshot.DeferredReceiveCompleteBytes == 0);
         assert(snapshot.PendingQuicReceiveBytes == 0);
+        assert(snapshot.WindowsEventQueueCapacity > 0);
+        assert(snapshot.WindowsEventQueueDepth == 0);
         snapshotWorker.Stop();
     }
     {
