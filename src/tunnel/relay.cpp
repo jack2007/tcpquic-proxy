@@ -30,7 +30,7 @@ bool TqRelayStart(
     TqApplyRelayPoolBudget(tuning, activeRelays);
 
 #if defined(_WIN32)
-    if (!TqWindowsRelayRuntime::Instance().Start(tuning.LinuxRelayWorkerCount) ||
+    if (!TqWindowsRelayRuntime::Instance().Start(tuning) ||
         !TqWindowsRelayRuntime::Instance().RegisterRelay(
             tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo)) {
         TqRelayUnregisterActive();

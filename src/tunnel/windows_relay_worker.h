@@ -4,6 +4,7 @@
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
+#include "windows_relay_event_queue.h"
 #include "relay_error.h"
 #include "trace.h"
 #include "tuning.h"
@@ -96,7 +97,10 @@ struct TqWindowsRelayWorkerSnapshot {
 
 class TqWindowsRelayWorker {
 public:
-    explicit TqWindowsRelayWorker(uint32_t workerIndex = 0);
+    explicit TqWindowsRelayWorker(
+        uint32_t workerIndex = 0,
+        size_t queueCapacity = 8192,
+        size_t eventBudget = 4096);
     ~TqWindowsRelayWorker();
 
     bool Start();
@@ -144,6 +148,12 @@ private:
 
     void Run();
     void PostStop();
+    bool EnqueueEvent(TqWindowsRelayTask&& task);
+    void Wake();
+    size_t DrainEvents(size_t budget);
+    void DrainPerRelayMaintenance();
+    void ProcessRelayTask(TqWindowsRelayTask& task);
+    std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
@@ -253,6 +263,13 @@ private:
     std::atomic<uint64_t> IocpStaleCompletionDropped_{0};
     std::atomic<uint64_t> TcpSendZeroBytesGraceful_{0};
     uint32_t WorkerIndex_{0};
+    TqWindowsRelayEventQueue EventQueue_;
+    size_t EventBudget_{0};
+    std::atomic<bool> WakeArmed_{false};
+    std::atomic<uint64_t> EventQueueFullCount_{0};
+    std::atomic<uint64_t> EventQueueWakeCount_{0};
+    std::atomic<uint64_t> EventQueueWakeFailedCount_{0};
+    std::atomic<uint64_t> EventsProcessed_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
 #endif
@@ -266,7 +283,7 @@ class TqWindowsRelayRuntime {
 public:
     static TqWindowsRelayRuntime& Instance();
 
-    bool Start(uint32_t workerCount);
+    bool Start(const TqTuningConfig& tuning);
     void Stop();
     bool RegisterRelay(
         TqSocketHandle tcpFd,

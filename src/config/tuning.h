@@ -41,6 +41,9 @@ struct TqTuningConfig {
     uint64_t LinuxRelayQuicReceiveCompleteBatchBytes{0};
     uint64_t WindowsRelayMaxPendingQuicReceiveBytesPerRelay{16ull * 1024 * 1024};
     uint64_t WindowsRelayQuicReceiveCompleteBatchBytes{0};
+    uint64_t WindowsRelayMaxBufferedQuicSendBytes{64ull * 1024 * 1024};
+    uint32_t WindowsRelayEventQueueCapacity{8192};
+    uint32_t WindowsRelayWorkerEventBudget{4096};
 };
 
 struct TqRuntimeObservations {

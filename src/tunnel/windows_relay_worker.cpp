@@ -37,7 +37,7 @@ uint64_t SaturatingFetchSub(std::atomic<uint64_t>& value, uint64_t delta) {
     }
 }
 
-enum class TqWindowsRelayEvent : uint32_t {
+enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
     TcpSend,
     QuicReceiveQueued,
@@ -79,7 +79,7 @@ struct TqWindowsRelayWorker::CallbackBinding {
 
 struct TqWindowsRelayWorker::IoOperation {
     OVERLAPPED Overlapped{};
-    TqWindowsRelayEvent Event{TqWindowsRelayEvent::TcpRecv};
+    TqWindowsIocpOperationType Event{TqWindowsIocpOperationType::TcpRecv};
     std::shared_ptr<RelayContext> Relay;
     TqBufferRef BufferOwner;
     WSABUF WsaBuffer{};
@@ -135,8 +135,13 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
     std::atomic<bool> QuicReceivePaused{false};
 };
 
-TqWindowsRelayWorker::TqWindowsRelayWorker(uint32_t workerIndex) :
-    WorkerIndex_(workerIndex) {}
+TqWindowsRelayWorker::TqWindowsRelayWorker(
+    uint32_t workerIndex,
+    size_t queueCapacity,
+    size_t eventBudget) :
+    EventQueue_(queueCapacity),
+    WorkerIndex_(workerIndex),
+    EventBudget_(eventBudget) {}
 TqWindowsRelayWorker::~TqWindowsRelayWorker() { Stop(); }
 
 bool TqWindowsRelayWorker::Start() {
@@ -277,18 +282,111 @@ void TqWindowsRelayWorker::PostStop() {
     }
 }
 
+bool TqWindowsRelayWorker::EnqueueEvent(TqWindowsRelayTask&& task) {
+    if (!EventQueue_.TryPush(std::move(task))) {
+        EventQueueFullCount_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    Wake();
+    return true;
+}
+
+void TqWindowsRelayWorker::Wake() {
+    if (Iocp_ == nullptr) {
+        return;
+    }
+    if (WakeArmed_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    if (::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, nullptr)) {
+        EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        WakeArmed_.store(false, std::memory_order_release);
+        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+size_t TqWindowsRelayWorker::DrainEvents(size_t budget) {
+    size_t processed = 0;
+    while (processed < budget) {
+        TqWindowsRelayTask task{};
+        if (!EventQueue_.TryPop(task)) {
+            break;
+        }
+        ProcessRelayTask(task);
+        ++processed;
+    }
+    EventsProcessed_.fetch_add(processed, std::memory_order_relaxed);
+    WakeArmed_.store(false, std::memory_order_release);
+    if (EventQueue_.SizeApprox() != 0) {
+        Wake();
+    }
+    return processed;
+}
+
+void TqWindowsRelayWorker::ProcessRelayTask(TqWindowsRelayTask& task) {
+    switch (task.Type) {
+    case TqWindowsRelayTaskType::TestMarker:
+        break;
+    case TqWindowsRelayTaskType::TcpWritable:
+        break;
+    case TqWindowsRelayTaskType::QuicReceive:
+        break;
+    case TqWindowsRelayTaskType::Shutdown:
+        if (task.RelayId != 0) {
+            auto relay = FindRelayById(task.RelayId);
+            CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "shutdown_task");
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void TqWindowsRelayWorker::DrainPerRelayMaintenance() {
+    std::vector<std::shared_ptr<RelayContext>> relays;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        relays.reserve(Relays_.size());
+        for (const auto& entry : Relays_) {
+            relays.push_back(entry.second);
+        }
+    }
+    for (const auto& relay : relays) {
+        if (!relay) {
+            continue;
+        }
+        RetryPendingQuicSends(relay);
+        (void)CloseRelayIfDrained(relay);
+        TryRetireRelay(relay);
+    }
+}
+
+std::shared_ptr<TqWindowsRelayWorker::RelayContext> TqWindowsRelayWorker::FindRelayById(
+    uint64_t relayId) {
+    std::lock_guard<std::mutex> guard(Lock_);
+    const auto it = Relays_.find(relayId);
+    return it != Relays_.end() ? it->second : nullptr;
+}
+
 void TqWindowsRelayWorker::Run() {
     while (!Stopping_.load()) {
+        (void)DrainEvents(EventBudget_);
+        DrainPerRelayMaintenance();
+
         DWORD bytes = 0;
         ULONG_PTR key = 0;
         OVERLAPPED* overlapped = nullptr;
         const BOOL ok = ::GetQueuedCompletionStatus(
             static_cast<HANDLE>(Iocp_), &bytes, &key, &overlapped, INFINITE);
         const DWORD completionError = ok ? ERROR_SUCCESS : ::GetLastError();
-        if (overlapped == nullptr && Stopping_.load()) {
-            break;
-        }
         if (overlapped == nullptr) {
+            WakeArmed_.store(false, std::memory_order_release);
+            (void)DrainEvents(EventBudget_);
+            DrainPerRelayMaintenance();
+            if (Stopping_.load(std::memory_order_acquire)) {
+                break;
+            }
             continue;
         }
         std::unique_ptr<IoOperation> op(reinterpret_cast<IoOperation*>(overlapped));
@@ -299,8 +397,8 @@ void TqWindowsRelayWorker::Run() {
             }
             continue;
         }
-        if (op->Event != TqWindowsRelayEvent::TcpRecv &&
-            op->Event != TqWindowsRelayEvent::TcpSend) {
+        if (op->Event != TqWindowsIocpOperationType::TcpRecv &&
+            op->Event != TqWindowsIocpOperationType::TcpSend) {
             relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
         }
         struct HandlerGuard {
@@ -320,7 +418,7 @@ void TqWindowsRelayWorker::Run() {
             }
         } handlerGuard{this, relay};
         if (!ok) {
-            if (relay && op->Event == TqWindowsRelayEvent::TcpRecv) {
+            if (relay && op->Event == TqWindowsIocpOperationType::TcpRecv) {
                 relay->InFlightTcpRecvs.fetch_sub(1, std::memory_order_acq_rel);
                 if (completionError != ERROR_SUCCESS) {
                     relay->LastTcpWriteErrno.store(completionError, std::memory_order_relaxed);
@@ -333,7 +431,7 @@ void TqWindowsRelayWorker::Run() {
                     (void)CloseRelayIfDrained(relay);
                     continue;
                 }
-            } else if (relay && op->Event == TqWindowsRelayEvent::TcpSend) {
+            } else if (relay && op->Event == TqWindowsIocpOperationType::TcpSend) {
                 relay->InFlightTcpSends.fetch_sub(1, std::memory_order_acq_rel);
                 if (completionError != ERROR_SUCCESS) {
                     relay->LastTcpWriteErrno.store(completionError, std::memory_order_relaxed);
@@ -351,10 +449,10 @@ void TqWindowsRelayWorker::Run() {
             }
             bool downgrade = false;
             switch (op->Event) {
-            case TqWindowsRelayEvent::TcpRecv:
+            case TqWindowsIocpOperationType::TcpRecv:
                 downgrade = ShouldDowngradeTcpRecvCompletion(relay.get(), completionError);
                 break;
-            case TqWindowsRelayEvent::TcpSend:
+            case TqWindowsIocpOperationType::TcpSend:
                 downgrade = ShouldDowngradeTcpSendCompletion(relay.get(), completionError);
                 break;
             default:
@@ -373,27 +471,30 @@ void TqWindowsRelayWorker::Run() {
             continue;
         }
         switch (op->Event) {
-        case TqWindowsRelayEvent::TcpRecv:
+        case TqWindowsIocpOperationType::TcpRecv:
             HandleTcpRecv(std::move(op), bytes);
             break;
-        case TqWindowsRelayEvent::TcpSend:
+        case TqWindowsIocpOperationType::TcpSend:
             HandleTcpSend(std::move(op), bytes);
             break;
-        case TqWindowsRelayEvent::QuicReceiveQueued:
+        case TqWindowsIocpOperationType::QuicReceiveQueued:
             HandleQuicReceiveQueued(std::move(op));
             break;
-        case TqWindowsRelayEvent::QuicReceiveViewQueued:
+        case TqWindowsIocpOperationType::QuicReceiveViewQueued:
             HandleQuicReceiveViewQueued(std::move(op));
             break;
-        case TqWindowsRelayEvent::QuicSendRetry:
+        case TqWindowsIocpOperationType::QuicSendRetry:
             RetryPendingQuicSends(op->Relay);
             break;
-        case TqWindowsRelayEvent::CloseRelay:
+        case TqWindowsIocpOperationType::CloseRelay:
             CloseRelay(op->Relay, TqRelayCloseMode::GracefulDrain, nullptr);
             break;
         default:
             break;
         }
+
+        (void)DrainEvents(EventBudget_);
+        DrainPerRelayMaintenance();
     }
 }
 
@@ -572,7 +673,7 @@ bool TqWindowsRelayWorker::TestLateReceiveViewCompletionIgnored(
     view->Drained = true;
 
     auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsRelayEvent::TcpSend;
+    op->Event = TqWindowsIocpOperationType::TcpSend;
     op->Relay = relay;
     op->ReceiveView = view;
     op->PostedLength = postedLength;
@@ -594,7 +695,7 @@ bool TqWindowsRelayWorker::TestBufferedTcpSendZeroCompletion(uint64_t relayId) {
         return false;
     }
     auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsRelayEvent::TcpSend;
+    op->Event = TqWindowsIocpOperationType::TcpSend;
     op->Relay = relay;
     op->Buffer.resize(8);
     relay->InFlightTcpSends.fetch_add(1);
@@ -724,7 +825,7 @@ bool TqWindowsRelayWorker::PostTcpRecv(const std::shared_ptr<RelayContext>& rela
         TcpRecvOperationsCreated_.fetch_add(1, std::memory_order_relaxed);
     }
     op->Overlapped = OVERLAPPED{};
-    op->Event = TqWindowsRelayEvent::TcpRecv;
+    op->Event = TqWindowsIocpOperationType::TcpRecv;
     op->Relay = relay;
     op->BufferOwner.reset();
     op->Buffer.clear();
@@ -1092,7 +1193,7 @@ bool TqWindowsRelayWorker::PostQuicSend(
         }
         if (repostOnBackpressure) {
             auto retry = std::make_unique<IoOperation>();
-            retry->Event = TqWindowsRelayEvent::QuicSendRetry;
+            retry->Event = TqWindowsIocpOperationType::QuicSendRetry;
             retry->Relay = relay;
             IoOperation* retryRaw = retry.release();
             relay->QueuedWorkerOps.fetch_add(1, std::memory_order_acq_rel);
@@ -1300,7 +1401,7 @@ void TqWindowsRelayWorker::HandleQuicReceiveQueued(std::unique_ptr<IoOperation> 
         (void)CloseRelayIfDrained(relay);
         return;
     }
-    op->Event = TqWindowsRelayEvent::TcpSend;
+    op->Event = TqWindowsIocpOperationType::TcpSend;
     op->Offset = 0;
     if (!PostTcpSend(std::move(op))) {
         CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_quic_receive_failed");
@@ -1377,7 +1478,7 @@ bool TqWindowsRelayWorker::QueueDeferredQuicReceive(
     }
 
     auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsRelayEvent::QuicReceiveViewQueued;
+    op->Event = TqWindowsIocpOperationType::QuicReceiveViewQueued;
     op->Relay = relay;
     op->ReceiveView = view;
 
@@ -1454,7 +1555,7 @@ bool TqWindowsRelayWorker::PostTcpSendFromReceiveView(
 
     const auto& slice = view->Slices[view->SliceIndex];
     auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsRelayEvent::TcpSend;
+    op->Event = TqWindowsIocpOperationType::TcpSend;
     op->Relay = relay;
     op->ReceiveView = view;
     op->Offset = view->SliceOffset;
@@ -1552,7 +1653,7 @@ bool TqWindowsRelayWorker::PostTcpSendFromCompressedReceiveView(
             ZstdDecompressOutputBytes_.fetch_add(result.OutputProduced, std::memory_order_relaxed);
 
             auto op = std::make_unique<IoOperation>();
-            op->Event = TqWindowsRelayEvent::TcpSend;
+            op->Event = TqWindowsIocpOperationType::TcpSend;
             op->Relay = relay;
             op->ReceiveView = view;
             op->BufferOwner = std::move(output);
@@ -1714,7 +1815,7 @@ bool TqWindowsRelayWorker::FinishReceiveView(
     }
     if (nextView && !relay->Closing.load(std::memory_order_acquire)) {
         auto op = std::make_unique<IoOperation>();
-        op->Event = TqWindowsRelayEvent::QuicReceiveViewQueued;
+        op->Event = TqWindowsIocpOperationType::QuicReceiveViewQueued;
         op->Relay = relay;
         op->ReceiveView = nextView;
         IoOperation* raw = op.release();
@@ -1981,7 +2082,7 @@ void TqWindowsRelayWorker::StopRelay(uint64_t relayId) {
     }
     MarkRelayCloseReason(relay, "stop_relay_request");
     auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsRelayEvent::CloseRelay;
+    op->Event = TqWindowsIocpOperationType::CloseRelay;
     op->Relay = relay;
     IoOperation* raw = op.release();
     relay->QueuedWorkerOps.fetch_add(1, std::memory_order_acq_rel);
@@ -2131,16 +2232,20 @@ TqWindowsRelayRuntime& TqWindowsRelayRuntime::Instance() {
     return runtime;
 }
 
-bool TqWindowsRelayRuntime::Start(uint32_t workerCount) {
+bool TqWindowsRelayRuntime::Start(const TqTuningConfig& tuning) {
     std::lock_guard<std::mutex> guard(Lock_);
     if (!Workers_.empty()) {
         return true;
     }
+    uint32_t workerCount = tuning.LinuxRelayWorkerCount;
     if (workerCount == 0) {
         workerCount = 1;
     }
     for (uint32_t i = 0; i < workerCount; ++i) {
-        auto worker = std::make_unique<TqWindowsRelayWorker>(i);
+        auto worker = std::make_unique<TqWindowsRelayWorker>(
+            i,
+            tuning.WindowsRelayEventQueueCapacity,
+            tuning.WindowsRelayWorkerEventBudget);
         if (!worker->Start()) {
             Workers_.clear();
             return false;
