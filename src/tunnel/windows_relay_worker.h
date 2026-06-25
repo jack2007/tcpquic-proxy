@@ -161,6 +161,7 @@ public:
     bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;
     void TestConfigureQuicSendBacklog(uint64_t relayId, uint64_t maxBufferedBytes, uint64_t outstandingBytes);
     void TestProcessQuicSendCompleteForTest(uint64_t relayId, uint64_t completedBytes);
+    size_t DrainEventsForTest(size_t budget);
 #endif
 
     void StopRelay(uint64_t relayId);

@@ -401,9 +401,12 @@ bool TestWindowsRelaySnapshotObservability() {
 
     const uint64_t resumeBefore = snapshot.TcpReadResumeByBacklogEvents;
     worker.TestProcessQuicSendCompleteForTest(relayId, 5);
+    if (worker.TestGetTcpReadPausedByQuicBacklog(relayId)) {
+        worker.Stop();
+        return false;
+    }
     snapshot = worker.Snapshot();
-    if (snapshot.TcpReadResumeByBacklogEvents <= resumeBefore ||
-        snapshot.ActiveRelayStates.front().TcpReadPausedByQuicBacklog) {
+    if (snapshot.TcpReadResumeByBacklogEvents <= resumeBefore) {
         worker.Stop();
         return false;
     }
@@ -432,6 +435,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
         aborted.PEER_RECEIVE_ABORTED.ErrorCode = 1;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -469,6 +473,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         aborted.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
         aborted.PEER_SEND_ABORTED.ErrorCode = 1;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -502,6 +507,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = TRUE;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
@@ -532,6 +538,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = FALSE;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
