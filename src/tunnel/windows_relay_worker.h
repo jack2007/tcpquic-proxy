@@ -21,6 +21,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -87,6 +88,10 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t TcpHardErrors{0};
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t QuicSendFatalErrors{0};
+    uint64_t QuicSendCompleteEvents{0};
+#if defined(TQ_UNIT_TESTING)
+    uint64_t PostTcpRecvFromSendCompleteCallbackCount{0};
+#endif
     uint64_t Errors{0};
     uint64_t ActiveRelays{0};
     uint64_t IocpCompletionDowngraded{0};
@@ -154,10 +159,18 @@ private:
     void DrainPerRelayMaintenance();
     void ProcessRelayTask(TqWindowsRelayTask& task);
     void ProcessQuicReceiveViewTask(TqWindowsRelayTask& task);
+    void ProcessQuicSendCompleteTask(TqWindowsRelayTask& task);
     void DrainCallbackPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
+    void DrainCallbackPendingQuicSendCompletions();
+    void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
+    bool MaybePostTcpRecv(const std::shared_ptr<RelayContext>& relay);
+    void SetTcpReadBackpressure(
+        const std::shared_ptr<RelayContext>& relay,
+        bool paused,
+        const char* reason);
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
     bool HandleTcpReadClosed(std::unique_ptr<IoOperation> op);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
@@ -199,7 +212,9 @@ private:
         const char* action,
         const char* reason) const;
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
-    bool PostQuicSend(std::unique_ptr<IoOperation> op, QUIC_SEND_FLAGS flags, bool repostOnBackpressure);
+    bool TrySubmitQuicSendOperation(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsQuicSendOperation* operation);
     void RetryPendingQuicSends(const std::shared_ptr<RelayContext>& relay);
     void CloseRelay(
         const std::shared_ptr<RelayContext>& relay,
@@ -260,7 +275,11 @@ private:
     std::atomic<uint64_t> TcpHardErrors_{0};
     std::atomic<uint64_t> QuicSendBackpressureEvents_{0};
     std::atomic<uint64_t> QuicSendFatalErrors_{0};
+    std::atomic<uint64_t> QuicSendCompleteEvents_{0};
     std::atomic<uint64_t> Errors_{0};
+    std::mutex CallbackPendingQuicSendCompleteLock_;
+    std::deque<TqWindowsQuicSendOperation*> CallbackPendingQuicSendCompletions_;
+    std::atomic<uint64_t> CallbackPendingQuicSendCompleteDepth_{0};
     std::atomic<uint64_t> IocpCompletionDowngraded_{0};
     std::atomic<uint64_t> IocpStaleCompletionDropped_{0};
     std::atomic<uint64_t> TcpSendZeroBytesGraceful_{0};
@@ -274,6 +293,7 @@ private:
     std::atomic<uint64_t> EventsProcessed_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
+    std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
 #endif
     mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;

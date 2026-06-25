@@ -311,6 +311,103 @@ bool TestWindowsRelayReceiveViewEventQueue() {
     return ok;
 }
 
+bool TestWindowsRelaySendCompleteEventQueue() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamSend = FakeStreamSend;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    g_FakeStreamSendStatus = QUIC_STATUS_SUCCESS;
+    ResetFakeStreamSends();
+
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorker receiveWorker;
+    if (!receiveWorker.Start()) {
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!receiveWorker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const char payload[] = "send-complete-queue-test";
+    if (TqSend(pair[1], payload, std::strlen(payload), TqSendFlags::None) !=
+        static_cast<int>(std::strlen(payload))) {
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+    if (!WaitForFakeStreamSendCount(1, 2000)) {
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
+    if (before.QuicSendCompleteEvents != 0) {
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    void* callbackContext = stream->Context;
+    CompleteFakeStreamSends(receiveWorker, stream, callbackContext);
+
+    if (receiveWorker.Snapshot().PostTcpRecvFromSendCompleteCallbackCount != 0) {
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    TqWindowsRelayWorkerSnapshot after{};
+    do {
+        after = receiveWorker.Snapshot();
+        if (after.QuicSendCompleteEvents >= 1) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    bool inFlightZero = false;
+    for (const auto& active : after.ActiveRelayStates) {
+        if (active.RelayId == handle.WindowsRelayId && active.InFlightQuicSends == 0) {
+            inFlightZero = true;
+            break;
+        }
+    }
+
+    const bool ok = after.QuicSendCompleteEvents >= 1 && after.PostTcpRecvFromSendCompleteCallbackCount == 0 &&
+        inFlightZero;
+
+    receiveWorker.Stop();
+    TqCloseSocket(pair[1]);
+    MsQuic = nullptr;
+    return ok;
+}
+
 }  // namespace
 #endif
 
@@ -325,6 +422,10 @@ int main() {
 
     if (!TestWindowsRelayReceiveViewEventQueue()) {
         return 39;
+    }
+
+    if (!TestWindowsRelaySendCompleteEventQueue()) {
+        return 40;
     }
 
     TqWindowsRelayWorker worker;
