@@ -87,8 +87,11 @@ void TqTraceIncOpenRx(uint32_t connId) {
     (void)connId;
 }
 
-void TqTraceRelayStarted(uint64_t tunnelId) {
+void TqTraceRelayStarted(uint64_t tunnelId, const char* backend, uint32_t workerIndex, uint64_t relayId) {
     (void)tunnelId;
+    (void)backend;
+    (void)workerIndex;
+    (void)relayId;
 }
 
 void TqTraceRelayStopping(
@@ -96,18 +99,21 @@ void TqTraceRelayStopping(
     const char* role,
     const char* target,
     const char* backend,
+    uint32_t workerIndex,
     uint64_t relayId,
     const char* reason) {
     (void)tunnelId;
     (void)role;
     (void)target;
     (void)backend;
+    (void)workerIndex;
     (void)relayId;
     (void)reason;
 }
 
 void TqTraceRelayFatalError(
     const char* backend,
+    uint32_t workerIndex,
     const char* reason,
     uint64_t relayId,
     uint64_t socketOrFd,
@@ -117,6 +123,7 @@ void TqTraceRelayFatalError(
     uint64_t inflightQuicSends,
     uint64_t inflightTcpSends) {
     (void)backend;
+    (void)workerIndex;
     (void)reason;
     (void)relayId;
     (void)socketOrFd;

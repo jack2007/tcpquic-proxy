@@ -238,6 +238,7 @@ int GetSocketError(int fd) {
 }
 
 void LogLinuxRelayError(
+    uint32_t workerIndex,
     const char* reason,
     uint64_t relayId,
     int tcpFd,
@@ -811,6 +812,7 @@ void TqLinuxRelayWorker::FailRelayFatal(RelayState* relay, const char* trigger, 
     }
     FatalRelayResets.fetch_add(1);
     LogLinuxRelayError(
+        Config.WorkerIndex,
         trigger,
         relay->Id,
         relay->TcpFd,
@@ -1517,6 +1519,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
                 QuicSendOperationAllocFailures.fetch_add(1);
                 QuicSendFatalErrors.fetch_add(1);
                 LogLinuxRelayError(
+                    Config.WorkerIndex,
                     "quic_fin_send_operation_alloc_failed",
                     relay->Id,
                     relay->TcpFd,
@@ -1565,6 +1568,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
             QuicSendBufferTooLargeFailures.fetch_add(1);
             QuicSendFatalErrors.fetch_add(1);
             LogLinuxRelayError(
+                Config.WorkerIndex,
                 "quic_send_buffer_too_large",
                 relay->Id,
                 relay->TcpFd,
@@ -1589,6 +1593,7 @@ bool TqLinuxRelayWorker::SubmitTcpBatchToQuic(
         QuicSendOperationAllocFailures.fetch_add(1);
         QuicSendFatalErrors.fetch_add(1);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "quic_send_operation_alloc_failed",
             relay->Id,
             relay->TcpFd,
@@ -1624,6 +1629,7 @@ bool TqLinuxRelayWorker::TrySubmitQuicSendOperation(
         RecordError(RelayErrorKind::QuicSend);
         QuicSendFatalErrors.fetch_add(1);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "quic_send_invalid_stream",
             relay->Id,
             relay->TcpFd,
@@ -1656,6 +1662,7 @@ bool TqLinuxRelayWorker::TrySubmitQuicSendOperation(
         QuicSendApiFailures.fetch_add(1);
         QuicSendFatalErrors.fetch_add(1);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "quic_send_api_failed",
             relay->Id,
             relay->TcpFd,
@@ -1686,6 +1693,7 @@ void TqLinuxRelayWorker::RetryPendingQuicSends(RelayState* relay) {
         }
         if (!TrySubmitQuicSendOperation(relay, operation.release())) {
             LogLinuxRelayError(
+                Config.WorkerIndex,
                 "quic_send_retry_failed",
                 relay->Id,
                 relay->TcpFd,
@@ -1884,6 +1892,7 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
     if (hasPending) {
         FatalRelayResets.fetch_add(1);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "stream_shutdown_complete_with_pending",
             relay->Id,
             relay->TcpFd,
@@ -2273,6 +2282,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         relay->LastTcpWriteErrno = savedErrno;
         LastTcpWriteErrno.store(savedErrno);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "tcp_write_hard_error",
             relay->Id,
             relay->TcpFd,
@@ -2591,6 +2601,7 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
         LastTcpWriteErrno.store(savedErrno);
         FatalRelayResets.fetch_add(1);
         LogLinuxRelayError(
+            Config.WorkerIndex,
             "tcp_write_hard_error",
             relay->Id,
             relay->TcpFd,
@@ -2669,6 +2680,7 @@ void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
             RecordError(RelayErrorKind::TcpWriteHard);
             FatalRelayResets.fetch_add(1);
             LogLinuxRelayError(
+                Config.WorkerIndex,
                 "tcp_socket_error",
                 relay->Id,
                 relay->TcpFd,

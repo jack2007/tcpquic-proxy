@@ -303,14 +303,15 @@ void TqTraceIncOpenTx(uint32_t) {
 void TqTraceIncOpenRx(uint32_t) {
 }
 
-void TqTraceRelayStarted(uint64_t) {
+void TqTraceRelayStarted(uint64_t, const char*, uint32_t, uint64_t) {
 }
 
-void TqTraceRelayStopping(uint64_t, const char*, const char*, const char*, uint64_t, const char*) {
+void TqTraceRelayStopping(uint64_t, const char*, const char*, const char*, uint32_t, uint64_t, const char*) {
 }
 
 void TqTraceRelayFatalError(
     const char*,
+    uint32_t,
     const char*,
     uint64_t,
     uint64_t,
@@ -444,6 +445,9 @@ bool TqRelayStartQuicReceiveSink(
     ++g_relay_start_count;
     handle->Backend = TqRelayBackendType::LinuxWorker;
     return true;
+}
+
+void TqRelaySetTraceContext(TqRelayHandle*, uint64_t, const char*) {
 }
 
 void TqRelayStop(TqRelayHandle* handle) {

@@ -131,6 +131,7 @@ void TqTraceRelayUnregister(
 
 void TqTraceRelayFatalError(
     const char* backend,
+    uint32_t workerIndex,
     const char* reason,
     uint64_t relayId,
     uint64_t socketOrFd,
@@ -140,6 +141,7 @@ void TqTraceRelayFatalError(
     uint64_t inflightQuicSends,
     uint64_t inflightTcpSends) {
     (void)backend;
+    (void)workerIndex;
     (void)reason;
     (void)relayId;
     (void)socketOrFd;
