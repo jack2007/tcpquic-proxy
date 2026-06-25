@@ -4,7 +4,7 @@
 #include "msquic.hpp"
 #include "relay_metrics.h"
 
-#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <atomic>
@@ -41,6 +41,9 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+constexpr size_t kTraceLogMaxSizeBytes = 100u * 1024u * 1024u;
+constexpr size_t kTraceLogMaxFiles = 10u;
 
 std::atomic<bool> g_traceEnabled{false};
 std::atomic<bool> g_diagStatsEnabled{false};
@@ -747,7 +750,10 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     const std::string logPath = JoinTracePath(logDir, logName);
 
     try {
-        auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath, true);
+        auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            logPath,
+            kTraceLogMaxSizeBytes,
+            kTraceLogMaxFiles);
         g_logger = std::make_shared<spdlog::logger>("tcpquic-trace", sink);
         g_logger->set_level(spdlog::level::info);
         g_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
@@ -1049,18 +1055,6 @@ void TqTraceRelayFatalError(
     uint64_t pendingQuicSends,
     uint64_t inflightQuicSends,
     uint64_t inflightTcpSends) {
-    spdlog::error(
-        "{} relay unrecoverable error worker={} reason={} relay_id={} socket={} pending_quic_receive_bytes={} pending_quic_receive_queue={} pending_quic_sends={} inflight_quic_sends={} inflight_tcp_sends={}",
-        backend != nullptr ? backend : "relay",
-        workerIndex,
-        reason != nullptr ? reason : "unknown",
-        relayId,
-        socketOrFd,
-        pendingQuicReceiveBytes,
-        pendingQuicReceiveQueue,
-        pendingQuicSends,
-        inflightQuicSends,
-        inflightTcpSends);
     if (!TqTraceEnabled()) {
         return;
     }
@@ -1897,13 +1891,14 @@ void TqTraceTargetTcpConnected(uint64_t tunnelId, TqSocketHandle fd) {
         TqTraceGlobalSnapshot().c_str());
 }
 
-void TqTraceTargetTcpFailed(uint64_t tunnelId, TqOpenError error) {
+void TqTraceTargetTcpFailed(uint64_t tunnelId, const char* target, TqOpenError error) {
     if (!TqTraceEnabled() || tunnelId == 0) {
         return;
     }
     LogInfo(
-        "event=target_tcp_failed tunnel=%llu error=%s %s",
+        "event=target_tcp_failed tunnel=%llu target=%s error=%s %s",
         static_cast<unsigned long long>(tunnelId),
+        target != nullptr ? target : "?",
         OpenErrorName(error),
         TqTraceGlobalSnapshot().c_str());
 }

@@ -391,7 +391,7 @@ void TqTraceTargetTcpDialing(uint64_t, const char*) {
 void TqTraceTargetTcpConnected(uint64_t, TqSocketHandle) {
 }
 
-void TqTraceTargetTcpFailed(uint64_t, TqOpenError) {
+void TqTraceTargetTcpFailed(uint64_t, const char*, TqOpenError) {
 }
 
 void TqTraceTargetTcpClosed(uint64_t) {

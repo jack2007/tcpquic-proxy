@@ -215,7 +215,7 @@ void TqTraceProxyClosed(TqTraceProxyProto proto, TqSocketHandle fd);
 
 void TqTraceTargetTcpDialing(uint64_t tunnelId, const char* target);
 void TqTraceTargetTcpConnected(uint64_t tunnelId, TqSocketHandle fd);
-void TqTraceTargetTcpFailed(uint64_t tunnelId, TqOpenError error);
+void TqTraceTargetTcpFailed(uint64_t tunnelId, const char* target, TqOpenError error);
 void TqTraceTargetTcpClosed(uint64_t tunnelId);
 
 bool TqFormatSocketPeerAddr(TqSocketHandle fd, std::string& out);

@@ -287,14 +287,20 @@ std::string SocketAddressToString(const sockaddr_storage& storage, socklen_t len
     return std::string(host) + ":" + std::to_string(port);
 }
 
-std::string GetSocketNameString(int fd, bool peer) {
+std::string GetSocketNameString(int fd, bool peer, int* errNo = nullptr) {
     sockaddr_storage storage{};
     socklen_t length = sizeof(storage);
     const int rc = peer
         ? ::getpeername(fd, reinterpret_cast<sockaddr*>(&storage), &length)
         : ::getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &length);
     if (rc != 0) {
+        if (errNo != nullptr) {
+            *errNo = errno;
+        }
         return peer ? "peer:unknown" : "local:unknown";
+    }
+    if (errNo != nullptr) {
+        *errNo = 0;
     }
     return SocketAddressToString(storage, length);
 }
@@ -1144,13 +1150,15 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
             removed->Stream == nullptr);
     }
 #endif
+    int peerErrno = 0;
     TqRelayDebugLog(
-        "event=linux_relay_unregister_detail worker=%u relay=%llu fd=%d local=%s peer=%s closing=%d stop=%d outstanding_quic_sends=%llu pending_quic_receive_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d",
+        "event=linux_relay_unregister_detail worker=%u relay=%llu fd=%d local=%s peer=%s peer_errno=%d closing=%d stop=%d outstanding_quic_sends=%llu pending_quic_receive_bytes=%llu tcp_read_closed=%d tcp_write_closed=%d",
         Config.WorkerIndex,
         static_cast<unsigned long long>(removed->Id),
         removed->TcpFd,
         removed->TcpFd >= 0 ? GetSocketNameString(removed->TcpFd, false).c_str() : "none",
-        removed->TcpFd >= 0 ? GetSocketNameString(removed->TcpFd, true).c_str() : "none",
+        removed->TcpFd >= 0 ? GetSocketNameString(removed->TcpFd, true, &peerErrno).c_str() : "none",
+        peerErrno,
         removed->Closing ? 1 : 0,
         removed->Handle != nullptr && removed->Handle->Stop.load(std::memory_order_acquire) ? 1 : 0,
         static_cast<unsigned long long>(removed->OutstandingQuicSends),
@@ -1298,16 +1306,16 @@ void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
             continue;
         }
         if (received == 0) {
-            TqRelayDebugLog(
-                "event=linux_relay_tcp_read worker=%u relay=%llu fd=%d result=eof tcp_read_closed=%d tcp_write_closed=%d quic_fin_submitted=%d quic_fin_completed=%d",
-                Config.WorkerIndex,
-                static_cast<unsigned long long>(relay->Id),
-                relay->TcpFd,
-                relay->TcpReadClosed ? 1 : 0,
-                relay->TcpWriteClosed ? 1 : 0,
-                relay->QuicSendFinSubmitted ? 1 : 0,
-                relay->QuicSendFinCompleted ? 1 : 0);
             if (!relay->TcpReadClosed) {
+                TqRelayDebugLog(
+                    "event=linux_relay_tcp_read worker=%u relay=%llu fd=%d result=eof tcp_read_closed=%d tcp_write_closed=%d quic_fin_submitted=%d quic_fin_completed=%d",
+                    Config.WorkerIndex,
+                    static_cast<unsigned long long>(relay->Id),
+                    relay->TcpFd,
+                    relay->TcpReadClosed ? 1 : 0,
+                    relay->TcpWriteClosed ? 1 : 0,
+                    relay->QuicSendFinSubmitted ? 1 : 0,
+                    relay->QuicSendFinCompleted ? 1 : 0);
                 relay->TcpReadClosed = true;
                 ArmTcpReadable(relay, false);
                 if (!FinishTcpToQuic(relay)) {

@@ -268,8 +268,9 @@ void TqTraceTargetTcpConnected(uint64_t tunnelId, TqSocketHandle fd) {
     (void)fd;
 }
 
-void TqTraceTargetTcpFailed(uint64_t tunnelId, TqOpenError error) {
+void TqTraceTargetTcpFailed(uint64_t tunnelId, const char* target, TqOpenError error) {
     (void)tunnelId;
+    (void)target;
     (void)error;
 }
 

@@ -1440,7 +1440,7 @@ private:
                 TqOpenErrorName(error),
                 static_cast<long long>(result.Fd));
             if (TraceTunnelId != 0) {
-                TqTraceTargetTcpFailed(TraceTunnelId, error);
+                TqTraceTargetTcpFailed(TraceTunnelId, TraceTarget.c_str(), error);
             }
             if (error == TqOpenError::AclDenied && OnAclDenied) {
                 OnAclDenied();
@@ -1527,7 +1527,7 @@ private:
                 TqOpenErrorName(err),
                 dial.Refused ? 1 : 0);
             if (TraceTunnelId != 0) {
-                TqTraceTargetTcpFailed(TraceTunnelId, err);
+                TqTraceTargetTcpFailed(TraceTunnelId, TraceTarget.c_str(), err);
             }
             SendOpenFailure(err);
             return;
