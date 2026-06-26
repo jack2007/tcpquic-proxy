@@ -2332,14 +2332,6 @@ bool TqWindowsRelayWorker::QueueDeferredQuicReceive(
     UpdateAtomicMax(MaxPendingQuicReceiveQueueObserved_, pendingDepth);
     TraceReceiveViewEvent(relay, view, "queue_receive", pendingDepth);
 
-    if (!PostCallbackOperation(TqWindowsIocpOperationType::RelayReceiveReady, relay)) {
-        TraceReceiveViewEvent(relay, view, "queue_receive_callback_pending", pendingDepth);
-        if (!relay->QuicReceivePaused.exchange(true, std::memory_order_acq_rel)) {
-            SetQuicReceiveEnabled(relay, false);
-        }
-        (void)CompletePendingQuicReceive(relay, view);
-        CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_receive_ready_failed");
-    }
     return true;
 }
 
