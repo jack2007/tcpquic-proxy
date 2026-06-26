@@ -1,6 +1,5 @@
 #include "compress.h"
 #include "platform_socket.h"
-#include "windows_relay_event_queue.h"
 #include "windows_relay_worker.h"
 
 #include <atomic>
@@ -182,36 +181,7 @@ public:
     void Reset() override {}
 };
 
-bool TestWindowsRelayEventQueuePushPop() {
-    TqWindowsRelayEventQueue queue(2);
-    TqWindowsRelayTask first{};
-    first.Type = TqWindowsRelayTaskType::QuicReceiveView;
-    first.RelayId = 7;
-    TqWindowsRelayTask second{};
-    second.Type = TqWindowsRelayTaskType::Shutdown;
-    second.RelayId = 8;
-
-    if (!queue.TryPush(std::move(first))) {
-        return false;
-    }
-    if (!queue.TryPush(std::move(second))) {
-        return false;
-    }
-    if (queue.TryPush(TqWindowsRelayTask{})) {
-        return false;
-    }
-
-    TqWindowsRelayTask out{};
-    if (!queue.TryPop(out) || out.Type != TqWindowsRelayTaskType::QuicReceiveView || out.RelayId != 7) {
-        return false;
-    }
-    if (!queue.TryPop(out) || out.Type != TqWindowsRelayTaskType::Shutdown || out.RelayId != 8) {
-        return false;
-    }
-    return !queue.TryPop(out);
-}
-
-bool TestWindowsRelayReceiveViewEventQueue() {
+bool TestWindowsRelayReceiveViewIocpCallbackQueue() {
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
     fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
@@ -388,8 +358,7 @@ bool TestWindowsRelaySnapshotObservability() {
 
     const TqWindowsRelayActiveSnapshot& active = snapshot.ActiveRelayStates.front();
     if (active.RelayId != relayId ||
-        active.CallbackPendingQuicReceiveDepth != 0 ||
-        active.WindowsEventQueueDepth != 0) {
+        active.CallbackPendingQuicReceiveDepth != 0) {
         worker.Stop();
         return false;
     }
@@ -706,7 +675,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     return 0;
 }
 
-bool TestWindowsRelaySendCompleteEventQueue() {
+bool TestWindowsRelaySendCompleteIocpCallbackQueue() {
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamSend = FakeStreamSend;
     MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
@@ -811,15 +780,11 @@ int main() {
     TqSocketStartup startup;
     assert(startup.Ok());
 
-    if (!TestWindowsRelayEventQueuePushPop()) {
-        return 1;
-    }
-
-    if (!TestWindowsRelayReceiveViewEventQueue()) {
+    if (!TestWindowsRelayReceiveViewIocpCallbackQueue()) {
         return 39;
     }
 
-    if (!TestWindowsRelaySendCompleteEventQueue()) {
+    if (!TestWindowsRelaySendCompleteIocpCallbackQueue()) {
         return 40;
     }
 

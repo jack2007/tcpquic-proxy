@@ -34,8 +34,6 @@ struct TqWindowsQuicSendOperation;
 enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
     TcpSend,
-    QuicReceiveQueued,
-    QuicReceiveViewQueued,
     QuicSendComplete,
     QuicSendRetry,
     CloseRelay,
@@ -61,7 +59,6 @@ struct TqWindowsRelayActiveSnapshot {
     uint64_t CallbackPendingQuicReceiveDepth{0};
     uint64_t OutstandingQuicSendBytes{0};
     uint64_t MaxOutstandingQuicSendBytes{0};
-    uint64_t WindowsEventQueueDepth{0};
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t LastTcpWriteErrno{0};
@@ -134,10 +131,7 @@ struct TqWindowsRelayWorkerSnapshot {
 
 class TqWindowsRelayWorker {
 public:
-    explicit TqWindowsRelayWorker(
-        uint32_t workerIndex = 0,
-        size_t queueCapacity = 8192,
-        size_t eventBudget = 4096);
+    explicit TqWindowsRelayWorker(uint32_t workerIndex = 0);
     ~TqWindowsRelayWorker();
 
     bool Start();
@@ -228,8 +222,6 @@ private:
     bool HandleTcpReadClosed(std::unique_ptr<IoOperation> op);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
     void TryRetireRelay(const std::shared_ptr<RelayContext>& relay);
-    void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
-    void HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op);
     bool ScheduleRelayReceiveDrain(const std::shared_ptr<RelayContext>& relay);
     void ScheduleRelayReceiveDrainOrFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void DrainRelayReceives(const std::shared_ptr<RelayContext>& relay);

@@ -607,11 +607,9 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         tuning.LinuxRelayWorkerCount);
 #if defined(_WIN32)
     std::fprintf(out,
-        " win_pending_recv_cap=%llu win_max_buffered_quic_send=%llu win_event_queue=%u win_event_budget=%u",
+        " win_pending_recv_cap=%llu win_max_buffered_quic_send=%llu",
         static_cast<unsigned long long>(tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay),
-        static_cast<unsigned long long>(tuning.WindowsRelayMaxBufferedQuicSendBytes),
-        tuning.WindowsRelayEventQueueCapacity,
-        tuning.WindowsRelayWorkerEventBudget);
+        static_cast<unsigned long long>(tuning.WindowsRelayMaxBufferedQuicSendBytes));
 #endif
     std::fputc('\n', out);
 }

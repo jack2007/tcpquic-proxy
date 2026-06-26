@@ -178,14 +178,7 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
     std::atomic<bool> ReceiveDrainQueued{false};
 };
 
-TqWindowsRelayWorker::TqWindowsRelayWorker(
-    uint32_t workerIndex,
-    size_t queueCapacity,
-    size_t eventBudget) :
-    WorkerIndex_(workerIndex) {
-    (void)queueCapacity;
-    (void)eventBudget;
-}
+TqWindowsRelayWorker::TqWindowsRelayWorker(uint32_t workerIndex) : WorkerIndex_(workerIndex) {}
 TqWindowsRelayWorker::~TqWindowsRelayWorker() { Stop(); }
 
 bool TqWindowsRelayWorker::Start() {
@@ -344,7 +337,6 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
                     relay->OutstandingQuicSendBytes.load(std::memory_order_relaxed);
                 active.MaxOutstandingQuicSendBytes =
                     relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
-                active.WindowsEventQueueDepth = 0;
                 {
                     std::lock_guard<std::mutex> pendingGuard(relay->CallbackPendingQuicReceiveLock);
                     active.CallbackPendingQuicReceiveDepth =
@@ -747,12 +739,6 @@ void TqWindowsRelayWorker::Run() {
             break;
         case TqWindowsIocpOperationType::TcpSend:
             HandleTcpSend(std::move(op), bytes);
-            break;
-        case TqWindowsIocpOperationType::QuicReceiveQueued:
-            HandleQuicReceiveQueued(std::move(op));
-            break;
-        case TqWindowsIocpOperationType::QuicReceiveViewQueued:
-            HandleQuicReceiveViewQueued(std::move(op));
             break;
         case TqWindowsIocpOperationType::QuicSendComplete: {
             ProcessQuicSendCompleteOperation(op->RelayId, static_cast<uintptr_t>(op->Value));
@@ -2107,47 +2093,6 @@ void TqWindowsRelayWorker::HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD 
     MaybePostTcpRecv(relay);
 }
 
-void TqWindowsRelayWorker::HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op) {
-    if (!op) {
-        return;
-    }
-    DrainRelayReceives(op->Relay);
-}
-
-void TqWindowsRelayWorker::HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op) {
-    auto relay = op->Relay;
-    if (!relay) {
-        return;
-    }
-    if (CloseRelayIfDrained(relay)) {
-        return;
-    }
-    if (relay->Closing.load() || op->Buffer.empty()) {
-        return;
-    }
-    if (relay->Decompressor != nullptr) {
-        std::vector<uint8_t> output;
-        if (!relay->Decompressor->Decompress(
-                op->Buffer.data(),
-                static_cast<uint32_t>(op->Buffer.size()),
-                output)) {
-            CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "decompress_quic_receive_failed");
-            return;
-        }
-        op->Buffer.swap(output);
-    }
-    if (op->Buffer.empty()) {
-        (void)CloseRelayIfDrained(relay);
-        return;
-    }
-    op->Event = TqWindowsIocpOperationType::TcpSend;
-    op->Offset = 0;
-    if (!PostTcpSend(std::move(op))) {
-        CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_quic_receive_failed");
-        return;
-    }
-}
-
 bool TqWindowsRelayWorker::QueueDeferredQuicReceive(
     const std::shared_ptr<RelayContext>& relay,
     MsQuicStream* stream,
@@ -2977,10 +2922,7 @@ bool TqWindowsRelayRuntime::Start(const TqTuningConfig& tuning) {
         workerCount = 1;
     }
     for (uint32_t i = 0; i < workerCount; ++i) {
-        auto worker = std::make_unique<TqWindowsRelayWorker>(
-            i,
-            tuning.WindowsRelayEventQueueCapacity,
-            tuning.WindowsRelayWorkerEventBudget);
+        auto worker = std::make_unique<TqWindowsRelayWorker>(i);
         if (!worker->Start()) {
             Workers_.clear();
             return false;

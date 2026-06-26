@@ -30,7 +30,6 @@ TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnap
     active.CallbackPendingQuicReceiveDepth = relay.CallbackPendingQuicReceiveDepth;
     active.OutstandingQuicSendBytes = relay.OutstandingQuicSendBytes;
     active.MaxOutstandingQuicSendBytes = relay.MaxOutstandingQuicSendBytes;
-    active.EventQueueDepth = relay.WindowsEventQueueDepth;
     active.TcpReadBytes = relay.TcpReadBytes;
     active.TcpWriteBytes = relay.TcpWriteBytes;
     active.LastTcpWriteErrno = relay.LastTcpWriteErrno;
