@@ -983,14 +983,9 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
     op->RelayId = relay->Id;
     op->Value = value;
     op->Length = length;
-
 #if defined(TQ_UNIT_TESTING)
-    {
-        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
-        LastPostedCallbackType_ = type;
-        LastPostedCallbackRelayId_ = op->RelayId;
-        LastPostedCallbackHadReceiveView_ = op->ReceiveView != nullptr;
-    }
+    const uint64_t postedRelayId = op->RelayId;
+    const bool postedHadReceiveView = op->ReceiveView != nullptr;
 #endif
 
     IoOperation* raw = op.release();
@@ -1001,6 +996,14 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
         EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+#if defined(TQ_UNIT_TESTING)
+    {
+        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+        LastPostedCallbackType_ = type;
+        LastPostedCallbackRelayId_ = postedRelayId;
+        LastPostedCallbackHadReceiveView_ = postedHadReceiveView;
+    }
+#endif
     EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
@@ -2932,6 +2935,10 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
                 event->RECEIVE.BufferCount,
                 fin)) {
             worker->FailRelayFatal(relay, "quic_receive_queue_failed");
+            return QUIC_STATUS_SUCCESS;
+        }
+        if (!worker->PostCallbackOperation(TqWindowsIocpOperationType::RelayReceiveReady, relay)) {
+            worker->FailRelayFatal(relay, "post_relay_receive_ready_failed");
             return QUIC_STATUS_SUCCESS;
         }
         return QUIC_STATUS_PENDING;
