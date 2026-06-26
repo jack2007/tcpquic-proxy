@@ -1178,6 +1178,83 @@ int main() {
         MsQuic = nullptr;
     }
     {
+        TqWindowsRelayWorker sendCompleteWorker;
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!sendCompleteWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            return 134;
+        }
+        if (!sendCompleteWorker.Start()) {
+            return 135;
+        }
+
+        auto* operation =
+            sendCompleteWorker.TestCreateQuicSendOperationForTest(handle.WindowsRelayId, 7);
+        if (operation == nullptr) {
+            sendCompleteWorker.Stop();
+            return 136;
+        }
+
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        event.SEND_COMPLETE.ClientContext = operation;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) !=
+            QUIC_STATUS_SUCCESS) {
+            sendCompleteWorker.Stop();
+            return 137;
+        }
+        if (!sendCompleteWorker.TestLastPostedCallbackWasQuicSendCompleteForTest(
+                handle.WindowsRelayId)) {
+            sendCompleteWorker.Stop();
+            return 138;
+        }
+        sendCompleteWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker sendCompleteWorker;
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!sendCompleteWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            return 404;
+        }
+        if (!sendCompleteWorker.TestMarkTcpRecvInFlightForRetirement(handle.WindowsRelayId)) {
+            return 405;
+        }
+        auto* operation =
+            sendCompleteWorker.TestCreateQuicSendOperationForTest(handle.WindowsRelayId, 7);
+        if (operation == nullptr) {
+            return 406;
+        }
+
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        event.SEND_COMPLETE.ClientContext = operation;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) !=
+            QUIC_STATUS_SUCCESS) {
+            return 407;
+        }
+        const TqWindowsRelayWorkerSnapshot snapshot = sendCompleteWorker.Snapshot();
+        if (snapshot.FatalRelayResets != 1 || snapshot.ActiveRelayStates.size() != 1 ||
+            snapshot.ActiveRelayStates.front().InFlightQuicSends != 0 ||
+            snapshot.ActiveRelayStates.front().OutstandingQuicSendBytes != 0) {
+            return 408;
+        }
+    }
+    {
         TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
         if (!TqSocketPair(pair)) {
             return 44;

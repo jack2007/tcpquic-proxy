@@ -595,21 +595,21 @@ void TqWindowsRelayWorker::QueueQuicSendCompleteFromCallback(
     if (operation == nullptr) {
         return;
     }
-    TqWindowsRelayTask task{};
-    task.Type = TqWindowsRelayTaskType::QuicSendComplete;
-    task.RelayId = operation->RelayId;
-    task.Value = reinterpret_cast<uintptr_t>(operation);
-    if (EnqueueEvent(std::move(task))) {
+
+    auto relay = FindRelayById(operation->RelayId);
+    if (!relay) {
+        std::unique_ptr<TqWindowsQuicSendOperation> cleanup(operation);
         return;
     }
-    {
-        std::lock_guard<std::mutex> guard(CallbackPendingQuicSendCompleteLock_);
-        CallbackPendingQuicSendCompletions_.push_back(operation);
-        CallbackPendingQuicSendCompleteDepth_.store(
-            CallbackPendingQuicSendCompletions_.size(),
-            std::memory_order_release);
+
+    if (!PostCallbackOperation(
+            TqWindowsIocpOperationType::QuicSendComplete,
+            relay,
+            reinterpret_cast<uintptr_t>(operation))) {
+        std::unique_ptr<TqWindowsQuicSendOperation> cleanup(operation);
+        CompleteQuicSendAccounting(relay, *cleanup);
+        FailRelayFatal(relay, "post_quic_send_complete_failed");
     }
-    Wake();
 }
 
 void TqWindowsRelayWorker::DrainCallbackPendingQuicSendCompletions() {
@@ -642,6 +642,16 @@ void TqWindowsRelayWorker::DrainCallbackPendingQuicSendCompletions() {
     }
 }
 
+void TqWindowsRelayWorker::CompleteQuicSendAccounting(
+    const std::shared_ptr<RelayContext>& relay,
+    const TqWindowsQuicSendOperation& operation) {
+    if (!relay) {
+        return;
+    }
+    relay->InFlightQuicSends.fetch_sub(1, std::memory_order_acq_rel);
+    SaturatingFetchSub(relay->OutstandingQuicSendBytes, operation.TotalBytes);
+}
+
 void TqWindowsRelayWorker::ProcessQuicSendCompleteTask(TqWindowsRelayTask& task) {
     QuicSendCompleteEvents_.fetch_add(1, std::memory_order_relaxed);
     std::unique_ptr<TqWindowsQuicSendOperation> operation(
@@ -652,8 +662,7 @@ void TqWindowsRelayWorker::ProcessQuicSendCompleteTask(TqWindowsRelayTask& task)
     }
     auto relay = FindRelayById(operation->RelayId);
     if (relay) {
-        relay->InFlightQuicSends.fetch_sub(1, std::memory_order_acq_rel);
-        SaturatingFetchSub(relay->OutstandingQuicSendBytes, operation->TotalBytes);
+        CompleteQuicSendAccounting(relay, *operation);
         if (operation->Fin) {
             relay->QuicSendFinCompleted.store(true, std::memory_order_release);
             TqTraceRelayStopCondition(
@@ -918,6 +927,15 @@ void TqWindowsRelayWorker::Run() {
         case TqWindowsIocpOperationType::QuicReceiveViewQueued:
             HandleQuicReceiveViewQueued(std::move(op));
             break;
+        case TqWindowsIocpOperationType::QuicSendComplete: {
+            TqWindowsRelayTask task{};
+            task.Type = TqWindowsRelayTaskType::QuicSendComplete;
+            task.RelayId = op->RelayId;
+            task.Value = op->Value;
+            op->Value = 0;
+            ProcessQuicSendCompleteTask(task);
+            break;
+        }
         case TqWindowsIocpOperationType::RelayReceiveReady:
             DrainRelayReceives(op->Relay);
             break;
@@ -1064,6 +1082,27 @@ bool TqWindowsRelayWorker::TestLastPostedCallbackWasReceiveReadyForTest(uint64_t
     std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
     return LastPostedCallbackType_ == TqWindowsIocpOperationType::RelayReceiveReady &&
         LastPostedCallbackRelayId_ == relayId && !LastPostedCallbackHadReceiveView_;
+}
+
+bool TqWindowsRelayWorker::TestLastPostedCallbackWasQuicSendCompleteForTest(uint64_t relayId) const {
+    std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+    return LastPostedCallbackType_ == TqWindowsIocpOperationType::QuicSendComplete &&
+        LastPostedCallbackRelayId_ == relayId;
+}
+
+TqWindowsQuicSendOperation* TqWindowsRelayWorker::TestCreateQuicSendOperationForTest(
+    uint64_t relayId,
+    uint64_t bytes) {
+    auto relay = FindRelayById(relayId);
+    if (!relay) {
+        return nullptr;
+    }
+    relay->InFlightQuicSends.fetch_add(1, std::memory_order_acq_rel);
+    relay->OutstandingQuicSendBytes.fetch_add(bytes, std::memory_order_acq_rel);
+    auto* operation = new TqWindowsQuicSendOperation();
+    operation->RelayId = relayId;
+    operation->TotalBytes = bytes;
+    return operation;
 }
 
 bool TqWindowsRelayWorker::TestNoWorkerEventQueueReceiveViewForTest() const {

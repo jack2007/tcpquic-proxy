@@ -32,6 +32,7 @@
 struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
+struct TqWindowsQuicSendOperation;
 
 enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
@@ -158,6 +159,8 @@ public:
         TqCompressAlgo compressAlgo);
     void SetQuicReceiveViewDrainEnabledForTest(bool enabled);
     bool TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const;
+    bool TestLastPostedCallbackWasQuicSendCompleteForTest(uint64_t relayId) const;
+    TqWindowsQuicSendOperation* TestCreateQuicSendOperationForTest(uint64_t relayId, uint64_t bytes);
     bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
     bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
@@ -253,6 +256,9 @@ private:
         uint64_t bytes);
     void FlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
     void CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
+    void CompleteQuicSendAccounting(
+        const std::shared_ptr<RelayContext>& relay,
+        const TqWindowsQuicSendOperation& operation);
     bool FinishReceiveView(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
