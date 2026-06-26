@@ -374,8 +374,10 @@ bool TestWindowsRelaySnapshotObservability() {
 
     const uint64_t relayId = handle.WindowsRelayId;
     TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
-    if (snapshot.WindowsEventQueueCapacity == 0 ||
+    if (snapshot.WindowsEventQueueCapacity != 0 ||
         snapshot.WindowsEventQueueDepth != 0 ||
+        snapshot.WindowsEventQueueFullCount != 0 ||
+        snapshot.EventsProcessed != 0 ||
         snapshot.ActiveRelayStates.size() != 1) {
         worker.Stop();
         return false;
@@ -384,7 +386,7 @@ bool TestWindowsRelaySnapshotObservability() {
     const TqWindowsRelayActiveSnapshot& active = snapshot.ActiveRelayStates.front();
     if (active.RelayId != relayId ||
         active.CallbackPendingQuicReceiveDepth != 0 ||
-        active.WindowsEventQueueDepth != snapshot.WindowsEventQueueDepth) {
+        active.WindowsEventQueueDepth != 0) {
         worker.Stop();
         return false;
     }
@@ -435,7 +437,6 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
         aborted.PEER_RECEIVE_ABORTED.ErrorCode = 1;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
-        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -473,7 +474,6 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         aborted.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
         aborted.PEER_SEND_ABORTED.ErrorCode = 1;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
-        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -507,7 +507,6 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = TRUE;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
-        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
@@ -538,7 +537,6 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = FALSE;
         (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
-        (void)receiveWorker.DrainEventsForTest(4096);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
@@ -636,7 +634,6 @@ int TestWindowsRelayQuicTeardownOnWorker() {
             return 240;
         }
         receiveWorker.TestProcessQuicSendCompleteForTest(relayId, 24);
-        (void)receiveWorker.DrainEventsForTest(4096);
         const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
         if (after.FatalRelayResets != before.FatalRelayResets ||
             after.GracefulRelayDrains <= before.GracefulRelayDrains) {
@@ -850,8 +847,10 @@ int main() {
         assert(snapshot.DeferredReceiveQueued == 0);
         assert(snapshot.DeferredReceiveCompleteBytes == 0);
         assert(snapshot.PendingQuicReceiveBytes == 0);
-        assert(snapshot.WindowsEventQueueCapacity > 0);
+        assert(snapshot.WindowsEventQueueCapacity == 0);
         assert(snapshot.WindowsEventQueueDepth == 0);
+        assert(snapshot.WindowsEventQueueFullCount == 0);
+        assert(snapshot.EventsProcessed == 0);
         snapshotWorker.Stop();
     }
     {

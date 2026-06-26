@@ -4,7 +4,6 @@
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
-#include "windows_relay_event_queue.h"
 #include "relay_error.h"
 #include "trace.h"
 #include "tuning.h"
@@ -21,8 +20,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <deque>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -33,6 +30,7 @@ struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 struct TqWindowsQuicSendOperation;
+struct TqWindowsRelayTask;
 
 enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
@@ -188,7 +186,6 @@ public:
     bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;
     void TestConfigureQuicSendBacklog(uint64_t relayId, uint64_t maxBufferedBytes, uint64_t outstandingBytes);
     void TestProcessQuicSendCompleteForTest(uint64_t relayId, uint64_t completedBytes);
-    size_t DrainEventsForTest(size_t budget);
 #endif
 
     void StopRelay(uint64_t relayId);
@@ -205,18 +202,11 @@ private:
 
     void Run();
     void PostStop();
-    bool EnqueueEvent(TqWindowsRelayTask&& task);
-    void Wake();
-    size_t DrainEvents(size_t budget);
     void DrainPerRelayMaintenance();
-    void ProcessRelayTask(TqWindowsRelayTask& task);
-    void ProcessQuicReceiveViewTask(TqWindowsRelayTask& task);
     void ProcessQuicSendCompleteTask(TqWindowsRelayTask& task);
     void ProcessQuicPeerAborted(uint64_t relayId, const char* reason, uint64_t errorCode);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
-    void DrainCallbackPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
-    void DrainCallbackPendingQuicSendCompletions();
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
     bool PostCallbackOperation(
@@ -361,23 +351,14 @@ private:
     std::atomic<uint64_t> QuicSendCompleteEvents_{0};
     std::atomic<uint64_t> TcpReadResumeByBacklogEvents_{0};
     std::atomic<uint64_t> Errors_{0};
-    std::mutex CallbackPendingQuicSendCompleteLock_;
-    std::deque<TqWindowsQuicSendOperation*> CallbackPendingQuicSendCompletions_;
-    std::atomic<uint64_t> CallbackPendingQuicSendCompleteDepth_{0};
     std::atomic<uint64_t> IocpCompletionDowngraded_{0};
     std::atomic<uint64_t> IocpStaleCompletionDropped_{0};
     std::atomic<uint64_t> TcpSendZeroBytesGraceful_{0};
     uint32_t WorkerIndex_{0};
-    TqWindowsRelayEventQueue EventQueue_;
-    size_t EventBudget_{0};
-    std::atomic<bool> WakeArmed_{false};
-    std::atomic<uint64_t> EventQueueFullCount_{0};
     std::atomic<uint64_t> EventQueueWakeCount_{0};
     std::atomic<uint64_t> EventQueueWakeFailedCount_{0};
-    std::atomic<uint64_t> EventsProcessed_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
-    std::atomic<uint64_t> WorkerEventQueueReceiveViewEnqueuedForTest_{0};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};

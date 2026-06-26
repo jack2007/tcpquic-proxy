@@ -25,5 +25,14 @@ int main() {
     if (productionBlock.find("windows_relay_worker.cpp") == std::string::npos) return 8;
 #endif
 
+    std::ifstream windowsRelayWorker("src/tunnel/windows_relay_worker.cpp");
+    if (!windowsRelayWorker) return 9;
+    std::ostringstream workerBuffer;
+    workerBuffer << windowsRelayWorker.rdbuf();
+    const std::string workerText = workerBuffer.str();
+    if (workerText.find("EnqueueEvent(") != std::string::npos) return 10;
+    if (workerText.find("DrainEvents(") != std::string::npos) return 11;
+    if (workerText.find("ProcessRelayTask(") != std::string::npos) return 12;
+
     return 0;
 }
