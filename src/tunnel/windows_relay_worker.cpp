@@ -262,13 +262,18 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
         QuicSendBackpressureEvents_.load(std::memory_order_relaxed);
     snapshot.QuicSendFatalErrors = QuicSendFatalErrors_.load(std::memory_order_relaxed);
     snapshot.QuicSendCompleteEvents = QuicSendCompleteEvents_.load(std::memory_order_relaxed);
-    snapshot.WindowsEventQueueDepth = 0;
-    snapshot.WindowsEventQueueCapacity = 0;
-    snapshot.WindowsEventQueueFullCount = 0;
-    snapshot.WindowsEventQueueWakeCount =
-        EventQueueWakeCount_.load(std::memory_order_relaxed);
-    snapshot.WindowsEventQueueWakeFailedCount =
-        EventQueueWakeFailedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsCallbackIocpPostCount =
+        CallbackIocpPostCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsCallbackIocpPostFailedCount =
+        CallbackIocpPostFailedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsReceiveReadyPostCount =
+        ReceiveReadyPostCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsReceiveDrainScheduledCount =
+        ReceiveDrainScheduledCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsReceiveDrainCoalescedCount =
+        ReceiveDrainCoalescedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsPostedCallbackStaleDropCount =
+        PostedCallbackStaleDropCount_.load(std::memory_order_relaxed);
     snapshot.EventsProcessed = 0;
     snapshot.TcpReadResumeByBacklogEvents =
         TcpReadResumeByBacklogEvents_.load(std::memory_order_relaxed);
@@ -411,6 +416,7 @@ bool TqWindowsRelayWorker::ScheduleRelayReceiveDrain(const std::shared_ptr<Relay
         return false;
     }
     if (relay->ReceiveDrainQueued.exchange(true, std::memory_order_acq_rel)) {
+        ReceiveDrainCoalescedCount_.fetch_add(1, std::memory_order_relaxed);
         return true;
     }
 
@@ -425,10 +431,9 @@ bool TqWindowsRelayWorker::ScheduleRelayReceiveDrain(const std::shared_ptr<Relay
         relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
         relay->ReceiveDrainQueued.store(false, std::memory_order_release);
         delete raw;
-        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
+    ReceiveDrainScheduledCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -510,6 +515,8 @@ void TqWindowsRelayWorker::ProcessQuicSendCompleteOperation(
         RetryPendingQuicSends(relay);
         MaybePostTcpRecv(relay);
         (void)CloseRelayIfDrained(relay);
+    } else {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -592,6 +599,7 @@ void TqWindowsRelayWorker::HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t 
     }
     auto relay = FindRelayById(relayId);
     if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     uint64_t ideal = relay->IdealSendBufferBytes.load(std::memory_order_relaxed);
@@ -967,7 +975,7 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
     uint64_t value,
     size_t length) {
     if (Iocp_ == nullptr || !relay) {
-        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
@@ -987,7 +995,7 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
     if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
         relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
         delete raw;
-        EventQueueWakeFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 #if defined(TQ_UNIT_TESTING)
@@ -999,7 +1007,10 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
         PostedCallbackSequence_.push_back(type);
     }
 #endif
-    EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
+    CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
+    if (type == TqWindowsIocpOperationType::RelayReceiveReady) {
+        ReceiveReadyPostCount_.fetch_add(1, std::memory_order_relaxed);
+    }
     return true;
 }
 
@@ -1659,6 +1670,7 @@ void TqWindowsRelayWorker::ProcessQuicPeerAborted(
     uint64_t errorCode) {
     auto relay = FindRelayById(relayId);
     if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     (void)errorCode;
@@ -1678,6 +1690,7 @@ void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
     uint32_t status) {
     auto relay = FindRelayById(relayId);
     if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     (void)errorCode;
@@ -3023,13 +3036,12 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.QuicSendBackpressureEvents += snapshot.QuicSendBackpressureEvents;
         total.QuicSendFatalErrors += snapshot.QuicSendFatalErrors;
         total.QuicSendCompleteEvents += snapshot.QuicSendCompleteEvents;
-        total.WindowsEventQueueDepth += snapshot.WindowsEventQueueDepth;
-        total.WindowsEventQueueCapacity = std::max(
-            total.WindowsEventQueueCapacity,
-            snapshot.WindowsEventQueueCapacity);
-        total.WindowsEventQueueFullCount += snapshot.WindowsEventQueueFullCount;
-        total.WindowsEventQueueWakeCount += snapshot.WindowsEventQueueWakeCount;
-        total.WindowsEventQueueWakeFailedCount += snapshot.WindowsEventQueueWakeFailedCount;
+        total.WindowsCallbackIocpPostCount += snapshot.WindowsCallbackIocpPostCount;
+        total.WindowsCallbackIocpPostFailedCount += snapshot.WindowsCallbackIocpPostFailedCount;
+        total.WindowsReceiveReadyPostCount += snapshot.WindowsReceiveReadyPostCount;
+        total.WindowsReceiveDrainScheduledCount += snapshot.WindowsReceiveDrainScheduledCount;
+        total.WindowsReceiveDrainCoalescedCount += snapshot.WindowsReceiveDrainCoalescedCount;
+        total.WindowsPostedCallbackStaleDropCount += snapshot.WindowsPostedCallbackStaleDropCount;
         total.EventsProcessed += snapshot.EventsProcessed;
         total.TcpReadResumeByBacklogEvents += snapshot.TcpReadResumeByBacklogEvents;
         total.LateTeardownDowngradedCount += snapshot.LateTeardownDowngradedCount;

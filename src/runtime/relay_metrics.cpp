@@ -299,8 +299,8 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     }
     metrics.Backend = "worker";
     metrics.EventsProcessed = snapshot.EventsProcessed;
-    metrics.PendingEvents = snapshot.WindowsEventQueueDepth;
-    metrics.EventQueueFullErrors = snapshot.WindowsEventQueueFullCount;
+    metrics.PendingEvents = 0;
+    metrics.EventQueueFullErrors = 0;
     metrics.ActiveRelays = snapshot.ActiveRelays;
     metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
     metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;
@@ -347,6 +347,12 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
     metrics.QuicSendFatalErrors = snapshot.QuicSendFatalErrors;
     metrics.Errors = snapshot.Errors;
+    metrics.WindowsCallbackIocpPostCount = snapshot.WindowsCallbackIocpPostCount;
+    metrics.WindowsCallbackIocpPostFailedCount = snapshot.WindowsCallbackIocpPostFailedCount;
+    metrics.WindowsReceiveReadyPostCount = snapshot.WindowsReceiveReadyPostCount;
+    metrics.WindowsReceiveDrainScheduledCount = snapshot.WindowsReceiveDrainScheduledCount;
+    metrics.WindowsReceiveDrainCoalescedCount = snapshot.WindowsReceiveDrainCoalescedCount;
+    metrics.WindowsPostedCallbackStaleDropCount = snapshot.WindowsPostedCallbackStaleDropCount;
 #endif
     return metrics;
 }
@@ -533,5 +539,17 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"linux_relay_fatal_relay_resets\":" << metrics.FatalRelayResets;
     out << ",\"windows_relay_tcp_hard_errors\":" << metrics.TcpHardErrors;
     out << ",\"windows_relay_graceful_relay_drains\":" << metrics.GracefulRelayDrains;
+    out << ",\"windows_relay_callback_iocp_posts\":"
+        << metrics.WindowsCallbackIocpPostCount;
+    out << ",\"windows_relay_callback_iocp_post_failures\":"
+        << metrics.WindowsCallbackIocpPostFailedCount;
+    out << ",\"windows_relay_receive_ready_posts\":"
+        << metrics.WindowsReceiveReadyPostCount;
+    out << ",\"windows_relay_receive_drain_scheduled\":"
+        << metrics.WindowsReceiveDrainScheduledCount;
+    out << ",\"windows_relay_receive_drain_coalesced\":"
+        << metrics.WindowsReceiveDrainCoalescedCount;
+    out << ",\"windows_relay_posted_callback_stale_drops\":"
+        << metrics.WindowsPostedCallbackStaleDropCount;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }

@@ -374,9 +374,12 @@ bool TestWindowsRelaySnapshotObservability() {
 
     const uint64_t relayId = handle.WindowsRelayId;
     TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
-    if (snapshot.WindowsEventQueueCapacity != 0 ||
-        snapshot.WindowsEventQueueDepth != 0 ||
-        snapshot.WindowsEventQueueFullCount != 0 ||
+    if (snapshot.WindowsCallbackIocpPostCount != 0 ||
+        snapshot.WindowsCallbackIocpPostFailedCount != 0 ||
+        snapshot.WindowsReceiveReadyPostCount != 0 ||
+        snapshot.WindowsReceiveDrainScheduledCount != 0 ||
+        snapshot.WindowsReceiveDrainCoalescedCount != 0 ||
+        snapshot.WindowsPostedCallbackStaleDropCount != 0 ||
         snapshot.EventsProcessed != 0 ||
         snapshot.ActiveRelayStates.size() != 1) {
         worker.Stop();
@@ -847,9 +850,12 @@ int main() {
         assert(snapshot.DeferredReceiveQueued == 0);
         assert(snapshot.DeferredReceiveCompleteBytes == 0);
         assert(snapshot.PendingQuicReceiveBytes == 0);
-        assert(snapshot.WindowsEventQueueCapacity == 0);
-        assert(snapshot.WindowsEventQueueDepth == 0);
-        assert(snapshot.WindowsEventQueueFullCount == 0);
+        assert(snapshot.WindowsCallbackIocpPostCount == 0);
+        assert(snapshot.WindowsCallbackIocpPostFailedCount == 0);
+        assert(snapshot.WindowsReceiveReadyPostCount == 0);
+        assert(snapshot.WindowsReceiveDrainScheduledCount == 0);
+        assert(snapshot.WindowsReceiveDrainCoalescedCount == 0);
+        assert(snapshot.WindowsPostedCallbackStaleDropCount == 0);
         assert(snapshot.EventsProcessed == 0);
         snapshotWorker.Stop();
     }

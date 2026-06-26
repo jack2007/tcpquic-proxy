@@ -392,7 +392,7 @@ void DumpPeriodicStats() {
                 }
 
                 LogInfo(
-                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u tcp_write_errno=%llu tcp_recv_errno=%llu tcp_send_errno=%llu iocp_errno=%llu iocp_op=%u closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d event_queue_depth=%llu callback_pending_quic_receives=%llu tcp_read_paused_by_quic_backlog=%d outstanding_quic_send_bytes=%llu",
+                    "event=stats_active_relay tunnel=%llu backend=windows worker=%u relay_id=%llu age=%.1fs tcp_read_bytes=%llu tcp_write_bytes=%llu pending_quic_receive_bytes=%llu pending_quic_receive_queue=%llu active_handlers=%u queued_worker_ops=%u inflight_tcp_recvs=%u inflight_tcp_sends=%u inflight_quic_sends=%u tcp_write_errno=%llu tcp_recv_errno=%llu tcp_send_errno=%llu iocp_errno=%llu iocp_op=%u closing=%d tcp_read_closed=%d tcp_write_closed=%d close_after_drained=%d quic_send_fin_submitted=%d quic_send_fin_completed=%d stop_published=%d stream_detached=%d callback_iocp_posts=%llu receive_ready_posts=%llu receive_drain_scheduled=%llu callback_pending_quic_receives=%llu tcp_read_paused_by_quic_backlog=%d outstanding_quic_send_bytes=%llu",
                     static_cast<unsigned long long>(tunnel.tunnelId),
                     relay->WorkerIndex,
                     static_cast<unsigned long long>(relay->RelayId),
@@ -419,7 +419,9 @@ void DumpPeriodicStats() {
                     relay->QuicSendFinCompleted ? 1 : 0,
                     relay->StopPublished ? 1 : 0,
                     relay->StreamDetached ? 1 : 0,
-                    static_cast<unsigned long long>(relay->EventQueueDepth),
+                    static_cast<unsigned long long>(relayMetrics.WindowsCallbackIocpPostCount),
+                    static_cast<unsigned long long>(relayMetrics.WindowsReceiveReadyPostCount),
+                    static_cast<unsigned long long>(relayMetrics.WindowsReceiveDrainScheduledCount),
                     static_cast<unsigned long long>(relay->CallbackPendingQuicReceiveDepth),
                     relay->TcpReadPausedByQuicBacklog ? 1 : 0,
                     static_cast<unsigned long long>(relay->OutstandingQuicSendBytes));
@@ -1077,7 +1079,7 @@ void TqTraceRelayFatalError(
 }
 
 std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metrics) {
-    char buffer[2048];
+    char buffer[3072];
     std::snprintf(
         buffer,
         sizeof(buffer),
@@ -1095,7 +1097,11 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         "fatal_relay_resets=%llu tcp_hard_errors=%llu graceful_drains=%llu errors=%llu "
         "event_queue_full_errors=%llu tcp_read_buffer_acquire_failures=%llu "
         "tcp_to_quic_buffer_acquire_failures=%llu quic_send_failures=%llu "
-        "quic_send_api_failures=%llu quic_send_fatal_errors=%llu last_quic_send_status=%lld",
+        "quic_send_api_failures=%llu quic_send_fatal_errors=%llu "
+        "callback_iocp_posts=%llu callback_iocp_post_failures=%llu "
+        "receive_ready_posts=%llu receive_drain_scheduled=%llu "
+        "receive_drain_coalesced=%llu posted_callback_stale_drops=%llu "
+        "last_quic_send_status=%lld",
         metrics.Backend != nullptr ? metrics.Backend : "?",
         static_cast<unsigned long long>(metrics.PendingBytes),
         static_cast<unsigned long long>(metrics.ActiveRelays),
@@ -1138,6 +1144,12 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         static_cast<unsigned long long>(metrics.QuicSendFailures),
         static_cast<unsigned long long>(metrics.QuicSendApiFailures),
         static_cast<unsigned long long>(metrics.QuicSendFatalErrors),
+        static_cast<unsigned long long>(metrics.WindowsCallbackIocpPostCount),
+        static_cast<unsigned long long>(metrics.WindowsCallbackIocpPostFailedCount),
+        static_cast<unsigned long long>(metrics.WindowsReceiveReadyPostCount),
+        static_cast<unsigned long long>(metrics.WindowsReceiveDrainScheduledCount),
+        static_cast<unsigned long long>(metrics.WindowsReceiveDrainCoalescedCount),
+        static_cast<unsigned long long>(metrics.WindowsPostedCallbackStaleDropCount),
         static_cast<long long>(metrics.LastQuicSendStatus));
     return buffer;
 }

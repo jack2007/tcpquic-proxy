@@ -112,11 +112,12 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t QuicSendFatalErrors{0};
     uint64_t QuicSendCompleteEvents{0};
-    uint64_t WindowsEventQueueDepth{0};
-    uint64_t WindowsEventQueueCapacity{0};
-    uint64_t WindowsEventQueueFullCount{0};
-    uint64_t WindowsEventQueueWakeCount{0};
-    uint64_t WindowsEventQueueWakeFailedCount{0};
+    uint64_t WindowsCallbackIocpPostCount{0};
+    uint64_t WindowsCallbackIocpPostFailedCount{0};
+    uint64_t WindowsReceiveReadyPostCount{0};
+    uint64_t WindowsReceiveDrainScheduledCount{0};
+    uint64_t WindowsReceiveDrainCoalescedCount{0};
+    uint64_t WindowsPostedCallbackStaleDropCount{0};
     uint64_t EventsProcessed{0};
     uint64_t TcpReadResumeByBacklogEvents{0};
     uint64_t LateTeardownDowngradedCount{0};
@@ -354,8 +355,12 @@ private:
     std::atomic<uint64_t> IocpStaleCompletionDropped_{0};
     std::atomic<uint64_t> TcpSendZeroBytesGraceful_{0};
     uint32_t WorkerIndex_{0};
-    std::atomic<uint64_t> EventQueueWakeCount_{0};
-    std::atomic<uint64_t> EventQueueWakeFailedCount_{0};
+    std::atomic<uint64_t> CallbackIocpPostCount_{0};
+    std::atomic<uint64_t> CallbackIocpPostFailedCount_{0};
+    std::atomic<uint64_t> ReceiveReadyPostCount_{0};
+    std::atomic<uint64_t> ReceiveDrainScheduledCount_{0};
+    std::atomic<uint64_t> ReceiveDrainCoalescedCount_{0};
+    std::atomic<uint64_t> PostedCallbackStaleDropCount_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};

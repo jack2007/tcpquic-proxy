@@ -422,3 +422,11 @@ cmake --build build-x64 --config Release --target tcpquic_windows_relay_worker_t
 - 如果再出现 `121`，日志能区分是 recv completion 还是 send completion。
 - `121` 仍然导致对应 relay fatal 结束。
 - 不回归前文核心问题：没有 `completed/accounted > total`，没有 `finish_already_drained`。
+
+## 9. 后续设计已确定/已实施方向
+
+后续设计已经收敛并在生产路径实施：所有 MsQuic callback 事件都迁移为 IOCP posted operation，由 worker 线程统一处理，不再通过 worker event queue 承载 callback 事件。
+
+`RECEIVE` callback 的粒度从 `QuicReceiveView(view pointer)` 改为 `RelayReceiveReady(relayId)` 顺序标记。callback 线程只把 view 放入 `relay->PendingReceives`，再向 IOCP 投递 ready；posted operation 不携带 receive view 指针。worker 收到 ready 后只从 pending queue 队首 drain，TCP send completion 或 `FinishReceiveView()` 推进后继续通过可合并的 `RelayReceiveDrain(relayId)` 唤醒 worker。
+
+因此，worker event queue 不再作为 callback 事件通道。receive view 的生命周期由 `relay->PendingReceives`、队首 drain、实际 TCP 写出进度和 `StreamReceiveComplete()` 共同维护，避免旧 per-view task 模型下重复投递同一个 view 的风险。

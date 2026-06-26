@@ -138,6 +138,12 @@ struct TqRelayMetricsSnapshot {
     uint64_t FatalRelayResets{0};
     uint64_t TcpHardErrors{0};
     uint64_t GracefulRelayDrains{0};
+    uint64_t WindowsCallbackIocpPostCount{0};
+    uint64_t WindowsCallbackIocpPostFailedCount{0};
+    uint64_t WindowsReceiveReadyPostCount{0};
+    uint64_t WindowsReceiveDrainScheduledCount{0};
+    uint64_t WindowsReceiveDrainCoalescedCount{0};
+    uint64_t WindowsPostedCallbackStaleDropCount{0};
     int64_t LastQuicSendStatus{0};
 };
 
