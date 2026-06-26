@@ -12,6 +12,10 @@ int main() {
     const size_t proxySources = text.find("set(TCPQUIC_PROXY_SOURCES");
     const size_t proxyTarget = text.find("add_tcpquic_executable(tcpquic-proxy");
     if (proxySources == std::string::npos || proxyTarget == std::string::npos) return 2;
+    if (text.find("set_target_properties(tcpquic-proxy PROPERTIES OUTPUT_NAME raypx2)") ==
+        std::string::npos) {
+        return 13;
+    }
 
     const std::string productionBlock = text.substr(proxySources, proxyTarget - proxySources);
     if (productionBlock.find("relay_blocking_demo.cpp") != std::string::npos) return 3;

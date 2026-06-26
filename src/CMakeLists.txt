@@ -174,6 +174,7 @@ if(WIN32)
 endif()
 
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
+set_target_properties(tcpquic-proxy PROPERTIES OUTPUT_NAME raypx2)
 
 if(WIN32)
     target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
