@@ -1178,6 +1178,87 @@ int main() {
         MsQuic = nullptr;
     }
     {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+        fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+        TqWindowsRelayWorker callbackOrderWorker;
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!callbackOrderWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            MsQuic = nullptr;
+            return 139;
+        }
+        callbackOrderWorker.SetQuicReceiveViewDrainEnabledForTest(false);
+        if (!callbackOrderWorker.Start()) {
+            MsQuic = nullptr;
+            return 140;
+        }
+
+        uint8_t data[] = {'o', 'r', 'd', 'e', 'r'};
+        QUIC_BUFFER buffer{};
+        buffer.Buffer = data;
+        buffer.Length = sizeof(data);
+        QUIC_STREAM_EVENT receive{};
+        receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receive.RECEIVE.BufferCount = 1;
+        receive.RECEIVE.Buffers = &buffer;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &receive) !=
+            QUIC_STATUS_PENDING) {
+            callbackOrderWorker.Stop();
+            MsQuic = nullptr;
+            return 141;
+        }
+
+        QUIC_STREAM_EVENT ideal{};
+        ideal.Type = QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE;
+        ideal.IDEAL_SEND_BUFFER_SIZE.ByteCount = 4096;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &ideal) !=
+            QUIC_STATUS_SUCCESS) {
+            callbackOrderWorker.Stop();
+            MsQuic = nullptr;
+            return 142;
+        }
+
+        QUIC_STREAM_EVENT peerReceiveAborted{};
+        peerReceiveAborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+        peerReceiveAborted.PEER_RECEIVE_ABORTED.ErrorCode = 17;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &peerReceiveAborted) !=
+            QUIC_STATUS_SUCCESS) {
+            callbackOrderWorker.Stop();
+            MsQuic = nullptr;
+            return 143;
+        }
+
+        QUIC_STREAM_EVENT shutdownComplete{};
+        shutdownComplete.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        shutdownComplete.SHUTDOWN_COMPLETE.ConnectionErrorCode = 23;
+        shutdownComplete.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_SUCCESS;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdownComplete) !=
+            QUIC_STATUS_SUCCESS) {
+            callbackOrderWorker.Stop();
+            MsQuic = nullptr;
+            return 144;
+        }
+
+        if (!callbackOrderWorker.TestPostedCallbackSequenceForTest(
+                "RelayReceiveReady,QuicIdealSendBuffer,QuicPeerReceiveAborted,QuicShutdownComplete")) {
+            callbackOrderWorker.Stop();
+            MsQuic = nullptr;
+            return 145;
+        }
+        callbackOrderWorker.Stop();
+        MsQuic = nullptr;
+    }
+    {
         TqWindowsRelayWorker sendCompleteWorker;
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);

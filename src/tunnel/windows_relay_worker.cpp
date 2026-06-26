@@ -10,6 +10,7 @@
 #include <cstring>
 #include <deque>
 #include <limits>
+#include <string>
 #include <spdlog/spdlog.h>
 
 #include <windows.h>
@@ -18,6 +19,25 @@ const MsQuicApi* MsQuic = nullptr;
 
 #if defined(TQ_UNIT_TESTING)
 thread_local bool g_InSendCompleteCallback = false;
+
+static const char* TestCallbackTypeName(TqWindowsIocpOperationType type) {
+    switch (type) {
+    case TqWindowsIocpOperationType::RelayReceiveReady:
+        return "RelayReceiveReady";
+    case TqWindowsIocpOperationType::QuicIdealSendBuffer:
+        return "QuicIdealSendBuffer";
+    case TqWindowsIocpOperationType::QuicPeerSendAborted:
+        return "QuicPeerSendAborted";
+    case TqWindowsIocpOperationType::QuicPeerReceiveAborted:
+        return "QuicPeerReceiveAborted";
+    case TqWindowsIocpOperationType::QuicShutdownComplete:
+        return "QuicShutdownComplete";
+    case TqWindowsIocpOperationType::QuicSendComplete:
+        return "QuicSendComplete";
+    default:
+        return "Other";
+    }
+}
 #endif
 
 constexpr const char* kWindowsRelayCloseReasonUnknown = "unknown";
@@ -945,6 +965,21 @@ void TqWindowsRelayWorker::Run() {
             }
             DrainRelayReceives(op->Relay);
             break;
+        case TqWindowsIocpOperationType::QuicIdealSendBuffer:
+            HandleQuicIdealSendBuffer(op->RelayId, op->Value);
+            break;
+        case TqWindowsIocpOperationType::QuicPeerSendAborted:
+            ProcessQuicPeerAborted(op->RelayId, "stream_peer_send_aborted", op->Value);
+            break;
+        case TqWindowsIocpOperationType::QuicPeerReceiveAborted:
+            ProcessQuicPeerAborted(op->RelayId, "stream_peer_receive_aborted", op->Value);
+            break;
+        case TqWindowsIocpOperationType::QuicShutdownComplete:
+            ProcessQuicShutdownComplete(
+                op->RelayId,
+                op->Value,
+                static_cast<uint32_t>(op->Length));
+            break;
         case TqWindowsIocpOperationType::QuicSendRetry:
             RetryPendingQuicSends(op->Relay);
             break;
@@ -1090,6 +1125,18 @@ bool TqWindowsRelayWorker::TestLastPostedCallbackWasQuicSendCompleteForTest(uint
         LastPostedCallbackRelayId_ == relayId;
 }
 
+bool TqWindowsRelayWorker::TestPostedCallbackSequenceForTest(const char* expectedCsv) const {
+    std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+    std::string actual;
+    for (TqWindowsIocpOperationType type : PostedCallbackSequence_) {
+        if (!actual.empty()) {
+            actual.push_back(',');
+        }
+        actual += TestCallbackTypeName(type);
+    }
+    return actual == (expectedCsv != nullptr ? expectedCsv : "");
+}
+
 TqWindowsQuicSendOperation* TqWindowsRelayWorker::TestCreateQuicSendOperationForTest(
     uint64_t relayId,
     uint64_t bytes) {
@@ -1158,6 +1205,7 @@ bool TqWindowsRelayWorker::PostCallbackOperation(
         LastPostedCallbackType_ = type;
         LastPostedCallbackRelayId_ = postedRelayId;
         LastPostedCallbackHadReceiveView_ = postedHadReceiveView;
+        PostedCallbackSequence_.push_back(type);
     }
 #endif
     EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
@@ -3085,33 +3133,41 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE) {
-        TqWindowsRelayTask task{};
-        task.Type = TqWindowsRelayTaskType::QuicIdealSendBuffer;
-        task.RelayId = relay->Id;
-        task.Value = event->IDEAL_SEND_BUFFER_SIZE.ByteCount;
-        (void)worker->EnqueueEvent(std::move(task));
+        if (!worker->PostCallbackOperation(
+                TqWindowsIocpOperationType::QuicIdealSendBuffer,
+                relay,
+                event->IDEAL_SEND_BUFFER_SIZE.ByteCount)) {
+            worker->FailRelayFatal(relay, "post_quic_ideal_send_buffer_failed");
+        }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
-        TqWindowsRelayTask task{};
-        task.Type = event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
-            ? TqWindowsRelayTaskType::QuicPeerSendAborted
-            : TqWindowsRelayTaskType::QuicPeerReceiveAborted;
-        task.RelayId = relay->Id;
-        task.Value = event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
-            ? event->PEER_SEND_ABORTED.ErrorCode
-            : event->PEER_RECEIVE_ABORTED.ErrorCode;
-        (void)worker->EnqueueEvent(std::move(task));
+        const bool peerSendAborted = event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+        if (!worker->PostCallbackOperation(
+                peerSendAborted
+                    ? TqWindowsIocpOperationType::QuicPeerSendAborted
+                    : TqWindowsIocpOperationType::QuicPeerReceiveAborted,
+                relay,
+                peerSendAborted
+                    ? event->PEER_SEND_ABORTED.ErrorCode
+                    : event->PEER_RECEIVE_ABORTED.ErrorCode)) {
+            worker->FailRelayFatal(
+                relay,
+                peerSendAborted
+                    ? "post_quic_peer_send_aborted_failed"
+                    : "post_quic_peer_receive_aborted_failed");
+        }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-        TqWindowsRelayTask task{};
-        task.Type = TqWindowsRelayTaskType::QuicShutdownComplete;
-        task.RelayId = relay->Id;
-        task.Value = event->SHUTDOWN_COMPLETE.ConnectionErrorCode;
-        task.Length = static_cast<size_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus);
-        (void)worker->EnqueueEvent(std::move(task));
+        if (!worker->PostCallbackOperation(
+                TqWindowsIocpOperationType::QuicShutdownComplete,
+                relay,
+                event->SHUTDOWN_COMPLETE.ConnectionErrorCode,
+                static_cast<size_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus))) {
+            worker->FailRelayFatal(relay, "post_quic_shutdown_complete_failed");
+        }
         return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;

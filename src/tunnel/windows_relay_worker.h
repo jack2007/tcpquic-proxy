@@ -45,6 +45,10 @@ enum class TqWindowsIocpOperationType : uint32_t {
     StopWorker,
     RelayReceiveReady,
     RelayReceiveDrain,
+    QuicIdealSendBuffer,
+    QuicPeerSendAborted,
+    QuicPeerReceiveAborted,
+    QuicShutdownComplete,
 };
 
 struct TqWindowsRelayActiveSnapshot {
@@ -160,6 +164,7 @@ public:
     void SetQuicReceiveViewDrainEnabledForTest(bool enabled);
     bool TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const;
     bool TestLastPostedCallbackWasQuicSendCompleteForTest(uint64_t relayId) const;
+    bool TestPostedCallbackSequenceForTest(const char* expectedCsv) const;
     TqWindowsQuicSendOperation* TestCreateQuicSendOperationForTest(uint64_t relayId, uint64_t bytes);
     bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
@@ -378,6 +383,7 @@ private:
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};
     uint64_t LastPostedCallbackRelayId_{0};
     bool LastPostedCallbackHadReceiveView_{false};
+    std::vector<TqWindowsIocpOperationType> PostedCallbackSequence_;
 #endif
     mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;
