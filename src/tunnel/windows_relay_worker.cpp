@@ -1050,6 +1050,10 @@ bool TqWindowsRelayWorker::TestLastPostedCallbackWasReceiveReadyForTest(uint64_t
         LastPostedCallbackRelayId_ == relayId && !LastPostedCallbackHadReceiveView_;
 }
 
+bool TqWindowsRelayWorker::TestNoWorkerEventQueueReceiveViewForTest() const {
+    return EventQueue_.SizeApprox() == 0;
+}
+
 bool TqWindowsRelayWorker::PostCallbackOperation(
     TqWindowsIocpOperationType type,
     const std::shared_ptr<RelayContext>& relay,
@@ -2630,23 +2634,13 @@ bool TqWindowsRelayWorker::FinishReceiveView(
         }
     }
     MaybeResumeQuicReceive(relay);
-    std::shared_ptr<TqWindowsPendingQuicReceive> nextView;
+    bool hasPendingReceives = false;
     {
         std::lock_guard<std::mutex> guard(relay->PendingReceiveLock);
-        if (!relay->PendingReceives.empty()) {
-            nextView = relay->PendingReceives.front();
-        }
+        hasPendingReceives = !relay->PendingReceives.empty();
     }
-    if (nextView && !relay->Closing.load(std::memory_order_acquire)) {
-        TraceReceiveViewEvent(relay, nextView, "finish_enqueue_next");
-        TqWindowsRelayTask task{};
-        task.Type = TqWindowsRelayTaskType::QuicReceiveView;
-        task.RelayId = relay->Id;
-        task.ReceiveView = nextView;
-        if (!EnqueueEvent(std::move(task))) {
-            std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
-            relay->CallbackPendingQuicReceives.push_front(nextView);
-        }
+    if (hasPendingReceives && !relay->Closing.load(std::memory_order_acquire)) {
+        (void)ScheduleRelayReceiveDrain(relay);
     }
     (void)CloseRelayIfDrained(relay);
     return true;
@@ -2824,7 +2818,9 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
                 FlushDeferredReceiveCompletion(*view, false);
                 if (!PostTcpSendFromReceiveView(relay, view)) {
                     CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_receive_view_failed");
+                    return;
                 }
+                (void)ScheduleRelayReceiveDrain(relay);
                 return;
             }
             op->Offset += bytes;
@@ -2845,9 +2841,11 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
                 delete raw;
                 (void)CompletePendingQuicReceive(relay, view);
                 HandleTcpPostFailure(relay, "wsa_send_receive_view_retry_failed", error);
+                return;
             } else if (error == WSA_IO_PENDING) {
                 TcpSendWouldBlockOrPendingCount_.fetch_add(1, std::memory_order_relaxed);
             }
+            (void)ScheduleRelayReceiveDrain(relay);
             return;
         }
         if (CloseRelayIfDrained(relay)) {
@@ -2859,6 +2857,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
         if (relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd) {
             if (!PostTcpSendFromCompressedReceiveView(relay, view)) {
                 CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_compressed_receive_view_failed");
+                return;
             }
         } else {
             AdvanceReceiveView(relay, *view, bytes);
@@ -2867,8 +2866,10 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
             FlushDeferredReceiveCompletion(*view, viewComplete);
             if (!PostTcpSendFromReceiveView(relay, view)) {
                 CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_receive_view_failed");
+                return;
             }
         }
+        (void)ScheduleRelayReceiveDrain(relay);
         return;
     }
     TcpSendBytes_.fetch_add(bytes, std::memory_order_relaxed);

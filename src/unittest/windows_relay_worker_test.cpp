@@ -1552,6 +1552,11 @@ int main() {
             MsQuic = nullptr;
             return 73;
         }
+        if (!receiveWorker.TestNoWorkerEventQueueReceiveViewForTest()) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            return 400;
+        }
         TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
         if (g_StreamReceiveCompleteBytes != 0 || g_StreamReceiveCompleteCalls != 0 ||
             snapshot.PendingQuicReceiveBytes != 3 || snapshot.PendingQuicReceiveQueueDepth != 1) {
@@ -1564,12 +1569,17 @@ int main() {
             MsQuic = nullptr;
             return 75;
         }
+        if (!receiveWorker.TestNoWorkerEventQueueReceiveViewForTest()) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            return 401;
+        }
         snapshot = receiveWorker.Snapshot();
         if (g_StreamReceiveCompleteBytes != 5 || g_StreamReceiveCompleteCalls != 1 ||
             snapshot.PendingQuicReceiveBytes != 0 || snapshot.PendingQuicReceiveQueueDepth != 0) {
             receiveWorker.Stop();
             MsQuic = nullptr;
-            return 76;
+            return 77;
         }
         receiveWorker.Stop();
         MsQuic = nullptr;

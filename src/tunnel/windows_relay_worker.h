@@ -158,6 +158,7 @@ public:
         TqCompressAlgo compressAlgo);
     void SetQuicReceiveViewDrainEnabledForTest(bool enabled);
     bool TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const;
+    bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
     bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
     bool TestLateReceiveViewCompletionIgnored(uint64_t relayId, DWORD bytes, uint64_t postedLength);
