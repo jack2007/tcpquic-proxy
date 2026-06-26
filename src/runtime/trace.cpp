@@ -139,6 +139,26 @@ void LogInfo(const char* fmt, ...) {
     g_logger->info("{}", buffer);
 }
 
+void LogDebug(const char* fmt, ...) {
+    if (!g_traceEnabled.load(std::memory_order_relaxed) || !g_logger) {
+        return;
+    }
+    char buffer[2048];
+    va_list args;
+    va_start(args, fmt);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#endif
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+    va_end(args);
+    std::lock_guard<std::mutex> guard(g_logMu);
+    g_logger->debug("{}", buffer);
+}
+
 void LogInfoMultiline(const std::string& header, const std::vector<std::string>& lines) {
     if (!g_traceEnabled.load(std::memory_order_relaxed) || !g_logger) {
         return;
@@ -693,7 +713,7 @@ bool EnsureTraceLogDirectory(const std::string& logDir) {
 #endif
 }
 
-bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
+bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec, TqConfig::TraceLevel level) {
     if (g_traceEnabled.load()) {
         return true;
     }
@@ -751,15 +771,19 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
 
     const std::string logPath = JoinTracePath(logDir, logName);
 
+    const spdlog::level::level_enum spdlogLevel =
+        level == TqConfig::TraceLevel::Debug ? spdlog::level::debug : spdlog::level::info;
+    const char* levelName = level == TqConfig::TraceLevel::Debug ? "debug" : "info";
+
     try {
         auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
             logPath,
             kTraceLogMaxSizeBytes,
             kTraceLogMaxFiles);
         g_logger = std::make_shared<spdlog::logger>("tcpquic-trace", sink);
-        g_logger->set_level(spdlog::level::info);
+        g_logger->set_level(spdlogLevel);
         g_logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
-        g_logger->flush_on(spdlog::level::info);
+        g_logger->flush_on(spdlogLevel);
     } catch (const std::exception& ex) {
         std::fprintf(
             stderr,
@@ -775,9 +799,10 @@ bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec) {
     g_traceEnabled.store(true);
 
     LogInfo(
-        "event=trace_started role=%s log=%s interval=%us",
+        "event=trace_started role=%s log=%s level=%s interval=%us",
         mode == TqMode::Client ? "client" : "server",
         logPathForMessage,
+        levelName,
         statsIntervalSec);
 
     if (statsIntervalSec > 0) {
@@ -985,7 +1010,7 @@ void TqTraceRelayReceiveViewEvent(
     }
     TqTraceLinuxRelayStreamState traceState = state;
     traceState.WorkerIndex = workerIndex;
-    LogInfo(
+    LogDebug(
         "%s stage=%s view=0x%llx value=%llu total=%llu completed=%llu accounted=%llu pending_complete=%llu slice_index=%llu slice_count=%llu slice_offset=%llu fin=%d drained=%d",
         TqFormatTraceRelayStateLine("relay_receive_view", backend, traceState).c_str(),
         stage != nullptr ? stage : "?",

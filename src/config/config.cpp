@@ -509,6 +509,16 @@ private:
             } else if (key == "interval_sec") {
                 if (!ParseUint32(cfg.TraceIntervalSec)) return Error("invalid trace.interval_sec");
                 cfg.Trace = true;
+            } else if (key == "level") {
+                std::string level;
+                if (!ParseString(level)) return Error("invalid trace.level");
+                if (level == "info") {
+                    cfg.TraceLogLevel = TqConfig::TraceLevel::Info;
+                } else if (level == "debug") {
+                    cfg.TraceLogLevel = TqConfig::TraceLevel::Debug;
+                } else {
+                    return Error("invalid trace.level (expected info or debug)");
+                }
             } else {
                 return Error(("unknown trace key: " + key).c_str());
             }
@@ -1072,6 +1082,7 @@ void TqPrintUsage(FILE* out) {
         "Diagnostics:\n"
         "  --trace                      Event + periodic debug trace (spdlog file log)\n"
         "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
+        "  --trace-level <info|debug>   Trace file log level when --trace (default info)\n"
         "  --diag-stats                 Low-overhead periodic stderr stats\n"
         "  --diag-stats-interval <sec>  Periodic stderr stats interval (default 5)\n");
 }
@@ -1522,6 +1533,22 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TraceIntervalSec)) {
                 err = "invalid value for --trace-interval";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--trace-level", value)) {
+            cfg.Trace = true;
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--trace-level", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (std::strcmp(value, "info") == 0) {
+                cfg.TraceLogLevel = TqConfig::TraceLevel::Info;
+            } else if (std::strcmp(value, "debug") == 0) {
+                cfg.TraceLogLevel = TqConfig::TraceLevel::Debug;
+            } else {
+                err = "invalid value for --trace-level (expected info or debug)";
                 return false;
             }
         } else if (std::strcmp(arg, "--diag-stats") == 0) {

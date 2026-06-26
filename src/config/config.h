@@ -86,7 +86,13 @@ struct TqConfig {
     uint32_t TuningOverrideQuicInitRttMs{0};
     TqTuningConfig Tuning{};
 
+    enum class TraceLevel {
+        Info,
+        Debug,
+    };
+
     bool Trace{false};
+    TraceLevel TraceLogLevel{TraceLevel::Info};
     uint32_t TraceIntervalSec{10};
     bool DiagStats{false};
     uint32_t DiagStatsIntervalSec{5};

@@ -387,11 +387,14 @@ int main(int argc, char** argv) {
 
     TqTraceGuard traceGuard;
     if (cfg.Trace) {
-        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec)) {
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec, cfg.TraceLogLevel)) {
             std::fprintf(stderr, "tcpquic-proxy: warning: trace log init failed\n");
         } else {
+            const char* traceLevelName =
+                cfg.TraceLogLevel == TqConfig::TraceLevel::Debug ? "debug" : "info";
             std::fprintf(stderr,
-                "tcpquic-proxy: trace enabled (interval=%us, log under <exe>/log/)\n",
+                "tcpquic-proxy: trace enabled (level=%s, interval=%us, log under <exe>/log/)\n",
+                traceLevelName,
                 cfg.TraceIntervalSec);
         }
     }

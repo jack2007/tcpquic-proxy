@@ -16,7 +16,7 @@ void TqTraceProxyTunnelFail(TqTraceProxyProto, const char*, TqOpenError) {
 void TqTraceProxyClosed(TqTraceProxyProto, TqSocketHandle) {
 }
 
-bool TqTraceInit(TqMode, uint32_t) { return true; }
+bool TqTraceInit(TqMode, uint32_t, TqConfig::TraceLevel) { return true; }
 
 void TqTraceShutdown() {
 }

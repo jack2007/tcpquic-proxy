@@ -73,7 +73,10 @@ struct TqTraceLinuxRelayStreamState {
     const char* Target{nullptr};
 };
 
-bool TqTraceInit(TqMode mode, uint32_t statsIntervalSec);
+bool TqTraceInit(
+    TqMode mode,
+    uint32_t statsIntervalSec,
+    TqConfig::TraceLevel level = TqConfig::TraceLevel::Info);
 void TqTraceShutdown();
 bool TqTraceEnabled();
 bool TqDiagStatsInit(uint32_t statsIntervalSec);
