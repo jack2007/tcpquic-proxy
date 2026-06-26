@@ -440,6 +440,51 @@ void TqWindowsRelayWorker::ScheduleRelayReceiveDrainOrFail(
     }
 }
 
+bool TqWindowsRelayWorker::PostCallbackOperation(
+    TqWindowsIocpOperationType type,
+    const std::shared_ptr<RelayContext>& relay,
+    uint64_t value,
+    size_t length) {
+    if (Iocp_ == nullptr || !relay) {
+        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    auto op = std::make_unique<IoOperation>();
+    op->Event = type;
+    op->Relay = relay;
+    op->RelayId = relay->Id;
+    op->Value = value;
+    op->Length = length;
+#if defined(TQ_UNIT_TESTING)
+    const uint64_t postedRelayId = op->RelayId;
+    const bool postedHadReceiveView = op->ReceiveView != nullptr;
+#endif
+
+    IoOperation* raw = op.release();
+    relay->QueuedWorkerOps.fetch_add(1, std::memory_order_acq_rel);
+    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+        relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
+        delete raw;
+        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+#if defined(TQ_UNIT_TESTING)
+    {
+        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+        LastPostedCallbackType_ = type;
+        LastPostedCallbackRelayId_ = postedRelayId;
+        LastPostedCallbackHadReceiveView_ = postedHadReceiveView;
+        PostedCallbackSequence_.push_back(type);
+    }
+#endif
+    CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
+    if (type == TqWindowsIocpOperationType::RelayReceiveReady) {
+        ReceiveReadyPostCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return true;
+}
+
 void TqWindowsRelayWorker::QueueQuicSendCompleteFromCallback(
     TqWindowsQuicSendOperation* operation) {
     if (operation == nullptr) {
@@ -951,51 +996,6 @@ bool TqWindowsRelayWorker::TestNoWorkerEventQueueReceiveViewForTest() const {
         if (!relay->CallbackPendingQuicReceives.empty()) {
             return false;
         }
-    }
-    return true;
-}
-
-bool TqWindowsRelayWorker::PostCallbackOperation(
-    TqWindowsIocpOperationType type,
-    const std::shared_ptr<RelayContext>& relay,
-    uint64_t value,
-    size_t length) {
-    if (Iocp_ == nullptr || !relay) {
-        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-
-    auto op = std::make_unique<IoOperation>();
-    op->Event = type;
-    op->Relay = relay;
-    op->RelayId = relay->Id;
-    op->Value = value;
-    op->Length = length;
-#if defined(TQ_UNIT_TESTING)
-    const uint64_t postedRelayId = op->RelayId;
-    const bool postedHadReceiveView = op->ReceiveView != nullptr;
-#endif
-
-    IoOperation* raw = op.release();
-    relay->QueuedWorkerOps.fetch_add(1, std::memory_order_acq_rel);
-    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
-        relay->QueuedWorkerOps.fetch_sub(1, std::memory_order_acq_rel);
-        delete raw;
-        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-#if defined(TQ_UNIT_TESTING)
-    {
-        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
-        LastPostedCallbackType_ = type;
-        LastPostedCallbackRelayId_ = postedRelayId;
-        LastPostedCallbackHadReceiveView_ = postedHadReceiveView;
-        PostedCallbackSequence_.push_back(type);
-    }
-#endif
-    CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
-    if (type == TqWindowsIocpOperationType::RelayReceiveReady) {
-        ReceiveReadyPostCount_.fetch_add(1, std::memory_order_relaxed);
     }
     return true;
 }

@@ -123,6 +123,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/server_admin.cpp
     runtime/server_metrics.cpp
     runtime/speed_test.cpp
+    runtime/shutdown.cpp
     runtime/trace.cpp
     platform/exe_path.cpp
     ${TCPQUIC_PLATFORM_SOURCES}

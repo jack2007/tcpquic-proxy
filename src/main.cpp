@@ -12,6 +12,7 @@
 #include "speed_test.h"
 #include "tuning.h"
 #include "tunnel_reaper.h"
+#include "shutdown.h"
 #include "trace.h"
 
 #include <chrono>
@@ -169,9 +170,7 @@ int RunSinglePeerClient(const TqConfig& cfg) {
         TqPrintAdminStarted(*admin, adminOptions);
     }
 
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::hours(24));
-    }
+    TqWaitForInterrupt();
     return 0;
 }
 
@@ -245,9 +244,8 @@ int RunClient(const TqConfig& cfg) {
         TqPrintAdminStarted(*admin, adminOptions);
     }
 
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::hours(24));
-    }
+    TqWaitForInterrupt();
+    return 0;
 }
 
 int RunServer(const TqConfig& cfg) {
@@ -335,7 +333,12 @@ int RunServer(const TqConfig& cfg) {
     }
 
     std::fprintf(stderr, "tcpquic-proxy: QUIC server listening on %s\n", cfg.QuicListen.c_str());
-    quic.Run();
+    std::thread quicThread([&quic] { quic.Run(); });
+    TqWaitForInterrupt();
+    quic.Stop();
+    if (quicThread.joinable()) {
+        quicThread.join();
+    }
     speed->StopAll();
     return 0;
 }
@@ -399,6 +402,8 @@ int main(int argc, char** argv) {
                 cfg.DiagStatsIntervalSec);
         }
     }
+
+    TqInstallInterruptHandler();
 
     if (cfg.Mode == TqMode::Client) {
         return RunClient(cfg);
