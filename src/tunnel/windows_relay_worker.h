@@ -231,6 +231,8 @@ private:
     void TryRetireRelay(const std::shared_ptr<RelayContext>& relay);
     void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
     void HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op);
+    bool ScheduleRelayReceiveDrain(const std::shared_ptr<RelayContext>& relay);
+    void DrainRelayReceives(const std::shared_ptr<RelayContext>& relay);
     bool QueueDeferredQuicReceive(
         const std::shared_ptr<RelayContext>& relay,
         MsQuicStream* stream,
