@@ -30,7 +30,6 @@ struct MsQuicStream;
 struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 struct TqWindowsQuicSendOperation;
-struct TqWindowsRelayTask;
 
 enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
@@ -203,7 +202,7 @@ private:
     void Run();
     void PostStop();
     void DrainPerRelayMaintenance();
-    void ProcessQuicSendCompleteTask(TqWindowsRelayTask& task);
+    void ProcessQuicSendCompleteOperation(uint64_t relayId, uintptr_t operationValue);
     void ProcessQuicPeerAborted(uint64_t relayId, const char* reason, uint64_t errorCode);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);

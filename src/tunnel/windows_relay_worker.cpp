@@ -5,7 +5,6 @@
 #include "msquic.hpp"
 #include "relay_buffer.h"
 #include "trace.h"
-#include "windows_relay_event_queue.h"
 
 #include <algorithm>
 #include <cstring>
@@ -476,15 +475,16 @@ void TqWindowsRelayWorker::CompleteQuicSendAccounting(
     SaturatingFetchSub(relay->OutstandingQuicSendBytes, operation.TotalBytes);
 }
 
-void TqWindowsRelayWorker::ProcessQuicSendCompleteTask(TqWindowsRelayTask& task) {
+void TqWindowsRelayWorker::ProcessQuicSendCompleteOperation(
+    uint64_t relayId,
+    uintptr_t operationValue) {
     QuicSendCompleteEvents_.fetch_add(1, std::memory_order_relaxed);
     std::unique_ptr<TqWindowsQuicSendOperation> operation(
-        reinterpret_cast<TqWindowsQuicSendOperation*>(task.Value));
-    task.Value = 0;
+        reinterpret_cast<TqWindowsQuicSendOperation*>(operationValue));
     if (!operation || operation->Magic != TqWindowsQuicSendOperation::MagicValue) {
         return;
     }
-    auto relay = FindRelayById(operation->RelayId);
+    auto relay = FindRelayById(relayId != 0 ? relayId : operation->RelayId);
     if (relay) {
         CompleteQuicSendAccounting(relay, *operation);
         if (operation->Fin) {
@@ -747,12 +747,8 @@ void TqWindowsRelayWorker::Run() {
             HandleQuicReceiveViewQueued(std::move(op));
             break;
         case TqWindowsIocpOperationType::QuicSendComplete: {
-            TqWindowsRelayTask task{};
-            task.Type = TqWindowsRelayTaskType::QuicSendComplete;
-            task.RelayId = op->RelayId;
-            task.Value = op->Value;
+            ProcessQuicSendCompleteOperation(op->RelayId, static_cast<uintptr_t>(op->Value));
             op->Value = 0;
-            ProcessQuicSendCompleteTask(task);
             break;
         }
         case TqWindowsIocpOperationType::RelayReceiveReady:
@@ -1308,11 +1304,7 @@ void TqWindowsRelayWorker::TestProcessQuicSendCompleteForTest(
     operation->RelayId = relayId;
     operation->TotalBytes = completedBytes;
     relay->InFlightQuicSends.fetch_add(1, std::memory_order_acq_rel);
-    TqWindowsRelayTask task{};
-    task.Type = TqWindowsRelayTaskType::QuicSendComplete;
-    task.RelayId = relayId;
-    task.Value = reinterpret_cast<uintptr_t>(operation);
-    ProcessQuicSendCompleteTask(task);
+    ProcessQuicSendCompleteOperation(relayId, reinterpret_cast<uintptr_t>(operation));
 }
 #endif
 
