@@ -233,6 +233,7 @@ private:
     void HandleQuicReceiveQueued(std::unique_ptr<IoOperation> op);
     void HandleQuicReceiveViewQueued(std::unique_ptr<IoOperation> op);
     bool ScheduleRelayReceiveDrain(const std::shared_ptr<RelayContext>& relay);
+    void ScheduleRelayReceiveDrainOrFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void DrainRelayReceives(const std::shared_ptr<RelayContext>& relay);
     bool QueueDeferredQuicReceive(
         const std::shared_ptr<RelayContext>& relay,
@@ -365,6 +366,7 @@ private:
     std::atomic<uint64_t> EventsProcessed_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
+    std::atomic<uint64_t> WorkerEventQueueReceiveViewEnqueuedForTest_{0};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};

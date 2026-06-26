@@ -1534,18 +1534,28 @@ int main() {
             return 71;
         }
 
-        uint8_t data[] = {'a', 'b', 'c', 'd', 'e'};
-        QUIC_BUFFER buffer{};
-        buffer.Buffer = data;
-        buffer.Length = sizeof(data);
+        uint8_t firstData[] = {'a', 'b'};
+        QUIC_BUFFER firstBuffer{};
+        firstBuffer.Buffer = firstData;
+        firstBuffer.Length = sizeof(firstData);
         QUIC_STREAM_EVENT event{};
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
-        event.RECEIVE.Buffers = &buffer;
+        event.RECEIVE.Buffers = &firstBuffer;
         if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 72;
+        }
+        uint8_t secondData[] = {'c', 'd', 'e'};
+        QUIC_BUFFER secondBuffer{};
+        secondBuffer.Buffer = secondData;
+        secondBuffer.Length = sizeof(secondData);
+        event.RECEIVE.Buffers = &secondBuffer;
+        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            return 403;
         }
         if (!receiveWorker.TestAdvanceReceiveViewForCompletion(handle.WindowsRelayId, 2)) {
             receiveWorker.Stop();
@@ -1579,7 +1589,7 @@ int main() {
             snapshot.PendingQuicReceiveBytes != 0 || snapshot.PendingQuicReceiveQueueDepth != 0) {
             receiveWorker.Stop();
             MsQuic = nullptr;
-            return 77;
+            return 402;
         }
         receiveWorker.Stop();
         MsQuic = nullptr;

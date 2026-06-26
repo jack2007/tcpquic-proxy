@@ -341,6 +341,11 @@ void TqWindowsRelayWorker::PostStop() {
 }
 
 bool TqWindowsRelayWorker::EnqueueEvent(TqWindowsRelayTask&& task) {
+#if defined(TQ_UNIT_TESTING)
+    if (task.Type == TqWindowsRelayTaskType::QuicReceiveView) {
+        WorkerEventQueueReceiveViewEnqueuedForTest_.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     if (!EventQueue_.TryPush(std::move(task))) {
         EventQueueFullCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -493,6 +498,17 @@ bool TqWindowsRelayWorker::ScheduleRelayReceiveDrain(const std::shared_ptr<Relay
     }
     EventQueueWakeCount_.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+void TqWindowsRelayWorker::ScheduleRelayReceiveDrainOrFail(
+    const std::shared_ptr<RelayContext>& relay,
+    const char* reason) {
+    if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!ScheduleRelayReceiveDrain(relay)) {
+        FailRelayFatal(relay, reason);
+    }
 }
 
 void TqWindowsRelayWorker::ProcessQuicReceiveViewTask(TqWindowsRelayTask& task) {
@@ -1051,6 +1067,20 @@ bool TqWindowsRelayWorker::TestLastPostedCallbackWasReceiveReadyForTest(uint64_t
 }
 
 bool TqWindowsRelayWorker::TestNoWorkerEventQueueReceiveViewForTest() const {
+    if (WorkerEventQueueReceiveViewEnqueuedForTest_.load(std::memory_order_relaxed) != 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(Lock_);
+    for (const auto& entry : Relays_) {
+        const auto& relay = entry.second;
+        if (!relay) {
+            continue;
+        }
+        std::lock_guard<std::mutex> pendingGuard(relay->CallbackPendingQuicReceiveLock);
+        if (!relay->CallbackPendingQuicReceives.empty()) {
+            return false;
+        }
+    }
     return EventQueue_.SizeApprox() == 0;
 }
 
@@ -2640,7 +2670,7 @@ bool TqWindowsRelayWorker::FinishReceiveView(
         hasPendingReceives = !relay->PendingReceives.empty();
     }
     if (hasPendingReceives && !relay->Closing.load(std::memory_order_acquire)) {
-        (void)ScheduleRelayReceiveDrain(relay);
+        ScheduleRelayReceiveDrainOrFail(relay, "schedule_receive_drain_after_finish_failed");
     }
     (void)CloseRelayIfDrained(relay);
     return true;
@@ -2820,7 +2850,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
                     CloseRelay(relay, TqRelayCloseMode::GracefulDrain, "post_tcp_send_receive_view_failed");
                     return;
                 }
-                (void)ScheduleRelayReceiveDrain(relay);
+                ScheduleRelayReceiveDrainOrFail(relay, "schedule_receive_drain_after_partial_send_failed");
                 return;
             }
             op->Offset += bytes;
@@ -2845,7 +2875,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
             } else if (error == WSA_IO_PENDING) {
                 TcpSendWouldBlockOrPendingCount_.fetch_add(1, std::memory_order_relaxed);
             }
-            (void)ScheduleRelayReceiveDrain(relay);
+            ScheduleRelayReceiveDrainOrFail(relay, "schedule_receive_drain_after_retry_send_failed");
             return;
         }
         if (CloseRelayIfDrained(relay)) {
@@ -2869,7 +2899,7 @@ void TqWindowsRelayWorker::HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD 
                 return;
             }
         }
-        (void)ScheduleRelayReceiveDrain(relay);
+        ScheduleRelayReceiveDrainOrFail(relay, "schedule_receive_drain_after_send_complete_failed");
         return;
     }
     TcpSendBytes_.fetch_add(bytes, std::memory_order_relaxed);
