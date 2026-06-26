@@ -117,7 +117,9 @@ set(TCPQUIC_PROXY_SOURCES
     tunnel/tunnel_reaper.cpp
     runtime/admin_auth.cpp
     runtime/admin_http.cpp
+    runtime/admin_memory.cpp
     runtime/client_peer_runtime.cpp
+    runtime/memory_stats.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_admin.cpp
@@ -323,6 +325,15 @@ tcpquic_target_include_dirs(tcpquic_relay_alloc_test)
 tcpquic_link_mimalloc(tcpquic_relay_alloc_test)
 set_property(TARGET tcpquic_relay_alloc_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_relay_alloc_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_memory_stats_test
+    unittest/memory_stats_test.cpp
+    runtime/memory_stats.cpp
+)
+tcpquic_target_include_dirs(tcpquic_memory_stats_test)
+tcpquic_link_mimalloc(tcpquic_memory_stats_test)
+set_property(TARGET tcpquic_memory_stats_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_memory_stats_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 set(TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES
     unittest/ares_dns_resolver_test.cpp
@@ -964,6 +975,8 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
+    runtime/admin_memory.cpp
+    runtime/memory_stats.cpp
     runtime/admin_auth.cpp
     runtime/admin_http.cpp
     tunnel/tunnel_registry.cpp
@@ -1021,10 +1034,13 @@ set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$O
 
 add_executable(tcpquic_server_admin_test
     unittest/server_admin_test.cpp
+    runtime/admin_memory.cpp
+    runtime/memory_stats.cpp
     runtime/server_admin.cpp
 )
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
 target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic)
+tcpquic_link_mimalloc(tcpquic_server_admin_test)
 set_property(TARGET tcpquic_server_admin_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_server_admin_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -1113,6 +1129,7 @@ endif()
 set(TCPQUIC_TEST_TARGETS
     tcpquic_relay_buffer_test
     tcpquic_relay_alloc_test
+    tcpquic_memory_stats_test
     tcpquic_tuning_test
     tcpquic_quic_settings_test
     tcpquic_thread_pool_test

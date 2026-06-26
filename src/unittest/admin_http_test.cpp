@@ -473,6 +473,9 @@ int main() {
             if (req.Method == "POST" && req.Path == "/server/connections/srv-1:abort-tunnels") {
                 return TqJsonResponse(202, "{\"server_abort\":true}");
             }
+            if (req.Method == "POST" && req.Path == "/memory/allocator:dump") {
+                return TqJsonResponse(200, "{\"memory_dump\":true}");
+            }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 120;
@@ -574,8 +577,20 @@ int main() {
         std::string serverAbortResponse;
         if (!TqRecvUntilClosed(serverAbortFd, serverAbortResponse)) return 159;
         TqCloseSocket(serverAbortFd);
-        server.Stop();
         if (!TqHttpStatusIs(serverAbortResponse, 202)) return 160;
+
+        TqSocketHandle memoryDumpFd = TqConnectLocal(port);
+        if (!TqSocketValid(memoryDumpFd)) return 161;
+        const std::string memoryDumpRequest =
+            "POST /api/v1/memory/allocator:dump HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\nContent-Length: 0\r\n\r\n";
+        if (!TqSendAll(memoryDumpFd, memoryDumpRequest)) return 162;
+        std::string memoryDumpResponse;
+        if (!TqRecvUntilClosed(memoryDumpFd, memoryDumpResponse)) return 163;
+        TqCloseSocket(memoryDumpFd);
+        server.Stop();
+        if (!TqHttpStatusIs(memoryDumpResponse, 200)) return 164;
+        if (memoryDumpResponse.find("\"memory_dump\":true") == std::string::npos) return 165;
     }
     {
         TqAdminHttpServerOptions options;

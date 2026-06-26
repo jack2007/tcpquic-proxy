@@ -1,5 +1,6 @@
 #include "router_runtime.h"
 
+#include "admin_memory.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
 
@@ -1409,6 +1410,11 @@ std::string TqRouterRuntime::HealthJson() const {
 }
 
 std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
+    std::string response;
+    if (TqHandleMemoryAdmin(req, response)) {
+        return response;
+    }
+
     if (req.Method == "GET" && req.Path == "/health") {
         return TqJsonResponse(200, HealthJson());
     }

@@ -94,7 +94,12 @@ int main() {
     if (tunnels.find("HTTP/1.1 200 OK") == std::string::npos) return 8;
     if (tunnels.find("\"tunnel_id\":\"tun-5\"") == std::string::npos) return 9;
 
+    std::string memory = TqHandleServerAdmin(Request("POST", "/memory/allocator:dump"), metrics, 10);
+    if (memory.find("HTTP/1.1 200 OK") == std::string::npos) return 10;
+    if (memory.find("\"status\":\"dumped\"") == std::string::npos) return 11;
+    if (memory.find("\"allocator\":\"mimalloc\"") == std::string::npos) return 12;
+
     std::string missing = TqHandleServerAdmin(Request("GET", "/server/connections/srv-404"), metrics, 10);
-    if (missing.find("HTTP/1.1 404 Not Found") == std::string::npos) return 10;
+    if (missing.find("HTTP/1.1 404 Not Found") == std::string::npos) return 13;
     return 0;
 }

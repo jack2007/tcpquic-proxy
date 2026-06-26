@@ -1,5 +1,6 @@
 #include "server_admin.h"
 
+#include "admin_memory.h"
 #include "quic_session.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
@@ -124,6 +125,11 @@ std::string TqHandleServerAdmin(
     const TqHttpRequest& req,
     TqServerMetrics& metrics,
     uint64_t uptimeSeconds) {
+    std::string response;
+    if (TqHandleMemoryAdmin(req, response)) {
+        return response;
+    }
+
     if (req.Method == "GET" && (req.Path == "/server" || req.Path == "/server/metrics")) {
         return TqJsonResponse(200, TqServerMetricsJson(metrics, uptimeSeconds));
     }

@@ -503,6 +503,11 @@ int main() {
         if (config.find("HTTP/1.1 200 OK") == std::string::npos) return 27;
         if (config.find("\"peer_id\":\"agent-d\"") == std::string::npos) return 28;
         if (config.find("quic_reconnect_interval_ms") != std::string::npos) return 259;
+        TqHttpRequest memoryDump = Request("POST", "/memory/allocator:dump", "");
+        std::string memoryDumpResp = adminRuntime.HandleAdmin(memoryDump);
+        if (memoryDumpResp.find("HTTP/1.1 200 OK") == std::string::npos) return 318;
+        if (memoryDumpResp.find("\"status\":\"dumped\"") == std::string::npos) return 319;
+        if (memoryDumpResp.find("\"allocator\":\"mimalloc\"") == std::string::npos) return 320;
         TqHttpRequest putRoundTrip = Request("PUT", "/config", JsonBody(config));
         std::string roundTrip = adminRuntime.HandleAdmin(putRoundTrip);
         if (roundTrip.find("HTTP/1.1 200 OK") == std::string::npos) return 74;

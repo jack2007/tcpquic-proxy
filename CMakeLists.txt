@@ -110,6 +110,15 @@ if(TCPQUIC_USE_MIMALLOC)
     set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
     set(MI_OSX_INTERPOSE OFF CACHE BOOL "" FORCE)
     set(MI_OSX_ZONE OFF CACHE BOOL "" FORCE)
+    set(TCPQUIC_MIMALLOC_EXTRA_CPPDEFS)
+    if(MI_EXTRA_CPPDEFS)
+        set(TCPQUIC_MIMALLOC_EXTRA_CPPDEFS ${MI_EXTRA_CPPDEFS})
+        list(FILTER TCPQUIC_MIMALLOC_EXTRA_CPPDEFS EXCLUDE REGEX "^(OFF|MI_STAT(=.*)?)$")
+    endif()
+    # Admin memory diagnostics rely on requested-byte and allocation-count
+    # counters, which mimalloc only maintains when MI_STAT is greater than 1.
+    list(APPEND TCPQUIC_MIMALLOC_EXTRA_CPPDEFS MI_STAT=2)
+    set(MI_EXTRA_CPPDEFS "${TCPQUIC_MIMALLOC_EXTRA_CPPDEFS}" CACHE STRING "" FORCE)
     add_subdirectory("${TCPQUIC_MIMALLOC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/mimalloc")
     # MsQuic's static archive flattener records only static targets with an
     # explicit archive output directory. MSVC multi-config generators append
