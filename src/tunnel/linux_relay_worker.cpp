@@ -388,6 +388,7 @@ TqLinuxRelayWorker::~TqLinuxRelayWorker() {
 }
 
 bool TqLinuxRelayWorker::Start() {
+    std::lock_guard<std::mutex> controlGuard(ControlLock);
     if (Running.load()) {
         return false;
     }
@@ -413,10 +414,12 @@ bool TqLinuxRelayWorker::Start() {
     }
     Running.store(true);
     Thread = std::thread(&TqLinuxRelayWorker::Run, this);
+    WorkerThreadId = Thread.get_id();
     return true;
 }
 
 bool TqLinuxRelayWorker::StartForTest() {
+    std::lock_guard<std::mutex> controlGuard(ControlLock);
     if (Running.exchange(true)) {
         return false;
     }
@@ -443,10 +446,12 @@ bool TqLinuxRelayWorker::StartForTest() {
         Running.store(false);
         return false;
     }
+    WorkerThreadId = std::this_thread::get_id();
     return true;
 }
 
 void TqLinuxRelayWorker::Stop() {
+    std::lock_guard<std::mutex> controlGuard(ControlLock);
     if (!Running.exchange(false)) {
         return;
     }
@@ -462,6 +467,7 @@ void TqLinuxRelayWorker::Stop() {
         ::close(WakeFd);
         WakeFd = -1;
     }
+    WorkerThreadId = std::thread::id{};
 }
 
 bool TqLinuxRelayWorker::Enqueue(TqLinuxRelayEvent event) {
@@ -977,8 +983,30 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             }
             break;
         }
+        case TqLinuxRelayEventType::RegisterRelay: {
+            auto* command = static_cast<RegisterRelayCommand*>(event.Control);
+            TqLinuxRelayRegistrationResult result{};
+            if (command != nullptr) {
+                result = RegisterRelayWithIdLocal(command->Registration);
+            }
+            CompleteRegisterCommand(command, result);
+            break;
+        }
+        case TqLinuxRelayEventType::UnregisterRelay: {
+            auto* command = static_cast<UnregisterRelayCommand*>(event.Control);
+            if (command != nullptr) {
+                UnregisterRelayLocal(command->RelayId);
+            }
+            CompleteUnregisterCommand(command);
+            break;
+        }
+        case TqLinuxRelayEventType::Snapshot: {
+            auto* command = static_cast<SnapshotCommand*>(event.Control);
+            CompleteSnapshotCommand(command, SnapshotLocal());
+            break;
+        }
         case TqLinuxRelayEventType::Shutdown:
-            UnregisterRelay(event.RelayId);
+            UnregisterRelayLocal(event.RelayId);
             break;
         default:
             break;
@@ -1025,12 +1053,75 @@ void TqLinuxRelayWorker::PurgeRetiredRelaysIfIdle() {
     }
 }
 
+void TqLinuxRelayWorker::CompleteRegisterCommand(
+    RegisterRelayCommand* command,
+    TqLinuxRelayRegistrationResult result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteUnregisterCommand(UnregisterRelayCommand* command) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteSnapshotCommand(
+    SnapshotCommand* command,
+    TqLinuxRelayWorkerSnapshot snapshot) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = std::move(snapshot);
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     const TqLinuxRelayRegistration& registration) {
-    return RegisterRelayWithIdLocal(registration);
+    if (!Running.load() || IsWorkerThread()) {
+        return RegisterRelayWithIdLocal(registration);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+        return RegisterRelayWithIdLocal(registration);
+    }
+
+    RegisterRelayCommand command{};
+    command.Registration = registration;
+
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::RegisterRelay;
+    event.Control = &command;
+    if (!Enqueue(std::move(event))) {
+        return {};
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    command.Cv.wait(lock, [&command]() {
+        return command.Done;
+    });
+    return command.Result;
 }
 
 bool TqLinuxRelayWorker::IsWorkerThread() const {
+    std::lock_guard<std::mutex> guard(ControlLock);
     return std::this_thread::get_id() == WorkerThreadId;
 }
 
@@ -1161,7 +1252,32 @@ bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
 #endif
 
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
-    UnregisterRelayLocal(relayId);
+    if (!Running.load() || IsWorkerThread()) {
+        UnregisterRelayLocal(relayId);
+        return;
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+        UnregisterRelayLocal(relayId);
+        return;
+    }
+
+    UnregisterRelayCommand command{};
+    command.RelayId = relayId;
+
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::UnregisterRelay;
+    event.Control = &command;
+    if (!Enqueue(std::move(event))) {
+        UnregisterRelayLocal(relayId);
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    command.Cv.wait(lock, [&command]() {
+        return command.Done;
+    });
 }
 
 void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
@@ -2824,7 +2940,29 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
-    return SnapshotLocal();
+    if (!Running.load() || IsWorkerThread()) {
+        return SnapshotLocal();
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+        return SnapshotLocal();
+    }
+
+    SnapshotCommand command{};
+
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::Snapshot;
+    event.Control = &command;
+    if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
+        return SnapshotLocal();
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    command.Cv.wait(lock, [&command]() {
+        return command.Done;
+    });
+    return command.Result;
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
@@ -3023,7 +3161,6 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
 }
 
 void TqLinuxRelayWorker::Run() {
-    WorkerThreadId = std::this_thread::get_id();
     epoll_event events[16]{};
     while (Running.load()) {
         const int count = ::epoll_wait(EpollFd, events, 16, 100);

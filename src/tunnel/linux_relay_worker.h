@@ -410,6 +410,7 @@ private:
     std::atomic<uint64_t> EventProducerThreadCount{0};
     std::atomic<bool> MultipleEventProducerThreadsObserved{false};
     std::thread Thread;
+    mutable std::mutex ControlLock;
     std::thread::id WorkerThreadId;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
