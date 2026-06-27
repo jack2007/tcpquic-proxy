@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -20,6 +21,7 @@
 
 namespace {
 constexpr uintptr_t kWakeIdent = 1;
+constexpr std::chrono::milliseconds kControlCommandWakeRetryInterval{10};
 
 #if defined(TCPQUIC_TESTING)
 TqDarwinRelayStreamSendForTest g_darwinRelayStreamSendForTest = nullptr;
@@ -171,6 +173,10 @@ bool TqDarwinRelayWorker::Start() {
         return false;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+        WorkerThreadId = std::thread::id{};
+    }
     Running.store(true, std::memory_order_release);
     Thread = std::thread(&TqDarwinRelayWorker::Run, this);
     return true;
@@ -186,6 +192,10 @@ void TqDarwinRelayWorker::Stop() {
                 Errors.fetch_add(1, std::memory_order_relaxed);
             }
             PurgeRetiredRelaysIfSafe();
+            {
+                std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+                WorkerThreadId = std::thread::id{};
+            }
             return;
         }
 
@@ -213,16 +223,40 @@ void TqDarwinRelayWorker::Stop() {
         Errors.fetch_add(1, std::memory_order_relaxed);
     }
     PurgeRetiredRelaysIfSafe();
+    {
+        std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+        WorkerThreadId = std::thread::id{};
+    }
 }
 
-bool TqDarwinRelayWorker::Wake() {
+bool TqDarwinRelayWorker::Wake() const {
     if (KqueueFd < 0) {
         return false;
     }
 
     struct kevent change;
     EV_SET(&change, kWakeIdent, EVFILT_USER, 0, NOTE_TRIGGER, 0, nullptr);
-    if (kevent(KqueueFd, &change, 1, nullptr, 0, nullptr) != 0) {
+#if defined(TCPQUIC_TESTING)
+    uint32_t wakeFailures = WakeFailuresForTest.load(std::memory_order_acquire);
+    while (wakeFailures != 0) {
+        if (WakeFailuresForTest.compare_exchange_weak(
+                wakeFailures,
+                wakeFailures - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            errno = EIO;
+            Errors.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+    }
+#endif
+    for (;;) {
+        if (kevent(KqueueFd, &change, 1, nullptr, 0, nullptr) == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
         Errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -238,6 +272,20 @@ bool TqDarwinRelayWorker::EnqueueEvent(TqDarwinRelayEvent&& event) {
     }
     (void)Wake();
     return true;
+}
+
+TqDarwinRelayWorker::ControlEnqueueResult TqDarwinRelayWorker::EnqueueControlEvent(
+    TqDarwinRelayEvent&& event) const {
+    if (!EventQueue.TryPush(std::move(event))) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return ControlEnqueueResult::Failed;
+    }
+    return Wake() ? ControlEnqueueResult::QueuedAndWoken : ControlEnqueueResult::QueuedWakeFailed;
+}
+
+bool TqDarwinRelayWorker::IsWorkerThread() const {
+    std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+    return WorkerThreadId == std::this_thread::get_id();
 }
 
 #if defined(TCPQUIC_TESTING)
@@ -258,6 +306,10 @@ bool TqDarwinRelayWorker::StartForTest() {
         }
     }
     Running.store(true, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+        WorkerThreadId = std::this_thread::get_id();
+    }
     return true;
 }
 
@@ -280,6 +332,10 @@ bool TqDarwinRelayWorker::RunningForTest() const {
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
     std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
     FailRegisterTcpFiltersForTest = fail;
+}
+
+void TqDarwinRelayWorker::SetWakeFailuresForTest(uint32_t failures) {
+    WakeFailuresForTest.store(failures, std::memory_order_release);
 }
 
 void TqDarwinRelayWorker::SetStreamSendForTest(TqDarwinRelayStreamSendForTest sendFn) {
@@ -417,6 +473,45 @@ uint64_t TqDarwinRelayWorker::PendingTcpWriteBytesForTest(uint64_t relayId) {
 }
 #endif
 
+void TqDarwinRelayWorker::CompleteRegisterCommand(
+    RegisterRelayCommand* command,
+    TqDarwinRelayRegistrationResult result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqDarwinRelayWorker::CompleteUnregisterCommand(UnregisterRelayCommand* command) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(command->Mutex);
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqDarwinRelayWorker::CompleteSnapshotCommand(
+    SnapshotCommand* command,
+    TqDarwinRelayWorkerSnapshot result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
 uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
     uint32_t processed = 0;
     TqDarwinRelayEvent event{};
@@ -446,6 +541,34 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
                 RetryPendingQuicSends(relay);
             }
             break;
+        case TqDarwinRelayEventType::RegisterRelay: {
+            auto* command = static_cast<RegisterRelayCommand*>(event.Control);
+            if (command == nullptr) {
+                Errors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            CompleteRegisterCommand(command, RegisterRelayWithIdLocal(command->Registration));
+            break;
+        }
+        case TqDarwinRelayEventType::UnregisterRelay: {
+            auto* command = static_cast<UnregisterRelayCommand*>(event.Control);
+            if (command == nullptr) {
+                Errors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            UnregisterRelayLocal(command->RelayId);
+            CompleteUnregisterCommand(command);
+            break;
+        }
+        case TqDarwinRelayEventType::Snapshot: {
+            auto* command = static_cast<SnapshotCommand*>(event.Control);
+            if (command == nullptr) {
+                Errors.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            CompleteSnapshotCommand(command, SnapshotLocal());
+            break;
+        }
         default:
             break;
         }
@@ -482,6 +605,15 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
                 RetryPendingQuicSends(relay);
             }
             break;
+        case TqDarwinRelayEventType::RegisterRelay:
+            CompleteRegisterCommand(static_cast<RegisterRelayCommand*>(event.Control), {});
+            break;
+        case TqDarwinRelayEventType::UnregisterRelay:
+            CompleteUnregisterCommand(static_cast<UnregisterRelayCommand*>(event.Control));
+            break;
+        case TqDarwinRelayEventType::Snapshot:
+            CompleteSnapshotCommand(static_cast<SnapshotCommand*>(event.Control), SnapshotLocal());
+            break;
         default:
             break;
         }
@@ -506,6 +638,10 @@ uint32_t TqDarwinRelayWorker::DrainWakeEvents() {
 }
 
 void TqDarwinRelayWorker::Run() {
+    {
+        std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+        WorkerThreadId = std::this_thread::get_id();
+    }
     struct kevent events[16];
     while (Running.load(std::memory_order_acquire)) {
         const int count = kevent(KqueueFd, nullptr, 0, events, 16, nullptr);
@@ -2171,9 +2307,8 @@ void TqDarwinRelayWorker::MaybeResumeQuicReceive(const std::shared_ptr<RelayStat
     }
 }
 
-TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithId(
+TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     const TqDarwinRelayRegistration& registration) {
-    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
     if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
         return {};
     }
@@ -2232,10 +2367,46 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithId(
     return {true, relay->Id};
 }
 
-void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
-    std::shared_ptr<RelayState> relay;
+TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithId(
+    const TqDarwinRelayRegistration& registration) {
+    if (IsWorkerThread()) {
+        return RegisterRelayWithIdLocal(registration);
+    }
+
+    RegisterRelayCommand command{};
+    command.Registration = registration;
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+        if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
+            return RegisterRelayWithIdLocal(registration);
+        }
+
+        TqDarwinRelayEvent event{};
+        event.Type = TqDarwinRelayEventType::RegisterRelay;
+        event.Control = &command;
+        if (EnqueueControlEvent(std::move(event)) == ControlEnqueueResult::Failed) {
+            return {};
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    while (!command.Done) {
+        if (command.Cv.wait_for(
+                lock,
+                kControlCommandWakeRetryInterval,
+                [&command] { return command.Done; })) {
+            break;
+        }
+        lock.unlock();
+        (void)Wake();
+        lock.lock();
+    }
+    return command.Result;
+}
+
+void TqDarwinRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
+    std::shared_ptr<RelayState> relay;
+    {
         std::lock_guard<std::mutex> lock(RelayMutex);
         const auto it = Relays.find(relayId);
         if (it == Relays.end()) {
@@ -2250,7 +2421,55 @@ void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
     PurgeRetiredRelaysIfSafe();
 }
 
-TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
+void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
+    if (IsWorkerThread()) {
+        UnregisterRelayLocal(relayId);
+        return;
+    }
+
+    UnregisterRelayCommand command{};
+    command.RelayId = relayId;
+    uint32_t enqueueAttempts = 0;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+            if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
+                UnregisterRelayLocal(relayId);
+                return;
+            }
+
+            TqDarwinRelayEvent event{};
+            event.Type = TqDarwinRelayEventType::UnregisterRelay;
+            event.Control = &command;
+            if (EnqueueControlEvent(std::move(event)) != ControlEnqueueResult::Failed) {
+                break;
+            }
+            (void)Wake();
+        }
+        ++enqueueAttempts;
+        if (enqueueAttempts < 1024) {
+            std::this_thread::yield();
+        } else {
+            enqueueAttempts = 0;
+            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    while (!command.Done) {
+        if (command.Cv.wait_for(
+                lock,
+                kControlCommandWakeRetryInterval,
+                [&command] { return command.Done; })) {
+            break;
+        }
+        lock.unlock();
+        (void)Wake();
+        lock.lock();
+    }
+}
+
+TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
     TqDarwinRelayWorkerSnapshot snapshot{};
     snapshot.EventsProcessed = EventsProcessed.load(std::memory_order_relaxed);
     snapshot.Wakeups = Wakeups.load(std::memory_order_relaxed);
@@ -2301,6 +2520,41 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
     }
     snapshot.Errors = Errors.load(std::memory_order_relaxed);
     return snapshot;
+}
+
+TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
+    if (IsWorkerThread()) {
+        return SnapshotLocal();
+    }
+
+    SnapshotCommand command{};
+    {
+        std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+        if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
+            return SnapshotLocal();
+        }
+
+        TqDarwinRelayEvent event{};
+        event.Type = TqDarwinRelayEventType::Snapshot;
+        event.Control = &command;
+        if (EnqueueControlEvent(std::move(event)) == ControlEnqueueResult::Failed) {
+            return SnapshotLocal();
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    while (!command.Done) {
+        if (command.Cv.wait_for(
+                lock,
+                kControlCommandWakeRetryInterval,
+                [&command] { return command.Done; })) {
+            break;
+        }
+        lock.unlock();
+        (void)Wake();
+        lock.lock();
+    }
+    return command.Result;
 }
 
 QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(

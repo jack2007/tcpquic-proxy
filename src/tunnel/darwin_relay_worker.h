@@ -11,6 +11,7 @@
 #include "tuning.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -121,6 +122,7 @@ public:
     uint32_t DrainWakeForTest();
     bool RunningForTest() const;
     void SetRegisterTcpFiltersFailureForTest(bool fail);
+    void SetWakeFailuresForTest(uint32_t failures);
     void SetStreamSendForTest(TqDarwinRelayStreamSendForTest sendFn);
     void SetReceiveCompleteForTest(TqDarwinRelayReceiveCompleteForTest completeFn);
     void SetReceiveSetEnabledForTest(TqDarwinRelayReceiveSetEnabledForTest setEnabledFn);
@@ -159,12 +161,49 @@ private:
         bool CompletionEventClaimed{false};
         std::shared_ptr<void> BindingOwner;
     };
+    struct RegisterRelayCommand {
+        TqDarwinRelayRegistration Registration;
+        TqDarwinRelayRegistrationResult Result;
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+    struct UnregisterRelayCommand {
+        uint64_t RelayId{0};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+    struct SnapshotCommand {
+        TqDarwinRelayWorkerSnapshot Result;
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+    enum class ControlEnqueueResult {
+        Failed,
+        QueuedAndWoken,
+        QueuedWakeFailed,
+    };
 
     void Run();
-    bool Wake();
+    bool IsWorkerThread() const;
+    bool Wake() const;
     bool EnqueueEvent(TqDarwinRelayEvent&& event);
+    ControlEnqueueResult EnqueueControlEvent(TqDarwinRelayEvent&& event) const;
     uint32_t DrainEvents(uint32_t budget);
     void PurgeQueuedEventsForStop();
+    TqDarwinRelayRegistrationResult RegisterRelayWithIdLocal(
+        const TqDarwinRelayRegistration& registration);
+    void UnregisterRelayLocal(uint64_t relayId);
+    TqDarwinRelayWorkerSnapshot SnapshotLocal() const;
+    static void CompleteRegisterCommand(
+        RegisterRelayCommand* command,
+        TqDarwinRelayRegistrationResult result);
+    static void CompleteUnregisterCommand(UnregisterRelayCommand* command);
+    static void CompleteSnapshotCommand(
+        SnapshotCommand* command,
+        TqDarwinRelayWorkerSnapshot result);
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
@@ -242,8 +281,10 @@ private:
     TqDarwinRelayWorkerConfig Config;
     int KqueueFd{-1};
     std::atomic<bool> Running{false};
-    TqDarwinRelayEventQueue EventQueue;
+    mutable TqDarwinRelayEventQueue EventQueue;
     std::thread Thread;
+    std::thread::id WorkerThreadId;
+    mutable std::mutex WorkerThreadIdMutex;
     mutable std::mutex LifecycleMutex;
     mutable std::mutex RelayMutex;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
@@ -253,9 +294,10 @@ private:
     uint64_t NextRelayId{1};
 #if defined(TCPQUIC_TESTING)
     bool FailRegisterTcpFiltersForTest{false};
+    mutable std::atomic<uint32_t> WakeFailuresForTest{0};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
-    std::atomic<uint64_t> Wakeups{0};
+    mutable std::atomic<uint64_t> Wakeups{0};
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};
     std::atomic<uint64_t> TcpWriteBatches{0};
@@ -266,7 +308,7 @@ private:
     std::atomic<uint64_t> QuicSendBackpressureEvents{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
-    std::atomic<uint64_t> Errors{0};
+    mutable std::atomic<uint64_t> Errors{0};
 };
 
 class TqDarwinRelayRuntime final {

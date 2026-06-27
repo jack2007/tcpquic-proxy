@@ -328,6 +328,13 @@ void CloseSocketPairAfterRelayOwned(int relayTcpFd, int fds[2]) {
     CHECK(close(peerFd) == 0);
 }
 
+TqDarwinRelayEvent TestMarkerEvent(uint64_t value) {
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::TestMarker;
+    event.Value = value;
+    return event;
+}
+
 void SocketPairEnvironmentWorks() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -356,6 +363,87 @@ void WorkerStartsAndStopsCleanly() {
     snapshot = worker.Snapshot();
     CHECK(snapshot.Errors == 0);
     CHECK(snapshot.ActiveRelays == 0);
+}
+
+void ControlEventRetriesAfterWakeFailure() {
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    CHECK(worker.Start());
+    worker.SetWakeFailuresForTest(1);
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    std::thread snapshotThread([&] {
+        snapshot = worker.Snapshot();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_one();
+    });
+
+    bool doneBeforeStop = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        doneBeforeStop = cv.wait_for(lock, std::chrono::seconds(2), [&] { return done; });
+    }
+
+    worker.Stop();
+    snapshotThread.join();
+
+    CHECK(doneBeforeStop);
+    CHECK(snapshot.Errors == 1);
+}
+
+void UnregisterWakesAfterFullQueueWakeFailures() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    TqDarwinRelayWorker worker(config);
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    worker.SetWakeFailuresForTest(2);
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(worker.Snapshot().PendingEvents == 2);
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    std::thread unregisterThread([&] {
+        worker.UnregisterRelay(result.RelayId);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_one();
+    });
+
+    bool doneBeforeStop = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        doneBeforeStop = cv.wait_for(lock, std::chrono::seconds(2), [&] { return done; });
+    }
+
+    worker.Stop();
+    unregisterThread.join();
+
+    CHECK(doneBeforeStop);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 void WorkerRegistersTcpReadinessShell() {
@@ -404,6 +492,35 @@ void WorkerRegistersTcpReadinessShell() {
     CHECK(handle.Backend == TqRelayBackendType::None);
     CHECK(handle.DarwinWorker == nullptr);
     CHECK(handle.DarwinRelayId == 0);
+
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void EventizedUnregisterClearsHandleAndRelayCount() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    TqRelayHandle handle{};
+    CHECK(worker.Start());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    worker.UnregisterRelay(result.RelayId);
+
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+    CHECK(worker.Snapshot().Errors == 0);
 
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -2478,7 +2595,10 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
 int main() {
     SocketPairEnvironmentWorks();
     WorkerStartsAndStopsCleanly();
+    ControlEventRetriesAfterWakeFailure();
+    UnregisterWakesAfterFullQueueWakeFailures();
     WorkerRegistersTcpReadinessShell();
+    EventizedUnregisterClearsHandleAndRelayCount();
     WorkerObservesTcpReadBytes();
     WorkerObservesTcpReadWithSmallByteBudget();
     CompressedTcpReadFlushesWhenCompressorBuffersInput();
