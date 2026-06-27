@@ -1,5 +1,7 @@
 #include "memory_stats.h"
 
+#include "relay_alloc.h"
+
 #include <cstdio>
 #include <sstream>
 
@@ -17,6 +19,10 @@ namespace {
 uint64_t TqNonNegativeInt64(int64_t value) {
     return value <= 0 ? 0 : static_cast<uint64_t>(value);
 }
+
+uint64_t TqNonNegativeSumInt64(int64_t a, int64_t b) {
+    return TqNonNegativeInt64(a) + TqNonNegativeInt64(b);
+}
 #endif
 
 const char* TqBoolJson(bool value) {
@@ -24,6 +30,44 @@ const char* TqBoolJson(bool value) {
 }
 
 } // namespace
+
+#if TCPQUIC_USE_MIMALLOC
+TqMemoryAllocatorStats TqMemoryAllocatorStatsFromMimallocStats(const mi_stats_t& stats) {
+    TqMemoryAllocatorStats out{};
+    out.MimallocEnabled = true;
+    out.Available = true;
+    out.RequestedCurrentBytes = TqNonNegativeSumInt64(
+        stats.malloc_normal.current,
+        stats.malloc_huge.current);
+    out.RequestedTotalBytes = TqNonNegativeSumInt64(
+        stats.malloc_normal.total,
+        stats.malloc_huge.total);
+    out.RequestedPeakBytes = TqNonNegativeSumInt64(
+        stats.malloc_normal.peak,
+        stats.malloc_huge.peak);
+    out.RequestedFreedBytes = out.RequestedTotalBytes >= out.RequestedCurrentBytes
+        ? out.RequestedTotalBytes - out.RequestedCurrentBytes
+        : 0;
+    out.ReservedCurrentBytes = TqNonNegativeInt64(stats.reserved.current);
+    out.CommittedCurrentBytes = TqNonNegativeInt64(stats.committed.current);
+    out.PageCommittedCurrentBytes = TqNonNegativeInt64(stats.page_committed.current);
+    if (out.PageCommittedCurrentBytes > out.CommittedCurrentBytes) {
+        out.PageCommittedCurrentBytes = out.CommittedCurrentBytes;
+    }
+    const TqRelayAllocStats relayAllocStats = TqSnapshotRelayAllocStats();
+    out.RequestedCurrentBytes = relayAllocStats.RequestedCurrentBytes;
+    out.RequestedTotalBytes = relayAllocStats.RequestedTotalBytes;
+    out.RequestedFreedBytes = relayAllocStats.RequestedFreedBytes;
+    out.RequestedPeakBytes = relayAllocStats.RequestedPeakBytes;
+    out.NormalAllocCount = relayAllocStats.NormalAllocCount;
+    out.HugeAllocCount = TqNonNegativeInt64(stats.malloc_huge_count.total);
+    out.MmapCalls = TqNonNegativeInt64(stats.mmap_calls.total);
+    out.CommitCalls = TqNonNegativeInt64(stats.commit_calls.total);
+    out.PurgeCalls = TqNonNegativeInt64(stats.purge_calls.total);
+    out.ThreadsCurrent = TqNonNegativeInt64(stats.threads.current);
+    return out;
+}
+#endif
 
 TqMemoryAllocatorStats TqSnapshotMemoryAllocatorStats() {
     TqMemoryAllocatorStats out{};
@@ -36,22 +80,7 @@ TqMemoryAllocatorStats TqSnapshotMemoryAllocatorStats() {
         return out;
     }
 
-    out.Available = true;
-    out.RequestedCurrentBytes = TqNonNegativeInt64(stats.malloc_requested.current);
-    out.RequestedTotalBytes = TqNonNegativeInt64(stats.malloc_requested.total);
-    out.RequestedPeakBytes = TqNonNegativeInt64(stats.malloc_requested.peak);
-    out.RequestedFreedBytes = out.RequestedTotalBytes >= out.RequestedCurrentBytes
-        ? out.RequestedTotalBytes - out.RequestedCurrentBytes
-        : 0;
-    out.ReservedCurrentBytes = TqNonNegativeInt64(stats.reserved.current);
-    out.CommittedCurrentBytes = TqNonNegativeInt64(stats.committed.current);
-    out.PageCommittedCurrentBytes = TqNonNegativeInt64(stats.page_committed.current);
-    out.NormalAllocCount = TqNonNegativeInt64(stats.malloc_normal_count.total);
-    out.HugeAllocCount = TqNonNegativeInt64(stats.malloc_huge_count.total);
-    out.MmapCalls = TqNonNegativeInt64(stats.mmap_calls.total);
-    out.CommitCalls = TqNonNegativeInt64(stats.commit_calls.total);
-    out.PurgeCalls = TqNonNegativeInt64(stats.purge_calls.total);
-    out.ThreadsCurrent = TqNonNegativeInt64(stats.threads.current);
+    out = TqMemoryAllocatorStatsFromMimallocStats(stats);
 #endif
     return out;
 }

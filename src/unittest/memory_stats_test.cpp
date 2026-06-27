@@ -1,9 +1,11 @@
 #include "memory_stats.h"
+#include "relay_alloc.h"
 
 #include <string>
 
 #if TCPQUIC_USE_MIMALLOC
 #include <mimalloc.h>
+#include <mimalloc-stats.h>
 #endif
 
 int main() {
@@ -63,18 +65,44 @@ int main() {
 
     const TqMemoryAllocatorStats snapshot = TqSnapshotMemoryAllocatorStats();
 #if TCPQUIC_USE_MIMALLOC
+    TqResetRelayAllocStatsForTesting();
+    void* trackedAllocation = TqMalloc(64);
+    if (trackedAllocation == nullptr) return 46;
+    TqMemoryAllocatorStats trackedSnapshot = TqSnapshotMemoryAllocatorStats();
+    TqFree(trackedAllocation);
+    if (trackedSnapshot.RequestedCurrentBytes != 64) return 47;
+    if (trackedSnapshot.RequestedTotalBytes != 64) return 48;
+    if (trackedSnapshot.RequestedFreedBytes != 0) return 49;
+    if (trackedSnapshot.RequestedPeakBytes != 64) return 50;
+    if (trackedSnapshot.NormalAllocCount != 1) return 51;
+    TqResetRelayAllocStatsForTesting();
+
+    mi_stats_t rawStats;
+    mi_stats_init(&rawStats);
+    rawStats.malloc_normal.current = 4096;
+    rawStats.malloc_normal.total = 8192;
+    rawStats.malloc_normal.peak = 4096;
+    rawStats.committed.current = 16384;
+    rawStats.page_committed.current = 65536;
+    const TqMemoryAllocatorStats mappedStats = TqMemoryAllocatorStatsFromMimallocStats(rawStats);
+    if (mappedStats.PageCommittedCurrentBytes > mappedStats.CommittedCurrentBytes) return 43;
+
     if (!snapshot.MimallocEnabled) return 34;
     if (!snapshot.Available) return 35;
 
-    void* allocation = mi_malloc(4096);
+    void* allocation = TqMalloc(4096);
     if (allocation == nullptr) return 36;
     static_cast<unsigned char*>(allocation)[0] = 0x5a;
     const TqMemoryAllocatorStats allocatedSnapshot = TqSnapshotMemoryAllocatorStats();
-    mi_free(allocation);
+    TqFree(allocation);
+    const TqMemoryAllocatorStats freedSnapshot = TqSnapshotMemoryAllocatorStats();
 
     if (allocatedSnapshot.RequestedCurrentBytes == 0) return 37;
     if (allocatedSnapshot.RequestedTotalBytes == 0) return 38;
     if (allocatedSnapshot.NormalAllocCount == 0) return 39;
+    if (freedSnapshot.RequestedCurrentBytes >= allocatedSnapshot.RequestedCurrentBytes) return 42;
+    if (allocatedSnapshot.PageCommittedCurrentBytes > allocatedSnapshot.CommittedCurrentBytes) return 44;
+    if (freedSnapshot.PageCommittedCurrentBytes > freedSnapshot.CommittedCurrentBytes) return 45;
 #else
     if (snapshot.MimallocEnabled) return 40;
     if (snapshot.Available) return 41;

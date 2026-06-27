@@ -329,6 +329,7 @@ set_property(TARGET tcpquic_relay_alloc_test APPEND PROPERTY BUILD_RPATH "$ORIGI
 add_executable(tcpquic_memory_stats_test
     unittest/memory_stats_test.cpp
     runtime/memory_stats.cpp
+    tunnel/relay_alloc.cpp
 )
 tcpquic_target_include_dirs(tcpquic_memory_stats_test)
 tcpquic_link_mimalloc(tcpquic_memory_stats_test)
@@ -1037,6 +1038,7 @@ add_executable(tcpquic_server_admin_test
     runtime/admin_memory.cpp
     runtime/memory_stats.cpp
     runtime/server_admin.cpp
+    tunnel/relay_alloc.cpp
 )
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
 target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic)

@@ -3,6 +3,10 @@
 #include <cstdint>
 #include <string>
 
+#if TCPQUIC_USE_MIMALLOC
+typedef struct mi_stats_s mi_stats_t;
+#endif
+
 struct TqMemoryAllocatorStats {
     bool MimallocEnabled{false};
     bool Available{false};
@@ -22,6 +26,9 @@ struct TqMemoryAllocatorStats {
 };
 
 TqMemoryAllocatorStats TqSnapshotMemoryAllocatorStats();
+#if TCPQUIC_USE_MIMALLOC
+TqMemoryAllocatorStats TqMemoryAllocatorStatsFromMimallocStats(const mi_stats_t& stats);
+#endif
 std::string TqFormatMemoryAllocatorStatsLine(const TqMemoryAllocatorStats& stats);
 std::string TqMemoryAllocatorStatsJson(const TqMemoryAllocatorStats& stats);
 void TqDumpMemoryAllocatorStatsToLog(const TqMemoryAllocatorStats& stats);
