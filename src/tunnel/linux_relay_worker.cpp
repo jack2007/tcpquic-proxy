@@ -1052,6 +1052,7 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
         relay->Id = NextRelayId++;
         event.data.u64 = relay->Id;
         Relays.push_back(relay);
+        RelaysById.emplace(relay->Id, relay);
         result.Ok = true;
         result.RelayId = relay->Id;
     }
@@ -1076,6 +1077,7 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
                 break;
             }
         }
+        RelaysById.erase(relay->Id);
         result.Ok = false;
         result.RelayId = 0;
         return result;
@@ -1094,6 +1096,7 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
                     break;
                 }
             }
+            RelaysById.erase(relay->Id);
             result.Ok = false;
             result.RelayId = 0;
             return result;
@@ -1124,6 +1127,7 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
             if ((*it)->Id == relayId) {
                 removed = *it;
                 Relays.erase(it);
+                RelaysById.erase(relayId);
                 break;
             }
         }

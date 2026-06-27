@@ -17,6 +17,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 struct MsQuicStream;
@@ -378,6 +379,8 @@ private:
     mutable std::mutex RelayLock;
     std::deque<std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;
+    std::unordered_map<uint64_t, std::shared_ptr<RelayState>> RelaysById;
+    std::unordered_map<uint64_t, std::shared_ptr<RelayState>> RetiredRelaysById;
     uint64_t NextRelayId{1};
     std::atomic<uint64_t> TcpReadBatches{0};
     std::atomic<uint64_t> TcpReadBytes{0};
