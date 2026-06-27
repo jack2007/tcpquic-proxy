@@ -41,6 +41,12 @@ enum class TqLinuxRelayEventType {
     UnregisterRelay,
     Snapshot,
     Shutdown,
+    CallbackReceiveQueueFailedShutdown,
+    TakeCapturedQuicBytesForTest,
+    EnqueueQuicReceiveForTest,
+    FlushTcpWritableForTest,
+    RelayIndexesConsistentForTest,
+    DispatchTcpEventsForTest,
 };
 
 struct TqLinuxRelayEvent {

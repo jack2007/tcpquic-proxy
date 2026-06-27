@@ -295,16 +295,82 @@ private:
         bool Done{false};
     };
 
+    struct TakeCapturedQuicBytesForTestCommand {
+        int TcpFd{-1};
+        std::vector<uint8_t> Result;
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct EnqueueQuicReceiveForTestCommand {
+        int TcpFd{-1};
+        std::vector<uint8_t> Data;
+        bool Fin{false};
+        bool Result{false};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct FlushTcpWritableForTestCommand {
+        int TcpFd{-1};
+        bool Result{false};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct RelayIndexesConsistentForTestCommand {
+        bool Result{false};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct DispatchTcpEventsForTestCommand {
+        uint64_t RelayId{0};
+        uint32_t Events{0};
+        bool Result{false};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
     bool IsWorkerThread() const;
     TqLinuxRelayRegistrationResult RegisterRelayWithIdLocal(
         const TqLinuxRelayRegistration& registration);
     void UnregisterRelayLocal(uint64_t relayId);
     TqLinuxRelayWorkerSnapshot SnapshotLocal() const;
+    bool RelayIndexesConsistentForTestLocal() const;
+    std::vector<uint8_t> TakeCapturedQuicBytesForTestLocal(int tcpFd);
+    bool EnqueueQuicReceiveForTestLocal(
+        int tcpFd,
+        const uint8_t* data,
+        size_t length,
+        bool fin);
+    bool FlushTcpWritableForTestLocal(int tcpFd);
+    bool DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_t events);
     void CompleteRegisterCommand(
         RegisterRelayCommand* command,
         TqLinuxRelayRegistrationResult result);
     void CompleteUnregisterCommand(UnregisterRelayCommand* command);
     void CompleteSnapshotCommand(SnapshotCommand* command, TqLinuxRelayWorkerSnapshot snapshot);
+    void CompleteTakeCapturedQuicBytesForTestCommand(
+        TakeCapturedQuicBytesForTestCommand* command,
+        std::vector<uint8_t> result);
+    void CompleteEnqueueQuicReceiveForTestCommand(
+        EnqueueQuicReceiveForTestCommand* command,
+        bool result);
+    void CompleteFlushTcpWritableForTestCommand(
+        FlushTcpWritableForTestCommand* command,
+        bool result);
+    void CompleteRelayIndexesConsistentForTestCommand(
+        RelayIndexesConsistentForTestCommand* command,
+        bool result);
+    void CompleteDispatchTcpEventsForTestCommand(
+        DispatchTcpEventsForTestCommand* command,
+        bool result);
     void RecordError(RelayErrorKind kind);
     void RecordBufferAcquireFailure(RelayErrorKind kind, TqBufferAcquireFailure failure);
     void RecordTcpWriteAttempt(uint64_t bytes);
@@ -382,7 +448,10 @@ private:
     void MaybeResumeQuicReceive(RelayState* relay);
     void SetQuicReceiveEnabled(RelayState* relay, bool enabled);
     void ArmTcpReadable(RelayState* relay, bool enabled);
-    void AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream);
+    void AbortRelayFromCallback(
+        uint64_t relayId,
+        StreamRelayBinding* binding,
+        MsQuicStream* stream);
     void ProcessQuicPeerSendAborted(uint64_t relayId, uint64_t errorCode);
     void ProcessQuicPeerReceiveAborted(uint64_t relayId, uint64_t errorCode);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
@@ -414,7 +483,6 @@ private:
     std::thread::id WorkerThreadId;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
-    mutable std::mutex RelayLock;
     std::deque<std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> RelaysById;

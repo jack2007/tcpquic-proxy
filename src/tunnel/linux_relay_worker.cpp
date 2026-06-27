@@ -317,6 +317,7 @@ void TqLinuxRelaySetStreamSendForTest(TqLinuxRelayStreamSendForTest sendFn) {
 struct TqLinuxRelayWorker::StreamRelayBinding {
     TqLinuxRelayWorker* Worker{nullptr};
     std::atomic<RelayState*> Relay{nullptr};
+    std::atomic<TqRelayHandle*> Handle{nullptr};
     std::atomic<uint32_t> CallbackRefs{0};
     std::atomic<bool> Closing{false};
 };
@@ -747,6 +748,7 @@ void TqLinuxRelayWorker::DetachRelayStreamBinding(
     }
     binding->Closing.store(true, std::memory_order_release);
     binding->Relay.store(nullptr, std::memory_order_release);
+    binding->Handle.store(nullptr, std::memory_order_release);
 
     MsQuicStream* boundStream = stream;
     if (boundStream == nullptr && relay != nullptr) {
@@ -788,6 +790,7 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
     if (binding != nullptr) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
+        binding->Handle.store(nullptr, std::memory_order_release);
     }
     if (relay->OutstandingQuicSends == 0) {
         DetachRelayStreamBinding(relay, relay->Stream, binding);
@@ -1008,6 +1011,54 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::Shutdown:
             UnregisterRelayLocal(event.RelayId);
             break;
+        case TqLinuxRelayEventType::CallbackReceiveQueueFailedShutdown: {
+            auto relay = FindRelayById(event.RelayId);
+            SetRelayStop(relay.get(), "quic_receive_queue_failed");
+            UnregisterRelayLocal(event.RelayId);
+            break;
+        }
+        case TqLinuxRelayEventType::TakeCapturedQuicBytesForTest: {
+            auto* command = static_cast<TakeCapturedQuicBytesForTestCommand*>(event.Control);
+            CompleteTakeCapturedQuicBytesForTestCommand(
+                command,
+                command != nullptr ? TakeCapturedQuicBytesForTestLocal(command->TcpFd)
+                                   : std::vector<uint8_t>{});
+            break;
+        }
+        case TqLinuxRelayEventType::EnqueueQuicReceiveForTest: {
+            auto* command = static_cast<EnqueueQuicReceiveForTestCommand*>(event.Control);
+            const bool result =
+                command != nullptr &&
+                EnqueueQuicReceiveForTestLocal(
+                    command->TcpFd,
+                    command->Data.data(),
+                    command->Data.size(),
+                    command->Fin);
+            CompleteEnqueueQuicReceiveForTestCommand(command, result);
+            break;
+        }
+        case TqLinuxRelayEventType::FlushTcpWritableForTest: {
+            auto* command = static_cast<FlushTcpWritableForTestCommand*>(event.Control);
+            const bool result =
+                command != nullptr && FlushTcpWritableForTestLocal(command->TcpFd);
+            CompleteFlushTcpWritableForTestCommand(command, result);
+            break;
+        }
+        case TqLinuxRelayEventType::RelayIndexesConsistentForTest: {
+            auto* command = static_cast<RelayIndexesConsistentForTestCommand*>(event.Control);
+            CompleteRelayIndexesConsistentForTestCommand(
+                command,
+                RelayIndexesConsistentForTestLocal());
+            break;
+        }
+        case TqLinuxRelayEventType::DispatchTcpEventsForTest: {
+            auto* command = static_cast<DispatchTcpEventsForTestCommand*>(event.Control);
+            const bool result =
+                command != nullptr &&
+                DispatchTcpEventsForTestLocal(command->RelayId, command->Events);
+            CompleteDispatchTcpEventsForTestCommand(command, result);
+            break;
+        }
         default:
             break;
         }
@@ -1015,11 +1066,7 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
     }
     EventsProcessed.fetch_add(processed);
 
-    std::vector<std::shared_ptr<RelayState>> activeRelays;
-    {
-        std::lock_guard<std::mutex> guard(RelayLock);
-        activeRelays.assign(Relays.begin(), Relays.end());
-    }
+    std::vector<std::shared_ptr<RelayState>> activeRelays(Relays.begin(), Relays.end());
     for (const auto& relay : activeRelays) {
         RetryPendingQuicSends(relay.get());
         DrainCallbackPendingQuicReceives(relay.get());
@@ -1038,7 +1085,6 @@ void TqLinuxRelayWorker::PurgeRetiredRelaysIfIdle() {
     if (EventQueue.SizeApprox() != 0) {
         return;
     }
-    std::lock_guard<std::mutex> guard(RelayLock);
     for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
         const auto& relay = *it;
         if (relay == nullptr ||
@@ -1092,9 +1138,79 @@ void TqLinuxRelayWorker::CompleteSnapshotCommand(
     command->Cv.notify_one();
 }
 
+void TqLinuxRelayWorker::CompleteTakeCapturedQuicBytesForTestCommand(
+    TakeCapturedQuicBytesForTestCommand* command,
+    std::vector<uint8_t> result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = std::move(result);
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteEnqueueQuicReceiveForTestCommand(
+    EnqueueQuicReceiveForTestCommand* command,
+    bool result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteFlushTcpWritableForTestCommand(
+    FlushTcpWritableForTestCommand* command,
+    bool result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteRelayIndexesConsistentForTestCommand(
+    RelayIndexesConsistentForTestCommand* command,
+    bool result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
+void TqLinuxRelayWorker::CompleteDispatchTcpEventsForTestCommand(
+    DispatchTcpEventsForTestCommand* command,
+    bool result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     const TqLinuxRelayRegistration& registration) {
-    if (!Running.load() || IsWorkerThread()) {
+    if (IsWorkerThread()) {
         return RegisterRelayWithIdLocal(registration);
     }
 
@@ -1150,15 +1266,12 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
     epoll_event event{};
     event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
 
-    {
-        std::lock_guard<std::mutex> guard(RelayLock);
-        relay->Id = NextRelayId++;
-        event.data.u64 = relay->Id;
-        Relays.push_back(relay);
-        RelaysById.emplace(relay->Id, relay);
-        result.Ok = true;
-        result.RelayId = relay->Id;
-    }
+    relay->Id = NextRelayId++;
+    event.data.u64 = relay->Id;
+    Relays.push_back(relay);
+    RelaysById.emplace(relay->Id, relay);
+    result.Ok = true;
+    result.RelayId = relay->Id;
     TqRelayDebugLog(
         "event=linux_relay_register worker=%u relay=%llu fd=%d local=%s peer=%s stream=%p handle=%p enable_quic_sends=%d sink_quic_receives=%d",
         Config.WorkerIndex,
@@ -1173,7 +1286,6 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
 
     if (registration.TcpFd >= 0 &&
         ::epoll_ctl(EpollFd, EPOLL_CTL_ADD, registration.TcpFd, &event) != 0) {
-        std::lock_guard<std::mutex> guard(RelayLock);
         for (auto it = Relays.begin(); it != Relays.end(); ++it) {
             if ((*it)->Id == relay->Id) {
                 Relays.erase(it);
@@ -1192,7 +1304,6 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
             if (registration.TcpFd >= 0) {
                 ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, registration.TcpFd, nullptr);
             }
-            std::lock_guard<std::mutex> guard(RelayLock);
             for (auto it = Relays.begin(); it != Relays.end(); ++it) {
                 if ((*it)->Id == relay->Id) {
                     Relays.erase(it);
@@ -1206,6 +1317,7 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
         }
         binding->Worker = this;
         binding->Relay.store(relay.get(), std::memory_order_release);
+        binding->Handle.store(registration.Handle, std::memory_order_release);
         relay->StreamBinding = binding.get();
         registration.Stream->Callback = TqLinuxRelayWorker::StreamCallback;
         registration.Stream->Context = binding.release();
@@ -1224,7 +1336,39 @@ bool TqLinuxRelayWorker::RegisterRelayForTest(const TqLinuxRelayRegistration& re
 
 #if defined(TQ_UNIT_TESTING)
 bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
-    std::lock_guard<std::mutex> guard(RelayLock);
+    if (IsWorkerThread()) {
+        return RelayIndexesConsistentForTestLocal();
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return RelayIndexesConsistentForTestLocal();
+        }
+
+        RelayIndexesConsistentForTestCommand command{};
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::RelayIndexesConsistentForTest;
+        event.Control = &command;
+        if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            const_cast<TqLinuxRelayWorker*>(this)->Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return command.Result;
+    }
+}
+#endif
+
+bool TqLinuxRelayWorker::RelayIndexesConsistentForTestLocal() const {
     if (Relays.size() != RelaysById.size() ||
         RetiredRelays.size() != RetiredRelaysById.size()) {
         return false;
@@ -1249,50 +1393,52 @@ bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
     }
     return true;
 }
-#endif
 
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
-    if (!Running.load() || IsWorkerThread()) {
+    if (IsWorkerThread()) {
         UnregisterRelayLocal(relayId);
         return;
     }
 
     std::unique_lock<std::mutex> controlGuard(ControlLock);
-    if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
-        UnregisterRelayLocal(relayId);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            UnregisterRelayLocal(relayId);
+            return;
+        }
+
+        UnregisterRelayCommand command{};
+        command.RelayId = relayId;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::UnregisterRelay;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
         return;
     }
-
-    UnregisterRelayCommand command{};
-    command.RelayId = relayId;
-
-    TqLinuxRelayEvent event{};
-    event.Type = TqLinuxRelayEventType::UnregisterRelay;
-    event.Control = &command;
-    if (!Enqueue(std::move(event))) {
-        UnregisterRelayLocal(relayId);
-        return;
-    }
-
-    std::unique_lock<std::mutex> lock(command.Mutex);
-    command.Cv.wait(lock, [&command]() {
-        return command.Done;
-    });
 }
 
 void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     std::shared_ptr<RelayState> removed;
-    {
-        std::lock_guard<std::mutex> guard(RelayLock);
-        auto found = RelaysById.find(relayId);
-        if (found != RelaysById.end()) {
-            removed = found->second;
-            RelaysById.erase(found);
-            for (auto it = Relays.begin(); it != Relays.end(); ++it) {
-                if ((*it)->Id == relayId) {
-                    Relays.erase(it);
-                    break;
-                }
+    auto found = RelaysById.find(relayId);
+    if (found != RelaysById.end()) {
+        removed = found->second;
+        RelaysById.erase(found);
+        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+            if ((*it)->Id == relayId) {
+                Relays.erase(it);
+                break;
             }
         }
     }
@@ -1349,6 +1495,7 @@ void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     if (binding != nullptr) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
+        binding->Handle.store(nullptr, std::memory_order_release);
     }
     if (removed->OutstandingQuicSends == 0) {
         DetachRelayStreamBinding(removed.get(), removed->Stream, binding);
@@ -1371,11 +1518,8 @@ void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
         }
         removed->CallbackPendingQuicReceives.clear();
     }
-    {
-        std::lock_guard<std::mutex> guard(RelayLock);
-        RetiredRelays.push_back(removed);
-        RetiredRelaysById.emplace(removed->Id, removed);
-    }
+    RetiredRelays.push_back(removed);
+    RetiredRelaysById.emplace(removed->Id, removed);
 }
 
 bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int timeoutMs) {
@@ -1390,6 +1534,39 @@ bool TqLinuxRelayWorker::WaitForObservedTcpBytesForTest(uint64_t bytes, int time
 }
 
 std::vector<uint8_t> TqLinuxRelayWorker::TakeCapturedQuicBytesForTest(int tcpFd) {
+    if (IsWorkerThread()) {
+        return TakeCapturedQuicBytesForTestLocal(tcpFd);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return TakeCapturedQuicBytesForTestLocal(tcpFd);
+        }
+
+        TakeCapturedQuicBytesForTestCommand command{};
+        command.TcpFd = tcpFd;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::TakeCapturedQuicBytesForTest;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return std::move(command.Result);
+    }
+}
+
+std::vector<uint8_t> TqLinuxRelayWorker::TakeCapturedQuicBytesForTestLocal(int tcpFd) {
     auto relay = FindRelayByFd(tcpFd);
     if (relay == nullptr) {
         return {};
@@ -1932,7 +2109,6 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
 }
 
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
-    std::lock_guard<std::mutex> guard(RelayLock);
     auto active = RelaysById.find(relayId);
     if (active != RelaysById.end()) {
         return active->second;
@@ -1945,7 +2121,6 @@ std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayByI
 }
 
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayByFd(int tcpFd) {
-    std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
         if (relay->TcpFd == tcpFd) {
             return relay;
@@ -1959,7 +2134,6 @@ uint64_t TqLinuxRelayWorker::FindRelayIdByStream(MsQuicStream* stream) {
         return 0;
     }
     StreamLookupScanCount.fetch_add(1);
-    std::lock_guard<std::mutex> guard(RelayLock);
     for (const auto& relay : Relays) {
         if (relay->Stream == stream) {
             return relay->Id;
@@ -1968,16 +2142,22 @@ uint64_t TqLinuxRelayWorker::FindRelayIdByStream(MsQuicStream* stream) {
     return 0;
 }
 
-void TqLinuxRelayWorker::AbortRelayFromCallback(uint64_t relayId, MsQuicStream* stream) {
-    auto relay = FindRelayById(relayId);
-    SetRelayStop(relay.get(), "quic_receive_queue_failed");
+void TqLinuxRelayWorker::AbortRelayFromCallback(
+    uint64_t relayId,
+    StreamRelayBinding* binding,
+    MsQuicStream* stream) {
     if (stream != nullptr && stream->Handle != nullptr) {
         (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
     }
     TqLinuxRelayEvent shutdown{};
-    shutdown.Type = TqLinuxRelayEventType::Shutdown;
+    shutdown.Type = TqLinuxRelayEventType::CallbackReceiveQueueFailedShutdown;
     shutdown.RelayId = relayId;
-    (void)Enqueue(std::move(shutdown));
+    if (!Enqueue(std::move(shutdown)) && binding != nullptr) {
+        if (auto* handle = binding->Handle.load(std::memory_order_acquire);
+            handle != nullptr) {
+            handle->Stop.store(true, std::memory_order_release);
+        }
+    }
 }
 
 void TqLinuxRelayWorker::ProcessQuicPeerSendAborted(uint64_t relayId, uint64_t errorCode) {
@@ -2592,6 +2772,54 @@ bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
     const uint8_t* data,
     size_t length,
     bool fin) {
+    if (length > 0 && data == nullptr) {
+        return false;
+    }
+    if (IsWorkerThread()) {
+        return EnqueueQuicReceiveForTestLocal(tcpFd, data, length, fin);
+    }
+
+    EnqueueQuicReceiveForTestCommand command{};
+    command.TcpFd = tcpFd;
+    command.Fin = fin;
+    if (length > 0) {
+        command.Data.assign(data, data + length);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return EnqueueQuicReceiveForTestLocal(
+                tcpFd,
+                command.Data.data(),
+                command.Data.size(),
+                fin);
+        }
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::EnqueueQuicReceiveForTest;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return command.Result;
+    }
+}
+
+bool TqLinuxRelayWorker::EnqueueQuicReceiveForTestLocal(
+    int tcpFd,
+    const uint8_t* data,
+    size_t length,
+    bool fin) {
     auto relay = FindRelayByFd(tcpFd);
     if (relay == nullptr) {
         return false;
@@ -2604,6 +2832,39 @@ bool TqLinuxRelayWorker::EnqueueQuicReceiveForTest(
 }
 
 bool TqLinuxRelayWorker::FlushTcpWritableForTest(int tcpFd) {
+    if (IsWorkerThread()) {
+        return FlushTcpWritableForTestLocal(tcpFd);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return FlushTcpWritableForTestLocal(tcpFd);
+        }
+
+        FlushTcpWritableForTestCommand command{};
+        command.TcpFd = tcpFd;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::FlushTcpWritableForTest;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return command.Result;
+    }
+}
+
+bool TqLinuxRelayWorker::FlushTcpWritableForTestLocal(int tcpFd) {
     auto relay = FindRelayByFd(tcpFd);
     if (relay == nullptr) {
         return false;
@@ -2615,6 +2876,40 @@ bool TqLinuxRelayWorker::FlushTcpWritableForTest(int tcpFd) {
 }
 
 bool TqLinuxRelayWorker::DispatchTcpEventsForTest(uint64_t relayId, uint32_t events) {
+    if (IsWorkerThread()) {
+        return DispatchTcpEventsForTestLocal(relayId, events);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return DispatchTcpEventsForTestLocal(relayId, events);
+        }
+
+        DispatchTcpEventsForTestCommand command{};
+        command.RelayId = relayId;
+        command.Events = events;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::DispatchTcpEventsForTest;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return command.Result;
+    }
+}
+
+bool TqLinuxRelayWorker::DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_t events) {
     if (FindRelayById(relayId) == nullptr) {
         return false;
     }
@@ -2940,7 +3235,7 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
-    if (!Running.load() || IsWorkerThread()) {
+    if (IsWorkerThread()) {
         return SnapshotLocal();
     }
 
@@ -2955,7 +3250,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     event.Type = TqLinuxRelayEventType::Snapshot;
     event.Control = &command;
     if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
-        return SnapshotLocal();
+        return {};
     }
 
     std::unique_lock<std::mutex> lock(command.Mutex);
@@ -3066,97 +3361,94 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.MultipleEventProducerThreadsObserved =
         MultipleEventProducerThreadsObserved.load(std::memory_order_acquire);
 
-    {
-        std::lock_guard<std::mutex> relayGuard(RelayLock);
-        snapshot.ActiveRelays = Relays.size();
-        snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
-        bool hasHotRelay = false;
-        for (const auto& relay : Relays) {
-            uint64_t relayPendingBytes =
-                relay->PendingBufferBytes.load(std::memory_order_relaxed);
-            snapshot.BufferAcquireCount +=
-                relay->AllocateCount.load(std::memory_order_relaxed);
-            snapshot.RelayBufferBytesInUse += relayPendingBytes;
-            if (relay->TcpFd >= 0) {
-                ++snapshot.ActiveTcpRelays;
-            }
-            if (relay->SinkQuicReceives) {
-                ++snapshot.ActiveSinkRelays;
-            }
-            if (relay->EnableQuicSends) {
-                ++snapshot.ActiveQuicSendRelays;
-            }
-            if (relay->TcpReadArmed) {
-                ++snapshot.TcpReadArmedRelays;
-            } else if (relay->TcpFd >= 0) {
-                ++snapshot.TcpReadDisabledRelays;
-            }
-            if (relay->TcpWriteArmed) {
-                ++snapshot.TcpWriteArmedRelays;
-            }
-            if (relay->Closing) {
-                ++snapshot.ClosingRelays;
-            }
-            if (relay->TcpReadClosed) {
-                ++snapshot.TcpReadClosedRelays;
-            }
-            if (relay->TcpWriteShutdownQueued) {
-                ++snapshot.TcpWriteShutdownQueuedRelays;
-            }
-            snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
-            snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
-            snapshot.OutstandingQuicSends += relay->PendingQuicSendRetries.size();
-            for (const auto& retry : relay->PendingQuicSendRetries) {
-                if (retry != nullptr) {
-                    snapshot.OutstandingQuicSendBytes += retry->TotalBytes;
-                    relayPendingBytes += retry->TotalBytes;
-                }
-            }
-            snapshot.MaxBufferedQuicSendBytes += CurrentRelayIdealSendBytes(relay.get());
-            snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
-            for (const auto& view : relay->PendingTcpWrites) {
-                relayPendingBytes += view.Len;
-                snapshot.PendingTcpWriteBytes += view.Len;
-            }
-            relayPendingBytes += relay->PendingQuicReceiveBytes;
-            snapshot.CurrentPendingQuicReceiveBytes += relay->PendingQuicReceiveBytes;
-            snapshot.CurrentPendingQuicReceiveQueue += relay->PendingQuicReceives.size();
-            snapshot.PendingBytes += relayPendingBytes;
-            snapshot.MaxRelayPendingQuicReceiveBytes = std::max(
-                snapshot.MaxRelayPendingQuicReceiveBytes,
-                relay->PendingQuicReceiveBytes);
-            snapshot.MaxRelayPendingQuicReceiveQueue = std::max<uint64_t>(
-                snapshot.MaxRelayPendingQuicReceiveQueue,
-                relay->PendingQuicReceives.size());
-            snapshot.MaxRelayTcpWriteEagainCount = std::max(
-                snapshot.MaxRelayTcpWriteEagainCount,
-                relay->TcpWriteEagainCount);
-            if (!hasHotRelay ||
-                relay->PendingQuicReceiveBytes > snapshot.HotRelayPendingQuicReceiveBytes ||
-                (relay->PendingQuicReceiveBytes == snapshot.HotRelayPendingQuicReceiveBytes &&
-                 relay->TcpWriteEagainCount > snapshot.HotRelayTcpWriteEagainCount)) {
-                hasHotRelay = true;
-                snapshot.HotRelayId = relay->Id;
-                snapshot.HotRelayWorkerIndex = Config.WorkerIndex;
-                snapshot.HotRelayTcpFd = relay->TcpFd;
-                snapshot.HotRelayPendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
-                snapshot.HotRelayPendingQuicReceiveQueue = relay->PendingQuicReceives.size();
-                snapshot.HotRelayTcpWriteBytes = relay->TcpWriteBytes;
-                snapshot.HotRelayTcpReadBytes = relay->TcpReadBytes;
-                snapshot.HotRelayOutstandingQuicSends = relay->OutstandingQuicSends;
-                snapshot.HotRelayOutstandingQuicSendBytes = relay->OutstandingQuicSendBytes;
-                snapshot.HotRelayPendingQuicSendRetries = relay->PendingQuicSendRetries.size();
-                snapshot.HotRelayIdealSendBytes = CurrentRelayIdealSendBytes(relay.get());
-                snapshot.HotRelayTcpWriteEagainCount = relay->TcpWriteEagainCount;
-                snapshot.HotRelayEpollOutEvents = relay->EpollOutEvents;
-                snapshot.HotRelayTcpReadArmed = relay->TcpReadArmed;
-                snapshot.HotRelayTcpWriteArmed = relay->TcpWriteArmed;
-                snapshot.HotRelayLocalAddress = GetSocketNameString(relay->TcpFd, false);
-                snapshot.HotRelayPeerAddress = GetSocketNameString(relay->TcpFd, true);
+    snapshot.ActiveRelays = Relays.size();
+    snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
+    bool hasHotRelay = false;
+    for (const auto& relay : Relays) {
+        uint64_t relayPendingBytes =
+            relay->PendingBufferBytes.load(std::memory_order_relaxed);
+        snapshot.BufferAcquireCount +=
+            relay->AllocateCount.load(std::memory_order_relaxed);
+        snapshot.RelayBufferBytesInUse += relayPendingBytes;
+        if (relay->TcpFd >= 0) {
+            ++snapshot.ActiveTcpRelays;
+        }
+        if (relay->SinkQuicReceives) {
+            ++snapshot.ActiveSinkRelays;
+        }
+        if (relay->EnableQuicSends) {
+            ++snapshot.ActiveQuicSendRelays;
+        }
+        if (relay->TcpReadArmed) {
+            ++snapshot.TcpReadArmedRelays;
+        } else if (relay->TcpFd >= 0) {
+            ++snapshot.TcpReadDisabledRelays;
+        }
+        if (relay->TcpWriteArmed) {
+            ++snapshot.TcpWriteArmedRelays;
+        }
+        if (relay->Closing) {
+            ++snapshot.ClosingRelays;
+        }
+        if (relay->TcpReadClosed) {
+            ++snapshot.TcpReadClosedRelays;
+        }
+        if (relay->TcpWriteShutdownQueued) {
+            ++snapshot.TcpWriteShutdownQueuedRelays;
+        }
+        snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
+        snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
+        snapshot.OutstandingQuicSends += relay->PendingQuicSendRetries.size();
+        for (const auto& retry : relay->PendingQuicSendRetries) {
+            if (retry != nullptr) {
+                snapshot.OutstandingQuicSendBytes += retry->TotalBytes;
+                relayPendingBytes += retry->TotalBytes;
             }
         }
-        snapshot.MaxWorkerPendingBytes = snapshot.PendingBytes;
+        snapshot.MaxBufferedQuicSendBytes += CurrentRelayIdealSendBytes(relay.get());
+        snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
+        for (const auto& view : relay->PendingTcpWrites) {
+            relayPendingBytes += view.Len;
+            snapshot.PendingTcpWriteBytes += view.Len;
+        }
+        relayPendingBytes += relay->PendingQuicReceiveBytes;
+        snapshot.CurrentPendingQuicReceiveBytes += relay->PendingQuicReceiveBytes;
+        snapshot.CurrentPendingQuicReceiveQueue += relay->PendingQuicReceives.size();
+        snapshot.PendingBytes += relayPendingBytes;
+        snapshot.MaxRelayPendingQuicReceiveBytes = std::max(
+            snapshot.MaxRelayPendingQuicReceiveBytes,
+            relay->PendingQuicReceiveBytes);
+        snapshot.MaxRelayPendingQuicReceiveQueue = std::max<uint64_t>(
+            snapshot.MaxRelayPendingQuicReceiveQueue,
+            relay->PendingQuicReceives.size());
+        snapshot.MaxRelayTcpWriteEagainCount = std::max(
+            snapshot.MaxRelayTcpWriteEagainCount,
+            relay->TcpWriteEagainCount);
+        if (!hasHotRelay ||
+            relay->PendingQuicReceiveBytes > snapshot.HotRelayPendingQuicReceiveBytes ||
+            (relay->PendingQuicReceiveBytes == snapshot.HotRelayPendingQuicReceiveBytes &&
+             relay->TcpWriteEagainCount > snapshot.HotRelayTcpWriteEagainCount)) {
+            hasHotRelay = true;
+            snapshot.HotRelayId = relay->Id;
+            snapshot.HotRelayWorkerIndex = Config.WorkerIndex;
+            snapshot.HotRelayTcpFd = relay->TcpFd;
+            snapshot.HotRelayPendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
+            snapshot.HotRelayPendingQuicReceiveQueue = relay->PendingQuicReceives.size();
+            snapshot.HotRelayTcpWriteBytes = relay->TcpWriteBytes;
+            snapshot.HotRelayTcpReadBytes = relay->TcpReadBytes;
+            snapshot.HotRelayOutstandingQuicSends = relay->OutstandingQuicSends;
+            snapshot.HotRelayOutstandingQuicSendBytes = relay->OutstandingQuicSendBytes;
+            snapshot.HotRelayPendingQuicSendRetries = relay->PendingQuicSendRetries.size();
+            snapshot.HotRelayIdealSendBytes = CurrentRelayIdealSendBytes(relay.get());
+            snapshot.HotRelayTcpWriteEagainCount = relay->TcpWriteEagainCount;
+            snapshot.HotRelayEpollOutEvents = relay->EpollOutEvents;
+            snapshot.HotRelayTcpReadArmed = relay->TcpReadArmed;
+            snapshot.HotRelayTcpWriteArmed = relay->TcpWriteArmed;
+            snapshot.HotRelayLocalAddress = GetSocketNameString(relay->TcpFd, false);
+            snapshot.HotRelayPeerAddress = GetSocketNameString(relay->TcpFd, true);
+        }
     }
+    snapshot.MaxWorkerPendingBytes = snapshot.PendingBytes;
     return snapshot;
 }
 
@@ -3265,7 +3557,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
                 fin)) {
-            AbortRelayFromCallback(relayId, stream);
+            AbortRelayFromCallback(relayId, binding, stream);
         }
         return QUIC_STATUS_PENDING;
     }
