@@ -1027,6 +1027,15 @@ void TqLinuxRelayWorker::PurgeRetiredRelaysIfIdle() {
 
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     const TqLinuxRelayRegistration& registration) {
+    return RegisterRelayWithIdLocal(registration);
+}
+
+bool TqLinuxRelayWorker::IsWorkerThread() const {
+    return std::this_thread::get_id() == WorkerThreadId;
+}
+
+TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
+    const TqLinuxRelayRegistration& registration) {
     TqLinuxRelayRegistrationResult result{};
     if ((!registration.SinkQuicReceives && registration.TcpFd < 0) ||
         (registration.SinkQuicReceives && registration.Stream == nullptr) ||
@@ -1152,6 +1161,10 @@ bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
 #endif
 
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
+    UnregisterRelayLocal(relayId);
+}
+
+void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     std::shared_ptr<RelayState> removed;
     {
         std::lock_guard<std::mutex> guard(RelayLock);
@@ -2811,6 +2824,10 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
+    return SnapshotLocal();
+}
+
+TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     TqLinuxRelayWorkerSnapshot snapshot{};
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
@@ -3006,6 +3023,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
 }
 
 void TqLinuxRelayWorker::Run() {
+    WorkerThreadId = std::this_thread::get_id();
     epoll_event events[16]{};
     while (Running.load()) {
         const int count = ::epoll_wait(EpollFd, events, 16, 100);
