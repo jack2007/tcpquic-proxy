@@ -42,7 +42,16 @@ std::string TqBaseNameFromArgv0(const char* argv0) {
     }
     std::string path(argv0);
     const size_t slash = path.find_last_of("/\\");
-    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (name.size() > 4) {
+        const size_t ext = name.size() - 4;
+        if (name[ext] == '.' &&
+            (name[ext + 1] == 'e' || name[ext + 1] == 'E') &&
+            (name[ext + 2] == 'x' || name[ext + 2] == 'X') &&
+            (name[ext + 3] == 'e' || name[ext + 3] == 'E')) {
+            name.resize(ext);
+        }
+    }
     return name.empty() ? std::string{} : name;
 }
 

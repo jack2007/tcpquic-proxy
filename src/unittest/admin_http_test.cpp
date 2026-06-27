@@ -186,6 +186,11 @@ int main() {
         if (runtimeDir != "custom-raypx2" && runtimeDir.find("custom-raypx2-") != 0) return 168;
         const std::filesystem::path serverTokenFile = TqAdminAuth::DefaultTokenFilePath("server");
         if (serverTokenFile.filename().string().find("server-admin-") != 0) return 169;
+
+        TqAdminAuth::SetRuntimeBinaryName("C:\\tcpquic\\bin\\raypx2.exe");
+        const std::filesystem::path windowsTokenFile = TqAdminAuth::DefaultTokenFilePath("client");
+        const std::string windowsRuntimeDir = windowsTokenFile.parent_path().filename().string();
+        if (windowsRuntimeDir != "raypx2" && windowsRuntimeDir.find("raypx2-") != 0) return 170;
     }
 #if !defined(_WIN32)
     {
