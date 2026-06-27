@@ -177,6 +177,14 @@ int main() {
         if (!auth.CleanupTokenFile(tokenFile.string())) return 92;
         if (std::filesystem::exists(tokenFile)) return 93;
     }
+    {
+        TqAdminAuth::SetRuntimeBinaryName("/opt/tcpquic/bin/custom-raypx2");
+        const std::filesystem::path defaultTokenFile = TqAdminAuth::DefaultTokenFilePath();
+        if (defaultTokenFile.filename().string().find("admin-") != 0) return 166;
+        if (defaultTokenFile.extension() != ".json") return 167;
+        const std::string runtimeDir = defaultTokenFile.parent_path().filename().string();
+        if (runtimeDir != "custom-raypx2" && runtimeDir.find("custom-raypx2-") != 0) return 168;
+    }
 #if !defined(_WIN32)
     {
         TqAdminAuth auth;

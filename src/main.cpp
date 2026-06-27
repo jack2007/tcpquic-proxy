@@ -346,6 +346,7 @@ int RunServer(const TqConfig& cfg) {
 } // namespace
 
 int main(int argc, char** argv) {
+    TqAdminAuth::SetRuntimeBinaryName(argc > 0 ? argv[0] : nullptr);
     TqInstallCrashDumpHandler();
 
     TqSocketStartup socketStartup;

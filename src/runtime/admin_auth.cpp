@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <vector>
@@ -24,6 +25,32 @@
 #endif
 
 namespace {
+
+std::mutex& TqRuntimeBinaryNameMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::string& TqRuntimeBinaryNameStorage() {
+    static std::string name;
+    return name;
+}
+
+std::string TqBaseNameFromArgv0(const char* argv0) {
+    if (argv0 == nullptr || argv0[0] == '\0') {
+        return {};
+    }
+    std::string path(argv0);
+    const size_t slash = path.find_last_of("/\\");
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    return name.empty() ? std::string{} : name;
+}
+
+std::string TqRuntimeBinaryName() {
+    std::lock_guard<std::mutex> lock(TqRuntimeBinaryNameMutex());
+    const std::string& name = TqRuntimeBinaryNameStorage();
+    return name.empty() ? "tcpquic-proxy" : name;
+}
 
 std::string TqHexEncode(const unsigned char* data, size_t len) {
     static constexpr char kHex[] = "0123456789abcdef";
@@ -326,21 +353,32 @@ bool TqAdminAuth::CleanupTokenFile(const std::string& path) const {
     return !ec;
 }
 
+void TqAdminAuth::SetRuntimeBinaryName(const char* argv0) {
+    const std::string name = TqBaseNameFromArgv0(argv0);
+    if (name.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(TqRuntimeBinaryNameMutex());
+    TqRuntimeBinaryNameStorage() = name;
+}
+
 std::string TqAdminAuth::DefaultTokenFilePath() {
+    const std::string runtimeName = TqRuntimeBinaryName();
     std::filesystem::path base;
 #if defined(_WIN32)
     char localAppData[MAX_PATH]{};
     const DWORD envLen = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
     base = envLen > 0 && envLen < MAX_PATH
-        ? std::filesystem::path(localAppData) / "tcpquic-proxy"
-        : std::filesystem::temp_directory_path() / "tcpquic-proxy";
+        ? std::filesystem::path(localAppData) / runtimeName
+        : std::filesystem::temp_directory_path() / runtimeName;
 #else
     const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR");
     if (runtimeDir != nullptr && runtimeDir[0] != '\0') {
-        base = std::filesystem::path(runtimeDir) / "tcpquic-proxy";
+        base = std::filesystem::path(runtimeDir) / runtimeName;
     } else {
         base = std::filesystem::temp_directory_path() /
-            ("tcpquic-proxy-" + std::to_string(static_cast<unsigned long>(::getuid())));
+            (runtimeName + "-" + std::to_string(static_cast<unsigned long>(::getuid())));
     }
 #endif
     return (base / ("admin-" + std::to_string(TqCurrentPid()) + ".json")).string();

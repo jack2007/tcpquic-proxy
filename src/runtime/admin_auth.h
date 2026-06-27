@@ -12,6 +12,7 @@ public:
     bool CleanupTokenFile(const std::string& path) const;
     const std::string& Token() const { return TokenValue; }
 
+    static void SetRuntimeBinaryName(const char* argv0);
     static std::string DefaultTokenFilePath();
 
 private:
