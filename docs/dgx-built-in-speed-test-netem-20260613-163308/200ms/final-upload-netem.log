@@ -1,5 +1,0 @@
-=== final applying peer netem delay=200ms loss=0 limit=1000000 ===
-qdisc netem 801e: root refcnt 425 limit 1000000 delay 200ms
---- 169.254.59.196 ping statistics ---
-10 packets transmitted, 10 received, 0% packet loss, time 1817ms
-rtt min/avg/max/mdev = 200.805/201.648/202.061/0.404 ms, pipe 2

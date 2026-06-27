@@ -1,5 +1,0 @@
-[tcpquic-dgx-bench] DURATION_SEC=10: bump payload 512MB -> 1500MB (single-stream sustained)
-[tcpquic-dgx-bench] mode=tunnel_zstd iterations=1 payload_kind=text payload=1500MB duration=10s quic-connections=1
-[tcpquic-dgx-bench]   run 1/1: 48290.32 Mbps
-tunnel_zstd,6036289951,48290.32,0
-[tcpquic-dgx-bench] done

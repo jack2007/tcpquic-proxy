@@ -1,8 +1,0 @@
-tcpquic-proxy QUIC execution profile: max-throughput
-tcpquic-proxy tuning: srw=536870912 fcw=500000000 iw=2000 initrtt=100ms relay_io=1048576 ideal_send=67108864 inflight=64 tcp_buf=4194304 relay_pending=4194304 tick_budget=67108864 read_batch=1048576 read_chunk=131072 worker_slots=128 ingress_slots=128 quic_complete_batch=0
-tcpquic-proxy runtime tuning: enabled (RTT/throughput feed next QUIC connection)
-tcpquic-proxy runtime: rtt=2ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
-tcpquic-proxy: speed client received READY session=3312489697 port=46223
-tcpquic-proxy: speed client sending FINISH session=3312489697 client_bytes=56975003328 elapsed_us=30000000
-tcpquic-proxy: speed client waiting for SPEED_RESULT
-tcpquic-proxy: speed client received RESULT session=3312489697 server_bytes=56962618932 elapsed_us=30002797 accepted=1 closed=1

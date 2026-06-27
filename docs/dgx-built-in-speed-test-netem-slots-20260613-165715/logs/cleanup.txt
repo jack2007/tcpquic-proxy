@@ -1,6 +1,0 @@
-qdisc mq 0: root 
-qdisc fq_codel 0: parent :14 limit 10240p flows 1024 quantum 9014 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
-qdisc fq_codel 0: parent :13 limit 10240p flows 1024 quantum 9014 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
-qdisc fq_codel 0: parent :12 limit 10240p flows 1024 quantum 9014 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
-qdisc fq_codel 0: parent :11 limit 10240p flows 1024 quantum 9014 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
-484385 bash -c tc qdisc show dev enp1s0f0np0 | head -5; pgrep -af tcpquic-proxy || true

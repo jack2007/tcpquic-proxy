@@ -1,4 +1,0 @@
-# dgx-msquic-vs-proxy-bench.sh DURATION_SEC=30 (2026-06-11T23:22:00+08:00)
-# proxy-1x1=5227.06 Mbps (5.227 Gbps), bare_tcp=18517.90 Mbps (18.518 Gbps)
-# proxy-16x16=16189.10 Mbps, proxy-4x16=19607.89 Mbps
-speed_download=994824394
