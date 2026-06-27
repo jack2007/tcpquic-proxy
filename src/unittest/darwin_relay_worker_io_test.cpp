@@ -558,7 +558,7 @@ void TransientSendFailureQueuesWithoutSelfRetry() {
     TqDarwinRelayWorker worker(config);
     worker.SetStreamSendForTest(FakeStreamSend);
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -571,6 +571,7 @@ void TransientSendFailureQueuesWithoutSelfRetry() {
 
     const char payload[] = "transient";
     CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     TqDarwinRelayWorkerSnapshot snapshot{};
@@ -648,6 +649,57 @@ void SendCompleteAfterUnregisterReleasesOperation() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void SendCompleteCallbackQueuesUntilWorkerDrain() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 16;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "queued-send-complete";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+
+    void* callbackContext = worker.StreamCallbackContextForTest(result.RelayId);
+    void* sendContext = g_lastSendContext.load(std::memory_order_acquire);
+    CHECK(callbackContext != nullptr);
+    CHECK(sendContext != nullptr);
+
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    event.SEND_COMPLETE.ClientContext = sendContext;
+    CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -687,8 +739,17 @@ void SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease() {
     } while (std::chrono::steady_clock::now() < deadline);
 
     CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    const auto completeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (worker.InFlightQuicSendCountForTest(result.RelayId) == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < completeDeadline);
+
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
     CHECK(worker.PendingQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -735,8 +796,17 @@ void SynchronousSendCompleteBeforeSuccessDoesNotLeak() {
     } while (std::chrono::steady_clock::now() < deadline);
 
     CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    const auto completeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (worker.InFlightQuicSendCountForTest(result.RelayId) == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < completeDeadline);
+
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
     CHECK(worker.PendingQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -756,7 +826,7 @@ void MagicMismatchKnownOperationCleansAccounting() {
     TqDarwinRelayWorker worker(config);
     worker.SetStreamSendForTest(FakeStreamSend);
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -769,14 +839,7 @@ void MagicMismatchKnownOperationCleansAccounting() {
 
     const char payload[] = "badmagic";
     CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    do {
-        if (worker.InFlightQuicSendCountForTest(result.RelayId) == 1) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    } while (std::chrono::steady_clock::now() < deadline);
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
 
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
     void* callbackContext = worker.StreamCallbackContextForTest(result.RelayId);
@@ -789,6 +852,8 @@ void MagicMismatchKnownOperationCleansAccounting() {
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     event.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+    CHECK(worker.DrainOneEventForTest());
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
     CHECK(worker.Snapshot().Errors == 1);
 
@@ -845,6 +910,13 @@ void StopThenLateCompletionDoesNotUseDanglingWorker() {
     event.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
+    const auto completionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (worker.KnownSendOperationCountForTest() == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < completionDeadline);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.Stop();
@@ -1240,6 +1312,13 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     event.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackOwner.get(), &event) == QUIC_STATUS_SUCCESS);
+    const auto completionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    do {
+        if (worker.KnownSendOperationCountForTest() == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    } while (std::chrono::steady_clock::now() < completionDeadline);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.Stop();
@@ -1263,7 +1342,7 @@ void StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends() {
     stream->Callback = MsQuicStream::NoOpCallback;
     stream->Context = nullptr;
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -1277,14 +1356,7 @@ void StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends() {
     const char firstPayload[] = "before-shutdown";
     CHECK(write(fds[0], firstPayload, sizeof(firstPayload) - 1) ==
         static_cast<ssize_t>(sizeof(firstPayload) - 1));
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    do {
-        if (g_sendCalls.load(std::memory_order_acquire) == 1) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    } while (std::chrono::steady_clock::now() < deadline);
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
 
     CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
     CHECK(worker.Snapshot().ActiveRelays == 1);
@@ -1295,18 +1367,114 @@ void StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends() {
     sendComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     sendComplete.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(stream->Callback(stream, stream->Context, &sendComplete) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+    CHECK(worker.DrainOneEventForTest());
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
 
     QUIC_STREAM_EVENT shutdown{};
     shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     CHECK(stream->Callback(stream, stream->Context, &shutdown) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.Snapshot().ActiveRelays == 0);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
 
     const char secondPayload[] = "after-shutdown";
     (void)send(fds[0], secondPayload, sizeof(secondPayload) - 1, MSG_NOSIGNAL);
     CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
     CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
     CHECK(worker.Snapshot().Errors == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void ShutdownCallbackQueuesCloseUntilWorkerDrain() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 16;
+    TqDarwinRelayWorker worker(config);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+    CHECK(handle.Backend == TqRelayBackendType::DarwinWorker);
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(stream->Callback(stream, stream->Context, &shutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+    CHECK(handle.Backend == TqRelayBackendType::DarwinWorker);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 16;
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    QUIC_STREAM_EVENT aborted{};
+    aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+    CHECK(stream->Callback(stream, stream->Context, &aborted) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    const char payload[] = "after-abort";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
 
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
@@ -2316,12 +2484,15 @@ int main() {
     CompressedTcpReadFlushesWhenCompressorBuffersInput();
     TransientSendFailureQueuesWithoutSelfRetry();
     SendCompleteAfterUnregisterReleasesOperation();
+    SendCompleteCallbackQueuesUntilWorkerDrain();
     SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease();
     SynchronousSendCompleteBeforeSuccessDoesNotLeak();
     MagicMismatchKnownOperationCleansAccounting();
     StopThenLateCompletionDoesNotUseDanglingWorker();
     StopThenLateTcpEventIgnoresRetiredRelay();
     StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends();
+    ShutdownCallbackQueuesCloseUntilWorkerDrain();
+    PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain();
     TcpErrorEventClosesAndRetiresRelay();
     StopAfterCompletionLeavesNoKnownOperations();
     UnknownSendCompleteContextIsIgnoredWithoutFreeing();

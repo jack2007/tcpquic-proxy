@@ -434,6 +434,13 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
         case TqDarwinRelayEventType::QuicSendComplete:
             CompleteQuicSend(reinterpret_cast<TqDarwinRelaySendOperation*>(static_cast<uintptr_t>(event.Value)));
             break;
+        case TqDarwinRelayEventType::QuicPeerSendAborted:
+        case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+        case TqDarwinRelayEventType::QuicShutdownComplete:
+            if (auto relay = FindRelay(event.RelayId)) {
+                CloseRelay(relay);
+            }
+            break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
             if (auto relay = FindRelay(event.RelayId)) {
                 RetryPendingQuicSends(relay);
@@ -462,6 +469,13 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             break;
         case TqDarwinRelayEventType::QuicSendComplete:
             CompleteQuicSend(reinterpret_cast<TqDarwinRelaySendOperation*>(static_cast<uintptr_t>(event.Value)));
+            break;
+        case TqDarwinRelayEventType::QuicPeerSendAborted:
+        case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+        case TqDarwinRelayEventType::QuicShutdownComplete:
+            if (auto relay = FindRelay(event.RelayId)) {
+                CloseRelay(relay);
+            }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
             if (auto relay = FindRelay(event.RelayId)) {
@@ -814,7 +828,9 @@ void TqDarwinRelayWorker::RegisterKnownSendOperation(
     }
 }
 
-bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(TqDarwinRelaySendOperation* operation) {
+bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(
+    TqDarwinRelaySendOperation* operation,
+    KnownSendOperationInfo* info) {
     std::shared_ptr<CompletionState> completions;
     {
         std::lock_guard<std::mutex> lock(RelayMutex);
@@ -823,6 +839,9 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(TqDarwinRelaySendOpera
             return false;
         }
         it->second.Submitting = false;
+        if (info != nullptr) {
+            *info = it->second;
+        }
         if (auto binding = std::static_pointer_cast<StreamBinding>(it->second.BindingOwner)) {
             completions = binding->Completions;
         }
@@ -832,6 +851,37 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(TqDarwinRelaySendOpera
         const auto it = completions->KnownSendOperations.find(operation);
         if (it != completions->KnownSendOperations.end()) {
             it->second.Submitting = false;
+            if (info != nullptr) {
+                *info = it->second;
+            }
+        }
+    }
+    return true;
+}
+
+bool TqDarwinRelayWorker::TryClaimKnownSendCompletionEvent(
+    TqDarwinRelaySendOperation* operation,
+    KnownSendOperationInfo* info) {
+    std::shared_ptr<CompletionState> completions;
+    {
+        std::lock_guard<std::mutex> lock(RelayMutex);
+        const auto it = KnownSendOperations.find(operation);
+        if (it == KnownSendOperations.end()) {
+            return false;
+        }
+        if (info != nullptr) {
+            *info = it->second;
+        }
+        it->second.CompletionEventClaimed = true;
+        if (auto binding = std::static_pointer_cast<StreamBinding>(it->second.BindingOwner)) {
+            completions = binding->Completions;
+        }
+    }
+    if (completions != nullptr) {
+        std::lock_guard<std::mutex> completionLock(completions->Mutex);
+        const auto it = completions->KnownSendOperations.find(operation);
+        if (it != completions->KnownSendOperations.end()) {
+            it->second.CompletionEventClaimed = true;
         }
     }
     return true;
@@ -917,6 +967,10 @@ bool TqDarwinRelayWorker::IsKnownSendOperation(TqDarwinRelaySendOperation* opera
 
 bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation) {
     if (binding == nullptr || operation == nullptr) {
+        return false;
+    }
+    TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
+    if (worker != nullptr && worker->IsKnownSendOperation(operation)) {
         return false;
     }
     KnownSendOperationInfo info{};
@@ -1278,7 +1332,8 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         raw->Fin ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE,
         raw);
 
-    const bool completionAlreadyRan = !MarkKnownSendOperationSubmitted(raw);
+    KnownSendOperationInfo submittedInfo{};
+    const bool completionAlreadyRan = !MarkKnownSendOperationSubmitted(raw, &submittedInfo);
     {
         std::lock_guard<std::mutex> relayLock(relay->Mutex);
         if (relay->SubmittingQuicSends > 0) {
@@ -1291,6 +1346,10 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     }
 
     if (QUIC_FAILED(status)) {
+        if (submittedInfo.CompletionEventClaimed) {
+            (void)operation.release();
+            return true;
+        }
         KnownSendOperationInfo removedInfo{};
         (void)UnregisterKnownSendOperation(raw, &removedInfo);
         {
@@ -1322,6 +1381,19 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
 
     (void)operation.release();
     return true;
+}
+
+bool TqDarwinRelayWorker::EnqueueQuicSendCompleteFromCallback(
+    uint64_t relayId,
+    TqDarwinRelaySendOperation* operation) {
+    if (!Running.load(std::memory_order_acquire)) {
+        return false;
+    }
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicSendComplete;
+    event.RelayId = relayId;
+    event.Value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(operation));
+    return EnqueueEvent(std::move(event));
 }
 
 void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay) {
@@ -2257,7 +2329,17 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         TqDarwinRelaySendOperation* operation =
             reinterpret_cast<TqDarwinRelaySendOperation*>(event->SEND_COMPLETE.ClientContext);
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
-        if (worker != nullptr && worker->IsKnownSendOperation(operation)) {
+        KnownSendOperationInfo info{};
+        if (worker != nullptr && worker->TryClaimKnownSendCompletionEvent(operation, &info)) {
+            if (info.CompletionEventClaimed) {
+                return QUIC_STATUS_SUCCESS;
+            }
+            if (worker->EnqueueQuicSendCompleteFromCallback(info.RelayId, operation)) {
+                return QUIC_STATUS_SUCCESS;
+            }
+            if (CompleteDetachedQuicSend(binding, operation)) {
+                return QUIC_STATUS_SUCCESS;
+            }
             worker->CompleteQuicSend(operation);
             return QUIC_STATUS_SUCCESS;
         }
@@ -2273,8 +2355,27 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
         if (worker != nullptr) {
-            if (auto relay = worker->FindRelay(binding->RelayId)) {
-                worker->CloseRelay(relay, 1);
+            auto relay = worker->FindRelay(binding->RelayId);
+            if (relay != nullptr) {
+                std::lock_guard<std::mutex> relayLock(relay->Mutex);
+                relay->Closing = true;
+                relay->TcpReadArmed = false;
+                relay->TcpWriteArmed = false;
+            }
+            TqDarwinRelayEvent queuedEvent{};
+            queuedEvent.RelayId = binding->RelayId;
+            if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
+                queuedEvent.Type = TqDarwinRelayEventType::QuicPeerSendAborted;
+            } else if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
+                queuedEvent.Type = TqDarwinRelayEventType::QuicPeerReceiveAborted;
+            } else {
+                queuedEvent.Type = TqDarwinRelayEventType::QuicShutdownComplete;
+            }
+            if (!worker->Running.load(std::memory_order_acquire) ||
+                !worker->EnqueueEvent(std::move(queuedEvent))) {
+                if (relay != nullptr) {
+                    worker->CloseRelay(relay, 1);
+                }
             }
         }
         return QUIC_STATUS_SUCCESS;

@@ -156,6 +156,7 @@ private:
         uint64_t TotalBytes{0};
         bool Fin{false};
         bool Submitting{false};
+        bool CompletionEventClaimed{false};
         std::shared_ptr<void> BindingOwner;
     };
 
@@ -182,6 +183,7 @@ private:
         const std::shared_ptr<RelayState>& relay,
         std::unique_ptr<TqDarwinRelaySendOperation> operation);
     void RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay);
+    bool EnqueueQuicSendCompleteFromCallback(uint64_t relayId, TqDarwinRelaySendOperation* operation);
     void CompleteQuicSend(TqDarwinRelaySendOperation* operation);
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
@@ -219,7 +221,13 @@ private:
     void RegisterKnownSendOperation(
         TqDarwinRelaySendOperation* operation,
         const KnownSendOperationInfo& info);
-    bool MarkKnownSendOperationSubmitted(TqDarwinRelaySendOperation* operation);
+    bool MarkKnownSendOperationSubmitted(
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info = nullptr);
+    // Claims a SEND_COMPLETE callback before enqueue; info reports the prior claim state.
+    bool TryClaimKnownSendCompletionEvent(
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info);
     bool UnregisterKnownSendOperation(
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info);
