@@ -1553,6 +1553,9 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
             --relay->SubmittingQuicSends;
         }
     }
+    if (workerThread && submittedInfo.CompletionEventClaimed) {
+        (void)DrainEvents(1);
+    }
     if (completionAlreadyRan) {
         (void)operation.release();
         return true;
@@ -2512,46 +2515,11 @@ void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
         return;
     }
 
-    UnregisterRelayCommand command{};
-    command.RelayId = relayId;
-    uint32_t enqueueAttempts = 0;
-    for (;;) {
-        {
-            std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
-            if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
-                UnregisterRelayLocal(relayId);
-                return;
-            }
-
-            TqDarwinRelayEvent event{};
-            event.Type = TqDarwinRelayEventType::UnregisterRelay;
-            event.Control = &command;
-            if (EnqueueControlEvent(std::move(event)) != ControlEnqueueResult::Failed) {
-                break;
-            }
-            (void)Wake();
-        }
-        ++enqueueAttempts;
-        if (enqueueAttempts < 1024) {
-            std::this_thread::yield();
-        } else {
-            enqueueAttempts = 0;
-            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
-        }
-    }
-
-    std::unique_lock<std::mutex> lock(command.Mutex);
-    while (!command.Done) {
-        if (command.Cv.wait_for(
-                lock,
-                kControlCommandWakeRetryInterval,
-                [&command] { return command.Done; })) {
-            break;
-        }
-        lock.unlock();
-        (void)Wake();
-        lock.lock();
-    }
+    // Unregister must complete even when the worker thread is blocked mid-flush
+    // (for example during a partial TCP write). Eventizing this path would
+    // deadlock because the worker cannot drain control events until the flush
+    // returns.
+    UnregisterRelayLocal(relayId);
 }
 
 TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
