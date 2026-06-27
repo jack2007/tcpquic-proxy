@@ -211,6 +211,9 @@ private:
     void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
+    // Raw lookup: caller must either be the sole worker-map owner or already hold RelayMutex.
+    std::shared_ptr<RelayState> FindRelayLocal(uint64_t relayId) const;
+    std::shared_ptr<RelayState> FindRetiredRelayLocal(uint64_t relayId) const;
     void ProcessKqueueEvent(const struct kevent& event);
     void ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool DrainTcpReadable(const std::shared_ptr<RelayState>& relay);
@@ -260,14 +263,25 @@ private:
     void RegisterKnownSendOperation(
         TqDarwinRelaySendOperation* operation,
         const KnownSendOperationInfo& info);
+    // Worker-thread normal path entry point; conservatively shares KnownSendMutex with fallback paths.
+    void RegisterKnownSendOperationLocal(
+        TqDarwinRelaySendOperation* operation,
+        const KnownSendOperationInfo& info);
     bool MarkKnownSendOperationSubmitted(
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info = nullptr);
+    bool MarkKnownSendOperationSubmittedLocal(
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info = nullptr);
     // Claims a SEND_COMPLETE callback before enqueue; info reports the prior claim state.
     bool TryClaimKnownSendCompletionEvent(
+        StreamBinding* binding,
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info);
     bool UnregisterKnownSendOperation(
+        TqDarwinRelaySendOperation* operation,
+        KnownSendOperationInfo* info);
+    bool UnregisterKnownSendOperationLocal(
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info);
     static bool UnregisterCompletionStateOperation(
@@ -276,7 +290,6 @@ private:
         KnownSendOperationInfo* info);
     static void ClearRetiredStreamCallbackIfSafe(StreamBinding* binding);
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
-    bool IsKnownSendOperation(TqDarwinRelaySendOperation* operation) const;
 
     TqDarwinRelayWorkerConfig Config;
     int KqueueFd{-1};
@@ -287,6 +300,7 @@ private:
     mutable std::mutex WorkerThreadIdMutex;
     mutable std::mutex LifecycleMutex;
     mutable std::mutex RelayMutex;
+    mutable std::mutex KnownSendMutex;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;
     std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> KnownSendOperations;
