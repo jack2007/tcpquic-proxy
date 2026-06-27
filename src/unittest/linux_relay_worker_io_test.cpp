@@ -3240,16 +3240,15 @@ int main() {
         TqLinuxRelayWorker worker(config);
         assert(worker.Start());
 
-        constexpr int kRelayCount = 8;
+        constexpr int kThreadCount = 8;
+        constexpr int kIterationsPerThread = 8;
         std::vector<std::thread> threads;
-        threads.reserve(kRelayCount);
-        for (int t = 0; t < kRelayCount; ++t) {
+        threads.reserve(kThreadCount);
+        for (int t = 0; t < kThreadCount; ++t) {
             threads.emplace_back([&worker]() {
-                for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < kIterationsPerThread; ++i) {
                     int fds[2]{-1, -1};
-                    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
-                        continue;
-                    }
+                    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
                     TqLinuxRelayRegistration registration{};
                     registration.TcpFd = fds[0];
@@ -3260,11 +3259,18 @@ int main() {
                     if (!result.Ok) {
                         ::close(fds[0]);
                         ::close(fds[1]);
+                        assert(result.Ok);
                         continue;
                     }
 
-                    const char payload[] = "stress";
-                    ::write(fds[1], payload, sizeof(payload));
+                    const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+                    if (snapshot.ActiveRelays == 0) {
+                        worker.UnregisterRelay(result.RelayId);
+                        ::close(fds[1]);
+                        assert(snapshot.ActiveRelays > 0);
+                        continue;
+                    }
+                    assert(snapshot.ActiveRelays > 0);
                     worker.UnregisterRelay(result.RelayId);
                     ::close(fds[1]);
                 }
@@ -3274,6 +3280,9 @@ int main() {
             thread.join();
         }
 
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        assert(snapshot.ActiveRelays == 0);
+        assert(worker.RelayIndexesConsistentForTest());
         worker.Stop();
     }
 
