@@ -3208,6 +3208,7 @@ int main() {
             assert(result.Ok);
             registrations.push_back(result);
         }
+        assert(worker.RelayIndexesConsistentForTest());
 
         const char payload[] = "relay-index-hit";
         assert(::write(fds[kRelayCount - 1][1], payload, sizeof(payload)) ==
@@ -3224,6 +3225,7 @@ int main() {
             worker.UnregisterRelay(registrations[i].RelayId);
             ::close(fds[i][1]);
         }
+        assert(worker.RelayIndexesConsistentForTest());
         worker.Stop();
     }
 

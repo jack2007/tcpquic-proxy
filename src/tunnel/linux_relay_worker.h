@@ -247,6 +247,9 @@ public:
     bool FlushTcpWritableForTest(int tcpFd);
     bool DispatchTcpEventsForTest(uint64_t relayId, uint32_t events);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
+#if defined(TQ_UNIT_TESTING)
+    bool RelayIndexesConsistentForTest() const;
+#endif
 
     static QUIC_STATUS QUIC_API StreamCallback(
         _In_ MsQuicStream* stream,

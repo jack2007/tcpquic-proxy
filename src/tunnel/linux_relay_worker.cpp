@@ -1122,6 +1122,35 @@ bool TqLinuxRelayWorker::RegisterRelayForTest(const TqLinuxRelayRegistration& re
     return RegisterRelay(registration);
 }
 
+#if defined(TQ_UNIT_TESTING)
+bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
+    std::lock_guard<std::mutex> guard(RelayLock);
+    if (Relays.size() != RelaysById.size() ||
+        RetiredRelays.size() != RetiredRelaysById.size()) {
+        return false;
+    }
+    for (const auto& relay : Relays) {
+        if (relay == nullptr) {
+            return false;
+        }
+        auto found = RelaysById.find(relay->Id);
+        if (found == RelaysById.end() || found->second.get() != relay.get()) {
+            return false;
+        }
+    }
+    for (const auto& relay : RetiredRelays) {
+        if (relay == nullptr) {
+            return false;
+        }
+        auto found = RetiredRelaysById.find(relay->Id);
+        if (found == RetiredRelaysById.end() || found->second.get() != relay.get()) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif
+
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
     std::shared_ptr<RelayState> removed;
     {
