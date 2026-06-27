@@ -78,6 +78,8 @@ struct TqDarwinRelayWorker::StreamBinding : public std::enable_shared_from_this<
     std::atomic<MsQuicStream*> RetiredStream{nullptr};
     std::atomic<bool> Active{true};
     std::atomic<uint32_t> CallbackRefs{0};
+    std::atomic<uint64_t> CallbackPendingReceiveBytes{0};
+    std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
 };
@@ -179,6 +181,7 @@ void TqDarwinRelayWorker::Stop() {
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
         if (!Running.exchange(false, std::memory_order_acq_rel) && KqueueFd < 0) {
+            PurgeQueuedEventsForStop();
             if (!WaitForKnownOperationsToDrain()) {
                 Errors.fetch_add(1, std::memory_order_relaxed);
             }
@@ -203,6 +206,7 @@ void TqDarwinRelayWorker::Stop() {
             close(KqueueFd);
             KqueueFd = -1;
         }
+        PurgeQueuedEventsForStop();
     }
 
     if (!WaitForKnownOperationsToDrain()) {
@@ -238,12 +242,31 @@ bool TqDarwinRelayWorker::EnqueueEvent(TqDarwinRelayEvent&& event) {
 
 #if defined(TCPQUIC_TESTING)
 bool TqDarwinRelayWorker::StartForTest() {
+    if (KqueueFd < 0) {
+        KqueueFd = kqueue();
+        if (KqueueFd < 0) {
+            Errors.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        struct kevent change;
+        EV_SET(&change, kWakeIdent, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, nullptr);
+        if (kevent(KqueueFd, &change, 1, nullptr, 0, nullptr) != 0) {
+            Errors.fetch_add(1, std::memory_order_relaxed);
+            close(KqueueFd);
+            KqueueFd = -1;
+            return false;
+        }
+    }
     Running.store(true, std::memory_order_release);
     return true;
 }
 
 bool TqDarwinRelayWorker::EnqueueForTest(TqDarwinRelayEvent event) {
     return EnqueueEvent(std::move(event));
+}
+
+bool TqDarwinRelayWorker::DrainOneEventForTest() {
+    return DrainEvents(1) == 1;
 }
 
 uint32_t TqDarwinRelayWorker::DrainWakeForTest() {
@@ -425,6 +448,34 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
         EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
     }
     return processed;
+}
+
+void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
+    uint32_t processed = 0;
+    TqDarwinRelayEvent event{};
+    while (EventQueue.TryPop(event)) {
+        ++processed;
+        switch (event.Type) {
+        case TqDarwinRelayEventType::QuicReceiveView:
+            ReleaseCallbackReceiveBudget(event.ReceiveView);
+            (void)DiscardDeferredQuicReceive(nullptr, event.ReceiveView);
+            break;
+        case TqDarwinRelayEventType::QuicSendComplete:
+            CompleteQuicSend(reinterpret_cast<TqDarwinRelaySendOperation*>(static_cast<uintptr_t>(event.Value)));
+            break;
+        case TqDarwinRelayEventType::QuicIdealSendBuffer:
+            if (auto relay = FindRelay(event.RelayId)) {
+                RetryPendingQuicSends(relay);
+            }
+            break;
+        default:
+            break;
+        }
+        event = TqDarwinRelayEvent{};
+    }
+    if (processed > 0) {
+        EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
+    }
 }
 
 uint32_t TqDarwinRelayWorker::DrainWakeEvents() {
@@ -676,7 +727,10 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
         const auto completions = (*it)->Completions;
         const bool hasKnownOperations = completions != nullptr &&
             completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0;
-        if ((*it)->CallbackRefs.load(std::memory_order_acquire) == 0 && !hasKnownOperations) {
+        const bool hasCallbackReceives =
+            (*it)->CallbackPendingReceiveEvents.load(std::memory_order_acquire) != 0;
+        if ((*it)->CallbackRefs.load(std::memory_order_acquire) == 0 && !hasKnownOperations &&
+            !hasCallbackReceives) {
             ClearRetiredStreamCallbackIfSafe(it->get());
             (*it)->Worker.store(nullptr, std::memory_order_release);
             it = RetiredStreamBindings.erase(it);
@@ -701,6 +755,10 @@ bool TqDarwinRelayWorker::WaitForKnownOperationsToDrain() {
                         drained = false;
                         break;
                     }
+                    if (binding->CallbackPendingReceiveEvents.load(std::memory_order_acquire) != 0) {
+                        drained = false;
+                        break;
+                    }
                 }
             }
         }
@@ -717,6 +775,9 @@ bool TqDarwinRelayWorker::WaitForKnownOperationsToDrain() {
         const auto completions = binding->Completions;
         if (completions != nullptr &&
             completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0) {
+            return false;
+        }
+        if (binding->CallbackPendingReceiveEvents.load(std::memory_order_acquire) != 0) {
             return false;
         }
     }
@@ -1409,6 +1470,87 @@ uint64_t TqDarwinRelayWorker::LowPendingQuicReceiveBytesPerRelay() const {
     return MaxPendingQuicReceiveBytesPerRelay() / 2;
 }
 
+bool TqDarwinRelayWorker::ReserveCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes) {
+    if (binding == nullptr) {
+        return false;
+    }
+    const uint64_t limit = MaxPendingQuicReceiveBytesPerRelay();
+    if (bytes > limit) {
+        uint64_t expectedEvents = 0;
+        if (!binding->CallbackPendingReceiveEvents.compare_exchange_strong(
+                expectedEvents,
+                1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return false;
+        }
+        uint64_t current = binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
+        for (;;) {
+            if (binding->CallbackPendingReceiveBytes.compare_exchange_weak(
+                    current,
+                    current + bytes,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    binding->CallbackPendingReceiveEvents.fetch_add(1, std::memory_order_acq_rel);
+    uint64_t current = binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
+    for (;;) {
+        if (current > limit - bytes) {
+            ReleaseCallbackReceiveBudget(binding, 0);
+            return false;
+        }
+        if (binding->CallbackPendingReceiveBytes.compare_exchange_weak(
+                current,
+                current + bytes,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return true;
+        }
+    }
+}
+
+void TqDarwinRelayWorker::ReleaseCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes) {
+    if (binding == nullptr) {
+        return;
+    }
+    uint64_t currentBytes = binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
+    for (;;) {
+        const uint64_t nextBytes = currentBytes >= bytes ? currentBytes - bytes : 0;
+        if (binding->CallbackPendingReceiveBytes.compare_exchange_weak(
+                currentBytes,
+                nextBytes,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            break;
+        }
+    }
+
+    uint64_t currentEvents = binding->CallbackPendingReceiveEvents.load(std::memory_order_acquire);
+    while (currentEvents != 0) {
+        if (binding->CallbackPendingReceiveEvents.compare_exchange_weak(
+                currentEvents,
+                currentEvents - 1,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            break;
+        }
+    }
+}
+
+void TqDarwinRelayWorker::ReleaseCallbackReceiveBudget(
+    const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
+    if (receive == nullptr) {
+        return;
+    }
+    auto binding = std::static_pointer_cast<StreamBinding>(receive->BindingOwner);
+    ReleaseCallbackReceiveBudget(binding.get(), receive->TotalLength);
+    receive->BindingOwner.reset();
+}
+
 bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
     const std::shared_ptr<RelayState>& relay,
     MsQuicStream* stream,
@@ -1452,13 +1594,19 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         return false;
     }
 
+    std::shared_ptr<StreamBinding> binding;
     {
         std::lock_guard<std::mutex> relayLock(relay->Mutex);
         if (relay->Closing) {
             return false;
         }
-        relay->PendingQuicReceiveBytes += receive->TotalLength;
+        binding = relay->Binding;
     }
+    if (!ReserveCallbackReceiveBudget(binding.get(), receive->TotalLength)) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    receive->BindingOwner = binding;
     QuicReceiveViewCount.fetch_add(1, std::memory_order_relaxed);
     QuicReceiveViewBytes.fetch_add(receive->TotalLength, std::memory_order_relaxed);
 
@@ -1469,10 +1617,7 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
     event.Fin = fin;
     event.ReceiveView = receive;
     if (!EnqueueEvent(std::move(event))) {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
-            ? relay->PendingQuicReceiveBytes - receive->TotalLength
-            : 0;
+        ReleaseCallbackReceiveBudget(receive);
         QuicReceiveViewCount.fetch_sub(1, std::memory_order_relaxed);
         QuicReceiveViewBytes.fetch_sub(receive->TotalLength, std::memory_order_relaxed);
         return false;
@@ -1487,6 +1632,7 @@ void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
     }
     auto relay = FindRelay(receive->RelayId);
     if (relay == nullptr) {
+        ReleaseCallbackReceiveBudget(receive);
         (void)DiscardDeferredQuicReceive(nullptr, receive);
         return;
     }
@@ -1496,9 +1642,11 @@ void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
         if (relay->Closing) {
             shouldDiscard = true;
         } else {
+            relay->PendingQuicReceiveBytes += receive->TotalLength;
             relay->PendingQuicReceives.push_back(receive);
         }
     }
+    ReleaseCallbackReceiveBudget(receive);
     if (shouldDiscard) {
         (void)DiscardDeferredQuicReceive(relay, receive);
         return;
@@ -1658,6 +1806,7 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     if (receive == nullptr) {
         return false;
     }
+    ReleaseCallbackReceiveBudget(receive);
     uint64_t bytesToComplete = 0;
     {
         if (relay != nullptr) {

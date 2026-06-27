@@ -19,6 +19,7 @@ struct TqDarwinQuicReceiveSlice {
 struct TqDarwinPendingQuicReceive {
     MsQuicStream* Stream{nullptr};
     uint64_t RelayId{0};
+    std::shared_ptr<void> BindingOwner;
     std::vector<TqDarwinQuicReceiveSlice> Slices;
     size_t SliceIndex{0};
     size_t SliceOffset{0};

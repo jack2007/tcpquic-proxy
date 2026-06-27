@@ -117,6 +117,7 @@ public:
 #if defined(TCPQUIC_TESTING)
     bool StartForTest();
     bool EnqueueForTest(TqDarwinRelayEvent event);
+    bool DrainOneEventForTest();
     uint32_t DrainWakeForTest();
     bool RunningForTest() const;
     void SetRegisterTcpFiltersFailureForTest(bool fail);
@@ -162,6 +163,7 @@ private:
     bool Wake();
     bool EnqueueEvent(TqDarwinRelayEvent&& event);
     uint32_t DrainEvents(uint32_t budget);
+    void PurgeQueuedEventsForStop();
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
@@ -192,6 +194,9 @@ private:
         bool fin);
     uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
     uint64_t LowPendingQuicReceiveBytesPerRelay() const;
+    bool ReserveCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes);
+    void ReleaseCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes);
+    void ReleaseCallbackReceiveBudget(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     void ProcessQuicReceiveViewEvent(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     bool EnqueueQuicReceiveForTcp(
         const std::shared_ptr<RelayState>& relay,
