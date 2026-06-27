@@ -19,6 +19,7 @@ struct TqDarwinQuicReceiveSlice {
 struct TqDarwinPendingQuicReceive {
     MsQuicStream* Stream{nullptr};
     uint64_t RelayId{0};
+    std::shared_ptr<void> BindingOwner;
     std::vector<TqDarwinQuicReceiveSlice> Slices;
     size_t SliceIndex{0};
     size_t SliceOffset{0};
@@ -34,7 +35,13 @@ enum class TqDarwinRelayEventType {
     QuicReceive,
     QuicReceiveView,
     QuicSendComplete,
+    QuicPeerSendAborted,
+    QuicPeerReceiveAborted,
+    QuicShutdownComplete,
     QuicIdealSendBuffer,
+    RegisterRelay,
+    UnregisterRelay,
+    Snapshot,
     Shutdown,
     StopRelay,
 };
@@ -44,6 +51,7 @@ struct TqDarwinRelayEvent {
     uint64_t Value{0};
     uint64_t RelayId{0};
     void* Relay{nullptr};
+    void* Control{nullptr};
     TqBufferRef Buffer;
     std::vector<TqBufferRef> Buffers;
     size_t Length{0};

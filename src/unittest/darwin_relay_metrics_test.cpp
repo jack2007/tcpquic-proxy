@@ -1,6 +1,10 @@
 #if defined(__APPLE__)
 
+#include "darwin_relay_worker.h"
 #include "relay_metrics.h"
+
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +29,36 @@ void Check(bool condition, const char* expression) {
         std::fprintf(stderr, "check failed: %s\n", expression);
         std::abort();
     }
+}
+
+void CloseSocketPairAfterRelayOwned(int relayTcpFd, int fds[2]) {
+    const int peerFd = relayTcpFd == fds[0] ? fds[1] : fds[0];
+    Check(close(peerFd) == 0, "close peer fd");
+}
+
+void EventizedSnapshotCountsActiveRelay() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    Check(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair succeeds");
+
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    TqRelayHandle handle{};
+    Check(worker.Start(), "worker.Start()");
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+
+    const TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    Check(result.Ok, "RegisterRelayWithId ok");
+
+    const TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
+    Check(snapshot.Errors == 0, "snapshot.Errors == 0");
+    Check(snapshot.ActiveRelays == 1, "snapshot.ActiveRelays == 1");
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
 } // namespace
@@ -62,6 +96,7 @@ int main() {
     CheckContains(json, "\"linux_relay_quic_receive_view_bytes\":99");
     CheckContains(json, "\"linux_relay_deferred_receive_completes\":111");
     CheckContains(json, "\"linux_relay_quic_send_backpressure_events\":222");
+    EventizedSnapshotCountsActiveRelay();
     return 0;
 }
 
