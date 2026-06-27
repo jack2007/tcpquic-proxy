@@ -11,6 +11,7 @@
 #include <msquic.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -272,6 +273,38 @@ private:
 
     struct RelayState;
     struct StreamRelayBinding;
+    struct RegisterRelayCommand {
+        TqLinuxRelayRegistration Registration;
+        TqLinuxRelayRegistrationResult Result;
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct UnregisterRelayCommand {
+        uint64_t RelayId{0};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    struct SnapshotCommand {
+        TqLinuxRelayWorkerSnapshot Result;
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
+    bool IsWorkerThread() const;
+    TqLinuxRelayRegistrationResult RegisterRelayWithIdLocal(
+        const TqLinuxRelayRegistration& registration);
+    void UnregisterRelayLocal(uint64_t relayId);
+    TqLinuxRelayWorkerSnapshot SnapshotLocal() const;
+    void CompleteRegisterCommand(
+        RegisterRelayCommand* command,
+        TqLinuxRelayRegistrationResult result);
+    void CompleteUnregisterCommand(UnregisterRelayCommand* command);
+    void CompleteSnapshotCommand(SnapshotCommand* command, TqLinuxRelayWorkerSnapshot snapshot);
     void RecordError(RelayErrorKind kind);
     void RecordBufferAcquireFailure(RelayErrorKind kind, TqBufferAcquireFailure failure);
     void RecordTcpWriteAttempt(uint64_t bytes);
@@ -377,6 +410,7 @@ private:
     std::atomic<uint64_t> EventProducerThreadCount{0};
     std::atomic<bool> MultipleEventProducerThreadsObserved{false};
     std::thread Thread;
+    std::thread::id WorkerThreadId;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
     mutable std::mutex RelayLock;

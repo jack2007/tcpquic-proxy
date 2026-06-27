@@ -37,6 +37,9 @@ enum class TqLinuxRelayEventType {
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
     QuicShutdownComplete,
+    RegisterRelay,
+    UnregisterRelay,
+    Snapshot,
     Shutdown,
 };
 
@@ -45,6 +48,7 @@ struct TqLinuxRelayEvent {
     uint64_t Value{0};
     uint64_t RelayId{0};
     void* Relay{nullptr};
+    void* Control{nullptr};
     TqBufferRef Buffer;
     std::vector<TqBufferRef> Buffers;
     size_t Length{0};
