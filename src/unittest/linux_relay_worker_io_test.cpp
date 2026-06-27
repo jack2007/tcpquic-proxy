@@ -3,6 +3,7 @@
 #include "relay.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
@@ -3175,6 +3176,55 @@ int main() {
         }
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 256;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        assert(worker.StartForTest());
+
+        constexpr int kRelayCount = 64;
+        std::vector<std::array<int, 2>> fds(kRelayCount);
+        std::vector<TqLinuxRelayRegistrationResult> registrations;
+        registrations.reserve(kRelayCount);
+
+        for (int i = 0; i < kRelayCount; ++i) {
+            fds[i] = std::array<int, 2>{-1, -1};
+            assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i].data()) == 0);
+
+            TqLinuxRelayRegistration registration{};
+            registration.TcpFd = fds[i][0];
+            registration.Stream = nullptr;
+            registration.Handle = nullptr;
+            registration.EnableQuicSends = false;
+
+            const auto result = worker.RegisterRelayWithId(registration);
+            assert(result.Ok);
+            registrations.push_back(result);
+        }
+
+        const char payload[] = "relay-index-hit";
+        assert(::write(fds[kRelayCount - 1][1], payload, sizeof(payload)) ==
+               static_cast<ssize_t>(sizeof(payload)));
+        assert(worker.DispatchTcpEventsForTest(
+            registrations[kRelayCount - 1].RelayId,
+            EPOLLIN));
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        assert(snapshot.ActiveRelays == kRelayCount);
+        assert(snapshot.TcpReadBytes >= sizeof(payload));
+
+        for (int i = 0; i < kRelayCount; ++i) {
+            worker.UnregisterRelay(registrations[i].RelayId);
+            ::close(fds[i][1]);
+        }
+        worker.Stop();
     }
 
     {
