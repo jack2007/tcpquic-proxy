@@ -104,6 +104,12 @@ uint64_t TqCurrentPid() {
 #endif
 }
 
+std::string TqDefaultTokenFileName(const std::string& role) {
+    const bool validRole = role == "client" || role == "server";
+    return (validRole ? role + "-" : std::string{}) +
+        "admin-" + std::to_string(TqCurrentPid()) + ".json";
+}
+
 uint64_t TqUnixNow() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
@@ -364,6 +370,10 @@ void TqAdminAuth::SetRuntimeBinaryName(const char* argv0) {
 }
 
 std::string TqAdminAuth::DefaultTokenFilePath() {
+    return DefaultTokenFilePath(std::string{});
+}
+
+std::string TqAdminAuth::DefaultTokenFilePath(const std::string& role) {
     const std::string runtimeName = TqRuntimeBinaryName();
     std::filesystem::path base;
 #if defined(_WIN32)
@@ -381,5 +391,5 @@ std::string TqAdminAuth::DefaultTokenFilePath() {
             (runtimeName + "-" + std::to_string(static_cast<unsigned long>(::getuid())));
     }
 #endif
-    return (base / ("admin-" + std::to_string(TqCurrentPid()) + ".json")).string();
+    return (base / TqDefaultTokenFileName(role)).string();
 }

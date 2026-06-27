@@ -14,6 +14,7 @@ public:
 
     static void SetRuntimeBinaryName(const char* argv0);
     static std::string DefaultTokenFilePath();
+    static std::string DefaultTokenFilePath(const std::string& role);
 
 private:
     std::string TokenValue;

@@ -96,7 +96,8 @@ struct TqTraceGuard {
 TqAdminHttpServerOptions TqMakeAdminOptions(const TqConfig& cfg) {
     TqAdminHttpServerOptions options;
     options.AdminThreads = cfg.AdminThreads;
-    options.TokenFile = cfg.AdminTokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath() : cfg.AdminTokenFile;
+    const char* role = cfg.Mode == TqMode::Client ? "client" : "server";
+    options.TokenFile = cfg.AdminTokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath(role) : cfg.AdminTokenFile;
     options.EnableTokenAuth = true;
     return options;
 }
