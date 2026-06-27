@@ -1011,15 +1011,18 @@ void TqLinuxRelayWorker::PurgeRetiredRelaysIfIdle() {
         return;
     }
     std::lock_guard<std::mutex> guard(RelayLock);
-    RetiredRelays.erase(
-        std::remove_if(
-            RetiredRelays.begin(),
-            RetiredRelays.end(),
-            [](const std::shared_ptr<RelayState>& relay) {
-                return relay == nullptr ||
-                       (relay->OutstandingQuicSends == 0 && relay->StreamBinding == nullptr);
-            }),
-        RetiredRelays.end());
+    for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
+        const auto& relay = *it;
+        if (relay == nullptr ||
+            (relay->OutstandingQuicSends == 0 && relay->StreamBinding == nullptr)) {
+            if (relay != nullptr) {
+                RetiredRelaysById.erase(relay->Id);
+            }
+            it = RetiredRelays.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
@@ -1123,12 +1126,15 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
     std::shared_ptr<RelayState> removed;
     {
         std::lock_guard<std::mutex> guard(RelayLock);
-        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
-            if ((*it)->Id == relayId) {
-                removed = *it;
-                Relays.erase(it);
-                RelaysById.erase(relayId);
-                break;
+        auto found = RelaysById.find(relayId);
+        if (found != RelaysById.end()) {
+            removed = found->second;
+            RelaysById.erase(found);
+            for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+                if ((*it)->Id == relayId) {
+                    Relays.erase(it);
+                    break;
+                }
             }
         }
     }
@@ -1210,6 +1216,7 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
     {
         std::lock_guard<std::mutex> guard(RelayLock);
         RetiredRelays.push_back(removed);
+        RetiredRelaysById.emplace(removed->Id, removed);
     }
 }
 
@@ -1768,15 +1775,13 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
 
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
     std::lock_guard<std::mutex> guard(RelayLock);
-    for (const auto& relay : Relays) {
-        if (relay->Id == relayId) {
-            return relay;
-        }
+    auto active = RelaysById.find(relayId);
+    if (active != RelaysById.end()) {
+        return active->second;
     }
-    for (const auto& relay : RetiredRelays) {
-        if (relay->Id == relayId) {
-            return relay;
-        }
+    auto retired = RetiredRelaysById.find(relayId);
+    if (retired != RetiredRelaysById.end()) {
+        return retired->second;
     }
     return nullptr;
 }
