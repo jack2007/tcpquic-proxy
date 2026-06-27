@@ -352,6 +352,12 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.WindowsReceiveDrainScheduledCount = snapshot.WindowsReceiveDrainScheduledCount;
     metrics.WindowsReceiveDrainCoalescedCount = snapshot.WindowsReceiveDrainCoalescedCount;
     metrics.WindowsPostedCallbackStaleDropCount = snapshot.WindowsPostedCallbackStaleDropCount;
+    metrics.WindowsRelayWorkerLockAcquireCount = snapshot.WorkerLockAcquireCount;
+    metrics.WindowsRelayWorkerLockWaitNanos = snapshot.WorkerLockWaitNanos;
+    metrics.WindowsRelayFindRelayByIdCount = snapshot.FindRelayByIdCount;
+    metrics.WindowsRelayCallbackDispatchNanos = snapshot.CallbackDispatchNanos;
+    metrics.WindowsRelaySnapshotBuildNanos = snapshot.SnapshotBuildNanos;
+    metrics.WindowsRelaySnapshotActiveRelaysScanned = snapshot.SnapshotActiveRelaysScanned;
 #endif
     return metrics;
 }
@@ -550,5 +556,17 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
         << metrics.WindowsReceiveDrainCoalescedCount;
     out << ",\"windows_relay_posted_callback_stale_drops\":"
         << metrics.WindowsPostedCallbackStaleDropCount;
+    out << ",\"windows_relay_worker_lock_acquires\":"
+        << metrics.WindowsRelayWorkerLockAcquireCount;
+    out << ",\"windows_relay_worker_lock_wait_nanos\":"
+        << metrics.WindowsRelayWorkerLockWaitNanos;
+    out << ",\"windows_relay_find_relay_by_id_count\":"
+        << metrics.WindowsRelayFindRelayByIdCount;
+    out << ",\"windows_relay_callback_dispatch_nanos\":"
+        << metrics.WindowsRelayCallbackDispatchNanos;
+    out << ",\"windows_relay_snapshot_build_nanos\":"
+        << metrics.WindowsRelaySnapshotBuildNanos;
+    out << ",\"windows_relay_snapshot_active_relays_scanned\":"
+        << metrics.WindowsRelaySnapshotActiveRelaysScanned;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }

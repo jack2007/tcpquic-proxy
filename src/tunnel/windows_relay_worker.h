@@ -38,6 +38,8 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicSendRetry,
     CloseRelay,
     StopWorker,
+    RegisterRelay,
+    Snapshot,
     RelayReceiveReady,
     RelayReceiveDrain,
     QuicIdealSendBuffer,
@@ -115,6 +117,12 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t WindowsReceiveDrainScheduledCount{0};
     uint64_t WindowsReceiveDrainCoalescedCount{0};
     uint64_t WindowsPostedCallbackStaleDropCount{0};
+    uint64_t WorkerLockAcquireCount{0};
+    uint64_t WorkerLockWaitNanos{0};
+    uint64_t FindRelayByIdCount{0};
+    uint64_t CallbackDispatchNanos{0};
+    uint64_t SnapshotBuildNanos{0};
+    uint64_t SnapshotActiveRelaysScanned{0};
     uint64_t EventsProcessed{0};
     uint64_t TcpReadResumeByBacklogEvents{0};
     uint64_t LateTeardownDowngradedCount{0};
@@ -158,6 +166,12 @@ public:
     bool TestLastPostedCallbackWasQuicSendCompleteForTest(uint64_t relayId) const;
     bool TestPostedCallbackSequenceForTest(const char* expectedCsv) const;
     TqWindowsQuicSendOperation* TestCreateQuicSendOperationForTest(uint64_t relayId, uint64_t bytes);
+    bool TestResolveStaleCallbackForTest(uint64_t relayId);
+    bool TestDispatchIdealSendBufferByIdForTest(uint64_t relayId, uint64_t byteCount);
+    bool TestCreateIocpForCallbackPostOnly();
+    bool TestDrainSingleQuicSendCompleteForTest();
+    bool TestDrainSingleReceiveReadyForTest();
+    bool TestDrainPostedCallbackOperationsForTest(size_t expectedCount);
     bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
     bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
@@ -193,21 +207,59 @@ private:
     struct RelayContext;
     struct IoOperation;
     struct CallbackBinding;
+    struct RegisterRelayCommand;
+    struct SnapshotCommand;
 
     void Run();
     void PostStop();
+    bool RegisterRelayLocal(RegisterRelayCommand& command);
+    TqWindowsRelayWorkerSnapshot BuildSnapshotLocal() const;
     void DrainPerRelayMaintenance();
-    void ProcessQuicSendCompleteOperation(uint64_t relayId, uintptr_t operationValue);
+    void ProcessQuicSendCompleteOperation(
+        uint64_t relayId,
+        uint64_t generation,
+        uintptr_t operationValue);
     void ProcessQuicPeerAborted(uint64_t relayId, const char* reason, uint64_t errorCode);
+    void ProcessQuicPeerAborted(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* reason,
+        uint64_t errorCode);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
+    void ProcessQuicShutdownComplete(
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t errorCode,
+        uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
+    void HandleQuicIdealSendBuffer(const std::shared_ptr<RelayContext>& relay, uint64_t byteCount);
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
+    void QueueQuicSendCompleteByIdFromCallback(
+        const CallbackBinding& binding,
+        TqWindowsQuicSendOperation* operation);
     std::shared_ptr<RelayContext> FindRelayById(uint64_t relayId);
     bool PostCallbackOperation(
         TqWindowsIocpOperationType type,
         const std::shared_ptr<RelayContext>& relay,
         uint64_t value = 0,
         size_t length = 0);
+    bool PostCallbackOperationById(
+        TqWindowsIocpOperationType type,
+        const CallbackBinding& binding,
+        uint64_t value = 0,
+        size_t length = 0,
+        std::shared_ptr<TqWindowsPendingQuicReceive> receiveView = nullptr);
+    std::shared_ptr<TqWindowsPendingQuicReceive> BuildDeferredQuicReceiveView(
+        const CallbackBinding& binding,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin,
+        uint64_t completeBatchBytes);
+    bool EnqueueDeferredQuicReceiveView(
+        const std::shared_ptr<RelayContext>& relay,
+        const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
+    std::shared_ptr<RelayContext> ResolveRelayForCallback(uint64_t relayId, uint64_t generation);
+    std::shared_ptr<RelayContext> ResolveRelayForSendComplete(uint64_t relayId, uint64_t generation);
+    std::shared_ptr<RelayContext> FindRelayByIdLocal(uint64_t relayId) const;
 
     bool PostTcpRecv(const std::shared_ptr<RelayContext>& relay);
     uint64_t CurrentRelayIdealSendBytes(const std::shared_ptr<RelayContext>& relay) const;
@@ -312,7 +364,9 @@ private:
     void* Iocp_{nullptr};
     std::thread Thread_;
     std::atomic<bool> Stopping_{false};
+    std::atomic<uint64_t> WorkerThreadToken_{0};
     std::atomic<uint64_t> NextRelayId_{1};
+    std::atomic<uint64_t> NextGeneration_{1};
     std::atomic<uint64_t> DeferredReceiveQueued_{0};
     std::atomic<uint64_t> DeferredReceiveBytesQueued_{0};
     std::atomic<uint64_t> DeferredReceiveCompleteBytes_{0};
@@ -353,6 +407,12 @@ private:
     std::atomic<uint64_t> ReceiveDrainScheduledCount_{0};
     std::atomic<uint64_t> ReceiveDrainCoalescedCount_{0};
     std::atomic<uint64_t> PostedCallbackStaleDropCount_{0};
+    mutable std::atomic<uint64_t> WorkerLockAcquireCount_{0};
+    mutable std::atomic<uint64_t> WorkerLockWaitNanos_{0};
+    std::atomic<uint64_t> FindRelayByIdCount_{0};
+    std::atomic<uint64_t> CallbackDispatchNanos_{0};
+    mutable std::atomic<uint64_t> SnapshotBuildNanos_{0};
+    mutable std::atomic<uint64_t> SnapshotActiveRelaysScanned_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
@@ -362,6 +422,7 @@ private:
     bool LastPostedCallbackHadReceiveView_{false};
     std::vector<TqWindowsIocpOperationType> PostedCallbackSequence_;
 #endif
+    mutable std::mutex ControlCommandLock_;
     mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;
     // Retired bindings keep late callbacks on old stream contexts safe until Stop or ref-counted pruning.

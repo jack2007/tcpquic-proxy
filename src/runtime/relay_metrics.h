@@ -144,6 +144,12 @@ struct TqRelayMetricsSnapshot {
     uint64_t WindowsReceiveDrainScheduledCount{0};
     uint64_t WindowsReceiveDrainCoalescedCount{0};
     uint64_t WindowsPostedCallbackStaleDropCount{0};
+    uint64_t WindowsRelayWorkerLockAcquireCount{0};
+    uint64_t WindowsRelayWorkerLockWaitNanos{0};
+    uint64_t WindowsRelayFindRelayByIdCount{0};
+    uint64_t WindowsRelayCallbackDispatchNanos{0};
+    uint64_t WindowsRelaySnapshotBuildNanos{0};
+    uint64_t WindowsRelaySnapshotActiveRelaysScanned{0};
     int64_t LastQuicSendStatus{0};
 };
 
