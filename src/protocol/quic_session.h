@@ -34,6 +34,9 @@ struct TqConnectionSnapshot {
     uint64_t ActiveTunnels{0};
     uint64_t TotalTunnels{0};
     std::string LastError;
+    std::string PathName;
+    std::string LocalAddress;
+    std::string PeerAddress;
 };
 
 struct TqServerConnectionSnapshot {

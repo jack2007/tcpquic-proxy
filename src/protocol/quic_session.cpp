@@ -700,7 +700,7 @@ uint32_t QuicClientSession::ConnectedConnectionCount() const {
 
 std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const {
     std::vector<TqConnectionSnapshot> snapshots;
-    std::lock_guard<std::mutex> guard(State->Lock);
+    std::scoped_lock guard(ConfigLock, State->Lock);
     snapshots.reserve(State->Slots.size());
     for (size_t i = 0; i < State->Slots.size(); ++i) {
         const auto& slot = State->Slots[i];
@@ -722,6 +722,11 @@ std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const
         snapshot.ActiveTunnels = slot.Connection ? TqCountConnectionTunnels(slot.Connection.get()) : 0;
         snapshot.TotalTunnels = 0;
         snapshot.LastError = slot.LastError;
+        if (i < SlotPaths.size()) {
+            snapshot.PathName = SlotPaths[i].Name;
+            snapshot.LocalAddress = SlotPaths[i].LocalAddress;
+            snapshot.PeerAddress = SlotPaths[i].PeerText;
+        }
         snapshots.push_back(std::move(snapshot));
     }
     return snapshots;

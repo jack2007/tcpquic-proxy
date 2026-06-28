@@ -403,6 +403,35 @@ static int TestStartSlotUsesPeerListRoundRobinPaths() {
     return 0;
 }
 
+static int TestConnectionSnapshotIncludesConfiguredPathMetadata() {
+    TqConfig cfg;
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
+
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(3, cfg);
+
+    const auto snapshots = session.SnapshotConnections();
+    if (snapshots.size() != 3) return 150;
+    if (snapshots[0].PathName != "cmcc" ||
+        snapshots[0].LocalAddress != "10.10.1.2" ||
+        snapshots[0].PeerAddress != "36.1.1.10:443") {
+        return 151;
+    }
+    if (snapshots[1].PathName != "cmcc" ||
+        snapshots[1].LocalAddress != "10.10.1.2" ||
+        snapshots[1].PeerAddress != "36.1.1.10:443") {
+        return 152;
+    }
+    if (snapshots[2].PathName != "ctcc" ||
+        snapshots[2].LocalAddress != "10.20.1.2" ||
+        snapshots[2].PeerAddress != "59.1.1.10:443") {
+        return 153;
+    }
+    session.Stop();
+    return 0;
+}
+
 static int TestScheme2CredentialConfig() {
     TqConfig client;
     client.QuicCa = "ca.crt";
@@ -466,6 +495,7 @@ int main() {
     if (int rc = TestQuicPathModeRejectsSlotTopologyMutation()) return rc;
     if (int rc = TestStartSlotUsesConfiguredPathSlots()) return rc;
     if (int rc = TestStartSlotUsesPeerListRoundRobinPaths()) return rc;
+    if (int rc = TestConnectionSnapshotIncludesConfiguredPathMetadata()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

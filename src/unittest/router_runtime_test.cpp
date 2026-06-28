@@ -691,6 +691,9 @@ int main() {
         adapter.Connections[0].SlotIndex = 0;
         adapter.Connections[0].State = "connected";
         adapter.Connections[0].Connected = true;
+        adapter.Connections[0].PathName = "cmcc";
+        adapter.Connections[0].LocalAddress = "10.10.1.2";
+        adapter.Connections[0].PeerAddress = "36.1.1.10:443";
         adapter.Connections[1].ConnectionId = "conn-1";
         adapter.Connections[1].SlotIndex = 1;
         adapter.Connections[1].State = "connecting";
@@ -707,6 +710,9 @@ int main() {
         if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 288;
         if (listResp.find("\"connection_id\":\"conn-0\"") == std::string::npos) return 289;
         if (listResp.find("\"state\":\"connected\"") == std::string::npos) return 290;
+        if (listResp.find("\"path\":\"cmcc\"") == std::string::npos) return 930;
+        if (listResp.find("\"local\":\"10.10.1.2\"") == std::string::npos) return 931;
+        if (listResp.find("\"peer\":\"36.1.1.10:443\"") == std::string::npos) return 932;
 
         TqHttpRequest get = Request("GET", "/peers/agent-conn/connections/conn-1", "");
         std::string getResp = adminRuntime.HandleAdmin(get);

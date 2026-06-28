@@ -216,6 +216,12 @@ void AppendConnectionJson(std::ostringstream& out, const TqConnectionSnapshot& c
     out << ",\"retry_scheduled\":" << (connection.RetryScheduled ? "true" : "false");
     out << ',';
     AppendJsonString(out, "state", connection.State);
+    out << ',';
+    AppendJsonString(out, "path", connection.PathName);
+    out << ',';
+    AppendJsonString(out, "local", connection.LocalAddress);
+    out << ',';
+    AppendJsonString(out, "peer", connection.PeerAddress);
     out << ",\"active_tunnels\":" << connection.ActiveTunnels;
     out << ',';
     AppendJsonString(out, "last_error", connection.LastError);

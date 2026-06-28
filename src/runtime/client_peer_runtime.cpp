@@ -366,8 +366,20 @@ bool TqClientRuntimeManager::StartPeer(const TqPeerConfig& peer, std::string& er
     }
     if (LogMode != TqClientPeerLogMode::Primary) {
         const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
-        std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peer %s (%u connections)\n",
-            peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
+        if (!peerCfg.QuicPaths.empty()) {
+            for (const auto& path : peerCfg.QuicPaths) {
+                std::fprintf(stderr,
+                    "tcpquic-proxy: peer %s path %s local %s -> %s (%u connections)\n",
+                    peer.PeerId.c_str(),
+                    path.Name.c_str(),
+                    path.LocalAddress.c_str(),
+                    path.Peer.c_str(),
+                    path.Connections);
+            }
+        } else {
+            std::fprintf(stderr, "tcpquic-proxy: peer %s QUIC peers %s (%u connections)\n",
+                peer.PeerId.c_str(), peerCfg.QuicPeer.c_str(), metrics.ConnectionCount);
+        }
     }
 
     std::lock_guard<std::mutex> guard(Lock);
