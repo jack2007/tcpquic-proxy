@@ -6,6 +6,33 @@
 
 namespace {
 
+std::string TqJsonStringValue(const std::string& value) {
+    std::string out;
+    for (char ch : value) {
+        switch (ch) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(ch) < 0x20) {
+                static const char Hex[] = "0123456789abcdef";
+                const unsigned char v = static_cast<unsigned char>(ch);
+                out += "\\u00";
+                out.push_back(Hex[v >> 4]);
+                out.push_back(Hex[v & 0x0f]);
+            } else {
+                out.push_back(ch);
+            }
+            break;
+        }
+    }
+    return out;
+}
+
 std::string TqPortForwardTargetText(const TqPortForwardConfig& forward) {
     std::ostringstream out;
     if (forward.TargetHost.find(':') != std::string::npos) {
@@ -28,6 +55,20 @@ void TqAppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortF
         out << ',';
         TqAppendJsonString(out, "target", TqPortForwardTargetText(forwards[i]));
         out << '}';
+    }
+    out << ']';
+}
+
+void TqAppendStringArrayJson(
+    std::ostringstream& out,
+    const char* name,
+    const std::vector<std::string>& values) {
+    out << ",\"" << name << "\":[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << '"' << TqJsonStringValue(values[i]) << '"';
     }
     out << ']';
 }
@@ -71,6 +112,7 @@ std::string TqServerMetricsJson(const TqServerMetrics& metrics, uint64_t uptimeS
     TqAppendJsonString(out, "status", metrics.LastError.empty() ? "healthy" : "degraded");
     out << ',';
     TqAppendJsonString(out, "listen", metrics.Listen);
+    TqAppendStringArrayJson(out, "resolved_listens", metrics.ResolvedListens);
     out << ",\"uptime_seconds\":" << uptimeSeconds;
     out << ",\"accepted_connections\":" << metrics.AcceptedConnections.load();
     out << ",\"active_streams\":" << metrics.ActiveStreams.load();

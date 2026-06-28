@@ -1,9 +1,25 @@
 #include "quic_address.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <limits>
 #include <unordered_set>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "Iphlpapi.lib")
+#else
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#endif
 
 namespace {
 
@@ -42,6 +58,178 @@ std::string TqTrimListItem(const std::string& value) {
     }
 
     return value.substr(begin, end - begin);
+}
+
+bool TqIsIpv4Wildcard(const TqEndpoint& endpoint) {
+    return endpoint.Host == "*" || endpoint.Host == "0.0.0.0";
+}
+
+bool TqIsIpv6Wildcard(const TqEndpoint& endpoint) {
+    return endpoint.Host == "::";
+}
+
+bool TqFormatQuicAddress(const QUIC_ADDR& address, std::string& text) {
+    QUIC_ADDR_STR addressText{};
+    if (!QuicAddrToString(&address, &addressText)) {
+        return false;
+    }
+    text = addressText.Address;
+    return true;
+}
+
+std::string TqQuicAddressKey(const QUIC_ADDR& address, const std::string& text) {
+    return std::to_string(static_cast<int>(QuicAddrGetFamily(&address))) + "|" + text;
+}
+
+bool TqAppendResolvedListen(
+    const TqEndpoint& endpoint,
+    std::vector<TqResolvedListen>& resolved,
+    std::unordered_set<std::string>& seen) {
+    QUIC_ADDR address{};
+    if (!TqMakeQuicAddr(endpoint, address)) {
+        return false;
+    }
+
+    std::string text;
+    if (!TqFormatQuicAddress(address, text)) {
+        return false;
+    }
+
+    if (seen.insert(TqQuicAddressKey(address, text)).second) {
+        resolved.push_back(TqResolvedListen{text, address});
+    }
+    return true;
+}
+
+#if defined(_WIN32)
+bool TqIsUsableAdapterAddress(const IP_ADAPTER_ADDRESSES& adapter) {
+    return adapter.OperStatus == IfOperStatusUp;
+}
+
+void TqCollectAdapterAddresses(ADDRESS_FAMILY family, std::vector<std::string>& hosts) {
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG size = 15 * 1024;
+    std::vector<unsigned char> buffer(size);
+    IP_ADAPTER_ADDRESSES* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    ULONG rc = GetAdaptersAddresses(family, flags, nullptr, adapters, &size);
+    if (rc == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(size);
+        adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        rc = GetAdaptersAddresses(family, flags, nullptr, adapters, &size);
+    }
+    if (rc != NO_ERROR) {
+        return;
+    }
+
+    std::unordered_set<std::string> seen;
+    for (IP_ADAPTER_ADDRESSES* adapter = adapters; adapter != nullptr; adapter = adapter->Next) {
+        if (!TqIsUsableAdapterAddress(*adapter)) {
+            continue;
+        }
+        for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress;
+             unicast != nullptr;
+             unicast = unicast->Next) {
+            if (unicast->Address.lpSockaddr == nullptr ||
+                unicast->Address.lpSockaddr->sa_family != family) {
+                continue;
+            }
+
+            char text[INET6_ADDRSTRLEN]{};
+            if (family == AF_INET) {
+                const auto* addr = reinterpret_cast<const sockaddr_in*>(unicast->Address.lpSockaddr);
+                const uint32_t hostOrder = ntohl(addr->sin_addr.s_addr);
+                if (addr->sin_addr.s_addr == INADDR_ANY ||
+                    (hostOrder & 0xff000000u) == 0x7f000000u ||
+                    IN_MULTICAST(hostOrder)) {
+                    continue;
+                }
+                if (inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text)) == nullptr) {
+                    continue;
+                }
+            } else if (family == AF_INET6) {
+                const auto* addr = reinterpret_cast<const sockaddr_in6*>(unicast->Address.lpSockaddr);
+                const in6_addr& ip = addr->sin6_addr;
+                if (IN6_IS_ADDR_UNSPECIFIED(&ip) ||
+                    IN6_IS_ADDR_LOOPBACK(&ip) ||
+                    IN6_IS_ADDR_MULTICAST(&ip) ||
+                    IN6_IS_ADDR_LINKLOCAL(&ip)) {
+                    continue;
+                }
+                if (inet_ntop(AF_INET6, &ip, text, sizeof(text)) == nullptr) {
+                    continue;
+                }
+            }
+
+            if (seen.insert(text).second) {
+                hosts.push_back(text);
+            }
+        }
+    }
+}
+#else
+void TqCollectIfaddrsAddresses(int family, std::vector<std::string>& hosts) {
+    ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) {
+        return;
+    }
+
+    std::unordered_set<std::string> seen;
+    for (ifaddrs* item = ifaddr; item != nullptr; item = item->ifa_next) {
+        if (item->ifa_addr == nullptr ||
+            item->ifa_addr->sa_family != family ||
+            (item->ifa_flags & IFF_UP) == 0 ||
+            (item->ifa_flags & IFF_LOOPBACK) != 0) {
+            continue;
+        }
+
+        char text[INET6_ADDRSTRLEN]{};
+        if (family == AF_INET) {
+            const auto* addr = reinterpret_cast<const sockaddr_in*>(item->ifa_addr);
+            const uint32_t hostOrder = ntohl(addr->sin_addr.s_addr);
+            if (addr->sin_addr.s_addr == INADDR_ANY ||
+                (hostOrder & 0xff000000u) == 0x7f000000u ||
+                IN_MULTICAST(hostOrder)) {
+                continue;
+            }
+            if (inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text)) == nullptr) {
+                continue;
+            }
+        } else if (family == AF_INET6) {
+            const auto* addr = reinterpret_cast<const sockaddr_in6*>(item->ifa_addr);
+            const in6_addr& ip = addr->sin6_addr;
+            if (IN6_IS_ADDR_UNSPECIFIED(&ip) ||
+                IN6_IS_ADDR_LOOPBACK(&ip) ||
+                IN6_IS_ADDR_MULTICAST(&ip) ||
+                IN6_IS_ADDR_LINKLOCAL(&ip)) {
+                continue;
+            }
+            if (inet_ntop(AF_INET6, &ip, text, sizeof(text)) == nullptr) {
+                continue;
+            }
+        }
+
+        if (seen.insert(text).second) {
+            hosts.push_back(text);
+        }
+    }
+
+    freeifaddrs(ifaddr);
+}
+#endif
+
+std::vector<std::string> TqCollectLocalAddresses(QUIC_ADDRESS_FAMILY family) {
+    std::vector<std::string> hosts;
+#if defined(_WIN32)
+    TqCollectAdapterAddresses(
+        family == QUIC_ADDRESS_FAMILY_INET ? AF_INET : AF_INET6,
+        hosts);
+#else
+    TqCollectIfaddrsAddresses(
+        family == QUIC_ADDRESS_FAMILY_INET ? AF_INET : AF_INET6,
+        hosts);
+#endif
+    std::sort(hosts.begin(), hosts.end());
+    return hosts;
 }
 
 }
@@ -139,18 +327,39 @@ bool TqResolveServerListenList(const std::string& value, std::vector<TqResolvedL
     std::unordered_set<std::string> seen;
     std::vector<TqResolvedListen> resolved;
     for (const TqEndpoint& endpoint : endpoints) {
-        const std::string text = TqFormatEndpoint(endpoint);
-        if (!seen.insert(text).second) {
-            err = "duplicate listen address: " + text;
-            return false;
+        if (TqIsIpv4Wildcard(endpoint) || TqIsIpv6Wildcard(endpoint)) {
+            const QUIC_ADDRESS_FAMILY family =
+                TqIsIpv4Wildcard(endpoint) ? QUIC_ADDRESS_FAMILY_INET : QUIC_ADDRESS_FAMILY_INET6;
+            const std::vector<std::string> hosts = TqCollectLocalAddresses(family);
+            if (hosts.empty()) {
+                err = TqFormatEndpoint(endpoint) + " expanded to no usable local addresses";
+                return false;
+            }
+            bool expanded = false;
+            for (const std::string& host : hosts) {
+                expanded = TqAppendResolvedListen(TqEndpoint{host, endpoint.Port}, resolved, seen) || expanded;
+            }
+            if (!expanded) {
+                err = TqFormatEndpoint(endpoint) + " expanded to no usable local addresses";
+                return false;
+            }
+            continue;
         }
 
         QUIC_ADDR address{};
         if (!TqMakeQuicAddr(endpoint, address)) {
-            err = "invalid listen address: " + text;
+            err = "invalid listen address: " + TqFormatEndpoint(endpoint);
             return false;
         }
-        resolved.push_back(TqResolvedListen{text, address});
+
+        std::string text;
+        if (!TqFormatQuicAddress(address, text)) {
+            err = "invalid listen address: " + TqFormatEndpoint(endpoint);
+            return false;
+        }
+        if (seen.insert(TqQuicAddressKey(address, text)).second) {
+            resolved.push_back(TqResolvedListen{text, address});
+        }
     }
 
     listens = std::move(resolved);

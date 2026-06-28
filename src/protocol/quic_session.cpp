@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "quic_address.h"
 #include "relay.h"
 #include "trace.h"
 #include "tunnel_registry.h"
@@ -22,7 +23,7 @@ namespace {
 constexpr char TqAlpn[] = "tcpquic-tunnel/1";
 constexpr uint64_t TqIdleTimeoutMs = 60 * 1000;
 
-struct TqEndpoint {
+struct TqPeerEndpoint {
     std::string Host;
     uint16_t Port{0};
 };
@@ -69,7 +70,7 @@ bool ParsePort(const std::string& value, uint16_t& port) {
     return true;
 }
 
-bool ParseEndpoint(const std::string& value, TqEndpoint& endpoint) {
+bool ParseEndpoint(const std::string& value, TqPeerEndpoint& endpoint) {
     if (value.empty()) {
         return false;
     }
@@ -102,16 +103,6 @@ bool ParseEndpoint(const std::string& value, TqEndpoint& endpoint) {
     endpoint.Host = host;
     endpoint.Port = port;
     return true;
-}
-
-bool ConvertListenAddress(const TqEndpoint& endpoint, QUIC_ADDR& address) {
-    if (endpoint.Host == "*") {
-        std::memset(&address, 0, sizeof(address));
-        QuicAddrSetFamily(&address, QUIC_ADDRESS_FAMILY_UNSPEC);
-        QuicAddrSetPort(&address, endpoint.Port);
-        return true;
-    }
-    return QuicAddrFromString(endpoint.Host.c_str(), endpoint.Port, &address);
 }
 
 std::string TqFormatConnectionAddr(MsQuicConnection* connection, uint32_t param) {
@@ -552,7 +543,7 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         State->Scheduler = scheduler;
     }
 
-    TqEndpoint endpoint;
+    TqPeerEndpoint endpoint;
     if (!ParseEndpoint(cfg.QuicPeer, endpoint)) {
         std::fprintf(stderr, "Invalid --quic-peer endpoint: %s\n", cfg.QuicPeer.c_str());
         return false;
@@ -1540,9 +1531,11 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
 bool QuicServerSession::Start(const TqConfig& cfg) {
     Stop();
 
-    TqEndpoint endpoint;
-    if (!ParseEndpoint(cfg.QuicListen, endpoint)) {
-        std::fprintf(stderr, "Invalid --quic-listen endpoint: %s\n", cfg.QuicListen.c_str());
+    std::vector<TqResolvedListen> resolvedListens;
+    std::string resolveErr;
+    if (!TqResolveServerListenList(cfg.QuicListen, resolvedListens, resolveErr)) {
+        std::fprintf(stderr, "Invalid --quic-listen endpoint: %s (%s)\n",
+            cfg.QuicListen.c_str(), resolveErr.c_str());
         return false;
     }
 
@@ -1553,36 +1546,41 @@ bool QuicServerSession::Start(const TqConfig& cfg) {
         return false;
     }
 
-    QUIC_ADDR address{};
-    if (!ConvertListenAddress(endpoint, address)) {
-        std::fprintf(stderr, "Invalid --quic-listen address: %s\n", cfg.QuicListen.c_str());
-        Stop();
-        return false;
-    }
-
-    Listener = std::make_unique<MsQuicListener>(
-        *Registration,
-        CleanUpManual,
-        QuicServerSession::ListenerCallback,
-        this);
-    if (!Listener || !Listener->IsValid()) {
-        std::fprintf(stderr, "ListenerOpen failed, 0x%x\n",
-            Listener ? Listener->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
-        Stop();
-        return false;
-    }
-
     MsQuicAlpn alpn(TqAlpn);
-    const QUIC_STATUS status = Listener->Start(alpn, &address);
-    if (QUIC_FAILED(status)) {
-        std::fprintf(stderr, "ListenerStart failed, 0x%x\n", status);
-        Stop();
-        return false;
+    for (const TqResolvedListen& listen : resolvedListens) {
+        auto listener = std::make_unique<MsQuicListener>(
+            *Registration,
+            CleanUpManual,
+            QuicServerSession::ListenerCallback,
+            this);
+        if (!listener || !listener->IsValid()) {
+            std::fprintf(stderr, "ListenerOpen failed for %s, 0x%x\n",
+                listen.Text.c_str(),
+                listener ? listener->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY);
+            Stop();
+            return false;
+        }
+
+        const QUIC_STATUS status = listener->Start(alpn, &listen.Address);
+        if (QUIC_FAILED(status)) {
+            std::fprintf(stderr, "ListenerStart failed for %s, 0x%x\n",
+                listen.Text.c_str(), status);
+            Stop();
+            return false;
+        }
+
+        std::lock_guard<std::mutex> guard(Lock);
+        Listeners.push_back(std::move(listener));
     }
 
     std::lock_guard<std::mutex> guard(Lock);
     Started = true;
     Stopping = false;
+    ResolvedListens.clear();
+    ResolvedListens.reserve(resolvedListens.size());
+    for (const TqResolvedListen& listen : resolvedListens) {
+        ResolvedListens.push_back(listen.Text);
+    }
     return true;
 }
 
@@ -1590,19 +1588,22 @@ void QuicServerSession::Stop() {
     std::shared_ptr<MsQuicApi> apiLocal;
     std::unique_ptr<MsQuicRegistration> registrationLocal;
     std::unique_ptr<MsQuicConfiguration> configurationLocal;
-    std::unique_ptr<MsQuicListener> listenerLocal;
+    std::vector<std::unique_ptr<MsQuicListener>> listenersLocal;
 
     {
         std::lock_guard<std::mutex> guard(Lock);
         Started = false;
         Stopping = true;
-        if (Listener && Listener->Handle) {
-            MsQuic->ListenerStop(Listener->Handle);
+        for (const auto& listener : Listeners) {
+            if (listener && listener->Handle) {
+                MsQuic->ListenerStop(listener->Handle);
+            }
         }
         apiLocal = std::move(Api);
         registrationLocal = std::move(Registration);
         configurationLocal = std::move(Configuration);
-        listenerLocal = std::move(Listener);
+        listenersLocal = std::move(Listeners);
+        ResolvedListens.clear();
     }
 
     StateChanged.notify_all();
@@ -1613,6 +1614,11 @@ void QuicServerSession::Run() {
     StateChanged.wait(guard, [this] { return !Started || Stopping; });
     guard.unlock();
     Stop();
+}
+
+std::vector<std::string> QuicServerSession::ResolvedListenAddresses() {
+    std::lock_guard<std::mutex> guard(Lock);
+    return ResolvedListens;
 }
 
 void QuicServerSession::SetPeerStreamHandler(StreamHandler h) {

@@ -305,6 +305,10 @@ int RunServer(const TqConfig& cfg) {
         metrics->LastError = "failed to start QUIC server";
         return 1;
     }
+    {
+        std::lock_guard<std::mutex> guard(metrics->Lock);
+        metrics->ResolvedListens = quic.ResolvedListenAddresses();
+    }
 
     std::unique_ptr<TqAdminHttpServer> admin;
     if (!cfg.AdminListen.empty()) {

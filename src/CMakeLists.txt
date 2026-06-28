@@ -692,6 +692,7 @@ add_executable(tcpquic_config_router_test
     config/tuning.cpp
     acl/acl.cpp
     protocol/quic_address.cpp
+    runtime/server_metrics.cpp
     ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )

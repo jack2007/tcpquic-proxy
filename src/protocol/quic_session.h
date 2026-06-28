@@ -198,6 +198,7 @@ public:
     bool Start(const TqConfig& cfg);
     void Stop();
     void Run();
+    std::vector<std::string> ResolvedListenAddresses();
     void SetPeerStreamHandler(StreamHandler h);
     void SetConnectionHandler(ConnectionHandler h);
 
@@ -221,5 +222,6 @@ private:
     std::shared_ptr<MsQuicApi> Api;
     std::unique_ptr<MsQuicRegistration> Registration;
     std::unique_ptr<MsQuicConfiguration> Configuration;
-    std::unique_ptr<MsQuicListener> Listener;
+    std::vector<std::unique_ptr<MsQuicListener>> Listeners;
+    std::vector<std::string> ResolvedListens;
 };

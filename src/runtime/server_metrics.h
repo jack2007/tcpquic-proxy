@@ -11,6 +11,7 @@
 struct TqServerMetrics {
     mutable std::mutex Lock;
     std::string Listen;
+    std::vector<std::string> ResolvedListens;
     std::atomic<uint64_t> AcceptedConnections{0};
     std::atomic<uint64_t> ActiveStreams{0};
     std::atomic<uint64_t> TotalStreams{0};

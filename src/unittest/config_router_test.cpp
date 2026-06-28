@@ -1,5 +1,7 @@
 #include "config.h"
 #include "quic_address.h"
+#include "relay_metrics.h"
+#include "server_metrics.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -39,6 +41,18 @@ static bool Load(const std::string& body, TqRouterConfig& router, std::string& e
     std::string file = WriteTempConfig(body);
     err.clear();
     return TqLoadClientConfig(file, router, err);
+}
+
+TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
+    return {};
+}
+
+void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
+    out << '"' << name << "\":\"" << value << '"';
+}
+
+void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot&) {
+    out << ",\"linux_relay_backend\":\"test\"";
 }
 
 static std::string CaptureUsage() {
@@ -373,8 +387,25 @@ int main() {
     {
         std::vector<TqResolvedListen> listens;
         std::string err;
-        if (TqResolveServerListenList("127.0.0.1:443,127.0.0.1:443", listens, err)) return 340;
-        if (err.find("duplicate listen address") == std::string::npos) return 341;
+        if (!TqResolveServerListenList("36.1.1.10:443,59.1.1.10:443", listens, err)) return 340;
+        if (listens.size() != 2) return 341;
+        if (listens[0].Text != "36.1.1.10:443") return 342;
+        if (listens[1].Text != "59.1.1.10:443") return 343;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("[0:0:0:0:0:0:0:1]:443,[::1]:443", listens, err)) return 344;
+        if (listens.size() != 1) return 345;
+        if (listens[0].Text != "[::1]:443") return 346;
+    }
+    {
+        TqServerMetrics metrics;
+        metrics.Listen = "0.0.0.0:443";
+        metrics.ResolvedListens = {"10.0.0.2:443", "10.0.0.3:443"};
+        const std::string body = TqServerMetricsJson(metrics, 11);
+        if (body.find("\"listen\":\"0.0.0.0:443\"") == std::string::npos) return 347;
+        if (body.find("\"resolved_listens\":[\"10.0.0.2:443\",\"10.0.0.3:443\"]") == std::string::npos) return 348;
     }
     {
         TqRouterConfig router;
