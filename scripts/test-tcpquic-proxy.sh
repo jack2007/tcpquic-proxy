@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="$ROOT_DIR/build/bin/Release/tcpquic-proxy"
+LEGACY_BIN="$ROOT_DIR/build/bin/Release/tcpquic-proxy"
+RENAMED_BIN="$ROOT_DIR/build/bin/Release/raypx2"
+USER_BIN="${TCPQUIC_PROXY_BIN:-${BIN:-}}"
+BIN=""
 TMP_DIR="/tmp/tcpquic-test-$$"
 
 SERVER_PID=""
@@ -17,6 +20,22 @@ NEG_SERVER_STDIN_FD=""
 log() {
     printf '[tcpquic-test] %s\n' "$*"
 }
+
+resolve_default_bin() {
+    if [ -x "$LEGACY_BIN" ]; then
+        BIN="$LEGACY_BIN"
+    elif [ ! -e "$LEGACY_BIN" ] && [ -x "$RENAMED_BIN" ]; then
+        BIN="$RENAMED_BIN"
+    else
+        BIN="$LEGACY_BIN"
+    fi
+}
+
+if [ -n "$USER_BIN" ]; then
+    BIN="$USER_BIN"
+else
+    resolve_default_bin
+fi
 
 cleanup() {
     local status=$?
@@ -139,6 +158,9 @@ build_if_missing() {
         -DCMAKE_BUILD_TYPE=Release
     cmake --build "$ROOT_DIR/build" --config Release --target tcpquic-proxy -j"$(nproc)"
 
+    if [ -z "$USER_BIN" ]; then
+        resolve_default_bin
+    fi
     [ -x "$BIN" ] || fail_with_logs "binary still missing after build: $BIN"
 }
 
