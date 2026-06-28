@@ -183,6 +183,10 @@ public:
     void Reset() override {}
 };
 
+bool StartRelayWorkerForTest(TqWindowsRelayWorker& worker) {
+    return worker.Start() && worker.TestHasIocpForTest();
+}
+
 bool TestWindowsRelayReceiveViewIocpCallbackQueue() {
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
@@ -545,7 +549,9 @@ bool TestWindowsRelayRegisterRunsOnWorkerForTest() {
 int TestWindowsRelayQuicTeardownOnWorker() {
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            return 147;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -576,13 +582,22 @@ int TestWindowsRelayQuicTeardownOnWorker() {
             after.GracefulRelayDrains <= before.GracefulRelayDrains ||
             !handle.Stop.load(std::memory_order_acquire)) {
             receiveWorker.Stop();
-            return 151;
+            if (after.FatalRelayResets != before.FatalRelayResets) {
+                return 1511;
+            }
+            if (after.GracefulRelayDrains <= before.GracefulRelayDrains) {
+                return 1512;
+            }
+            return 1513;
         }
         receiveWorker.Stop();
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -619,7 +634,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         TqRelayHandle handle{};
@@ -649,7 +667,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         TqRelayHandle handle{};
@@ -679,7 +700,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -723,7 +747,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -769,7 +796,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -798,7 +828,10 @@ int TestWindowsRelayQuicTeardownOnWorker() {
     }
     {
         TqWindowsRelayWorker receiveWorker;
-        assert(receiveWorker.Start());
+        if (!StartRelayWorkerForTest(receiveWorker)) {
+            receiveWorker.Stop();
+            return 146;
+        }
         alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
         auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
         stream->Callback = MsQuicStream::NoOpCallback;
@@ -2647,6 +2680,7 @@ int main() {
             MsQuic = nullptr;
             return 99;
         }
+        receiveWorker.StopRelay(handle.WindowsRelayId);
         CompleteFakeStreamSends(receiveWorker, stream, callbackContext);
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);

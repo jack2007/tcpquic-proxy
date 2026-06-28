@@ -168,6 +168,10 @@ public:
     TqWindowsQuicSendOperation* TestCreateQuicSendOperationForTest(uint64_t relayId, uint64_t bytes);
     bool TestResolveStaleCallbackForTest(uint64_t relayId);
     bool TestDispatchIdealSendBufferByIdForTest(uint64_t relayId, uint64_t byteCount);
+    bool TestHasIocpForTest() const { return Iocp_ != nullptr; }
+    DWORD TestLastCallbackPostWin32ErrorForTest() const {
+        return LastCallbackPostWin32Error_.load(std::memory_order_relaxed);
+    }
     bool TestCreateIocpForCallbackPostOnly();
     bool TestDrainSingleQuicSendCompleteForTest();
     bool TestDrainSingleReceiveReadyForTest();
@@ -294,6 +298,9 @@ private:
         TqWindowsPendingQuicReceive& view,
         uint64_t bytes);
     void FlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
+    void FlushBatchedDeferredReceiveCompletion(
+        const std::shared_ptr<RelayContext>& relay,
+        MsQuicStream* stream);
     void CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
     void CompleteQuicSendAccounting(
         const std::shared_ptr<RelayContext>& relay,
@@ -416,6 +423,7 @@ private:
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
+    std::atomic<DWORD> LastCallbackPostWin32Error_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};
     uint64_t LastPostedCallbackRelayId_{0};
