@@ -1457,6 +1457,10 @@ static int TestQuicClientSessionReconnectApiSurface() {
         "EnsureAnyConnected default overload must remain available");
     static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().EnsureAnyConnected(std::chrono::milliseconds(1))), bool>::value,
         "EnsureAnyConnected timeout overload must remain available");
+    static_assert(std::is_same<decltype(std::declval<QuicClientSession&>().PickConnection()), MsQuicConnection*>::value,
+        "PickConnection must remain the tunnel connection-level selection entrypoint");
+    // A TCP tunnel binds to one selected QUIC connection; single-tunnel multipath fanout is not used here.
+    (void)static_cast<MsQuicConnection* (QuicClientSession::*)()>(&QuicClientSession::PickConnection);
     (void)static_cast<void (QuicClientSession::*)(Handler)>(&QuicClientSession::SetConnectionStateHandler);
     (void)static_cast<void (QuicClientSession::*)(Scheduler)>(&QuicClientSession::SetDelayedTaskScheduler);
     return 0;

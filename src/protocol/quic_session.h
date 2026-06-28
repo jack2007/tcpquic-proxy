@@ -104,6 +104,9 @@ public:
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
     void MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg);
+    void MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection);
+    void MarkSlotDisconnectedForTest(size_t index);
+    MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
     void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
@@ -128,6 +131,9 @@ private:
         bool Connected{false};
         bool RetryScheduled{false};
         std::string LastError;
+#if defined(TQ_UNIT_TESTING)
+        MsQuicConnection* TestConnectionOverride{nullptr};
+#endif
     };
 
     struct ConnectionStateNotification {
@@ -176,6 +182,7 @@ private:
     static QuicClientSession* AcquireLiveSession(
         const std::shared_ptr<ClientSessionGate>& gate);
     static void ReleaseLiveSession(const std::shared_ptr<ClientSessionGate>& gate);
+    static MsQuicConnection* PickableConnectionLocked(const ConnectionSlot& slot);
     static uint32_t ConnectedCountLocked(const ClientSharedState& state);
     static void NotifyConnectionStateChanged(ConnectionStateNotification notification);
     static ConnectionStateNotification OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);

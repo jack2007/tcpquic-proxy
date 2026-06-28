@@ -432,6 +432,40 @@ static int TestConnectionSnapshotIncludesConfiguredPathMetadata() {
     return 0;
 }
 
+static int TestPickConnectionRoundRobinSkipsUnavailableSlots() {
+    auto* conn0 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1000));
+    auto* conn1 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1001));
+    auto* conn2 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x2000));
+
+    QuicClientSession session;
+    std::function<void()> retryTask;
+
+    session.MarkReconnectStartedForTest(4);
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds, std::function<void()> task) {
+            retryTask = std::move(task);
+            return true;
+        });
+    session.MarkSlotConnectedForTest(0, conn0);
+    session.MarkSlotConnectedForTest(1, conn1);
+    session.ScheduleStartRetryForTest(1);
+    session.MarkSlotConnectedForTest(2, conn2);
+    session.MarkSlotConnectedForTest(3, nullptr);
+
+    if (session.PickConnectionForTest() != conn0) return 160;
+    if (session.PickConnectionForTest() != conn2) return 161;
+    if (session.PickConnectionForTest() != conn0) return 162;
+
+    session.MarkSlotDisconnectedForTest(0);
+    if (session.PickConnectionForTest() != conn2) return 163;
+    if (session.PickConnectionForTest() != conn2) return 164;
+    if (session.PickConnectionForTest() != conn2) return 165;
+
+    if (!retryTask) return 166;
+    session.Stop();
+    return 0;
+}
+
 static int TestScheme2CredentialConfig() {
     TqConfig client;
     client.QuicCa = "ca.crt";
@@ -496,6 +530,7 @@ int main() {
     if (int rc = TestStartSlotUsesConfiguredPathSlots()) return rc;
     if (int rc = TestStartSlotUsesPeerListRoundRobinPaths()) return rc;
     if (int rc = TestConnectionSnapshotIncludesConfiguredPathMetadata()) return rc;
+    if (int rc = TestPickConnectionRoundRobinSkipsUnavailableSlots()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

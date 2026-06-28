@@ -653,8 +653,8 @@ MsQuicConnection* QuicClientSession::PickConnection() {
     for (size_t attempt = 0; attempt < count; ++attempt) {
         const size_t index = PickIndex.fetch_add(1) % count;
         auto& slot = State->Slots[index];
-        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
-            return slot.Connection.get();
+        if (auto* connection = PickableConnectionLocked(slot)) {
+            return connection;
         }
     }
     return nullptr;
@@ -666,10 +666,7 @@ MsQuicConnection* QuicClientSession::PickConnectionAt(size_t index) {
         return nullptr;
     }
     auto& slot = State->Slots[index];
-    if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
-        return slot.Connection.get();
-    }
-    return nullptr;
+    return PickableConnectionLocked(slot);
 }
 
 MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t firstIndex) {
@@ -681,8 +678,8 @@ MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t firstIndex) {
     for (size_t attempt = 0; attempt < count; ++attempt) {
         const size_t index = firstIndex + (PickIndex.fetch_add(1) % count);
         auto& slot = State->Slots[index];
-        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
-            return slot.Connection.get();
+        if (auto* connection = PickableConnectionLocked(slot)) {
+            return connection;
         }
     }
     return nullptr;
@@ -862,10 +859,25 @@ bool QuicClientSession::AbortConnectionTunnels(const std::string& connectionId, 
     return true;
 }
 
+MsQuicConnection* QuicClientSession::PickableConnectionLocked(const ConnectionSlot& slot) {
+    if (!slot.Connected || slot.RetryScheduled) {
+        return nullptr;
+    }
+#if defined(TQ_UNIT_TESTING)
+    if (slot.TestConnectionOverride) {
+        return slot.TestConnectionOverride;
+    }
+#endif
+    if (slot.Connection && slot.Connection->IsValid()) {
+        return slot.Connection.get();
+    }
+    return nullptr;
+}
+
 uint32_t QuicClientSession::ConnectedCountLocked(const ClientSharedState& state) {
     uint32_t count = 0;
     for (const auto& slot : state.Slots) {
-        if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
+        if (PickableConnectionLocked(slot)) {
             ++count;
         }
     }
@@ -968,6 +980,32 @@ void QuicClientSession::MarkReconnectStartedForTest(size_t slots, const TqConfig
         std::lock_guard<std::mutex> guard(gate->Lock);
         gate->Session = this;
     }
+}
+
+void QuicClientSession::MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index >= State->Slots.size()) {
+        return;
+    }
+    auto& slot = State->Slots[index];
+    slot.Connected = true;
+    slot.RetryScheduled = false;
+    slot.LastError.clear();
+    slot.TestConnectionOverride = connection;
+}
+
+void QuicClientSession::MarkSlotDisconnectedForTest(size_t index) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index >= State->Slots.size()) {
+        return;
+    }
+    auto& slot = State->Slots[index];
+    slot.Connected = false;
+    slot.TestConnectionOverride = nullptr;
+}
+
+MsQuicConnection* QuicClientSession::PickConnectionForTest() {
+    return PickConnection();
 }
 
 void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
