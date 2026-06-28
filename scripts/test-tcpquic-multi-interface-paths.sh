@@ -2,9 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BIN="${TCPQUIC_PROXY_BIN:-$ROOT/build/bin/Release/tcpquic-proxy}"
-BIN_DIR="$(cd "$(dirname "$BIN")" && pwd)"
-CONFIG_ROUTER_TEST="${TCPQUIC_CONFIG_ROUTER_TEST_BIN:-$BIN_DIR/tcpquic_config_router_test}"
+if [[ -n "${TCPQUIC_CONFIG_ROUTER_TEST_BIN:-}" ]]; then
+  CONFIG_ROUTER_TEST="$TCPQUIC_CONFIG_ROUTER_TEST_BIN"
+else
+  BIN="${TCPQUIC_PROXY_BIN:-$ROOT/build/bin/Release/tcpquic-proxy}"
+  BIN_DIR="$(cd "$(dirname "$BIN")" && pwd)"
+  CONFIG_ROUTER_TEST="$BIN_DIR/tcpquic_config_router_test"
+fi
 
 if [[ ! -x "$CONFIG_ROUTER_TEST" ]]; then
   echo "missing tcpquic_config_router_test binary: $CONFIG_ROUTER_TEST" >&2
