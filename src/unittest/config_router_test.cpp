@@ -379,6 +379,19 @@ int main() {
         if (err.find("path name, local, peer and connections are required") == std::string::npos) return 326;
     }
     {
+        const char* locals[] = {"10.0.0.2:0", "bad local", "   "};
+        for (size_t i = 0; i < sizeof(locals) / sizeof(locals[0]); ++i) {
+            std::string body =
+                R"json({"version":1,"peers":[{"peer_id":"agent-b","socks_listen":"127.0.0.1:11001","paths":[{"name":"cmcc","local":")json";
+            body += locals[i];
+            body += R"json(","peer":"36.1.1.10:443","connections":4}]}]})json";
+            TqRouterConfig router;
+            std::string err;
+            if (Load(body, router, err)) return 327;
+            if (err.find("invalid path local") == std::string::npos) return 328;
+        }
+    }
+    {
         TqRouterConfig router;
         std::string err;
         if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","quic_connections":0}]})json", router, err)) return 44;

@@ -153,6 +153,20 @@ bool IsHostPortList(const std::string& value) {
     return true;
 }
 
+bool IsValidQuicPathLocalAddress(const std::string& value) {
+    if (value.empty()) {
+        return false;
+    }
+    bool hasNonWhitespace = false;
+    for (char ch : value) {
+        if (ch == ',' || ch == ':' || std::isspace(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+        hasNonWhitespace = true;
+    }
+    return hasNonWhitespace;
+}
+
 bool SplitHostPortValue(const std::string& value, std::string& host, uint16_t& port) {
     host.clear();
     port = 0;
@@ -1797,7 +1811,7 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
             for (const auto& path : peer.QuicPaths) {
                 if (path.Name.empty()) { err = "path name is required for " + peer.PeerId; return false; }
                 if (!pathNames.insert(path.Name).second) { err = "duplicate path name: " + path.Name; return false; }
-                if (path.LocalAddress.empty() || path.LocalAddress.find(',') != std::string::npos) {
+                if (!IsValidQuicPathLocalAddress(path.LocalAddress)) {
                     err = "invalid path local for " + peer.PeerId;
                     return false;
                 }
