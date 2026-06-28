@@ -1,4 +1,5 @@
 #include "quic_address.h"
+#include "config.h"
 
 #include <algorithm>
 #include <cctype>

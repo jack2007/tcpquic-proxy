@@ -96,6 +96,7 @@ public:
 #if defined(TQ_UNIT_TESTING)
     struct ReconnectTestHooks {
         std::function<bool(size_t index)> StartSlotOverride;
+        std::function<void(size_t index, const TqClientSlotPath& path)> StartSlotPathObserver;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
@@ -184,6 +185,7 @@ private:
 
     TqConfig Config;
     std::vector<TqClientSlotPath> SlotPaths;
+    mutable std::mutex ConfigLock;
     std::atomic<size_t> PickIndex{0};
     std::shared_ptr<ClientSharedState> State{std::make_shared<ClientSharedState>()};
     std::shared_ptr<MsQuicApi> Api;

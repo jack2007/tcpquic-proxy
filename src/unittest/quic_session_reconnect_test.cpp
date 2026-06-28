@@ -318,6 +318,91 @@ static int TestQuicPathModeRejectsSlotTopologyMutation() {
     return 0;
 }
 
+static int TestStartSlotUsesConfiguredPathSlots() {
+    TqConfig cfg;
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
+
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(3, cfg);
+
+    std::vector<TqClientSlotPath> observed;
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotPathObserver = [&](size_t index, const TqClientSlotPath& path) {
+        if (index != observed.size()) {
+            observed.push_back(TqClientSlotPath{"bad-index", "", "", 0, ""});
+            return;
+        }
+        observed.push_back(path);
+    };
+    hooks.StartSlotOverride = [](size_t) {
+        return true;
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 130;
+    if (!session.ReconnectConnection("conn-1", err)) return 131;
+    if (!session.ReconnectConnection("conn-2", err)) return 132;
+    if (observed.size() != 3) return 133;
+    if (observed[0].Name != "cmcc" ||
+        observed[0].LocalAddress != "10.10.1.2" ||
+        observed[0].PeerHost != "36.1.1.10" ||
+        observed[0].PeerPort != 443) {
+        return 134;
+    }
+    if (observed[1].Name != "cmcc" ||
+        observed[1].LocalAddress != "10.10.1.2" ||
+        observed[1].PeerHost != "36.1.1.10" ||
+        observed[1].PeerPort != 443) {
+        return 135;
+    }
+    if (observed[2].Name != "ctcc" ||
+        observed[2].LocalAddress != "10.20.1.2" ||
+        observed[2].PeerHost != "59.1.1.10" ||
+        observed[2].PeerPort != 443) {
+        return 136;
+    }
+    session.Stop();
+    return 0;
+}
+
+static int TestStartSlotUsesPeerListRoundRobinPaths() {
+    TqConfig cfg;
+    cfg.QuicPeer = "36.1.1.10:443,59.1.1.10:8443";
+    cfg.QuicConnections = 2;
+
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(2, cfg);
+
+    std::vector<TqClientSlotPath> observed;
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotPathObserver = [&](size_t, const TqClientSlotPath& path) {
+        observed.push_back(path);
+    };
+    hooks.StartSlotOverride = [](size_t) {
+        return true;
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 140;
+    if (!session.ReconnectConnection("conn-1", err)) return 141;
+    if (observed.size() != 2) return 142;
+    if (observed[0].PeerHost != "36.1.1.10" ||
+        observed[0].PeerPort != 443 ||
+        !observed[0].LocalAddress.empty()) {
+        return 143;
+    }
+    if (observed[1].PeerHost != "59.1.1.10" ||
+        observed[1].PeerPort != 8443 ||
+        !observed[1].LocalAddress.empty()) {
+        return 144;
+    }
+    session.Stop();
+    return 0;
+}
+
 static int TestScheme2CredentialConfig() {
     TqConfig client;
     client.QuicCa = "ca.crt";
@@ -379,6 +464,8 @@ int main() {
     if (int rc = TestQuicPathSlotExpansion()) return rc;
     if (int rc = TestQuicPeerListSlotExpansionRoundRobin()) return rc;
     if (int rc = TestQuicPathModeRejectsSlotTopologyMutation()) return rc;
+    if (int rc = TestStartSlotUsesConfiguredPathSlots()) return rc;
+    if (int rc = TestStartSlotUsesPeerListRoundRobinPaths()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

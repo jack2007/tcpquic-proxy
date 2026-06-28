@@ -1,11 +1,12 @@
 #pragma once
 
 #include "msquic.hpp"
-#include "config.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
+
+struct TqConfig;
 
 struct TqEndpoint {
     std::string Host;
