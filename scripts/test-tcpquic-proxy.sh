@@ -463,6 +463,8 @@ grep -q "tcpquic-proxy smoke test" "$TMP_DIR/socks5.out" ||
 
 FORWARD_TARGET_PORT=$(pick_free_tcp_port)
 FORWARD_LISTEN_PORT=$(pick_free_tcp_port)
+FORWARD_HTTP_PORT=$(pick_free_tcp_port)
+FORWARD_SOCKS_PORT=$(pick_free_tcp_port)
 
 log "starting forward echo target on 127.0.0.1:${FORWARD_TARGET_PORT}"
 python3 - "$FORWARD_TARGET_PORT" >"$TMP_DIR/forward-echo.log" 2>&1 <<'PY' &
@@ -487,7 +489,7 @@ wait_tcp 127.0.0.1 "$FORWARD_TARGET_PORT" "forward echo target"
 kill "$CLIENT_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true
 CLIENT_PID=""
-CLIENT_PID=$(start_client_with_forward 4433 8080 1080 "$FORWARD_LISTEN_PORT" "$FORWARD_TARGET_PORT" off "$TMP_DIR/proxy-client-forward.log")
+CLIENT_PID=$(start_client_with_forward 4433 "$FORWARD_HTTP_PORT" "$FORWARD_SOCKS_PORT" "$FORWARD_LISTEN_PORT" "$FORWARD_TARGET_PORT" off "$TMP_DIR/proxy-client-forward.log")
 wait_tcp 127.0.0.1 "$FORWARD_LISTEN_PORT" "port forward listener"
 
 python3 - "$FORWARD_LISTEN_PORT" <<'PY'
