@@ -1,8 +1,5 @@
 #pragma once
 
-#define QUIC_API_ENABLE_INSECURE_FEATURES 1
-#define QUIC_API_ENABLE_PREVIEW_FEATURES 1
-
 #include "msquic.hpp"
 
 #include <cstdint>
