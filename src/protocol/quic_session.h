@@ -100,6 +100,9 @@ public:
     struct ReconnectTestHooks {
         std::function<bool(size_t index)> StartSlotOverride;
         std::function<void(size_t index, const TqClientSlotPath& path)> StartSlotPathObserver;
+        std::function<void(size_t index)> BeforePublishSlot;
+        std::function<QUIC_STATUS(size_t index)> ConnectionStartOverride;
+        std::function<void(size_t index, uint64_t generation)> ContextDeleted;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
@@ -121,6 +124,7 @@ private:
         std::shared_ptr<ClientSharedState> State;
         size_t SlotIndex{0};
         uint64_t Generation{0};
+        ~ClientConnContext();
     };
 
     struct ConnectionSlot {
@@ -200,7 +204,7 @@ private:
     std::shared_ptr<ClientSharedState> State{std::make_shared<ClientSharedState>()};
     std::shared_ptr<MsQuicApi> Api;
     std::unique_ptr<MsQuicRegistration> Registration;
-    std::unique_ptr<MsQuicConfiguration> Configuration;
+    std::shared_ptr<MsQuicConfiguration> Configuration;
 };
 
 class QuicServerSession {

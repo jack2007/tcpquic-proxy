@@ -587,7 +587,7 @@ void QuicClientSession::Stop() {
 void QuicClientSession::Stop(bool clearHandlers) {
     std::shared_ptr<MsQuicApi> apiLocal;
     std::unique_ptr<MsQuicRegistration> registrationLocal;
-    std::unique_ptr<MsQuicConfiguration> configurationLocal;
+    std::shared_ptr<MsQuicConfiguration> configurationLocal;
     std::shared_ptr<ClientSharedState> state = State;
     std::shared_ptr<ClientSessionGate> gate;
     {
@@ -1021,6 +1021,21 @@ bool QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS status) {
 }
 #endif
 
+QuicClientSession::ClientConnContext::~ClientConnContext() {
+#if defined(TQ_UNIT_TESTING)
+    std::function<void(size_t, uint64_t)> contextDeleted;
+    if (State) {
+        {
+            std::lock_guard<std::mutex> guard(State->Lock);
+            contextDeleted = State->TestHooks.ContextDeleted;
+        }
+    }
+    if (contextDeleted) {
+        contextDeleted(SlotIndex, Generation);
+    }
+#endif
+}
+
 void QuicClientSession::AbortAllTunnels() {
     std::vector<MsQuicConnection*> connections;
     {
@@ -1091,11 +1106,53 @@ bool QuicClientSession::StartSlot(size_t index) {
 #if defined(TQ_UNIT_TESTING)
     std::function<bool(size_t)> startSlotOverride;
     std::function<void(size_t, const TqClientSlotPath&)> startSlotPathObserver;
+    std::function<void(size_t)> beforePublishSlot;
+    std::function<QUIC_STATUS(size_t)> connectionStartOverride;
 #endif
 
     std::unique_ptr<MsQuicConnection> oldConnection;
     std::shared_ptr<ClientSharedState> state = State;
     TqClientSlotPath path;
+    uint64_t generation = 0;
+    std::shared_ptr<ClientSessionGate> gate;
+
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
+            return false;
+        }
+        gate = state->SessionGate;
+    }
+    if (!gate) {
+        return false;
+    }
+
+    struct LiveCallGuard {
+        std::shared_ptr<ClientSessionGate> Gate;
+        bool Active{false};
+        ~LiveCallGuard() {
+            if (Active) {
+                QuicClientSession::ReleaseLiveSession(Gate);
+            }
+        }
+    };
+
+    LiveCallGuard liveGuard{gate, false};
+    QuicClientSession* liveSession = AcquireLiveSession(gate);
+    if (liveSession != this) {
+        if (liveSession != nullptr) {
+            ReleaseLiveSession(gate);
+        }
+        return false;
+    }
+    liveGuard.Active = true;
+
+    auto SetSlotLastError = [&state](size_t slotIndex, std::string message) {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (slotIndex < state->Slots.size()) {
+            state->Slots[slotIndex].LastError = std::move(message);
+        }
+    };
 
     {
         std::scoped_lock guard(ConfigLock, state->Lock);
@@ -1110,6 +1167,8 @@ bool QuicClientSession::StartSlot(size_t index) {
 #if defined(TQ_UNIT_TESTING)
         startSlotOverride = state->TestHooks.StartSlotOverride;
         startSlotPathObserver = state->TestHooks.StartSlotPathObserver;
+        beforePublishSlot = state->TestHooks.BeforePublishSlot;
+        connectionStartOverride = state->TestHooks.ConnectionStartOverride;
 #endif
 
         auto& slot = state->Slots[index];
@@ -1120,6 +1179,7 @@ bool QuicClientSession::StartSlot(size_t index) {
         slot.Context = nullptr;
         slot.Connected = false;
         slot.RetryScheduled = false;
+        generation = slot.Generation;
         TqClientDebugLog("slot-reset", index, oldConnection.get());
     }
 
@@ -1142,157 +1202,96 @@ bool QuicClientSession::StartSlot(size_t index) {
     std::unique_ptr<MsQuicConnection> newConnection;
     MsQuicConnection* connectionToStart = nullptr;
     ClientConnContext* newContext = nullptr;
-    std::shared_ptr<ClientSessionGate> gate;
+    TqConfig configSnapshot;
+    MsQuicRegistration* registration = nullptr;
+    std::shared_ptr<MsQuicConfiguration> configuration;
     bool scheduleRetry = false;
+    std::string retryError;
 
     {
-        std::lock_guard<std::mutex> guard(state->Lock);
-        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
-            return false;
-        }
-        gate = state->SessionGate;
-    }
-
-    uint64_t generation = 0;
-    {
-        std::lock_guard<std::mutex> guard(state->Lock);
-        if (!state->Started || state->Stopping || index >= state->Slots.size()) {
-            return false;
-        }
-        generation = state->Slots[index].Generation;
-    }
-
-    QUIC_STATUS startStatus = QUIC_STATUS_SUCCESS;
-    {
-        std::unique_lock<std::mutex> configGuard(ConfigLock);
-
+        std::lock_guard<std::mutex> configGuard(ConfigLock);
         if (TqRuntimeTuningEnabled(Config)) {
             TqApplyRuntimeObservations(Config);
-            if (!Registration || !InitConfiguration(Config, *Registration, false, Configuration)) {
+            std::unique_ptr<MsQuicConfiguration> refreshedConfiguration;
+            if (!Registration || !InitConfiguration(Config, *Registration, false, refreshedConfiguration)) {
                 std::fprintf(stderr, "Configuration refresh failed\n");
-                {
-                    std::lock_guard<std::mutex> guard(state->Lock);
-                    if (index < state->Slots.size()) {
-                        state->Slots[index].LastError = "configuration refresh failed";
-                    }
-                }
-                scheduleRetry = true;
-            }
-        }
-
-        if (!scheduleRetry && (!Registration || !Configuration)) {
-            {
-                std::lock_guard<std::mutex> guard(state->Lock);
-                if (index < state->Slots.size()) {
-                    state->Slots[index].LastError = "session configuration unavailable";
-                }
-            }
-            scheduleRetry = true;
-        }
-
-        if (!scheduleRetry) {
-            newContext = new (std::nothrow) ClientConnContext{gate, state, index, generation};
-        }
-        if (!scheduleRetry && newContext == nullptr) {
-            {
-                std::lock_guard<std::mutex> guard(state->Lock);
-                if (index < state->Slots.size()) {
-                    state->Slots[index].LastError = "connection context allocation failed";
-                }
-            }
-            scheduleRetry = true;
-        }
-
-        if (!scheduleRetry) {
-            newConnection = std::make_unique<MsQuicConnection>(
-                    *Registration,
-                    CleanUpManual,
-                    QuicClientSession::ConnectionCallback,
-                    newContext);
-            if (!newConnection || !newConnection->IsValid()) {
-                const QUIC_STATUS initStatus =
-                    newConnection ? newConnection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY;
-                std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
-                    initStatus);
-                {
-                    std::lock_guard<std::mutex> guard(state->Lock);
-                    if (index < state->Slots.size()) {
-                        state->Slots[index].LastError = TqQuicStatusText("ConnectionOpen", initStatus);
-                    }
-                }
-                delete newContext;
-                newContext = nullptr;
-                newConnection.reset();
-                scheduleRetry = true;
-            }
-        }
-
-        if (!scheduleRetry && Config.QuicDisable1RttEncryption &&
-            !TqSetDisable1RttEncryption(newConnection.get(), "client")) {
-            {
-                std::lock_guard<std::mutex> guard(state->Lock);
-                if (index < state->Slots.size()) {
-                    state->Slots[index].LastError = "failed to disable 1-RTT encryption";
-                }
-            }
-            delete newContext;
-            newContext = nullptr;
-            newConnection.reset();
-            scheduleRetry = true;
-        }
-
-        if (!scheduleRetry && !path.LocalAddress.empty()) {
-            QuicAddr localAddr;
-            if (!TqMakeQuicAddr(TqEndpoint{path.LocalAddress, 0}, localAddr.SockAddr)) {
-                {
-                    std::lock_guard<std::mutex> guard(state->Lock);
-                    if (index < state->Slots.size()) {
-                        state->Slots[index].LastError =
-                            "invalid local address for path " + path.Name + ": " + path.LocalAddress;
-                    }
-                }
-                delete newContext;
-                newContext = nullptr;
-                newConnection.reset();
+                retryError = "configuration refresh failed";
                 scheduleRetry = true;
             } else {
-                const QUIC_STATUS bindStatus = newConnection->SetLocalAddr(localAddr);
-                if (QUIC_FAILED(bindStatus)) {
-                    {
-                        std::lock_guard<std::mutex> guard(state->Lock);
-                        if (index < state->Slots.size()) {
-                            state->Slots[index].LastError =
-                                TqQuicStatusText(("SetLocalAddr " + path.Name).c_str(), bindStatus);
-                        }
-                    }
-                    delete newContext;
-                    newContext = nullptr;
-                    newConnection.reset();
-                    scheduleRetry = true;
-                }
+                Configuration = std::move(refreshedConfiguration);
             }
         }
 
-        {
-            std::lock_guard<std::mutex> guard(state->Lock);
-            if (!state->Started || state->Stopping || index >= state->Slots.size()) {
-                delete newContext;
-                return false;
-            }
+        configSnapshot = Config;
+        registration = Registration.get();
+        configuration = Configuration;
+    }
 
-            auto& slot = state->Slots[index];
-            if (!scheduleRetry) {
-                slot.Connection = std::move(newConnection);
-                slot.Context = newContext;
-                connectionToStart = slot.Connection.get();
-                TqClientDebugLog("connection-opened", index, connectionToStart,
-                    slot.Connection->GetInitStatus());
-            }
+    if (scheduleRetry) {
+        SetSlotLastError(index, std::move(retryError));
+    }
+
+    if (!scheduleRetry && (!registration || !configuration)) {
+        SetSlotLastError(index, "session configuration unavailable");
+        scheduleRetry = true;
+    }
+
+    if (!scheduleRetry) {
+        newContext = new (std::nothrow) ClientConnContext{gate, state, index, generation};
+    }
+    if (!scheduleRetry && newContext == nullptr) {
+        SetSlotLastError(index, "connection context allocation failed");
+        scheduleRetry = true;
+    }
+
+    auto ResetUnpublishedConnectionAndContext = [&newConnection, &newContext]() {
+        if (newConnection) {
+            newConnection->Context = nullptr;
         }
-        if (!scheduleRetry) {
-            TqClientDebugLog("connection-start-before", index, connectionToStart);
-            startStatus = connectionToStart->Start(*Configuration, path.PeerHost.c_str(), path.PeerPort);
-            TqClientDebugLog("connection-start-after", index, connectionToStart, startStatus);
+        delete newContext;
+        newContext = nullptr;
+        newConnection.reset();
+    };
+
+    if (!scheduleRetry) {
+        newConnection = std::make_unique<MsQuicConnection>(
+                *registration,
+                CleanUpManual,
+                QuicClientSession::ConnectionCallback,
+                newContext);
+        if (!newConnection || !newConnection->IsValid()) {
+            const QUIC_STATUS initStatus =
+                newConnection ? newConnection->GetInitStatus() : QUIC_STATUS_OUT_OF_MEMORY;
+            std::fprintf(stderr, "ConnectionOpen failed, 0x%x\n",
+                initStatus);
+            SetSlotLastError(index, TqQuicStatusText("ConnectionOpen", initStatus));
+            ResetUnpublishedConnectionAndContext();
+            scheduleRetry = true;
+        }
+    }
+
+    if (!scheduleRetry && configSnapshot.QuicDisable1RttEncryption &&
+        !TqSetDisable1RttEncryption(newConnection.get(), "client")) {
+        SetSlotLastError(index, "failed to disable 1-RTT encryption");
+        ResetUnpublishedConnectionAndContext();
+        scheduleRetry = true;
+    }
+
+    if (!scheduleRetry && !path.LocalAddress.empty()) {
+        QuicAddr localAddr;
+        if (!TqMakeQuicAddr(TqEndpoint{path.LocalAddress, 0}, localAddr.SockAddr)) {
+            SetSlotLastError(index,
+                "invalid local address for path " + path.Name + ": " + path.LocalAddress);
+            ResetUnpublishedConnectionAndContext();
+            scheduleRetry = true;
+        } else {
+            const QUIC_STATUS bindStatus = newConnection->SetLocalAddr(localAddr);
+            if (QUIC_FAILED(bindStatus)) {
+                SetSlotLastError(index,
+                    TqQuicStatusText(("SetLocalAddr " + path.Name).c_str(), bindStatus));
+                ResetUnpublishedConnectionAndContext();
+                scheduleRetry = true;
+            }
         }
     }
 
@@ -1301,10 +1300,49 @@ bool QuicClientSession::StartSlot(size_t index) {
         return false;
     }
 
+#if defined(TQ_UNIT_TESTING)
+    if (beforePublishSlot) {
+        beforePublishSlot(index);
+    }
+#endif
+
+    bool published = false;
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (!state->Started || state->Stopping || index >= state->Slots.size() ||
+            state->Slots[index].Generation != generation) {
+            published = false;
+        } else {
+            auto& slot = state->Slots[index];
+            slot.Connection = std::move(newConnection);
+            slot.Context = newContext;
+            connectionToStart = slot.Connection.get();
+            TqClientDebugLog("connection-opened", index, connectionToStart,
+                slot.Connection->GetInitStatus());
+            published = true;
+        }
+    }
+    if (!published) {
+        ResetUnpublishedConnectionAndContext();
+        return false;
+    }
+
+    QUIC_STATUS startStatus = QUIC_STATUS_SUCCESS;
+    TqClientDebugLog("connection-start-before", index, connectionToStart);
+#if defined(TQ_UNIT_TESTING)
+    if (connectionStartOverride) {
+        startStatus = connectionStartOverride(index);
+    } else
+#endif
+    startStatus = connectionToStart->Start(*configuration, path.PeerHost.c_str(), path.PeerPort);
+    TqClientDebugLog("connection-start-after", index, connectionToStart, startStatus);
+
     if (TqTraceEnabled()) {
         TqTraceQuicConnecting("client", static_cast<uint32_t>(index + 1), path.PeerText.c_str());
     }
 
+    std::unique_ptr<MsQuicConnection> failedStartConnection;
+    ClientConnContext* failedStartContext = nullptr;
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         if (!state->Started || state->Stopping || index >= state->Slots.size()) {
@@ -1320,11 +1358,17 @@ bool QuicClientSession::StartSlot(size_t index) {
             std::fprintf(stderr, "ConnectionStart failed, 0x%x\n", startStatus);
             slot.LastError = TqQuicStatusText("ConnectionStart", startStatus);
             slot.Context = nullptr;
-            delete newContext;
-            slot.Connection.reset();
+            if (slot.Connection.get() == connectionToStart) {
+                slot.Connection->Context = nullptr;
+                failedStartConnection = std::move(slot.Connection);
+            }
+            failedStartContext = newContext;
+            newContext = nullptr;
             scheduleRetry = true;
         }
     }
+    delete failedStartContext;
+    failedStartConnection.reset();
     if (scheduleRetry) {
         ScheduleStartRetry(index);
         return false;

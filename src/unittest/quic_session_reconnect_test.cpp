@@ -403,6 +403,138 @@ static int TestStartSlotUsesPeerListRoundRobinPaths() {
     return 0;
 }
 
+static int TestStartSlotDoesNotOverwriteChangedGeneration() {
+    QuicClientSession session;
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.QuicConnections = 1;
+    cfg.QuicCa = "cert/ca.crt";
+    cfg.QuicDisable1RttEncryption = false;
+
+    std::atomic<int> beforePublishCalls{0};
+    std::atomic<bool> reconnectDuringPublish{false};
+    std::atomic<bool> deletedStaleGeneration{false};
+    if (!session.Start(cfg)) return 1801;
+
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.BeforePublishSlot = [&](size_t index) {
+        if (index != 0) {
+            return;
+        }
+        beforePublishCalls.fetch_add(1, std::memory_order_acq_rel);
+        if (!reconnectDuringPublish.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+        std::string err;
+        (void)session.ReconnectConnection("conn-0", err);
+    };
+    hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
+        if (index == 0 && generation == 1) {
+            deletedStaleGeneration.store(true, std::memory_order_release);
+        }
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    reconnectDuringPublish.store(true, std::memory_order_release);
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) {
+        session.Stop();
+        return 1802;
+    }
+    for (int i = 0; i < 50 && !deletedStaleGeneration.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!deletedStaleGeneration.load(std::memory_order_acquire)) {
+        session.Stop();
+        return 1804;
+    }
+    session.Stop();
+
+    if (beforePublishCalls.load(std::memory_order_acquire) < 2) return 1803;
+    return 0;
+}
+
+static int TestStartSlotCleansUnpublishedContextOnLocalBindFailure() {
+    QuicClientSession session;
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicCa = "cert/ca.crt";
+    cfg.QuicDisable1RttEncryption = false;
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"bad-local", "not-an-ip", "127.0.0.1:4433", 1});
+
+    if (!session.Start(cfg)) return 1811;
+
+    std::atomic<int> deletedContexts{0};
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
+        if (index == 0 && generation == 1) {
+            deletedContexts.fetch_add(1, std::memory_order_acq_rel);
+        }
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) {
+        session.Stop();
+        return 1812;
+    }
+    for (int i = 0; i < 50 && deletedContexts.load(std::memory_order_acquire) == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    session.Stop();
+
+    if (deletedContexts.load(std::memory_order_acquire) == 0) return 1813;
+    return 0;
+}
+
+static int TestConnectionStartFailureCleansContextAndSchedulesRetry() {
+    QuicClientSession session;
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.QuicConnections = 1;
+    cfg.QuicCa = "cert/ca.crt";
+    cfg.QuicDisable1RttEncryption = false;
+
+    std::atomic<int> scheduled{0};
+    std::function<void()> retryTask;
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds, std::function<void()> task) {
+            scheduled.fetch_add(1, std::memory_order_acq_rel);
+            retryTask = std::move(task);
+            return true;
+        });
+
+    if (!session.Start(cfg)) return 1821;
+
+    std::atomic<int> deletedContexts{0};
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.ConnectionStartOverride = [](size_t index) {
+        return index == 0 ? QUIC_STATUS_ABORTED : QUIC_STATUS_SUCCESS;
+    };
+    hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
+        if (index == 0 && generation == 1) {
+            deletedContexts.fetch_add(1, std::memory_order_acq_rel);
+        }
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) {
+        session.Stop();
+        return 1822;
+    }
+    for (int i = 0; i < 50 && deletedContexts.load(std::memory_order_acquire) == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    session.Stop();
+
+    if (deletedContexts.load(std::memory_order_acquire) == 0) return 1823;
+    if (scheduled.load(std::memory_order_acquire) == 0 || !retryTask) return 1824;
+    return 0;
+}
+
 static int TestConnectionSnapshotIncludesConfiguredPathMetadata() {
     TqConfig cfg;
     cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
@@ -529,6 +661,9 @@ int main() {
     if (int rc = TestQuicPathModeRejectsSlotTopologyMutation()) return rc;
     if (int rc = TestStartSlotUsesConfiguredPathSlots()) return rc;
     if (int rc = TestStartSlotUsesPeerListRoundRobinPaths()) return rc;
+    if (int rc = TestStartSlotDoesNotOverwriteChangedGeneration()) return rc;
+    if (int rc = TestStartSlotCleansUnpublishedContextOnLocalBindFailure()) return rc;
+    if (int rc = TestConnectionStartFailureCleansContextAndSchedulesRetry()) return rc;
     if (int rc = TestConnectionSnapshotIncludesConfiguredPathMetadata()) return rc;
     if (int rc = TestPickConnectionRoundRobinSkipsUnavailableSlots()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
