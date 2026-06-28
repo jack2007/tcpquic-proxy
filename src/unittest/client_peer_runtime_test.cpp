@@ -1,6 +1,24 @@
 #include "client_peer_runtime.h"
+#include "client_ingress_reactor.h"
+#include "speed_test.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
+#include <thread>
+#include <vector>
+
+bool TqAttachServerSpeedControlStream(
+    TqServerSpeedTestController&,
+    MsQuicConnection*,
+    MsQuicStream*,
+    std::vector<uint8_t>,
+    std::function<void()>) {
+    return false;
+}
 
 static int TestPrimaryPeerConfigUsesCliFields() {
     TqConfig cfg;
@@ -78,9 +96,261 @@ static int TestPeerConfigOverlayUsesBaseDefaults() {
     return 0;
 }
 
+static int TestConnectionStateCallbackDoesNotSynchronouslyOpenListeners() {
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.SocksListen = "127.0.0.1:0";
+    cfg.HttpListen.clear();
+    cfg.PortForwards.clear();
+    cfg.QuicConnections = 1;
+
+    TqClientIngressReactor ingress;
+    if (!ingress.Start()) return 1701;
+
+    auto runtime = std::make_shared<TqClientPeerRuntime>("peer-a", cfg, &ingress);
+    std::string err;
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
+        ingress.Stop();
+        return 1702;
+    }
+
+    std::atomic<bool> blockerStarted{false};
+    std::atomic<bool> releaseBlocker{false};
+    if (!ingress.EnqueueDelayed(std::chrono::milliseconds(0), [&blockerStarted, &releaseBlocker]() {
+            blockerStarted.store(true, std::memory_order_release);
+            for (int i = 0; i < 500 && !releaseBlocker.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        })) {
+        ingress.Stop();
+        return 1705;
+    }
+
+    for (int i = 0; i < 50 && !blockerStarted.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!blockerStarted.load(std::memory_order_acquire)) {
+        releaseBlocker.store(true, std::memory_order_release);
+        ingress.Stop();
+        return 1706;
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    runtime->ScheduleConnectionStateApplyForTest(1);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    if (elapsed > std::chrono::milliseconds(100)) {
+        releaseBlocker.store(true, std::memory_order_release);
+        ingress.Stop();
+        return 1703;
+    }
+
+    if (ingress.PeerCountForTest() != 0) {
+        releaseBlocker.store(true, std::memory_order_release);
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1707;
+    }
+
+    releaseBlocker.store(true, std::memory_order_release);
+    for (int i = 0; i < 50 && ingress.PeerCountForTest() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (ingress.PeerCountForTest() != 1) {
+        ingress.Stop();
+        return 1704;
+    }
+
+    runtime->StopAccepting();
+    ingress.Stop();
+    return 0;
+}
+
+static int TestStopAcceptingDoesNotHangBehindPendingListenerApply() {
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.SocksListen = "127.0.0.1:0";
+    cfg.HttpListen.clear();
+    cfg.PortForwards.clear();
+    cfg.QuicConnections = 1;
+
+    TqClientIngressReactor ingress;
+    if (!ingress.Start()) return 1801;
+
+    auto runtime = std::make_shared<TqClientPeerRuntime>("peer-b", cfg, &ingress);
+    std::string err;
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
+        ingress.Stop();
+        return 1802;
+    }
+    runtime->ScheduleConnectionStateApplyForTest(1);
+    for (int i = 0; i < 50 && ingress.PeerCountForTest() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (ingress.PeerCountForTest() != 1) {
+        ingress.Stop();
+        return 1807;
+    }
+
+    std::atomic<bool> blockerStarted{false};
+    std::atomic<bool> releaseBlocker{false};
+    if (!ingress.EnqueueDelayed(std::chrono::milliseconds(0), [&blockerStarted, &releaseBlocker]() {
+            blockerStarted.store(true, std::memory_order_release);
+            for (int i = 0; i < 500 && !releaseBlocker.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        })) {
+        ingress.Stop();
+        return 1803;
+    }
+
+    for (int i = 0; i < 50 && !blockerStarted.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!blockerStarted.load(std::memory_order_acquire)) {
+        releaseBlocker.store(true, std::memory_order_release);
+        ingress.Stop();
+        return 1804;
+    }
+
+    runtime->ScheduleConnectionStateApplyForTest(1);
+
+    auto stopFinished = std::make_shared<std::atomic<bool>>(false);
+    std::thread stopper([runtime, stopFinished]() {
+        runtime->StopAccepting();
+        stopFinished->store(true, std::memory_order_release);
+    });
+
+    releaseBlocker.store(true, std::memory_order_release);
+    for (int i = 0; i < 50 && !stopFinished->load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!stopFinished->load(std::memory_order_acquire)) {
+        stopper.detach();
+        return 1805;
+    }
+    stopper.join();
+
+    for (int i = 0; i < 50 && ingress.PeerCountForTest() != 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (ingress.PeerCountForTest() != 0) {
+        runtime->StopAll();
+        ingress.Stop();
+        return 1806;
+    }
+
+    runtime->StopAll();
+    ingress.Stop();
+    return 0;
+}
+
+static int TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen() {
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.SocksListen = "127.0.0.1:0";
+    cfg.HttpListen.clear();
+    cfg.PortForwards.clear();
+    cfg.QuicConnections = 1;
+
+    TqClientIngressReactor ingress;
+    if (!ingress.Start()) return 1901;
+
+    auto runtime = std::make_shared<TqClientPeerRuntime>("peer-c", cfg, &ingress);
+    std::string err;
+    if (!runtime->EnableAcceptingAndApplyCurrentConnectionState(err, false)) {
+        ingress.Stop();
+        return 1902;
+    }
+
+    std::atomic<bool> hookStarted{false};
+    std::atomic<bool> releaseHook{false};
+    runtime->SetBeforeOpenIngressForTest([&hookStarted, &releaseHook]() {
+        hookStarted.store(true, std::memory_order_release);
+        for (int i = 0; i < 500 && !releaseHook.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    runtime->ScheduleConnectionStateApplyForTest(1);
+    for (int i = 0; i < 50 && !hookStarted.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!hookStarted.load(std::memory_order_acquire)) {
+        releaseHook.store(true, std::memory_order_release);
+        runtime->SetBeforeOpenIngressForTest(nullptr);
+        ingress.Stop();
+        return 1903;
+    }
+
+    auto syncFinished = std::make_shared<std::atomic<bool>>(false);
+    auto syncResult = std::make_shared<std::atomic<bool>>(false);
+    std::thread syncApply([runtime, syncFinished, syncResult]() {
+        std::string syncErr;
+        syncResult->store(
+            runtime->ApplyConnectionStateForTest(1, syncErr, false),
+            std::memory_order_release);
+        syncFinished->store(true, std::memory_order_release);
+    });
+
+    for (int i = 0; i < 5 && !syncFinished->load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (syncFinished->load(std::memory_order_acquire)) {
+        releaseHook.store(true, std::memory_order_release);
+        syncApply.join();
+        runtime->SetBeforeOpenIngressForTest(nullptr);
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1904;
+    }
+    if (ingress.PeerCountForTest() != 0) {
+        releaseHook.store(true, std::memory_order_release);
+        syncApply.join();
+        runtime->SetBeforeOpenIngressForTest(nullptr);
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1905;
+    }
+
+    releaseHook.store(true, std::memory_order_release);
+    for (int i = 0; i < 50 && !syncFinished->load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!syncFinished->load(std::memory_order_acquire)) {
+        syncApply.detach();
+        runtime->SetBeforeOpenIngressForTest(nullptr);
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1906;
+    }
+    syncApply.join();
+    runtime->SetBeforeOpenIngressForTest(nullptr);
+
+    if (!syncResult->load(std::memory_order_acquire)) {
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1907;
+    }
+    if (ingress.PeerCountForTest() != 1) {
+        runtime->StopAccepting();
+        ingress.Stop();
+        return 1908;
+    }
+
+    runtime->StopAccepting();
+    ingress.Stop();
+    return 0;
+}
+
 int main() {
     if (int rc = TestPrimaryPeerConfigUsesCliFields()) return rc;
     if (int rc = TestPeerConfigOverlayUsesPeerOverrides()) return rc;
     if (int rc = TestPeerConfigOverlayUsesBaseDefaults()) return rc;
+    if (int rc = TestConnectionStateCallbackDoesNotSynchronouslyOpenListeners()) return rc;
+    if (int rc = TestStopAcceptingDoesNotHangBehindPendingListenerApply()) return rc;
+    if (int rc = TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen()) return rc;
     return 0;
 }

@@ -6,6 +6,21 @@
 #include <thread>
 #include <utility>
 
+namespace {
+
+void TqLogClientPeerListenerError(
+    TqClientPeerLogMode logMode,
+    const std::string& peerId,
+    const char* message) {
+    if (logMode == TqClientPeerLogMode::Primary) {
+        std::fprintf(stderr, "tcpquic-proxy: %s\n", message);
+    } else {
+        std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n", peerId.c_str(), message);
+    }
+}
+
+} // namespace
+
 TqClientPeerRuntime::TqClientPeerRuntime(
     std::string peerId,
     TqConfig config,
@@ -32,15 +47,7 @@ bool TqClientPeerRuntime::Start(std::string& err) {
         if (!self) {
             return;
         }
-        std::string listenerErr;
-        if (!self->ApplyConnectionState(connectedCount, listenerErr, false)) {
-            if (self->LogMode == TqClientPeerLogMode::Primary) {
-                std::fprintf(stderr, "tcpquic-proxy: %s\n", listenerErr.c_str());
-            } else {
-                std::fprintf(stderr, "tcpquic-proxy: peer %s %s\n",
-                    self->PeerId.c_str(), listenerErr.c_str());
-            }
-        }
+        self->ScheduleConnectionStateApply(connectedCount);
     });
     if (!Quic->Start(Config)) {
         err = "failed to start QUIC client for " + PeerId;
@@ -171,25 +178,24 @@ bool TqClientPeerRuntime::EnsureAnyConnected(std::chrono::milliseconds timeout) 
 bool TqClientPeerRuntime::EnableAcceptingAndApplyCurrentConnectionState(
     std::string& err,
     bool requireConnected) {
-    std::lock_guard<std::mutex> guard(ListenerMutex);
-    AcceptingEnabled = true;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = true;
+    }
     const bool applied = ApplyCurrentConnectionStateLocked(err, requireConnected);
     if (!applied) {
-        AcceptingEnabled = false;
-        CloseListenersLocked();
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            AcceptingEnabled = false;
+            DesiredListenersOpen = false;
+            PendingListenerUpdate = false;
+        }
+        CloseListeners();
     }
     return applied;
 }
 
-bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
-    if (ListenersOpen) {
-        return true;
-    }
-    if (Ingress == nullptr) {
-        err = "listener runtime is not initialized";
-        return false;
-    }
-
+TqClientIngressPeer TqClientPeerRuntime::MakeIngressPeer() {
     TqClientIngressPeer peer{};
     peer.PeerId = PeerId;
     peer.SocksListen = Config.SocksListen;
@@ -216,12 +222,10 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
     peer.CancelTunnel = [](TqClientTunnelOpenHandle* handle) {
         TqCancelClientTunnelOpen(handle);
     };
-    if (!Ingress->AddPeer(peer)) {
-        err = "failed to add ingress reactor peer " + PeerId;
-        return false;
-    }
+    return peer;
+}
 
-    ListenersOpen = true;
+void TqClientPeerRuntime::LogListenersOpened() {
     if (LogMode == TqClientPeerLogMode::Primary) {
         if (!Config.SocksListen.empty()) {
             std::fprintf(stderr, "tcpquic-proxy: SOCKS5 listening on %s\n", Config.SocksListen.c_str());
@@ -249,11 +253,92 @@ bool TqClientPeerRuntime::OpenListenersLocked(std::string& err) {
                 PeerId.c_str(), forward.Listen.c_str(), target.c_str());
         }
     }
+}
+
+bool TqClientPeerRuntime::OpenListeners(std::string& err, bool waitForInFlight) {
+#ifdef TQ_UNIT_TESTING
+    std::function<void()> beforeOpenHook;
+#endif
+    {
+        std::unique_lock<std::mutex> guard(ListenerMutex);
+        for (;;) {
+            if (ListenersOpen) {
+                return true;
+            }
+            if (!AcceptingEnabled || !DesiredListenersOpen) {
+                return true;
+            }
+            if (!ListenersOpening) {
+                ListenersOpening = true;
+#ifdef TQ_UNIT_TESTING
+                beforeOpenHook = BeforeOpenIngressForTest;
+#endif
+                break;
+            }
+            if (!waitForInFlight) {
+                return true;
+            }
+            ListenerCv.wait(guard, [this]() {
+                return !ListenersOpening;
+            });
+        }
+    }
+    if (Ingress == nullptr) {
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            ListenersOpening = false;
+        }
+        ListenerCv.notify_all();
+        err = "listener runtime is not initialized";
+        return false;
+    }
+
+    TqClientIngressPeer peer = MakeIngressPeer();
+#ifdef TQ_UNIT_TESTING
+    if (beforeOpenHook) {
+        beforeOpenHook();
+    }
+#endif
+    if (!Ingress->AddPeer(peer)) {
+        bool alreadyOpen = false;
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            ListenersOpening = false;
+            alreadyOpen = ListenersOpen;
+        }
+        ListenerCv.notify_all();
+        if (alreadyOpen) {
+            return true;
+        }
+        err = "failed to add ingress reactor peer " + PeerId;
+        return false;
+    }
+
+    bool keepOpen = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        ListenersOpening = false;
+        keepOpen = AcceptingEnabled && DesiredListenersOpen;
+        if (keepOpen) {
+            ListenersOpen = true;
+        }
+    }
+    ListenerCv.notify_all();
+    if (!keepOpen) {
+        (void)Ingress->RemovePeer(PeerId);
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            ListenersOpen = false;
+        }
+        ListenerCv.notify_all();
+        return true;
+    }
+
+    LogListenersOpened();
     return true;
 }
 
 bool TqClientPeerRuntime::ApplyCurrentConnectionState(std::string& err, bool requireConnected) {
-    std::lock_guard<std::mutex> guard(ListenerMutex);
     return ApplyCurrentConnectionStateLocked(err, requireConnected);
 }
 
@@ -261,19 +346,27 @@ bool TqClientPeerRuntime::ApplyConnectionState(
     uint32_t connectedCount,
     std::string& err,
     bool requireConnected) {
-    std::lock_guard<std::mutex> guard(ListenerMutex);
     return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
 }
 
 bool TqClientPeerRuntime::ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected) {
-    if (!AcceptingEnabled) {
-        CloseListenersLocked();
-        if (requireConnected) {
-            err = "listener accepting is disabled";
-            return false;
+    bool accepting = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        accepting = AcceptingEnabled;
+        if (!AcceptingEnabled) {
+            DesiredListenersOpen = false;
         }
-        return true;
     }
+    if (!accepting) {
+        CloseListeners();
+        if (!requireConnected) {
+            return true;
+        }
+        err = "listener accepting is disabled";
+        return false;
+    }
+
     const uint32_t connectedCount = Quic ? Quic->ConnectedConnectionCount() : 0;
     return ApplyConnectionStateLocked(connectedCount, err, requireConnected);
 }
@@ -282,28 +375,130 @@ bool TqClientPeerRuntime::ApplyConnectionStateLocked(
     uint32_t connectedCount,
     std::string& err,
     bool requireConnected) {
-    if (!AcceptingEnabled || connectedCount == 0) {
-        CloseListenersLocked();
-        if (requireConnected) {
-            err = AcceptingEnabled ? "no connected QUIC connection" : "listener accepting is disabled";
-            return false;
-        }
-        return true;
+    bool desiredOpen = false;
+    bool accepting = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        accepting = AcceptingEnabled;
+        DesiredListenersOpen = AcceptingEnabled && connectedCount > 0;
+        desiredOpen = DesiredListenersOpen;
     }
-    return OpenListenersLocked(err);
+    if (!desiredOpen) {
+        CloseListeners();
+        if (!requireConnected) {
+            return true;
+        }
+        err = accepting ? "no connected QUIC connection" : "listener accepting is disabled";
+        return false;
+    }
+    return OpenListeners(err, true);
 }
 
-void TqClientPeerRuntime::CloseListenersLocked() {
-    if (ListenersOpen && Ingress != nullptr) {
+void TqClientPeerRuntime::ScheduleConnectionStateApply(uint32_t connectedCount) {
+    bool shouldEnqueue = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        DesiredListenersOpen = AcceptingEnabled && connectedCount > 0;
+        if (!PendingListenerUpdate) {
+            PendingListenerUpdate = true;
+            shouldEnqueue = true;
+        }
+    }
+    if (!shouldEnqueue) {
+        return;
+    }
+    if (Ingress == nullptr) {
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            PendingListenerUpdate = false;
+        }
+        TqLogClientPeerListenerError(
+            LogMode,
+            PeerId,
+            "failed to schedule listener update: listener runtime is not initialized");
+        return;
+    }
+    std::weak_ptr<TqClientPeerRuntime> weakSelf = shared_from_this();
+    if (!Ingress->EnqueueDelayed(std::chrono::milliseconds(0), [weakSelf]() {
+            auto self = weakSelf.lock();
+            if (self) {
+                self->FlushPendingListenerUpdate();
+            }
+        })) {
+        {
+            std::lock_guard<std::mutex> guard(ListenerMutex);
+            PendingListenerUpdate = false;
+        }
+        TqLogClientPeerListenerError(
+            LogMode,
+            PeerId,
+            "failed to schedule listener update");
+    }
+}
+
+void TqClientPeerRuntime::FlushPendingListenerUpdate() {
+    std::string err;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        PendingListenerUpdate = false;
+    }
+    if (!ApplyDesiredListenerState(err)) {
+        TqLogClientPeerListenerError(LogMode, PeerId, err.c_str());
+    }
+}
+
+bool TqClientPeerRuntime::ApplyDesiredListenerState(std::string& err) {
+    bool desiredOpen = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        desiredOpen = AcceptingEnabled && DesiredListenersOpen;
+    }
+    if (!desiredOpen) {
+        CloseListeners();
+        return true;
+    }
+    return OpenListeners(err, false);
+}
+
+#ifdef TQ_UNIT_TESTING
+void TqClientPeerRuntime::ScheduleConnectionStateApplyForTest(uint32_t connectedCount) {
+    ScheduleConnectionStateApply(connectedCount);
+}
+
+bool TqClientPeerRuntime::ApplyConnectionStateForTest(
+    uint32_t connectedCount,
+    std::string& err,
+    bool requireConnected) {
+    return ApplyConnectionState(connectedCount, err, requireConnected);
+}
+
+void TqClientPeerRuntime::SetBeforeOpenIngressForTest(std::function<void()> hook) {
+    std::lock_guard<std::mutex> guard(ListenerMutex);
+    BeforeOpenIngressForTest = std::move(hook);
+}
+#endif
+
+void TqClientPeerRuntime::CloseListeners() {
+    bool shouldClose = false;
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        shouldClose = ListenersOpen;
+        ListenersOpen = false;
+    }
+    ListenerCv.notify_all();
+    if (shouldClose && Ingress != nullptr) {
         (void)Ingress->RemovePeer(PeerId);
     }
-    ListenersOpen = false;
 }
 
 void TqClientPeerRuntime::DisableAccepting() {
-    std::lock_guard<std::mutex> guard(ListenerMutex);
-    AcceptingEnabled = false;
-    CloseListenersLocked();
+    {
+        std::lock_guard<std::mutex> guard(ListenerMutex);
+        AcceptingEnabled = false;
+        DesiredListenersOpen = false;
+        PendingListenerUpdate = false;
+    }
+    CloseListeners();
 }
 
 TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(

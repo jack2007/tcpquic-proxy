@@ -1063,9 +1063,80 @@ set_property(TARGET tcpquic_server_admin_test APPEND PROPERTY BUILD_RPATH "$ORIG
 
 add_executable(tcpquic_client_peer_runtime_test
     unittest/client_peer_runtime_test.cpp
+    runtime/client_peer_runtime.cpp
+    ingress/client_ingress_reactor.cpp
+    ingress/client_ingress_state.cpp
+    ingress/http_connect_server.cpp
+    ingress/proxy_auth.cpp
+    ingress/socks5_server.cpp
+    protocol/quic_address.cpp
+    protocol/quic_session.cpp
+    protocol/compress.cpp
+    protocol/control_protocol.cpp
+    config/config.cpp
+    config/tuning.cpp
+    acl/acl.cpp
+    tunnel/tcp_tunnel.cpp
+    tunnel/tcp_dialer.cpp
+    tunnel/tunnel_registry.cpp
+    tunnel/tunnel_reaper.cpp
+    tunnel/relay.cpp
+    runtime/listen_socket.cpp
+    runtime/relay_metrics.cpp
+    runtime/thread_pool.cpp
+    runtime/trace.cpp
+    platform/exe_path.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(tcpquic_client_peer_runtime_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/linux_relay_worker.cpp
+        runtime/linux_reactor.cpp
+    )
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_sources(tcpquic_client_peer_runtime_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/darwin_relay_worker.cpp
+        runtime/darwin_reactor.cpp
+    )
+endif()
+if(WIN32)
+    target_sources(tcpquic_client_peer_runtime_test PRIVATE
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        acl/acl_filter.cpp
+        tunnel/relay_alloc.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/windows_relay_worker.cpp
+        runtime/windows_reactor.cpp
+    )
+endif()
 tcpquic_target_include_dirs(tcpquic_client_peer_runtime_test)
-target_compile_definitions(tcpquic_client_peer_runtime_test PRIVATE TQ_UNIT_TESTING=1)
+target_compile_definitions(tcpquic_client_peer_runtime_test PRIVATE ${TCPQUIC_TEST_DEFS} TQ_UNIT_TESTING=1)
+target_link_libraries(tcpquic_client_peer_runtime_test PRIVATE ${TCPQUIC_TEST_LIBS} Threads::Threads inc warnings msquic logging base_link spdlog::spdlog cpp_httplib)
+tcpquic_link_quic_address_deps(tcpquic_client_peer_runtime_test)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
+    target_link_libraries(tcpquic_client_peer_runtime_test PRIVATE ${TCPQUIC_CARES_TARGET})
+endif()
+if(BUILD_SHARED_LIBS)
+    target_link_libraries(tcpquic_client_peer_runtime_test PRIVATE msquic_platform)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    tcpquic_link_mimalloc(tcpquic_client_peer_runtime_test)
+endif()
+if(WIN32)
+    tcpquic_link_mimalloc(tcpquic_client_peer_runtime_test)
+endif()
 set_property(TARGET tcpquic_client_peer_runtime_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_client_peer_runtime_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -1191,6 +1262,7 @@ if(WIN32)
     set(TCPQUIC_MSQUIC_RUNTIME_TARGETS
         tcpquic_tunnel_test
         tcpquic_router_runtime_test
+        tcpquic_client_peer_runtime_test
         ${TCPQUIC_WINDOWS_TEST_TARGETS}
     )
     foreach(target IN LISTS TCPQUIC_MSQUIC_RUNTIME_TARGETS)

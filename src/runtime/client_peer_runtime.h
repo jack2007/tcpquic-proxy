@@ -9,6 +9,8 @@
 #include "tcp_tunnel.h"
 
 #include <chrono>
+#include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -79,14 +81,24 @@ public:
     MsQuicConnection* PickConnection();
     bool EnsureAnyConnected(std::chrono::milliseconds timeout);
     bool EnableAcceptingAndApplyCurrentConnectionState(std::string& err, bool requireConnected);
+#ifdef TQ_UNIT_TESTING
+    void ScheduleConnectionStateApplyForTest(uint32_t connectedCount);
+    bool ApplyConnectionStateForTest(uint32_t connectedCount, std::string& err, bool requireConnected);
+    void SetBeforeOpenIngressForTest(std::function<void()> hook);
+#endif
 
 private:
-    bool OpenListenersLocked(std::string& err);
+    TqClientIngressPeer MakeIngressPeer();
+    void LogListenersOpened();
+    bool OpenListeners(std::string& err, bool waitForInFlight);
+    void CloseListeners();
     bool ApplyConnectionState(uint32_t connectedCount, std::string& err, bool requireConnected);
     bool ApplyCurrentConnectionState(std::string& err, bool requireConnected);
     bool ApplyConnectionStateLocked(uint32_t connectedCount, std::string& err, bool requireConnected);
     bool ApplyCurrentConnectionStateLocked(std::string& err, bool requireConnected);
-    void CloseListenersLocked();
+    void ScheduleConnectionStateApply(uint32_t connectedCount);
+    void FlushPendingListenerUpdate();
+    bool ApplyDesiredListenerState(std::string& err);
     void DisableAccepting();
     TqClientTunnelOpenHandle* StartTunnel(
         const TunnelRequest& req,
@@ -98,10 +110,17 @@ private:
     TqClientPeerLogMode LogMode{TqClientPeerLogMode::Peer};
     mutable std::mutex TunnelStartMutex;
     mutable std::mutex ListenerMutex;
+    std::condition_variable ListenerCv;
     std::unique_ptr<QuicClientSession> Quic;
     TqClientIngressReactor* Ingress{nullptr};
     bool AcceptingEnabled{false};
     bool ListenersOpen{false};
+    bool ListenersOpening{false};
+    bool DesiredListenersOpen{false};
+    bool PendingListenerUpdate{false};
+#ifdef TQ_UNIT_TESTING
+    std::function<void()> BeforeOpenIngressForTest;
+#endif
 };
 
 class TqClientRuntimeManager {
