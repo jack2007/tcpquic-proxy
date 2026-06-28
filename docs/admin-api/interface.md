@@ -1,0 +1,300 @@
+# Admin API 接口清单
+
+本文档按当前代码实现整理，入口来自 `src/runtime/admin_http.cpp`、`src/runtime/router_runtime.cpp` 和 `src/runtime/server_admin.cpp`。
+
+## 通用约定
+
+- 公开路径前缀固定为 `/api/v1`。Admin HTTP server 会先校验该前缀，再剥离 `/api/v1` 转发给内部 handler。
+- 只允许绑定 loopback：`127.0.0.1:<port>`、`localhost:<port>`、`::1:<port>`。启动参数为 `--admin-listen` 或配置 `admin.listen`。
+- 默认开启 Bearer Token 鉴权。Token 文件由 `--admin-token-file` 或配置 `admin.token_file` 指定；省略时使用按进程/角色生成的默认路径。
+- 请求和响应均为 JSON。路径参数使用单个 path segment，若包含特殊字符需要 percent-encode；实现会拒绝空 segment、非法 `%xx`、以及包含 `/` 的 segment。
+- 当前 HTTP server 白名单只接受 `/api/v1/*`。代码中仍存在少量 legacy 内部路径解析，例如 `/peers/{id}/enable`，但经公开 Admin HTTP 入口会被白名单拦截，应使用本文档中的 colon action 形式。
+- 常见错误：
+  - 未认证：`401 {"error":{"code":"unauthorized","message":"unauthorized"}}`
+  - HTTP server 层找不到路径：`404 {"error":{"code":"not_found","message":"not found"}}`
+  - handler 层找不到资源：`404 {"error":"not found"}`
+  - 请求体非法：`400 {"error":"<reason>"}`
+  - 冲突：`409 {"error":"<reason>"}`
+  - 请求体过大：`413 {"error":{"code":"payload_too_large","message":"payload too large"}}`
+  - 当前后端不支持：`503 {"error":{"code":"not_supported","message":"..."}}`
+
+## Admin HTTP Server 接口
+
+| Method | Path | 状态码 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/admin` | `200` | 查询 Admin HTTP server 自身状态，包括角色、监听地址、鉴权状态、token 文件路径、线程数、请求体限制和安全约束；不返回 token 内容。 |
+
+## Client/Router 模式接口
+
+Client 单 peer 和 multi-peer 都通过 `TqRouterRuntime::HandleAdmin()` 提供以下接口。
+
+| Method | Path | 状态码 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/health` | `200` | 返回 client 角色、健康状态和 uptime。 |
+| `GET` | `/api/v1/metrics` | `200` | 返回 client/router 总体状态和 peer 指标列表。 |
+| `GET` | `/api/v1/runtime/config` | `200` | 查询完整运行时配置快照，敏感内容脱敏或省略。 |
+| `GET` | `/api/v1/client/config` | `200` | 查询 client 推荐 schema 配置快照。 |
+| `GET` | `/api/v1/diagnostics` | `200` | 查询 trace、diag-stats 等诊断配置状态。 |
+| `GET` | `/api/v1/config` | `200` | 返回当前 router 配置。 |
+| `PUT` | `/api/v1/config` | `200`/`400` | 替换当前 router 配置。 |
+| `GET` | `/api/v1/peers` | `200` | 返回所有 peer 运行时指标。 |
+| `POST` | `/api/v1/peers` | `201`/`400`/`409` | 创建 peer。重复 `peer_id` 返回 `409`。 |
+| `GET` | `/api/v1/peers/{peer_id}` | `200`/`404` | 查询单个 peer 指标。 |
+| `GET` | `/api/v1/peers/{peer_id}/config` | `200`/`404` | 查询单 peer 推荐 schema 配置。 |
+| `PUT` | `/api/v1/peers/{peer_id}` | `200`/`400`/`404` | 替换 peer 配置。请求体内 `peer_id` 应与路径一致。 |
+| `PATCH` | `/api/v1/peers/{peer_id}` | `200`/`400`/`404` | 部分更新 peer 配置。 |
+| `DELETE` | `/api/v1/peers/{peer_id}` | `200`/`400`/`404`/`409` | 删除 peer。活跃 peer 默认拒绝，需要 body 指定 `mode`。 |
+| `POST` | `/api/v1/peers/{peer_id}:enable` | `200`/`400`/`404` | 启用 peer。 |
+| `POST` | `/api/v1/peers/{peer_id}:disable` | `200`/`400`/`404` | 禁用 peer。 |
+| `POST` | `/api/v1/peers/{peer_id}:drain` | `202`/`400`/`404` | 停止接收新流量并等待 drain。 |
+| `POST` | `/api/v1/peers/{peer_id}:abort-tunnels` | `202`/`400`/`404` | 中止该 peer 下的 active tunnels。 |
+| `GET` | `/api/v1/peers/{peer_id}/connections` | `200`/`404` | 列出该 peer 的 QUIC connection。 |
+| `POST` | `/api/v1/peers/{peer_id}/connections` | `201`/`400`/`404` | 增加一个目标 connection。 |
+| `GET` | `/api/v1/peers/{peer_id}/connections/{connection_id}` | `200`/`404` | 查询单个 connection。 |
+| `DELETE` | `/api/v1/peers/{peer_id}/connections/{connection_id}` | `200`/`400`/`404`/`409` | 删除 connection。只能删除最高 slot，且不能删最后一个 connection。 |
+| `POST` | `/api/v1/peers/{peer_id}/connections/{connection_id}:reconnect` | `202`/`400`/`404` | 重连指定 connection。 |
+| `POST` | `/api/v1/peers/{peer_id}/connections/{connection_id}:abort-tunnels` | `202`/`400`/`404` | 中止指定 connection 下的 tunnels。 |
+| `GET` | `/api/v1/tunnels` | `200` | 列出所有 tunnel。 |
+| `GET` | `/api/v1/tunnels/{tunnel_id}` | `200`/`404` | 查询单个 tunnel。 |
+| `DELETE` | `/api/v1/tunnels/{tunnel_id}` | `202`/`404` | 中止 tunnel，等价于 `:abort`。 |
+| `POST` | `/api/v1/tunnels/{tunnel_id}:abort` | `202`/`404` | 中止 tunnel。 |
+| `POST` | `/api/v1/tunnels/{tunnel_id}:drain` | `202`/`404` | drain tunnel。 |
+| `GET` | `/api/v1/relay/metrics` | `200` | 返回 relay 聚合指标和平台扩展诊断字段。 |
+| `GET` | `/api/v1/relay/active-relays` | `200` | 查询 active relay capability 和当前可见明细列表。 |
+| `GET` | `/api/v1/relay/active-relays/{relay_id}` | `200`/`404`/`503` | 查询单个 active relay；当前平台不支持逐 relay 明细时返回 `not_supported`。 |
+| `GET` | `/api/v1/relay/workers` | `200` | 返回 worker 列表；当前公开聚合 worker `aggregate`。 |
+| `GET` | `/api/v1/relay/workers/aggregate` | `200` | 返回聚合 worker 指标。 |
+| `GET` | `/api/v1/relay/workers/{worker_id}` | `200`/`503` | 查询 worker 指标；当前除 `aggregate` 外返回 `not_supported`。 |
+| `POST` | `/api/v1/memory/allocator:dump` | `200` | 将 allocator 统计写到日志，并返回统计 JSON。 |
+
+### Client 请求体
+
+`PUT /api/v1/config`：
+
+```json
+{
+  "version": 1,
+  "peers": [
+    {
+      "peer_id": "agent-a",
+      "quic_peer": "127.0.0.1:14444",
+      "socks_listen": "127.0.0.1:11001",
+      "http_listen": "127.0.0.1:18001",
+      "port_forwards": [
+        {"listen": "127.0.0.1:15432", "target": "db.internal:5432"}
+      ],
+      "paths": [
+        {"name": "default", "local": "0.0.0.0", "peer": "127.0.0.1:14444", "connections": 1}
+      ],
+      "quic_connections": 1,
+      "compress": "off",
+      "enabled": true
+    }
+  ]
+}
+```
+
+`POST /api/v1/peers` 和 `PUT /api/v1/peers/{peer_id}` 使用单个 peer 对象，不包 `version/peers`。
+
+`PATCH /api/v1/peers/{peer_id}` 支持字段：`peer_id`、`quic_peer`、`socks_listen`、`http_listen`、`port_forwards`、`paths`、`quic_connections`、`compress`、`enabled`。未出现字段保持不变。
+
+`DELETE /api/v1/peers/{peer_id}` 和 `POST /api/v1/peers/{peer_id}:drain` 可使用：
+
+```json
+{
+  "mode": "reject-if-active",
+  "grace_seconds": 10
+}
+```
+
+- `mode` 默认 `reject-if-active`；删除 active peer 时需要 `drain` 或 `abort`。
+- `grace_seconds` 默认 `10`，仅 drain 类动作使用。
+
+### Client 响应模型
+
+`PeerConfig`：
+
+```json
+{
+  "peer_id": "agent-a",
+  "quic_peer": "127.0.0.1:14444",
+  "socks_listen": "127.0.0.1:11001",
+  "http_listen": "",
+  "port_forwards": [{"listen": "127.0.0.1:15432", "target": "db.internal:5432"}],
+  "paths": [{"name": "default", "local": "0.0.0.0", "peer": "127.0.0.1:14444", "connections": 1}],
+  "quic_connections": 1,
+  "compress": "off",
+  "enabled": true
+}
+```
+
+`PeerMetrics` 在 `PeerConfig` 基础上增加：`state`、`connection_count`、`connected_connections`、`active_streams`、`total_streams`、`reconnects`、`last_error`、`last_connected_at`。
+
+`Connection` 字段：`connection_id`、`slot_index`、`generation`、`connected`、`retry_scheduled`、`state`、`path`、`local`、`peer`、`active_tunnels`、`last_error`。
+
+`Tunnel` 字段：`tunnel_id`、`peer_id`、`connection_id`、`state`、`target`、`role`、`ingress`、`compress`、`created_at`、`duration_ms`、`tcp_read_bytes`、`tcp_write_bytes`、`pending_bytes`、`relay_backend`、`worker_index`、`last_error`。
+
+## Server 模式接口
+
+Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提供以下接口。
+
+| Method | Path | 状态码 | 说明 |
+| --- | --- | --- | --- |
+| `GET` | `/api/v1/health` | `200` | 返回 server 健康/指标 JSON。 |
+| `GET` | `/api/v1/metrics` | `200` | 返回 server 指标 JSON。 |
+| `GET` | `/api/v1/diagnostics` | `200` | 查询 trace、diag-stats 等诊断配置状态。 |
+| `GET` | `/api/v1/server` | `200` | 返回 server 指标 JSON。 |
+| `GET` | `/api/v1/server/metrics` | `200` | 返回 server 指标 JSON。 |
+| `GET` | `/api/v1/server/config` | `200` | 查询 server 配置快照，包括 listen、resolved listens、ACL、proto、tuning、relay、compression 等字段。 |
+| `GET` | `/api/v1/server/connections` | `200` | 列出 server 侧 QUIC connection。 |
+| `GET` | `/api/v1/server/connections/{connection_id}` | `200`/`404` | 查询 server 侧单个 connection。 |
+| `POST` | `/api/v1/server/connections/{connection_id}:abort-tunnels` | `202`/`404` | 中止该 server connection 下的 tunnels。 |
+| `GET` | `/api/v1/server/tunnels` | `200` | 列出 server role 的 tunnels。 |
+| `GET` | `/api/v1/server/tunnels/{tunnel_id}` | `200`/`404` | 查询 server tunnel。 |
+| `DELETE` | `/api/v1/server/tunnels/{tunnel_id}` | `202`/`404` | 中止 server tunnel，等价于 `:abort`。 |
+| `POST` | `/api/v1/server/tunnels/{tunnel_id}:abort` | `202`/`404` | 中止 server tunnel。 |
+| `POST` | `/api/v1/server/tunnels/{tunnel_id}:drain` | `202`/`404` | drain server tunnel。 |
+| `POST` | `/api/v1/memory/allocator:dump` | `200` | 将 allocator 统计写到日志，并返回统计 JSON。 |
+
+### Server 响应模型
+
+`GET /api/v1/server`、`/server/metrics`、`/metrics`、`/health` 返回：
+
+```json
+{
+  "role": "server",
+  "status": "healthy",
+  "listen": "0.0.0.0:4433",
+  "resolved_listens": ["0.0.0.0:4433"],
+  "uptime_seconds": 10,
+  "accepted_connections": 1,
+  "active_streams": 0,
+  "total_streams": 1,
+  "acl_denied": 0,
+  "tcp_dialing": 0,
+  "last_error": ""
+}
+```
+
+实际响应还会包含 `TqAppendRelayMetricsJson()` 输出的 relay 诊断字段。
+
+`ServerConnection` 字段：`connection_id`、`remote_address`、`state`、`active_streams`、`total_streams`、`active_tunnels`、`last_error`。
+
+`ServerTunnel` 字段：`tunnel_id`、`peer_id`、`connection_id`、`state`、`target`、`role`、`duration_ms`、`active`。
+
+`GET /api/v1/server/config` 返回 server 运行时配置快照，字段使用推荐配置 schema 命名，例如 `listen`、`resolved_listens`、`allow_targets`、`deny_targets`、`proto`、`tls`、`tuning`、`relay`、`compression`、`admin`。证书密钥等敏感字段会脱敏或不返回。
+
+## Relay 和内存诊断响应
+
+`GET /api/v1/relay/metrics` 的基础字段：`backend`、`active_relays`、`pending_bytes`、`tcp_read_bytes`、`tcp_write_bytes`、`errors`。Linux/Windows/macOS 平台会追加不同的 relay 诊断计数器。
+
+`GET /api/v1/relay/active-relays` 返回：
+
+```json
+{
+  "capabilities": {
+    "active_relay_detail": false,
+    "worker_detail": true
+  },
+  "relays": []
+}
+```
+
+- Windows 后端可通过 active relay snapshot 返回逐 relay 明细。
+- 当前 Linux/macOS 后端没有逐 relay 明细时，`GET /api/v1/relay/active-relays/{relay_id}` 返回 `503 not_supported`。
+
+`GET /api/v1/relay/workers` 返回：
+
+```json
+{
+  "workers": [
+    {
+      "worker_id": "aggregate",
+      "backend": "worker",
+      "active_relays": 0,
+      "pending_bytes": 0,
+      "tcp_read_bytes": 0,
+      "tcp_write_bytes": 0
+    }
+  ]
+}
+```
+
+`POST /api/v1/memory/allocator:dump` 返回：
+
+```json
+{
+  "status": "dumped",
+  "allocator": "mimalloc",
+  "enabled": true,
+  "available": true,
+  "requested_current_bytes": 0,
+  "requested_total_bytes": 0,
+  "requested_freed_bytes": 0,
+  "requested_peak_bytes": 0,
+  "reserved_current_bytes": 0,
+  "committed_current_bytes": 0,
+  "page_committed_current_bytes": 0,
+  "normal_alloc_count": 0,
+  "huge_alloc_count": 0,
+  "mmap_calls": 0,
+  "commit_calls": 0,
+  "purge_calls": 0,
+  "threads_current": 0
+}
+```
+
+未启用 mimalloc 时，`enabled`/`available` 为 `false`，计数字段通常为 `0`。
+
+## 当前缺少的 Admin API 覆盖
+
+以下是对现有配置与查询能力的覆盖性检查，按当前代码实现判断。
+
+### 已补齐
+
+1. Runtime 全局配置已提供只读 Admin API。
+   - `/api/v1/runtime/config` 返回启动后的完整运行时配置快照。
+   - `/api/v1/client/config` 和 `/api/v1/peers/{peer_id}/config` 返回推荐 schema 视角的 client/peer 配置。
+   - `/api/v1/diagnostics` 返回 trace、diag-stats 等诊断配置状态。
+
+2. Server 模式已提供只读配置查询接口。
+   - `/api/v1/server/config` 覆盖 listen、resolved listens、ACL、proto、tuning、relay、compression 等 server 配置。
+   - Server 配置仍是只读快照，不支持通过 Admin API 热更新。
+
+3. Admin server 自身已提供查询接口。
+   - `/api/v1/admin` 返回 admin 监听地址、token 文件路径、鉴权状态、worker threads、payload limit 和安全约束。
+   - token 内容不会被序列化。
+
+4. Relay capability 查询已补齐基础接口。
+   - `/api/v1/relay/active-relays` 返回 capability 和当前可见 active relay 列表。
+   - `/api/v1/relay/workers/{worker_id}` 支持 `aggregate`，非 aggregate worker 当前返回 `not_supported`。
+
+5. Server tunnel 单项查询和控制已补齐。
+   - `/api/v1/server/tunnels/{tunnel_id}` 支持查询。
+   - `/api/v1/server/tunnels/{tunnel_id}`、`:abort`、`:drain` 支持按 tunnel 控制 server role tunnel。
+
+### 仍待实现
+
+1. Client peer Admin API 未覆盖所有推荐配置字段。
+   - 可操作字段包括 peer endpoint/listeners/forwards/paths/connection count/compress/enabled。
+   - 不支持通过 peer API 修改或查询 per-peer `proto_reconnect_interval_ms`；代码还会明确拒绝旧字段 `quic_reconnect_interval_ms`。
+   - 不支持 proxy auth 用户、默认 proto connections、connection stream count、keepalive、handshake threads、warmup、speed-test 配置的运行时查询或修改。
+
+2. Relay 查询还不是按 worker 精细化。
+   - `/api/v1/relay/workers` 当前只公开 `aggregate`，没有真实 worker id 列表，也没有单 worker active relay/tunnel 明细。
+   - Linux per-worker relay 明细需要后续 worker snapshot 支持。
+
+3. 运行时配置修改仍不支持。
+   - TLS、proto、relay、Admin listen、tuning、compression 等启动级配置目前仅支持查询，不支持动态修改。
+   - `/api/v1/config` 仍只热更新 router peer 子集。
+
+4. 运行时诊断开关不可通过 Admin API 控制。
+   - `trace.enabled`、`trace.interval_sec`、`trace-level`、`diag-stats`、`diag-stats-interval` 当前可以查询，但不能动态开关。
+   - `PATCH /api/v1/diagnostics` 暂不支持。
+
+## 后续建议
+
+1. 统一 legacy router 配置 API 与推荐配置 schema 的命名，逐步减少 `quic_*` 和 `proto_*` 双轨暴露。
+2. 增加 Linux/macOS relay worker snapshot，补齐真实 worker id、per-worker active relay/tunnel 明细。
+3. 设计运行时配置变更接口，明确 TLS/proto/relay/Admin listen 等启动级配置是否允许热更新，以及失败回滚语义。
+4. 设计 `PATCH /api/v1/diagnostics`，明确 trace/diag-stats 动态开关的生命周期、并发安全和日志输出一致性。

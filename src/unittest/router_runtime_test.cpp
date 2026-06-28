@@ -1,3 +1,4 @@
+#include "admin_config.h"
 #include "client_peer_runtime.h"
 #include "router_runtime.h"
 #include "server_metrics.h"
@@ -284,6 +285,114 @@ static TqHttpRequest Request(const std::string& method, const std::string& path,
 }
 
 int main() {
+    {
+        TqConfig cfg;
+        cfg.Mode = TqMode::Client;
+        cfg.ConfigPath = "client.json";
+        cfg.AdminListen = "127.0.0.1:18080";
+        cfg.AdminTokenFile = "/tmp/token.json";
+        cfg.AdminThreads = 2;
+        cfg.QuicCa = "certs/ca.crt";
+        cfg.QuicProfile = TqQuicProfile::MaxThroughput;
+        cfg.QuicDisable1RttEncryption = true;
+        cfg.QuicConnections = 4;
+        cfg.QuicConnectionStreamCount = 1024;
+        cfg.QuicKeepAliveIntervalMs = 5000;
+        cfg.Compress = "off";
+        cfg.CompressLevel = 1;
+        TqPeerConfig peer;
+        peer.PeerId = "agent-a";
+        peer.QuicPeer = "127.0.0.1:14444";
+        peer.SocksListen = "127.0.0.1:11001";
+        peer.QuicConnections = 4;
+        peer.Enabled = true;
+        cfg.Router.Peers.push_back(peer);
+
+        const std::string json = TqRuntimeConfigJson(cfg, false);
+        if (json.find("\"role\":\"client\"") == std::string::npos) return 930;
+        if (json.find("\"id\":\"agent-a\"") == std::string::npos) return 931;
+        if (json.find("\"proto_peer\":\"127.0.0.1:14444\"") == std::string::npos) return 932;
+        if (json.find("\"proto_connections\":4") == std::string::npos) return 933;
+        if (json.find("\"token\":\"") != std::string::npos) return 934;
+    }
+    {
+        const std::string json = TqStructuredErrorJson("bad\"code\\x", "line\nbreak");
+        if (json.find("\"code\":\"bad\\\"code\\\\x\"") == std::string::npos) return 935;
+        if (json.find("\"message\":\"line\\nbreak\"") == std::string::npos) return 936;
+    }
+    {
+        TqConfig cfg;
+        cfg.QuicKey = "raw-secret-key.pem";
+        const std::string json = TqRuntimeConfigJson(cfg, true);
+        if (json.find("\"key\":\"***\"") == std::string::npos) return 937;
+        if (json.find("raw-secret-key.pem") != std::string::npos) return 938;
+    }
+    {
+        TqConfig cfg;
+        cfg.Router.ProxyAuth.push_back({"alice", "raw-proxy-password"});
+        const std::string json = TqClientPublicConfigJson(cfg);
+        if (json.find("\"password\":\"***\"") == std::string::npos) return 939;
+        if (json.find("raw-proxy-password") != std::string::npos) return 952;
+    }
+    {
+        TqConfig cfg;
+        TqPeerConfig peer;
+        peer.PeerId = "agent-public";
+        peer.QuicPeer = "127.0.0.1:24444";
+        peer.QuicConnections = 8;
+        const std::string json = TqPeerPublicConfigJson(cfg, peer);
+        if (json.find("\"id\":\"agent-public\"") == std::string::npos) return 953;
+        if (json.find("\"proto_peer\":\"127.0.0.1:24444\"") == std::string::npos) return 954;
+        if (json.find("\"proto_connections\":8") == std::string::npos) return 955;
+    }
+    {
+        TqConfig cfg;
+        const std::vector<std::string> resolvedListens = {"0.0.0.0:443", "[::]:443"};
+        const std::string json = TqServerRuntimeConfigJson(cfg, resolvedListens, false);
+        if (json.find("\"role\":\"server\"") == std::string::npos) return 956;
+        if (json.find("\"resolved_listens\":[\"0.0.0.0:443\",\"[::]:443\"]") == std::string::npos) return 957;
+    }
+    {
+        TqConfig cfg;
+        cfg.Trace = true;
+        cfg.TraceIntervalSec = 7;
+        cfg.DiagStats = true;
+        cfg.DiagStatsIntervalSec = 9;
+        const std::string json = TqDiagnosticsJson(cfg);
+        if (json.find("\"trace\":true") == std::string::npos) return 958;
+        if (json.find("\"trace_interval_sec\":7") == std::string::npos) return 959;
+        if (json.find("\"diag_stats\":true") == std::string::npos) return 981;
+        if (json.find("\"diag_stats_interval_sec\":9") == std::string::npos) return 982;
+    }
+    {
+        TqConfig cfg;
+        cfg.Mode = TqMode::Client;
+        cfg.AdminListen = "127.0.0.1:18080";
+        cfg.QuicConnections = 2;
+        TqPeerConfig peer;
+        peer.PeerId = "agent-public";
+        peer.QuicPeer = "127.0.0.1:14460";
+        peer.SocksListen = "127.0.0.1:11060";
+        cfg.Router.Peers.push_back(peer);
+        TqRouterRuntime runtime(nullptr, cfg);
+
+        std::string runtimeConfig = runtime.HandleAdmin(Request("GET", "/runtime/config", ""));
+        if (runtimeConfig.find("HTTP/1.1 200") == std::string::npos) return 983;
+        if (runtimeConfig.find("\"proto_peer\":\"127.0.0.1:14460\"") == std::string::npos) return 984;
+
+        std::string clientConfig = runtime.HandleAdmin(Request("GET", "/client/config", ""));
+        if (clientConfig.find("\"peers\"") == std::string::npos) return 985;
+
+        std::string peerConfig = runtime.HandleAdmin(Request("GET", "/peers/agent-public/config", ""));
+        if (peerConfig.find("HTTP/1.1 200") == std::string::npos) return 986;
+        if (peerConfig.find("\"id\":\"agent-public\"") == std::string::npos) return 987;
+
+        std::string missingPeerConfig = runtime.HandleAdmin(Request("GET", "/peers/missing/config", ""));
+        if (missingPeerConfig.find("HTTP/1.1 404") == std::string::npos) return 989;
+
+        std::string diag = runtime.HandleAdmin(Request("GET", "/diagnostics", ""));
+        if (diag.find("\"diag_stats\"") == std::string::npos) return 988;
+    }
     {
         FakeAdapter adapter;
         adapter.ConnectedConnections = 2;
@@ -872,6 +981,45 @@ int main() {
         std::string relayWorkersResp = adminRuntime.HandleAdmin(relayWorkers);
         if (relayWorkersResp.find("HTTP/1.1 200 OK") == std::string::npos) return 314;
         if (relayWorkersResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 315;
+
+        TqHttpRequest activeRelays = Request("GET", "/relay/active-relays", "");
+        std::string activeRelaysResp = adminRuntime.HandleAdmin(activeRelays);
+        if (activeRelaysResp.find("HTTP/1.1 200 OK") == std::string::npos) return 318;
+        if (activeRelaysResp.find("\"capabilities\":{") == std::string::npos) return 319;
+        if (activeRelaysResp.find("\"relays\":[") == std::string::npos) return 320;
+
+        TqHttpRequest missingRelay = Request("GET", "/relay/active-relays/relay-missing", "");
+        std::string missingRelayResp = adminRuntime.HandleAdmin(missingRelay);
+        if (missingRelayResp.find("HTTP/1.1 500 Internal Server Error") != std::string::npos) return 321;
+        if (missingRelayResp.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 325;
+        if (missingRelayResp.find("\"code\":\"not_supported\"") == std::string::npos) return 326;
+
+        TqHttpRequest activeRelaysEmptyId = Request("GET", "/relay/active-relays/", "");
+        std::string activeRelaysEmptyIdResp = adminRuntime.HandleAdmin(activeRelaysEmptyId);
+        if (activeRelaysEmptyIdResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 327;
+
+        TqHttpRequest activeRelaysNestedId = Request("GET", "/relay/active-relays/relay-1/extra", "");
+        std::string activeRelaysNestedIdResp = adminRuntime.HandleAdmin(activeRelaysNestedId);
+        if (activeRelaysNestedIdResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 328;
+
+        TqHttpRequest aggregateWorker = Request("GET", "/relay/workers/aggregate", "");
+        std::string aggregateWorkerResp = adminRuntime.HandleAdmin(aggregateWorker);
+        if (aggregateWorkerResp.find("HTTP/1.1 200 OK") == std::string::npos) return 322;
+        if (aggregateWorkerResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 323;
+
+        TqHttpRequest missingWorker = Request("GET", "/relay/workers/worker-1", "");
+        std::string missingWorkerResp = adminRuntime.HandleAdmin(missingWorker);
+        if (missingWorkerResp.find("HTTP/1.1 500 Internal Server Error") != std::string::npos) return 329;
+        if (missingWorkerResp.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 330;
+        if (missingWorkerResp.find("\"code\":\"not_supported\"") == std::string::npos) return 324;
+
+        TqHttpRequest workersEmptyId = Request("GET", "/relay/workers/", "");
+        std::string workersEmptyIdResp = adminRuntime.HandleAdmin(workersEmptyId);
+        if (workersEmptyIdResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 331;
+
+        TqHttpRequest workersNestedId = Request("GET", "/relay/workers/a/b", "");
+        std::string workersNestedIdResp = adminRuntime.HandleAdmin(workersNestedId);
+        if (workersNestedIdResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 332;
 
         TqHttpRequest abort = Request("POST", "/tunnels/" + tunnels[0].TunnelId + ":abort", "");
         std::string abortResp = adminRuntime.HandleAdmin(abort);

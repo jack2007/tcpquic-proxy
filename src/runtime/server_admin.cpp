@@ -1,14 +1,22 @@
 #include "server_admin.h"
 
+#include "admin_config.h"
 #include "admin_memory.h"
 #include "quic_session.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
 
 #include <algorithm>
+#include <mutex>
 #include <sstream>
+#include <vector>
 
 namespace {
+
+struct TqServerTunnelAdminPath {
+    std::string TunnelId;
+    std::string Action;
+};
 
 std::string ErrorJson(const std::string& err) {
     std::ostringstream out;
@@ -87,6 +95,12 @@ std::string ServerTunnelsJson() {
     return out.str();
 }
 
+std::string ServerTunnelJson(const TqTunnelSnapshot& tunnel) {
+    std::ostringstream out;
+    AppendTunnelJson(out, tunnel);
+    return out.str();
+}
+
 bool DecodePathSegment(const std::string& encoded, std::string& decoded) {
     decoded.clear();
     decoded.reserve(encoded.size());
@@ -119,17 +133,62 @@ bool DecodePathSegment(const std::string& encoded, std::string& decoded) {
     return !decoded.empty();
 }
 
+bool ParseServerTunnelAdminPath(const std::string& path, TqServerTunnelAdminPath& out) {
+    out = TqServerTunnelAdminPath{};
+    constexpr const char* TunnelPrefix = "/server/tunnels";
+    constexpr size_t tunnelPrefixLen = std::char_traits<char>::length(TunnelPrefix);
+    if (path.compare(0, tunnelPrefixLen + 1, "/server/tunnels/") != 0) {
+        return false;
+    }
+
+    std::string tail = path.substr(tunnelPrefixLen + 1);
+    if (tail.empty() || tail.find('/') != std::string::npos) {
+        return false;
+    }
+    const size_t actionPos = tail.find(':');
+    if (actionPos != std::string::npos) {
+        out.Action = tail.substr(actionPos + 1);
+        if (out.Action.empty()) {
+            return false;
+        }
+        tail.resize(actionPos);
+    }
+    if (!DecodePathSegment(tail, out.TunnelId)) {
+        return false;
+    }
+    return out.TunnelId.find('/') == std::string::npos;
+}
+
 } // namespace
 
 std::string TqHandleServerAdmin(
     const TqHttpRequest& req,
     TqServerMetrics& metrics,
     uint64_t uptimeSeconds) {
+    return TqHandleServerAdmin(req, metrics, uptimeSeconds, TqConfig{});
+}
+
+std::string TqHandleServerAdmin(
+    const TqHttpRequest& req,
+    TqServerMetrics& metrics,
+    uint64_t uptimeSeconds,
+    const TqConfig& runtimeConfig) {
     std::string response;
     if (TqHandleMemoryAdmin(req, response)) {
         return response;
     }
 
+    if (req.Method == "GET" && req.Path == "/server/config") {
+        std::vector<std::string> resolved;
+        {
+            std::lock_guard<std::mutex> guard(metrics.Lock);
+            resolved = metrics.ResolvedListens;
+        }
+        return TqJsonResponse(200, TqServerRuntimeConfigJson(runtimeConfig, resolved, false));
+    }
+    if (req.Method == "GET" && req.Path == "/diagnostics") {
+        return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
+    }
     if (req.Method == "GET" && (req.Path == "/server" || req.Path == "/server/metrics")) {
         return TqJsonResponse(200, TqServerMetricsJson(metrics, uptimeSeconds));
     }
@@ -163,6 +222,44 @@ std::string TqHandleServerAdmin(
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
             return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+        }
+        return TqJsonResponse(404, ErrorJson("not found"));
+    }
+    if (req.Path.compare(0, 16, "/server/tunnels/") == 0) {
+        TqServerTunnelAdminPath tunnelPath;
+        if (!ParseServerTunnelAdminPath(req.Path, tunnelPath)) {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        TqTunnelSnapshot tunnel;
+        if (!TqGetTunnelSnapshot(tunnelPath.TunnelId, tunnel) || tunnel.Role != "server") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (tunnelPath.Action.empty()) {
+            if (req.Method == "GET") {
+                return TqJsonResponse(200, ServerTunnelJson(tunnel));
+            }
+            if (req.Method == "DELETE") {
+                if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            }
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (req.Method != "POST") {
+            return TqJsonResponse(404, ErrorJson("not found"));
+        }
+        if (tunnelPath.Action == "abort") {
+            if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
+                return TqJsonResponse(404, ErrorJson("not found"));
+            }
+            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+        }
+        if (tunnelPath.Action == "drain") {
+            if (!TqDrainTunnelById(tunnelPath.TunnelId)) {
+                return TqJsonResponse(404, ErrorJson("not found"));
+            }
+            return TqJsonResponse(202, "{\"status\":\"draining\"}");
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }

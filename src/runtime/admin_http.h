@@ -30,6 +30,7 @@ struct TqAdminHttpServerOptions {
     uint32_t AdminThreads{2};
     size_t MaxBodyBytes{1024 * 1024};
     std::string TokenFile;
+    std::string Role;
     bool EnableTokenAuth{false};
 };
 

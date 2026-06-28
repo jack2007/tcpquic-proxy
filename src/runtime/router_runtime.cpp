@@ -1,5 +1,6 @@
 #include "router_runtime.h"
 
+#include "admin_config.h"
 #include "admin_memory.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
@@ -345,21 +346,6 @@ std::string RelayWorkersJson() {
     out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
     out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
     out << "}]}";
-    return out.str();
-}
-
-std::string RelayWorkerJson(const std::string& workerId) {
-    const auto metrics = TqSnapshotRelayMetrics();
-    std::ostringstream out;
-    out << '{';
-    AppendJsonString(out, "worker_id", workerId);
-    out << ',';
-    AppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
-    out << '}';
     return out.str();
 }
 
@@ -833,6 +819,14 @@ bool ParsePeerAdminPath(const std::string& path, TqPeerAdminPath& out) {
     }
 
     std::string tail = path.substr(peerPrefixLen + 1);
+    constexpr const char* ConfigSuffix = "/config";
+    constexpr size_t configSuffixLen = std::char_traits<char>::length(ConfigSuffix);
+    if (tail.size() > configSuffixLen &&
+        tail.compare(tail.size() - configSuffixLen, configSuffixLen, ConfigSuffix) == 0) {
+        out.Action = "config";
+        tail.resize(tail.size() - configSuffixLen);
+        return DecodePathSegment(tail, out.PeerId);
+    }
     const struct LegacyAction {
         const char* Suffix;
         const char* Action;
@@ -1053,11 +1047,22 @@ bool UpdatePeerConnectionCount(TqRouterConfig& config, const std::string& peerId
     return true;
 }
 
+TqConfig DefaultClientRuntimeConfig() {
+    TqConfig cfg;
+    cfg.Mode = TqMode::Client;
+    return cfg;
+}
+
 } // namespace
 
-TqRouterRuntime::TqRouterRuntime(TqPeerRuntimeAdapter* adapter) : Adapter(adapter) {}
+TqRouterRuntime::TqRouterRuntime(TqPeerRuntimeAdapter* adapter)
+    : RuntimeConfig(DefaultClientRuntimeConfig()), Adapter(adapter) {}
 
-TqRouterRuntime::TqRouterRuntime(bool bridgeValidationMode) : BridgeValidationMode(bridgeValidationMode) {}
+TqRouterRuntime::TqRouterRuntime(TqPeerRuntimeAdapter* adapter, TqConfig runtimeConfig)
+    : RuntimeConfig(std::move(runtimeConfig)), Config(RuntimeConfig.Router), Adapter(adapter) {}
+
+TqRouterRuntime::TqRouterRuntime(bool bridgeValidationMode)
+    : RuntimeConfig(DefaultClientRuntimeConfig()), BridgeValidationMode(bridgeValidationMode) {}
 
 bool TqRouterRuntime::ApplyConfig(const TqRouterConfig& config, std::string& err) {
     std::lock_guard<std::mutex> lock(Mutex);
@@ -1153,6 +1158,7 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
     }
 
     Config = config;
+    RuntimeConfig.Router = config;
     return true;
 }
 
@@ -1520,21 +1526,79 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
     if (req.Method == "GET" && req.Path == "/metrics") {
         return TqJsonResponse(200, MetricsJson());
     }
+    if (req.Method == "GET" && req.Path == "/runtime/config") {
+        TqConfig runtimeConfig;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            runtimeConfig = RuntimeConfig;
+        }
+        return TqJsonResponse(200, TqRuntimeConfigJson(runtimeConfig, false));
+    }
+    if (req.Method == "GET" && req.Path == "/client/config") {
+        TqConfig runtimeConfig;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            runtimeConfig = RuntimeConfig;
+        }
+        return TqJsonResponse(200, TqClientPublicConfigJson(runtimeConfig));
+    }
+    if (req.Method == "GET" && req.Path == "/diagnostics") {
+        TqConfig runtimeConfig;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            runtimeConfig = RuntimeConfig;
+        }
+        return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
+    }
     if (req.Method == "GET" && req.Path == "/config") {
         return TqJsonResponse(200, ConfigJson());
     }
     if (req.Method == "GET" && req.Path == "/relay/metrics") {
         return TqJsonResponse(200, RelayMetricsJson());
     }
+    if (req.Method == "GET" && req.Path == "/relay/active-relays") {
+        return TqJsonResponse(200, TqRelayActiveRelaysJson());
+    }
+    if (req.Method == "GET" && req.Path.compare(0, 21, "/relay/active-relays/") == 0) {
+        const std::string encodedRelayId = req.Path.substr(21);
+        std::string relayId;
+        if (encodedRelayId.empty() || encodedRelayId.find('/') != std::string::npos ||
+            !DecodePathSegment(encodedRelayId, relayId) || relayId.empty()) {
+            return TqJsonResponse(404, TqStructuredErrorJson("not_found", "not found"));
+        }
+        bool found = false;
+        bool supported = false;
+        const std::string body = TqRelayActiveRelayJson(relayId, found, supported);
+        if (!supported) {
+            return TqJsonResponse(503, TqStructuredErrorJson(
+                "not_supported", "relay active relay detail is not supported by this backend"));
+        }
+        if (!found) {
+            return TqJsonResponse(404, TqStructuredErrorJson("not_found", "not found"));
+        }
+        return TqJsonResponse(200, body);
+    }
     if (req.Method == "GET" && req.Path == "/relay/workers") {
         return TqJsonResponse(200, RelayWorkersJson());
     }
     if (req.Method == "GET" && req.Path.compare(0, 15, "/relay/workers/") == 0) {
+        const std::string encodedWorkerId = req.Path.substr(15);
         std::string workerId;
-        if (!DecodePathSegment(req.Path.substr(15), workerId) || workerId != "aggregate") {
-            return TqJsonResponse(404, ErrorJson("not found"));
+        if (encodedWorkerId.empty() || encodedWorkerId.find('/') != std::string::npos ||
+            !DecodePathSegment(encodedWorkerId, workerId) || workerId.empty()) {
+            return TqJsonResponse(404, TqStructuredErrorJson("not_found", "not found"));
         }
-        return TqJsonResponse(200, RelayWorkerJson(workerId));
+        bool found = false;
+        bool supported = false;
+        const std::string body = TqRelayWorkerDetailJson(workerId, found, supported);
+        if (!supported) {
+            return TqJsonResponse(503, TqStructuredErrorJson(
+                "not_supported", "relay worker detail is not supported by this backend"));
+        }
+        if (!found) {
+            return TqJsonResponse(404, TqStructuredErrorJson("not_found", "not found"));
+        }
+        return TqJsonResponse(200, body);
     }
     if (req.Method == "PUT" && req.Path == "/config") {
         TqRouterConfig config;
@@ -1653,6 +1717,20 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
 
     TqPeerAdminPath peerPath;
     if (ParsePeerAdminPath(req.Path, peerPath)) {
+        if (!peerPath.Collection && req.Method == "GET" && peerPath.Action == "config") {
+            TqConfig runtimeConfig;
+            TqPeerConfig peerConfig;
+            {
+                std::lock_guard<std::mutex> lock(Mutex);
+                auto peer = FindPeerConfig(RuntimeConfig.Router.Peers, peerPath.PeerId);
+                if (peer == RuntimeConfig.Router.Peers.end()) {
+                    return TqJsonResponse(404, ErrorJson("not found"));
+                }
+                runtimeConfig = RuntimeConfig;
+                peerConfig = *peer;
+            }
+            return TqJsonResponse(200, TqPeerPublicConfigJson(runtimeConfig, peerConfig));
+        }
         if (peerPath.Collection) {
             if (req.Method == "GET") {
                 return TqJsonResponse(200, PeersJson(ListPeers()));

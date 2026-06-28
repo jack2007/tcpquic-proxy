@@ -188,5 +188,8 @@ struct TqRelayActiveSnapshot {
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays();
+std::string TqRelayActiveRelaysJson();
+std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool& supported);
+std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported);
 void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics);
 void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value);

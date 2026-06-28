@@ -9,6 +9,8 @@
 namespace {
 
 bool g_abortCalled = false;
+bool g_tunnelAbortCalled = false;
+bool g_tunnelDrainCalled = false;
 
 TqHttpRequest Request(const std::string& method, const std::string& path) {
     TqHttpRequest req;
@@ -71,6 +73,36 @@ std::vector<TqTunnelSnapshot> TqSnapshotTunnels() {
     return {tunnel};
 }
 
+bool TqGetTunnelSnapshot(const std::string& tunnelId, TqTunnelSnapshot& out) {
+    if (tunnelId == "client-tun") {
+        out = TqSnapshotTunnels()[0];
+        out.TunnelId = "client-tun";
+        out.Role = "client";
+        return true;
+    }
+    if (tunnelId != "tun-5") {
+        return false;
+    }
+    out = TqSnapshotTunnels()[0];
+    return true;
+}
+
+bool TqAbortTunnelById(const std::string& tunnelId) {
+    if (tunnelId != "tun-5") {
+        return false;
+    }
+    g_tunnelAbortCalled = true;
+    return true;
+}
+
+bool TqDrainTunnelById(const std::string& tunnelId) {
+    if (tunnelId != "tun-5") {
+        return false;
+    }
+    g_tunnelDrainCalled = true;
+    return true;
+}
+
 int main() {
     TqServerMetrics metrics;
     metrics.Listen = "127.0.0.1:1443";
@@ -94,6 +126,54 @@ int main() {
     if (tunnels.find("HTTP/1.1 200 OK") == std::string::npos) return 8;
     if (tunnels.find("\"tunnel_id\":\"tun-5\"") == std::string::npos) return 9;
 
+    std::string getTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/tun-5"), metrics, 10);
+    if (getTunnel.find("HTTP/1.1 200 OK") == std::string::npos) return 130;
+    if (getTunnel.find("\"tunnel_id\":\"tun-5\"") == std::string::npos) return 131;
+
+    std::string getEncodedTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/tun%2d5"), metrics, 10);
+    if (getEncodedTunnel.find("HTTP/1.1 200 OK") == std::string::npos) return 140;
+
+    std::string abortTunnel = TqHandleServerAdmin(Request("POST", "/server/tunnels/tun-5:abort"), metrics, 10);
+    if (abortTunnel.find("HTTP/1.1 202 Accepted") == std::string::npos) return 132;
+    if (!g_tunnelAbortCalled) return 133;
+
+    std::string drainTunnel = TqHandleServerAdmin(Request("POST", "/server/tunnels/tun-5:drain"), metrics, 10);
+    if (drainTunnel.find("HTTP/1.1 202 Accepted") == std::string::npos) return 134;
+    if (!g_tunnelDrainCalled) return 135;
+
+    g_tunnelAbortCalled = false;
+    std::string deleteTunnel = TqHandleServerAdmin(Request("DELETE", "/server/tunnels/tun-5"), metrics, 10);
+    if (deleteTunnel.find("HTTP/1.1 202 Accepted") == std::string::npos) return 136;
+    if (!g_tunnelAbortCalled) return 137;
+
+    std::string missingTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/missing"), metrics, 10);
+    if (missingTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 138;
+
+    std::string clientTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/client-tun"), metrics, 10);
+    if (clientTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 139;
+
+    g_tunnelAbortCalled = false;
+    g_tunnelDrainCalled = false;
+    std::string clientAbortTunnel = TqHandleServerAdmin(Request("POST", "/server/tunnels/client-tun:abort"), metrics, 10);
+    if (clientAbortTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 145;
+    if (g_tunnelAbortCalled) return 146;
+
+    std::string clientDrainTunnel = TqHandleServerAdmin(Request("POST", "/server/tunnels/client-tun:drain"), metrics, 10);
+    if (clientDrainTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 147;
+    if (g_tunnelDrainCalled) return 148;
+
+    std::string emptyTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/"), metrics, 10);
+    if (emptyTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 141;
+
+    std::string nestedTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/tun-5/extra"), metrics, 10);
+    if (nestedTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 142;
+
+    std::string badPercentTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/tun%xx"), metrics, 10);
+    if (badPercentTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 143;
+
+    std::string slashPercentTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/tun%2f5"), metrics, 10);
+    if (slashPercentTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 144;
+
     std::string memory = TqHandleServerAdmin(Request("POST", "/memory/allocator:dump"), metrics, 10);
     if (memory.find("HTTP/1.1 200 OK") == std::string::npos) return 10;
     if (memory.find("\"status\":\"dumped\"") == std::string::npos) return 11;
@@ -101,5 +181,20 @@ int main() {
 
     std::string missing = TqHandleServerAdmin(Request("GET", "/server/connections/srv-404"), metrics, 10);
     if (missing.find("HTTP/1.1 404 Not Found") == std::string::npos) return 13;
+    {
+        TqConfig cfg;
+        cfg.Mode = TqMode::Server;
+        cfg.QuicListen = "0.0.0.0:4433";
+        cfg.AllowTargets = {"127.0.0.1/32"};
+        TqServerMetrics configMetrics;
+        configMetrics.Listen = cfg.QuicListen;
+        configMetrics.ResolvedListens = {"0.0.0.0:4433"};
+        std::string config = TqHandleServerAdmin(Request("GET", "/server/config"), configMetrics, 10, cfg);
+        if (config.find("HTTP/1.1 200") == std::string::npos) return 120;
+        if (config.find("\"allow_targets\"") == std::string::npos) return 121;
+
+        std::string diag = TqHandleServerAdmin(Request("GET", "/diagnostics"), configMetrics, 10, cfg);
+        if (diag.find("\"trace\"") == std::string::npos) return 122;
+    }
     return 0;
 }

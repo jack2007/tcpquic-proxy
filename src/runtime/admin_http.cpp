@@ -148,10 +148,14 @@ bool TqIsV1PeerPath(const std::string& path) {
     if (firstSlash != std::string::npos) {
         const std::string peer = tail.substr(0, firstSlash);
         const std::string rest = tail.substr(firstSlash + 1);
+        const bool peerConfig = rest == "config";
         const bool connectionsCollection = rest == "connections";
         const bool connectionsItem = rest.compare(0, 12, "connections/") == 0;
-        if (peer.empty() || (!connectionsCollection && !connectionsItem)) {
+        if (peer.empty() || (!peerConfig && !connectionsCollection && !connectionsItem)) {
             return false;
+        }
+        if (peerConfig) {
+            return true;
         }
         if (connectionsCollection) {
             return true;
@@ -178,21 +182,111 @@ bool TqIsV1PeerPath(const std::string& path) {
         (name == "enable" || name == "disable" || name == "drain" || name == "abort-tunnels");
 }
 
+bool TqIsV1RelayActiveRelaysPath(const std::string& path) {
+    constexpr const char* kActiveRelays = "/api/v1/relay/active-relays";
+    constexpr size_t kActiveRelaysLen = std::char_traits<char>::length(kActiveRelays);
+    if (path == kActiveRelays) {
+        return true;
+    }
+    if (path.compare(0, kActiveRelaysLen + 1, "/api/v1/relay/active-relays/") != 0) {
+        return false;
+    }
+    const std::string relayId = path.substr(kActiveRelaysLen + 1);
+    return !relayId.empty() && relayId.find('/') == std::string::npos;
+}
+
+bool TqIsV1RelayWorkersPath(const std::string& path) {
+    constexpr const char* kWorkers = "/api/v1/relay/workers";
+    constexpr size_t kWorkersLen = std::char_traits<char>::length(kWorkers);
+    if (path == kWorkers) {
+        return true;
+    }
+    if (path.compare(0, kWorkersLen + 1, "/api/v1/relay/workers/") != 0) {
+        return false;
+    }
+    const std::string workerId = path.substr(kWorkersLen + 1);
+    return !workerId.empty() && workerId.find('/') == std::string::npos;
+}
+
+int TqHexValue(char ch) {
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+bool TqDecodeV1PathSegment(const std::string& encoded, std::string& decoded) {
+    decoded.clear();
+    decoded.reserve(encoded.size());
+    for (size_t i = 0; i < encoded.size(); ++i) {
+        const char ch = encoded[i];
+        if (ch == '/') {
+            return false;
+        }
+        if (ch != '%') {
+            decoded.push_back(ch);
+            continue;
+        }
+        if (i + 2 >= encoded.size()) {
+            return false;
+        }
+        const int hi = TqHexValue(encoded[i + 1]);
+        const int lo = TqHexValue(encoded[i + 2]);
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        decoded.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+    }
+    return !decoded.empty();
+}
+
+bool TqIsV1ServerTunnelsPath(const std::string& path) {
+    constexpr const char* kServerTunnels = "/api/v1/server/tunnels";
+    constexpr size_t kServerTunnelsLen = std::char_traits<char>::length(kServerTunnels);
+    if (path == kServerTunnels) {
+        return true;
+    }
+    if (path.compare(0, kServerTunnelsLen + 1, "/api/v1/server/tunnels/") != 0) {
+        return false;
+    }
+    std::string tunnelId = path.substr(kServerTunnelsLen + 1);
+    if (tunnelId.empty() || tunnelId.find('/') != std::string::npos) {
+        return false;
+    }
+    const size_t actionPos = tunnelId.find(':');
+    std::string decodedTunnelId;
+    if (actionPos == std::string::npos) {
+        return TqDecodeV1PathSegment(tunnelId, decodedTunnelId) &&
+            decodedTunnelId.find('/') == std::string::npos;
+    }
+    const std::string action = tunnelId.substr(actionPos + 1);
+    tunnelId.resize(actionPos);
+    return TqDecodeV1PathSegment(tunnelId, decodedTunnelId) &&
+        decodedTunnelId.find('/') == std::string::npos &&
+        (action == "abort" || action == "drain");
+}
+
 bool TqIsV1AdminPath(const std::string& path) {
-    return path == "/api/v1/health" ||
+    return path == "/api/v1/admin" ||
+        path == "/api/v1/health" ||
         path == "/api/v1/metrics" ||
         path == "/api/v1/config" ||
+        path == "/api/v1/runtime/config" ||
+        path == "/api/v1/client/config" ||
+        path == "/api/v1/diagnostics" ||
         path == "/api/v1/tunnels" ||
         path == "/api/v1/memory/allocator:dump" ||
         path.compare(0, 16, "/api/v1/tunnels/") == 0 ||
         path == "/api/v1/relay/metrics" ||
-        path == "/api/v1/relay/workers" ||
-        path.compare(0, 22, "/api/v1/relay/workers/") == 0 ||
+        TqIsV1RelayActiveRelaysPath(path) ||
+        TqIsV1RelayWorkersPath(path) ||
         path == "/api/v1/server" ||
         path == "/api/v1/server/metrics" ||
+        path == "/api/v1/server/config" ||
         path == "/api/v1/server/connections" ||
         path.compare(0, 27, "/api/v1/server/connections/") == 0 ||
-        path == "/api/v1/server/tunnels" ||
+        TqIsV1ServerTunnelsPath(path) ||
         TqIsV1PeerPath(path);
 }
 
@@ -244,6 +338,77 @@ void TqSetLegacyResponse(httplib::Response& res, const std::string& raw) {
 
 std::string TqUnauthorizedJson() {
     return "{\"error\":{\"code\":\"unauthorized\",\"message\":\"unauthorized\"}}";
+}
+
+std::string TqAdminStatusEscape(const std::string& text) {
+    std::string escaped;
+    escaped.reserve(text.size());
+    const char* hex = "0123456789abcdef";
+    for (unsigned char ch : text) {
+        switch (ch) {
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '\b':
+            escaped += "\\b";
+            break;
+        case '\f':
+            escaped += "\\f";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            if (ch < 0x20) {
+                escaped += "\\u00";
+                escaped += hex[(ch >> 4) & 0x0f];
+                escaped += hex[ch & 0x0f];
+            } else {
+                escaped.push_back(static_cast<char>(ch));
+            }
+            break;
+        }
+    }
+    return escaped;
+}
+
+std::string TqAdminStatusBody(
+    const TqAdminHttpServerOptions& options,
+    const std::string& listen,
+    const TqAdminAuth* auth,
+    const std::string& tokenFile) {
+    const bool authEnabled = auth != nullptr;
+    const bool tokenPresent = auth && !auth->Token().empty();
+    std::ostringstream out;
+    out << "{"
+        << "\"role\":\"" << TqAdminStatusEscape(options.Role) << "\","
+        << "\"listen\":\"" << TqAdminStatusEscape(listen) << "\","
+        << "\"auth\":{"
+        << "\"enabled\":" << (authEnabled ? "true" : "false") << ","
+        << "\"type\":\"bearer\","
+        << "\"token_file\":\"" << TqAdminStatusEscape(tokenFile) << "\","
+        << "\"token_present\":" << (tokenPresent ? "true" : "false")
+        << "},"
+        << "\"http\":{"
+        << "\"threads\":" << options.AdminThreads << ","
+        << "\"max_body_bytes\":" << options.MaxBodyBytes << ","
+        << "\"keep_alive\":false"
+        << "},"
+        << "\"security\":{"
+        << "\"loopback_only\":true,"
+        << "\"tls\":false"
+        << "}"
+        << "}";
+    return out.str();
 }
 
 } // namespace
@@ -499,6 +664,10 @@ void TqAdminHttpServer::ConfigureRoutes() {
         TqHttpRequest adminReq = TqMakeAdminRequest(req);
         if (Auth && !Auth->Authorize(adminReq)) {
             TqSetJson(res, 401, TqUnauthorizedJson());
+            return;
+        }
+        if (req.path == "/api/v1/admin") {
+            TqSetJson(res, 200, TqAdminStatusBody(Options, BoundListen, Auth.get(), TokenFilePath));
             return;
         }
         if (!TqIsV1AdminPath(req.path)) {

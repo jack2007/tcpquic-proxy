@@ -125,6 +125,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/admin_auth.cpp
     runtime/admin_http.cpp
     runtime/admin_memory.cpp
+    runtime/admin_config.cpp
     runtime/client_peer_runtime.cpp
     runtime/memory_stats.cpp
     runtime/router_runtime.cpp
@@ -992,6 +993,7 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
     runtime/admin_memory.cpp
+    runtime/admin_config.cpp
     runtime/memory_stats.cpp
     runtime/admin_auth.cpp
     runtime/admin_http.cpp
@@ -1051,6 +1053,7 @@ set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$O
 add_executable(tcpquic_server_admin_test
     unittest/server_admin_test.cpp
     runtime/admin_memory.cpp
+    runtime/admin_config.cpp
     runtime/memory_stats.cpp
     runtime/server_admin.cpp
     tunnel/relay_alloc.cpp

@@ -97,6 +97,7 @@ TqAdminHttpServerOptions TqMakeAdminOptions(const TqConfig& cfg) {
     TqAdminHttpServerOptions options;
     options.AdminThreads = cfg.AdminThreads;
     const char* role = cfg.Mode == TqMode::Client ? "client" : "server";
+    options.Role = role;
     options.TokenFile = cfg.AdminTokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath(role) : cfg.AdminTokenFile;
     options.EnableTokenAuth = true;
     return options;
@@ -140,7 +141,7 @@ int RunSinglePeerClient(const TqConfig& cfg) {
 
     const TqRouterConfig router = TqMakeSinglePeerRouterConfig(cfg);
     TqMultiPeerRuntimeAdapter adapter(cfg);
-    TqRouterRuntime runtime(&adapter);
+    TqRouterRuntime runtime(&adapter, cfg);
     if (!runtime.ApplyConfig(router, err)) {
         std::fprintf(stderr, "tcpquic-proxy: invalid router config: %s\n", err.c_str());
         return 1;
@@ -222,7 +223,7 @@ int RunClient(const TqConfig& cfg) {
     }
 
     TqMultiPeerRuntimeAdapter adapter(cfg);
-    TqRouterRuntime runtime(&adapter);
+    TqRouterRuntime runtime(&adapter, cfg);
     std::string err;
     if (!runtime.ApplyConfig(cfg.Router, err)) {
         std::fprintf(stderr, "tcpquic-proxy: invalid router config: %s\n", err.c_str());
@@ -319,7 +320,7 @@ int RunServer(const TqConfig& cfg) {
             return 1;
         }
         const TqAdminHttpServerOptions adminOptions = TqMakeAdminOptions(cfg);
-        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [metrics, started, &serverDial](const TqHttpRequest& req) {
+        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [metrics, started, &serverDial, &cfg](const TqHttpRequest& req) {
             const uint64_t uptimeSeconds = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
             metrics->TcpDialing.store(serverDial.PendingCount());
@@ -329,7 +330,7 @@ int RunServer(const TqConfig& cfg) {
             if (req.Method == "GET" && req.Path == "/metrics") {
                 return TqJsonResponse(200, TqServerMetricsJson(*metrics, uptimeSeconds));
             }
-            return TqHandleServerAdmin(req, *metrics, uptimeSeconds);
+            return TqHandleServerAdmin(req, *metrics, uptimeSeconds, cfg);
         }, adminOptions));
         if (!admin->Start(err)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());

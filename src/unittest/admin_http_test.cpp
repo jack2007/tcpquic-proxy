@@ -458,6 +458,33 @@ int main() {
     }
     {
         TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.Role = "client";
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest&) {
+            return TqJsonResponse(500, "{\"handler_called\":true}");
+        }, options);
+        if (!server.Start(err)) return 171;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 172;
+
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 173;
+        const std::string request = "GET /api/v1/admin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(fd, request)) return 174;
+        std::string response;
+        if (!TqRecvUntilClosed(fd, response)) return 175;
+        TqCloseSocket(fd);
+        server.Stop();
+        if (!TqHttpStatusIs(response, 200)) return 176;
+        if (response.find("\"role\":\"client\"") == std::string::npos) return 177;
+        if (response.find("\"token_present\":true") == std::string::npos) return 178;
+        if (response.find("\"token\":\"") != std::string::npos) return 179;
+    }
+    {
+        TqAdminHttpServerOptions options;
         options.TokenFile = TqSecureTokenFile("v1-peers").string();
         std::string err;
         TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
@@ -479,8 +506,26 @@ int main() {
             if (req.Method == "POST" && req.Path == "/tunnels/tun-1:abort") {
                 return TqJsonResponse(202, "{\"tunnel_abort\":true}");
             }
+            if (req.Method == "GET" && req.Path == "/relay/active-relays") {
+                return TqJsonResponse(200, "{\"active_relays\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/active-relays/relay-1") {
+                return TqJsonResponse(200, "{\"relay_id\":\"relay-1\"}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/active-relays/") {
+                return TqJsonResponse(500, "{\"bad_active_relays_empty\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/active-relays/relay-1/extra") {
+                return TqJsonResponse(500, "{\"bad_active_relays_nested\":true}");
+            }
             if (req.Method == "GET" && req.Path == "/relay/workers/aggregate") {
                 return TqJsonResponse(200, "{\"worker_id\":\"aggregate\"}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/workers/") {
+                return TqJsonResponse(500, "{\"bad_worker_empty\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/relay/workers/a/b") {
+                return TqJsonResponse(500, "{\"bad_worker_nested\":true}");
             }
             if (req.Method == "GET" && req.Path == "/server/connections") {
                 return TqJsonResponse(200, "{\"connections\":[]}");
@@ -488,14 +533,73 @@ int main() {
             if (req.Method == "POST" && req.Path == "/server/connections/srv-1:abort-tunnels") {
                 return TqJsonResponse(202, "{\"server_abort\":true}");
             }
+            if (req.Method == "GET" && req.Path == "/server/tunnels") {
+                return TqJsonResponse(200, "{\"server_tunnels\":[]}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/tunnels/tun-5") {
+                return TqJsonResponse(200, "{\"server_tunnel\":\"tun-5\"}");
+            }
+            if (req.Method == "POST" && req.Path == "/server/tunnels/tun-5:abort") {
+                return TqJsonResponse(202, "{\"server_tunnel_abort\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/server/tunnels/tun-5:drain") {
+                return TqJsonResponse(202, "{\"server_tunnel_drain\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/tunnels/") {
+                return TqJsonResponse(500, "{\"bad_server_tunnel_empty\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/tunnels/tun-5/extra") {
+                return TqJsonResponse(500, "{\"bad_server_tunnel_nested\":true}");
+            }
+            if (req.Method == "POST" && req.Path == "/server/tunnels/tun-5:unknown") {
+                return TqJsonResponse(500, "{\"bad_server_tunnel_action\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/tunnels/tun%2f5") {
+                return TqJsonResponse(500, "{\"bad_server_tunnel_encoded_slash\":true}");
+            }
             if (req.Method == "POST" && req.Path == "/memory/allocator:dump") {
                 return TqJsonResponse(200, "{\"memory_dump\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/runtime/config") {
+                return TqJsonResponse(200, "{\"runtime_config\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/client/config") {
+                return TqJsonResponse(200, "{\"client_config\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/diagnostics") {
+                return TqJsonResponse(200, "{\"diagnostics\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/config") {
+                return TqJsonResponse(200, "{\"server_config\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/peers/agent-d/config") {
+                return TqJsonResponse(200, "{\"peer_config\":true}");
+            }
+            if (req.Method == "GET" && req.Path == "/peers/agent-d/config/extra") {
+                return TqJsonResponse(500, "{\"bad_forward\":true}");
             }
             return TqJsonResponse(404, "{}");
         }, options);
         if (!server.Start(err)) return 120;
         const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
         if (port == 0) return 121;
+
+        auto sendAuthorized = [&](const std::string& method, const std::string& path, std::string& out) -> int {
+            TqSocketHandle requestFd = TqConnectLocal(port);
+            if (!TqSocketValid(requestFd)) return 180;
+            const std::string requestText = method + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+                server.AuthTokenForTesting() + "\r\n\r\n";
+            if (!TqSendAll(requestFd, requestText)) {
+                TqCloseSocket(requestFd);
+                return 181;
+            }
+            if (!TqRecvUntilClosed(requestFd, out)) {
+                TqCloseSocket(requestFd);
+                return 182;
+            }
+            TqCloseSocket(requestFd);
+            return 0;
+        };
 
         TqSocketHandle fd = TqConnectLocal(port);
         if (!TqSocketValid(fd)) return 122;
@@ -561,6 +665,26 @@ int main() {
         TqCloseSocket(tunnelAbortFd);
         if (!TqHttpStatusIs(tunnelAbortResponse, 202)) return 148;
 
+        std::string activeRelaysResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/active-relays", activeRelaysResponse)) return code;
+        if (!TqHttpStatusIs(activeRelaysResponse, 200)) return 195;
+        if (activeRelaysResponse.find("\"active_relays\":true") == std::string::npos) return 196;
+
+        std::string activeRelayResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/active-relays/relay-1", activeRelayResponse)) return code;
+        if (!TqHttpStatusIs(activeRelayResponse, 200)) return 197;
+        if (activeRelayResponse.find("\"relay_id\":\"relay-1\"") == std::string::npos) return 198;
+
+        std::string activeRelaysEmptyResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/active-relays/", activeRelaysEmptyResponse)) return code;
+        if (!TqHttpStatusIs(activeRelaysEmptyResponse, 404)) return 199;
+        if (activeRelaysEmptyResponse.find("bad_active_relays_empty") != std::string::npos) return 200;
+
+        std::string activeRelaysNestedResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/active-relays/relay-1/extra", activeRelaysNestedResponse)) return code;
+        if (!TqHttpStatusIs(activeRelaysNestedResponse, 404)) return 201;
+        if (activeRelaysNestedResponse.find("bad_active_relays_nested") != std::string::npos) return 202;
+
         TqSocketHandle relayWorkerFd = TqConnectLocal(port);
         if (!TqSocketValid(relayWorkerFd)) return 149;
         const std::string relayWorkerRequest =
@@ -571,6 +695,21 @@ int main() {
         if (!TqRecvUntilClosed(relayWorkerFd, relayWorkerResponse)) return 151;
         TqCloseSocket(relayWorkerFd);
         if (!TqHttpStatusIs(relayWorkerResponse, 200)) return 152;
+
+        std::string relayWorkerAggregateResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/workers/aggregate", relayWorkerAggregateResponse)) return code;
+        if (!TqHttpStatusIs(relayWorkerAggregateResponse, 200)) return 203;
+        if (relayWorkerAggregateResponse.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 204;
+
+        std::string relayWorkerEmptyResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/workers/", relayWorkerEmptyResponse)) return code;
+        if (!TqHttpStatusIs(relayWorkerEmptyResponse, 404)) return 205;
+        if (relayWorkerEmptyResponse.find("bad_worker_empty") != std::string::npos) return 206;
+
+        std::string relayWorkerNestedResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/relay/workers/a/b", relayWorkerNestedResponse)) return code;
+        if (!TqHttpStatusIs(relayWorkerNestedResponse, 404)) return 207;
+        if (relayWorkerNestedResponse.find("bad_worker_nested") != std::string::npos) return 208;
 
         TqSocketHandle serverConnectionsFd = TqConnectLocal(port);
         if (!TqSocketValid(serverConnectionsFd)) return 153;
@@ -594,6 +733,46 @@ int main() {
         TqCloseSocket(serverAbortFd);
         if (!TqHttpStatusIs(serverAbortResponse, 202)) return 160;
 
+        std::string serverTunnelsResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/tunnels", serverTunnelsResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelsResponse, 200)) return 219;
+        if (serverTunnelsResponse.find("\"server_tunnels\":[]") == std::string::npos) return 220;
+
+        std::string serverTunnelResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/tunnels/tun-5", serverTunnelResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelResponse, 200)) return 209;
+        if (serverTunnelResponse.find("\"server_tunnel\":\"tun-5\"") == std::string::npos) return 210;
+
+        std::string serverTunnelAbortResponse;
+        if (const int code = sendAuthorized("POST", "/api/v1/server/tunnels/tun-5:abort", serverTunnelAbortResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelAbortResponse, 202)) return 211;
+        if (serverTunnelAbortResponse.find("\"server_tunnel_abort\":true") == std::string::npos) return 212;
+
+        std::string serverTunnelDrainResponse;
+        if (const int code = sendAuthorized("POST", "/api/v1/server/tunnels/tun-5:drain", serverTunnelDrainResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelDrainResponse, 202)) return 213;
+        if (serverTunnelDrainResponse.find("\"server_tunnel_drain\":true") == std::string::npos) return 214;
+
+        std::string serverTunnelEmptyResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/tunnels/", serverTunnelEmptyResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelEmptyResponse, 404)) return 215;
+        if (serverTunnelEmptyResponse.find("bad_server_tunnel_empty") != std::string::npos) return 216;
+
+        std::string serverTunnelNestedResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/tunnels/tun-5/extra", serverTunnelNestedResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelNestedResponse, 404)) return 217;
+        if (serverTunnelNestedResponse.find("bad_server_tunnel_nested") != std::string::npos) return 218;
+
+        std::string serverTunnelUnknownActionResponse;
+        if (const int code = sendAuthorized("POST", "/api/v1/server/tunnels/tun-5:unknown", serverTunnelUnknownActionResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelUnknownActionResponse, 404)) return 221;
+        if (serverTunnelUnknownActionResponse.find("bad_server_tunnel_action") != std::string::npos) return 222;
+
+        std::string serverTunnelEncodedSlashResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/tunnels/tun%2f5", serverTunnelEncodedSlashResponse)) return code;
+        if (!TqHttpStatusIs(serverTunnelEncodedSlashResponse, 404)) return 223;
+        if (serverTunnelEncodedSlashResponse.find("bad_server_tunnel_encoded_slash") != std::string::npos) return 224;
+
         TqSocketHandle memoryDumpFd = TqConnectLocal(port);
         if (!TqSocketValid(memoryDumpFd)) return 161;
         const std::string memoryDumpRequest =
@@ -603,7 +782,37 @@ int main() {
         std::string memoryDumpResponse;
         if (!TqRecvUntilClosed(memoryDumpFd, memoryDumpResponse)) return 163;
         TqCloseSocket(memoryDumpFd);
+
+        std::string runtimeConfigResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/runtime/config", runtimeConfigResponse)) return code;
+        if (!TqHttpStatusIs(runtimeConfigResponse, 200)) return 183;
+        if (runtimeConfigResponse.find("\"runtime_config\":true") == std::string::npos) return 184;
+
+        std::string clientConfigResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/client/config", clientConfigResponse)) return code;
+        if (!TqHttpStatusIs(clientConfigResponse, 200)) return 185;
+        if (clientConfigResponse.find("\"client_config\":true") == std::string::npos) return 186;
+
+        std::string diagnosticsResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/diagnostics", diagnosticsResponse)) return code;
+        if (!TqHttpStatusIs(diagnosticsResponse, 200)) return 187;
+        if (diagnosticsResponse.find("\"diagnostics\":true") == std::string::npos) return 188;
+
+        std::string serverConfigResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/server/config", serverConfigResponse)) return code;
+        if (!TqHttpStatusIs(serverConfigResponse, 200)) return 189;
+        if (serverConfigResponse.find("\"server_config\":true") == std::string::npos) return 190;
+
+        std::string peerConfigResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/peers/agent-d/config", peerConfigResponse)) return code;
+        if (!TqHttpStatusIs(peerConfigResponse, 200)) return 191;
+        if (peerConfigResponse.find("\"peer_config\":true") == std::string::npos) return 192;
+
+        std::string badPeerConfigResponse;
+        if (const int code = sendAuthorized("GET", "/api/v1/peers/agent-d/config/extra", badPeerConfigResponse)) return code;
         server.Stop();
+        if (!TqHttpStatusIs(badPeerConfigResponse, 404)) return 193;
+        if (badPeerConfigResponse.find("bad_forward") != std::string::npos) return 194;
         if (!TqHttpStatusIs(memoryDumpResponse, 200)) return 164;
         if (memoryDumpResponse.find("\"memory_dump\":true") == std::string::npos) return 165;
     }

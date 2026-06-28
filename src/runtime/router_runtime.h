@@ -80,6 +80,7 @@ public:
 class TqRouterRuntime {
 public:
     explicit TqRouterRuntime(TqPeerRuntimeAdapter* adapter = nullptr);
+    explicit TqRouterRuntime(TqPeerRuntimeAdapter* adapter, TqConfig runtimeConfig);
     explicit TqRouterRuntime(bool bridgeValidationMode);
 
     bool ApplyConfig(const TqRouterConfig& config, std::string& err);
@@ -109,6 +110,7 @@ public:
 private:
     mutable std::mutex Mutex;
     std::mutex ConnectionControlMutex;
+    TqConfig RuntimeConfig;
     TqRouterConfig Config;
     std::unordered_map<std::string, TqPeerMetrics> Metrics;
     std::unordered_map<std::string, TqPeerConfig> RunningPeers;
