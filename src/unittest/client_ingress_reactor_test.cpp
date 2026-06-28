@@ -1265,6 +1265,36 @@ int TestDelayedTaskDroppedOnStop() {
     return calls.load(std::memory_order_relaxed) == 0 ? 0 : 942;
 }
 
+int TestAddRemovePeerFromReactorThreadDoesNotDeadlock() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) {
+        return 1501;
+    }
+
+    std::atomic<bool> ran{false};
+    std::atomic<bool> addOk{false};
+    std::atomic<bool> removeOk{false};
+    if (!reactor.EnqueueDelayed(std::chrono::milliseconds(1), [&]() {
+            ran.store(true, std::memory_order_release);
+            addOk.store(reactor.AddPeer(MakePeer("reactor-thread")), std::memory_order_release);
+            removeOk.store(reactor.RemovePeer("reactor-thread"), std::memory_order_release);
+        })) {
+        reactor.Stop();
+        return 1502;
+    }
+
+    for (int i = 0; i < 50 && !ran.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    reactor.Stop();
+
+    if (!ran.load(std::memory_order_acquire)) return 1503;
+    if (!addOk.load(std::memory_order_acquire)) return 1504;
+    if (!removeOk.load(std::memory_order_acquire)) return 1505;
+    if (reactor.PeerCountForTest() != 0) return 1506;
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -1308,6 +1338,8 @@ int main() {
     result = TestDelayedTaskRejectedAfterStop();
     if (result != 0) return result;
     result = TestDelayedTaskDroppedOnStop();
+    if (result != 0) return result;
+    result = TestAddRemovePeerFromReactorThreadDoesNotDeadlock();
     if (result != 0) return result;
     return 0;
 }

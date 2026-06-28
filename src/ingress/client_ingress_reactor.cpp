@@ -536,6 +536,10 @@ void TqClientIngressReactor::SetOpenTimeoutForTest(std::chrono::milliseconds tim
 #endif
 
 void TqClientIngressReactor::Run() {
+    {
+        std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+        ReactorThreadId = std::this_thread::get_id();
+    }
     while (Running.load(std::memory_order_acquire)) {
         ProcessPendingTasks();
         if (!Running.load(std::memory_order_acquire)) {
@@ -549,6 +553,15 @@ void TqClientIngressReactor::Run() {
         }
         (void)Reactor.RunOnce(timeoutMs);
     }
+    {
+        std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+        ReactorThreadId = std::thread::id{};
+    }
+}
+
+bool TqClientIngressReactor::IsReactorThread() const {
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    return std::this_thread::get_id() == ReactorThreadId;
 }
 
 bool TqClientIngressReactor::EnqueueDelayed(
@@ -576,6 +589,10 @@ bool TqClientIngressReactor::EnqueueDelayed(
 }
 
 bool TqClientIngressReactor::EnqueueSync(std::function<bool()> task) {
+    if (IsReactorThread()) {
+        return task ? task() : false;
+    }
+
     auto promise = std::make_shared<std::promise<bool>>();
     std::future<bool> future = promise->get_future();
     {

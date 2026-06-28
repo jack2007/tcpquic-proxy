@@ -150,6 +150,7 @@ private:
 
     void Run();
     bool EnqueueSync(std::function<bool()> task);
+    bool IsReactorThread() const;
     bool EnqueueAsync(std::function<void()> task);
     void ProcessPendingTasks();
     void ProcessDueDelayedTasks();
@@ -199,6 +200,7 @@ private:
     TqClientIngressPlatformReactor Reactor;
     std::shared_ptr<CompletionToken> CompletionTokenPtr{std::make_shared<CompletionToken>()};
     std::thread Worker;
+    std::thread::id ReactorThreadId{};
     std::deque<std::function<void()>> PendingTasks;
     std::vector<DelayedTask> DelayedTasks;
     uint64_t NextDelayedTaskOrder{1};
