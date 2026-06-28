@@ -378,3 +378,71 @@ bool TqResolveServerListenList(const std::string& value, std::vector<TqResolvedL
     listens = std::move(resolved);
     return true;
 }
+
+bool TqBuildClientSlotPaths(const TqConfig& cfg, std::vector<TqClientSlotPath>& slots, std::string& err) {
+    err.clear();
+    std::vector<TqClientSlotPath> expanded;
+
+    if (!cfg.QuicPaths.empty()) {
+        for (const TqQuicPathConfig& path : cfg.QuicPaths) {
+            if (path.Connections == 0) {
+                err = "path connections must be greater than zero: " + path.Name;
+                return false;
+            }
+
+            TqEndpoint endpoint;
+            if (!TqParseEndpoint(path.Peer, endpoint)) {
+                err = "invalid path peer: " + path.Peer;
+                return false;
+            }
+
+            const std::string peerText = TqFormatEndpoint(endpoint);
+            for (uint32_t i = 0; i < path.Connections; ++i) {
+                expanded.push_back(TqClientSlotPath{
+                    path.Name,
+                    path.LocalAddress,
+                    endpoint.Host,
+                    endpoint.Port,
+                    peerText});
+            }
+        }
+
+        if (expanded.empty()) {
+            err = "path-mode produced no connection slots";
+            return false;
+        }
+        slots = std::move(expanded);
+        return true;
+    }
+
+    if (cfg.QuicConnections == 0) {
+        err = "quic connections must be greater than zero";
+        return false;
+    }
+
+    std::vector<TqEndpoint> peers;
+    if (!TqParseEndpointList(cfg.QuicPeer, peers, err)) {
+        if (err.empty()) {
+            err = "invalid quic peer list";
+        }
+        return false;
+    }
+    if (peers.empty()) {
+        err = "quic peer list is empty";
+        return false;
+    }
+
+    expanded.reserve(cfg.QuicConnections);
+    for (uint32_t i = 0; i < cfg.QuicConnections; ++i) {
+        const TqEndpoint& endpoint = peers[i % peers.size()];
+        expanded.push_back(TqClientSlotPath{
+            "default",
+            "",
+            endpoint.Host,
+            endpoint.Port,
+            TqFormatEndpoint(endpoint)});
+    }
+
+    slots = std::move(expanded);
+    return true;
+}

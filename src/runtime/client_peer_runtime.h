@@ -21,6 +21,7 @@ inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     peer.PeerId = "primary";
     peer.Enabled = true;
     peer.QuicPeer = cfg.QuicPeer;
+    peer.QuicPaths = cfg.QuicPaths;
     peer.SocksListen = cfg.SocksListen;
     peer.HttpListen = cfg.HttpListen;
     peer.PortForwards = cfg.PortForwards;
@@ -41,6 +42,7 @@ inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeer
     cfg.ClientConfigPath.clear();
     cfg.AdminListen.clear();
     cfg.QuicPeer = peer.QuicPeer;
+    cfg.QuicPaths = peer.QuicPaths;
     cfg.SocksListen = peer.SocksListen;
     cfg.HttpListen = peer.HttpListen;
     cfg.PortForwards = peer.PortForwards;

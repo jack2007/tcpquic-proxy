@@ -23,11 +23,6 @@ namespace {
 constexpr char TqAlpn[] = "tcpquic-tunnel/1";
 constexpr uint64_t TqIdleTimeoutMs = 60 * 1000;
 
-struct TqPeerEndpoint {
-    std::string Host;
-    uint16_t Port{0};
-};
-
 struct TqCredentialConfig {
     QUIC_CREDENTIAL_CONFIG Config{};
     QUIC_CERTIFICATE_FILE CertFile{};
@@ -57,52 +52,6 @@ struct TqCredentialConfig {
 
 QUIC_CREDENTIAL_FLAGS TqMakeCredentialFlags(bool server) {
     return server ? QUIC_CREDENTIAL_FLAG_NONE : QUIC_CREDENTIAL_FLAG_CLIENT;
-}
-
-bool ParsePort(const std::string& value, uint16_t& port) {
-    char* end = nullptr;
-    const unsigned long parsed = std::strtoul(value.c_str(), &end, 10);
-    if (end == value.c_str() || *end != '\0' ||
-        parsed == 0 || parsed > std::numeric_limits<uint16_t>::max()) {
-        return false;
-    }
-    port = static_cast<uint16_t>(parsed);
-    return true;
-}
-
-bool ParseEndpoint(const std::string& value, TqPeerEndpoint& endpoint) {
-    if (value.empty()) {
-        return false;
-    }
-
-    std::string host;
-    std::string portText;
-    if (value[0] == '[') {
-        const size_t close = value.find(']');
-        if (close == std::string::npos ||
-            close + 1 >= value.size() ||
-            value[close + 1] != ':') {
-            return false;
-        }
-        host = value.substr(1, close - 1);
-        portText = value.substr(close + 2);
-    } else {
-        const size_t colon = value.rfind(':');
-        if (colon == std::string::npos || colon == 0 || colon + 1 >= value.size()) {
-            return false;
-        }
-        host = value.substr(0, colon);
-        portText = value.substr(colon + 1);
-    }
-
-    uint16_t port = 0;
-    if (host.empty() || !ParsePort(portText, port)) {
-        return false;
-    }
-
-    endpoint.Host = host;
-    endpoint.Port = port;
-    return true;
 }
 
 std::string TqFormatConnectionAddr(MsQuicConnection* connection, uint32_t param) {
@@ -543,15 +492,16 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         State->Scheduler = scheduler;
     }
 
-    TqPeerEndpoint endpoint;
-    if (!ParseEndpoint(cfg.QuicPeer, endpoint)) {
-        std::fprintf(stderr, "Invalid --quic-peer endpoint: %s\n", cfg.QuicPeer.c_str());
+    std::vector<TqClientSlotPath> slotPaths;
+    std::string pathErr;
+    if (!TqBuildClientSlotPaths(cfg, slotPaths, pathErr)) {
+        std::fprintf(stderr, "Invalid QUIC peer/path config: %s\n", pathErr.c_str());
         return false;
     }
 
     Config = cfg;
-    PeerHost = endpoint.Host;
-    PeerPort = endpoint.Port;
+    SlotPaths = std::move(slotPaths);
+    Config.QuicConnections = static_cast<uint32_t>(SlotPaths.size());
 
     if (!InitApiAndRegistration(Api, Registration, TqToMsQuicProfile(cfg.QuicProfile)) ||
         !InitConfiguration(Config, *Registration, false, Configuration)) {
@@ -572,7 +522,7 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         State->Api = Api;
         State->SessionGate = std::make_shared<ClientSessionGate>();
         State->Slots.clear();
-        State->Slots.resize(Config.QuicConnections);
+        State->Slots.resize(SlotPaths.size());
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
         }
@@ -724,7 +674,8 @@ MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t firstIndex) {
 }
 
 uint32_t QuicClientSession::ConnectionCount() const {
-    return static_cast<uint32_t>(Config.QuicConnections);
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return static_cast<uint32_t>(State->Slots.size());
 }
 
 uint32_t QuicClientSession::ConnectedConnectionCount() const {
@@ -762,6 +713,10 @@ std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const
 }
 
 bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string& err) {
+    if (!Config.QuicPaths.empty()) {
+        err = "path-mode uses fixed connection slots";
+        return false;
+    }
     if (desired == 0) {
         err = "desired connection count must be greater than zero";
         return false;
@@ -779,11 +734,32 @@ bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string&
             err = "use StopHighestConnection to shrink";
             return false;
         }
+    }
+
+    TqConfig updatedConfig = Config;
+    updatedConfig.QuicConnections = desired;
+    std::vector<TqClientSlotPath> updatedSlotPaths;
+    if (!TqBuildClientSlotPaths(updatedConfig, updatedSlotPaths, err)) {
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (!State->Started || State->Stopping) {
+            err = "session is not running";
+            return false;
+        }
+        oldSize = State->Slots.size();
+        if (desired < oldSize) {
+            err = "use StopHighestConnection to shrink";
+            return false;
+        }
+        Config = updatedConfig;
+        SlotPaths = std::move(updatedSlotPaths);
         State->Slots.resize(desired);
         for (size_t i = oldSize; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
         }
-        Config.QuicConnections = desired;
     }
 
     for (size_t i = oldSize; i < desired; ++i) {
@@ -793,6 +769,11 @@ bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string&
 }
 
 bool QuicClientSession::StopHighestConnection(const std::string& connectionId, std::string& err) {
+    if (!Config.QuicPaths.empty()) {
+        err = "path-mode uses fixed connection slots";
+        return false;
+    }
+
     size_t index = 0;
     if (!ParseConnectionId(connectionId, index)) {
         err = "invalid connection id";
@@ -817,6 +798,9 @@ bool QuicClientSession::StopHighestConnection(const std::string& connectionId, s
         slot.Connected = false;
         State->Slots.pop_back();
         Config.QuicConnections = static_cast<uint32_t>(State->Slots.size());
+        if (SlotPaths.size() > State->Slots.size()) {
+            SlotPaths.resize(State->Slots.size());
+        }
     }
     if (oldConnection) {
         oldConnection->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
@@ -945,9 +929,23 @@ void QuicClientSession::SetReconnectTestHooks(ReconnectTestHooks hooks) {
 }
 
 void QuicClientSession::MarkReconnectStartedForTest(size_t slots) {
+    TqConfig cfg;
+    cfg.QuicConnections = static_cast<uint32_t>(slots);
+    cfg.QuicPeer = "127.0.0.1:443";
+    MarkReconnectStartedForTest(slots, cfg);
+}
+
+void QuicClientSession::MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg) {
     std::shared_ptr<ClientSessionGate> gate;
     {
         std::lock_guard<std::mutex> guard(State->Lock);
+        Config = cfg;
+        Config.QuicConnections = static_cast<uint32_t>(slots);
+        SlotPaths.clear();
+        std::string err;
+        if (!TqBuildClientSlotPaths(Config, SlotPaths, err)) {
+            SlotPaths.resize(slots);
+        }
         State->Started = true;
         State->Stopping = false;
         State->Slots.clear();
@@ -1029,7 +1027,11 @@ void QuicClientSession::ReleaseLiveSession(const std::shared_ptr<ClientSessionGa
 }
 
 void QuicClientSession::StartAllSlots() {
-    const size_t count = Config.QuicConnections;
+    size_t count = 0;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        count = State->Slots.size();
+    }
     for (size_t i = 0; i < count; ++i) {
         {
             std::lock_guard<std::mutex> guard(State->Lock);
@@ -1055,12 +1057,18 @@ bool QuicClientSession::StartSlot(size_t index) {
 
     std::unique_ptr<MsQuicConnection> oldConnection;
     std::shared_ptr<ClientSharedState> state = State;
+    TqClientSlotPath path;
 
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         if (!state->Started || state->Stopping || index >= state->Slots.size()) {
             return false;
         }
+        if (index >= SlotPaths.size()) {
+            state->Slots[index].LastError = "connection slot has no QUIC path";
+            return false;
+        }
+        path = SlotPaths[index];
 
         auto& slot = state->Slots[index];
         if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
@@ -1167,6 +1175,38 @@ bool QuicClientSession::StartSlot(size_t index) {
         scheduleRetry = true;
     }
 
+    if (!scheduleRetry && !path.LocalAddress.empty()) {
+        QuicAddr localAddr;
+        if (!TqMakeQuicAddr(TqEndpoint{path.LocalAddress, 0}, localAddr.SockAddr)) {
+            {
+                std::lock_guard<std::mutex> guard(state->Lock);
+                if (index < state->Slots.size()) {
+                    state->Slots[index].LastError =
+                        "invalid local address for path " + path.Name + ": " + path.LocalAddress;
+                }
+            }
+            delete newContext;
+            newContext = nullptr;
+            newConnection.reset();
+            scheduleRetry = true;
+        } else {
+            const QUIC_STATUS bindStatus = newConnection->SetLocalAddr(localAddr);
+            if (QUIC_FAILED(bindStatus)) {
+                {
+                    std::lock_guard<std::mutex> guard(state->Lock);
+                    if (index < state->Slots.size()) {
+                        state->Slots[index].LastError =
+                            TqQuicStatusText(("SetLocalAddr " + path.Name).c_str(), bindStatus);
+                    }
+                }
+                delete newContext;
+                newContext = nullptr;
+                newConnection.reset();
+                scheduleRetry = true;
+            }
+        }
+    }
+
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         if (!state->Started || state->Stopping || index >= state->Slots.size()) {
@@ -1190,12 +1230,11 @@ bool QuicClientSession::StartSlot(size_t index) {
 
     TqClientDebugLog("connection-start-before", index, connectionToStart);
     const QUIC_STATUS startStatus =
-        connectionToStart->Start(*Configuration, PeerHost.c_str(), PeerPort);
+        connectionToStart->Start(*Configuration, path.PeerHost.c_str(), path.PeerPort);
     TqClientDebugLog("connection-start-after", index, connectionToStart, startStatus);
 
     if (TqTraceEnabled()) {
-        const std::string peer = PeerHost + ":" + std::to_string(PeerPort);
-        TqTraceQuicConnecting("client", static_cast<uint32_t>(index + 1), peer.c_str());
+        TqTraceQuicConnecting("client", static_cast<uint32_t>(index + 1), path.PeerText.c_str());
     }
 
     {

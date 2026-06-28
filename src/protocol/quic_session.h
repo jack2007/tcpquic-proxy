@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "msquic.hpp"
+#include "quic_address.h"
 
 #include <atomic>
 #include <chrono>
@@ -98,6 +99,7 @@ public:
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
+    void MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg);
     void ScheduleStartRetryForTest(size_t index);
     void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
@@ -181,8 +183,7 @@ private:
     bool ReconnectSlot(size_t index, std::string& err);
 
     TqConfig Config;
-    std::string PeerHost;
-    uint16_t PeerPort{0};
+    std::vector<TqClientSlotPath> SlotPaths;
     std::atomic<size_t> PickIndex{0};
     std::shared_ptr<ClientSharedState> State{std::make_shared<ClientSharedState>()};
     std::shared_ptr<MsQuicApi> Api;

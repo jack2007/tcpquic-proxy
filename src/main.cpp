@@ -198,6 +198,7 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
     out.Router.ProxyAuth = proxyAuth;
     out.ClientConfigPath.clear();
     out.QuicPeer = selected->QuicPeer;
+    out.QuicPaths = selected->QuicPaths;
     out.SocksListen = selected->SocksListen.empty() ? cfg.SocksListen : selected->SocksListen;
     out.HttpListen = selected->HttpListen.empty() ? cfg.HttpListen : selected->HttpListen;
     out.QuicConnections = selected->QuicConnections == 0 ? cfg.QuicConnections : selected->QuicConnections;

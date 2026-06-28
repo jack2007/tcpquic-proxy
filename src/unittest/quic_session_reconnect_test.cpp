@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "quic_address.h"
 
 #include <atomic>
 #include <chrono>
@@ -229,6 +230,94 @@ static int TestConnectionSnapshotAndSlotControls() {
     return 0;
 }
 
+static int TestQuicPathSlotExpansion() {
+    TqConfig cfg;
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
+
+    std::vector<TqClientSlotPath> slots;
+    std::string err;
+    if (!TqBuildClientSlotPaths(cfg, slots, err)) return 100;
+    if (slots.size() != 3) return 101;
+    if (slots[0].Name != "cmcc" ||
+        slots[0].LocalAddress != "10.10.1.2" ||
+        slots[0].PeerHost != "36.1.1.10" ||
+        slots[0].PeerPort != 443 ||
+        slots[0].PeerText != "36.1.1.10:443") {
+        return 102;
+    }
+    if (slots[1].Name != "cmcc" ||
+        slots[1].LocalAddress != "10.10.1.2" ||
+        slots[1].PeerHost != "36.1.1.10" ||
+        slots[1].PeerPort != 443 ||
+        slots[1].PeerText != "36.1.1.10:443") {
+        return 103;
+    }
+    if (slots[2].Name != "ctcc" ||
+        slots[2].LocalAddress != "10.20.1.2" ||
+        slots[2].PeerHost != "59.1.1.10" ||
+        slots[2].PeerPort != 443 ||
+        slots[2].PeerText != "59.1.1.10:443") {
+        return 104;
+    }
+    return 0;
+}
+
+static int TestQuicPeerListSlotExpansionRoundRobin() {
+    TqConfig cfg;
+    cfg.QuicPeer = "36.1.1.10:443,59.1.1.10:8443";
+    cfg.QuicConnections = 5;
+
+    std::vector<TqClientSlotPath> slots;
+    std::string err;
+    if (!TqBuildClientSlotPaths(cfg, slots, err)) return 110;
+    if (slots.size() != 5) return 111;
+
+    const char* expectedHosts[] = {
+        "36.1.1.10",
+        "59.1.1.10",
+        "36.1.1.10",
+        "59.1.1.10",
+        "36.1.1.10",
+    };
+    const uint16_t expectedPorts[] = {443, 8443, 443, 8443, 443};
+    const char* expectedTexts[] = {
+        "36.1.1.10:443",
+        "59.1.1.10:8443",
+        "36.1.1.10:443",
+        "59.1.1.10:8443",
+        "36.1.1.10:443",
+    };
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].Name != "default") return 112;
+        if (!slots[i].LocalAddress.empty()) return 113;
+        if (slots[i].PeerHost != expectedHosts[i]) return 114;
+        if (slots[i].PeerPort != expectedPorts[i]) return 115;
+        if (slots[i].PeerText != expectedTexts[i]) return 116;
+    }
+    return 0;
+}
+
+static int TestQuicPathModeRejectsSlotTopologyMutation() {
+    TqConfig cfg;
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
+
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(3, cfg);
+
+    std::string err;
+    if (session.SetDesiredConnectionCount(4, err)) return 120;
+    if (err.find("path-mode uses fixed connection slots") == std::string::npos) return 121;
+
+    err.clear();
+    if (session.StopHighestConnection("conn-2", err)) return 122;
+    if (err.find("path-mode uses fixed connection slots") == std::string::npos) return 123;
+
+    session.Stop();
+    return 0;
+}
+
 static int TestScheme2CredentialConfig() {
     TqConfig client;
     client.QuicCa = "ca.crt";
@@ -287,6 +376,9 @@ int main() {
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
+    if (int rc = TestQuicPathSlotExpansion()) return rc;
+    if (int rc = TestQuicPeerListSlotExpansionRoundRobin()) return rc;
+    if (int rc = TestQuicPathModeRejectsSlotTopologyMutation()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     return 0;
 }

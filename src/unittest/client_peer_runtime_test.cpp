@@ -8,6 +8,8 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     cfg.SocksListen = "127.0.0.1:1080";
     cfg.HttpListen = "127.0.0.1:18080";
     cfg.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15432", "db.internal", 5432});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
     cfg.QuicConnections = 4;
     cfg.Compress = "off";
 
@@ -21,6 +23,9 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     if (!peer.Enabled) return 16;
     if (peer.PortForwards.size() != 1) return 17;
     if (peer.PortForwards[0].Listen != "127.0.0.1:15432") return 18;
+    if (peer.QuicPaths.size() != 2) return 19;
+    if (peer.QuicPaths[0].Name != "cmcc") return 101;
+    if (peer.QuicPaths[1].Peer != "59.1.1.10:443") return 102;
     return 0;
 }
 
@@ -35,6 +40,8 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     peer.SocksListen = "127.0.0.1:11001";
     peer.HttpListen = "127.0.0.1:18081";
     peer.PortForwards.push_back(TqPortForwardConfig{"127.0.0.1:15433", "cache.internal", 6379});
+    peer.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
+    peer.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
     peer.QuicConnections = 8;
     peer.Compress = "off";
 
@@ -49,6 +56,9 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     if (out.PortForwards.size() != 1) return 27;
     if (out.PortForwards[0].TargetHost != "cache.internal") return 28;
     if (out.PortForwards[0].TargetPort != 6379) return 29;
+    if (out.QuicPaths.size() != 2) return 103;
+    if (out.QuicPaths[0].LocalAddress != "10.10.1.2") return 104;
+    if (out.QuicPaths[1].Connections != 1) return 105;
     return 0;
 }
 
