@@ -104,6 +104,7 @@ set(TCPQUIC_PROXY_SOURCES
     protocol/control_protocol.cpp
     acl/acl.cpp
     protocol/compress.cpp
+    protocol/quic_address.cpp
     protocol/quic_session.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tcp_tunnel.cpp
@@ -690,6 +691,7 @@ add_executable(tcpquic_config_router_test
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    protocol/quic_address.cpp
     ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )

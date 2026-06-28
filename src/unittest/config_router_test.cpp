@@ -1,4 +1,5 @@
 #include "config.h"
+#include "quic_address.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -6,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 static std::string WriteTempConfig(const std::string& body) {
     static unsigned counter = 0;
@@ -344,6 +346,35 @@ int main() {
         if (router.Peers.size() != 1) return 301;
         if (router.Peers[0].QuicPeer != "36.1.1.10:443,59.1.1.10:443") return 302;
         if (router.Peers[0].QuicConnections != 8) return 303;
+    }
+    {
+        std::vector<TqEndpoint> endpoints;
+        std::string err;
+        if (!TqParseEndpointList("36.1.1.10:443,59.1.1.10:443", endpoints, err)) return 329;
+        if (endpoints.size() != 2) return 330;
+        if (endpoints[0].Host != "36.1.1.10" || endpoints[0].Port != 443) return 331;
+        if (endpoints[1].Host != "59.1.1.10" || endpoints[1].Port != 443) return 332;
+    }
+    {
+        std::vector<TqEndpoint> endpoints;
+        std::string err;
+        if (!TqParseEndpointList("[2001:db8::1]:443,[2001:db8::2]:443", endpoints, err)) return 333;
+        if (endpoints.size() != 2) return 334;
+        if (endpoints[0].Host != "2001:db8::1" || endpoints[0].Port != 443) return 335;
+        if (endpoints[1].Host != "2001:db8::2" || endpoints[1].Port != 443) return 336;
+        if (TqFormatEndpoint(endpoints[0]) != "[2001:db8::1]:443") return 337;
+    }
+    {
+        std::vector<TqEndpoint> endpoints;
+        std::string err;
+        if (TqParseEndpointList("2001:db8::1:443", endpoints, err)) return 338;
+        if (err.find("invalid endpoint") == std::string::npos) return 339;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (TqResolveServerListenList("127.0.0.1:443,127.0.0.1:443", listens, err)) return 340;
+        if (err.find("duplicate listen address") == std::string::npos) return 341;
     }
     {
         TqRouterConfig router;
