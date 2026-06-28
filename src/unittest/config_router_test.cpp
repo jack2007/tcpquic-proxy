@@ -450,7 +450,7 @@ int main() {
         if (err.find("path name, local, peer and connections are required") == std::string::npos) return 326;
     }
     {
-        const char* locals[] = {"10.0.0.2:0", "bad local", "   "};
+        const char* locals[] = {"10.0.0.2:0", "bad local", "   ", "localhost", "not_an_ip", "999.999.999.999"};
         for (size_t i = 0; i < sizeof(locals) / sizeof(locals[0]); ++i) {
             std::string body =
                 R"json({"version":1,"peers":[{"peer_id":"agent-b","socks_listen":"127.0.0.1:11001","paths":[{"name":"cmcc","local":")json";

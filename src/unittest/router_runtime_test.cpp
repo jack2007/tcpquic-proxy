@@ -261,6 +261,15 @@ static TqPortForwardConfig Forward(const std::string& listen, const std::string&
     return forward;
 }
 
+static TqQuicPathConfig QuicPath(const std::string& name, const std::string& local, const std::string& peer, uint32_t connections) {
+    TqQuicPathConfig path;
+    path.Name = name;
+    path.LocalAddress = local;
+    path.Peer = peer;
+    path.Connections = connections;
+    return path;
+}
+
 static std::string JsonBody(const std::string& response) {
     const size_t body = response.find("\r\n\r\n");
     return body == std::string::npos ? std::string{} : response.substr(body + 4);
@@ -374,6 +383,32 @@ int main() {
         if (adapter.AbortAll.size() != 1 || adapter.AbortAll[0] != "agent-forward-change") return 188;
         if (adapter.Drained.size() != 1 || adapter.Drained[0] != "agent-forward-change") return 189;
         if (adapter.Started.size() != 2 || adapter.Started[1] != "agent-forward-change") return 190;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-path-change", "127.0.0.1:11017"));
+        cfg.Peers[0].QuicPaths.push_back(QuicPath("cmcc", "10.0.0.2", "36.1.1.10:443", 2));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 940;
+        if (adapter.LastStartedPeer.QuicPaths.size() != 1) return 941;
+        if (adapter.LastStartedPeer.QuicPaths[0].LocalAddress != "10.0.0.2") return 942;
+
+        cfg.Peers[0].QuicPaths[0].LocalAddress = "10.0.0.3";
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 943;
+        if (adapter.Started.size() != 2 || adapter.LastStartedPeer.QuicPaths[0].LocalAddress != "10.0.0.3") return 944;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped.back() != "agent-path-change") return 945;
+
+        cfg.Peers[0].QuicPaths[0].Peer = "59.1.1.10:443";
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 946;
+        if (adapter.Started.size() != 3 || adapter.LastStartedPeer.QuicPaths[0].Peer != "59.1.1.10:443") return 947;
+        if (adapter.Stopped.size() != 2 || adapter.Stopped.back() != "agent-path-change") return 948;
+
+        cfg.Peers[0].QuicPaths[0].Connections = 3;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 949;
+        if (adapter.Started.size() != 4 || adapter.LastStartedPeer.QuicPaths[0].Connections != 3) return 950;
+        if (adapter.Stopped.size() != 3 || adapter.Stopped.back() != "agent-path-change") return 951;
     }
     {
         TqRouterRuntime runtime;
@@ -599,6 +634,55 @@ int main() {
         std::string deleteResp = adminRuntime.HandleAdmin(deletePeer);
         if (deleteResp.find("HTTP/1.1 200 OK") == std::string::npos) return 282;
         if (adminRuntime.SnapshotConfig().Peers.size() != 0) return 283;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adminRuntime(&adapter);
+        const std::string createBody =
+            "{\"peer_id\":\"agent-path-admin\","
+            "\"quic_peer\":\"127.0.0.1:14461\","
+            "\"socks_listen\":\"127.0.0.1:11070\","
+            "\"quic_connections\":2,"
+            "\"paths\":[{\"name\":\"cmcc\",\"local\":\"10.0.0.2\",\"peer\":\"36.1.1.10:443\",\"connections\":2}],"
+            "\"enabled\":true}";
+        TqHttpRequest create = Request("POST", "/peers", createBody);
+        std::string createResp = adminRuntime.HandleAdmin(create);
+        if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 960;
+        if (adapter.Started.size() != 1 || adapter.Started[0] != "agent-path-admin") return 961;
+        if (adapter.LastStartedPeer.QuicPaths.size() != 1) return 962;
+        if (adapter.LastStartedPeer.QuicPaths[0].Name != "cmcc") return 963;
+        if (adapter.LastStartedPeer.QuicPaths[0].LocalAddress != "10.0.0.2") return 964;
+        if (adapter.LastStartedPeer.QuicPaths[0].Peer != "36.1.1.10:443") return 965;
+        if (adapter.LastStartedPeer.QuicPaths[0].Connections != 2) return 966;
+
+        TqHttpRequest getConfig = Request("GET", "/config", "");
+        std::string configResp = adminRuntime.HandleAdmin(getConfig);
+        if (configResp.find("HTTP/1.1 200 OK") == std::string::npos) return 967;
+        if (configResp.find("\"paths\":[{\"name\":\"cmcc\",\"local\":\"10.0.0.2\",\"peer\":\"36.1.1.10:443\",\"connections\":2}]") == std::string::npos) return 968;
+
+        TqHttpRequest listPeers = Request("GET", "/peers", "");
+        std::string listResp = adminRuntime.HandleAdmin(listPeers);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 969;
+        if (listResp.find("\"paths\":[{\"name\":\"cmcc\",\"local\":\"10.0.0.2\",\"peer\":\"36.1.1.10:443\",\"connections\":2}]") == std::string::npos) return 970;
+
+        TqHttpRequest patch = Request(
+            "PATCH",
+            "/peers/agent-path-admin",
+            "{\"paths\":[{\"name\":\"cmcc\",\"local\":\"10.0.0.3\",\"peer\":\"59.1.1.10:443\",\"connections\":3}]}");
+        std::string patchResp = adminRuntime.HandleAdmin(patch);
+        if (patchResp.find("HTTP/1.1 200 OK") == std::string::npos) return 971;
+        if (adapter.Stopped.size() != 1 || adapter.Stopped.back() != "agent-path-admin") return 972;
+        if (adapter.Drained.size() != 1 || adapter.Drained.back() != "agent-path-admin") return 973;
+        if (adapter.Started.size() != 2 || adapter.LastStartedPeer.QuicPaths.size() != 1) return 974;
+        if (adapter.LastStartedPeer.QuicPaths[0].LocalAddress != "10.0.0.3") return 975;
+        if (adapter.LastStartedPeer.QuicPaths[0].Peer != "59.1.1.10:443") return 976;
+        if (adapter.LastStartedPeer.QuicPaths[0].Connections != 3) return 977;
+
+        TqHttpRequest clear = Request("PATCH", "/peers/agent-path-admin", "{\"paths\":[]}");
+        std::string clearResp = adminRuntime.HandleAdmin(clear);
+        if (clearResp.find("HTTP/1.1 200 OK") == std::string::npos) return 978;
+        if (adapter.Stopped.size() != 2 || adapter.Stopped.back() != "agent-path-admin") return 979;
+        if (adapter.Started.size() != 3 || !adapter.LastStartedPeer.QuicPaths.empty()) return 980;
     }
     {
         TqRouterRuntime adminRuntime;

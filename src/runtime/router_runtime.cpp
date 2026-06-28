@@ -9,6 +9,7 @@
 #include <cctype>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 namespace {
 
@@ -21,6 +22,7 @@ struct TqPeerPatch {
     bool HasSocksListen{false};
     bool HasHttpListen{false};
     bool HasPortForwards{false};
+    bool HasQuicPaths{false};
     bool HasQuicConnections{false};
     bool HasCompress{false};
     bool HasEnabled{false};
@@ -28,6 +30,7 @@ struct TqPeerPatch {
     std::string SocksListen;
     std::string HttpListen;
     std::vector<TqPortForwardConfig> PortForwards;
+    std::vector<TqQuicPathConfig> QuicPaths;
     uint32_t QuicConnections{0};
     std::string Compress;
     bool Enabled{false};
@@ -145,6 +148,24 @@ void AppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortFor
     out << ']';
 }
 
+void AppendQuicPathsJson(std::ostringstream& out, const std::vector<TqQuicPathConfig>& paths) {
+    out << ",\"paths\":[";
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << '{';
+        AppendJsonString(out, "name", paths[i].Name);
+        out << ',';
+        AppendJsonString(out, "local", paths[i].LocalAddress);
+        out << ',';
+        AppendJsonString(out, "peer", paths[i].Peer);
+        out << ",\"connections\":" << paths[i].Connections;
+        out << '}';
+    }
+    out << ']';
+}
+
 void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     out << '{';
     AppendJsonString(out, "peer_id", peer.PeerId);
@@ -155,6 +176,7 @@ void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
     out << ',';
     AppendJsonString(out, "http_listen", peer.HttpListen);
     AppendPortForwardsJson(out, peer.PortForwards);
+    AppendQuicPathsJson(out, peer.QuicPaths);
     if (peer.QuicConnections != 0) {
         out << ",\"quic_connections\":" << peer.QuicConnections;
     }
@@ -174,6 +196,7 @@ void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
     out << ',';
     AppendJsonString(out, "http_listen", peer.HttpListen);
     AppendPortForwardsJson(out, peer.PortForwards);
+    AppendQuicPathsJson(out, peer.QuicPaths);
     out << ',';
     AppendJsonString(out, "state", peer.State);
     out << ",\"connection_count\":" << peer.ConnectionCount;
@@ -405,6 +428,9 @@ public:
             } else if (key == "port_forwards") {
                 patch.HasPortForwards = true;
                 if (!ParsePortForwards(patch.PortForwards)) return false;
+            } else if (key == "paths") {
+                patch.HasQuicPaths = true;
+                if (!ParseQuicPaths(patch.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 patch.HasQuicConnections = true;
                 if (!ParseUint32(patch.QuicConnections)) return Error("invalid quic_connections");
@@ -484,6 +510,8 @@ private:
                 if (!ParseStringField(peer.HttpListen, "invalid http_listen")) return false;
             } else if (key == "port_forwards") {
                 if (!ParsePortForwards(peer.PortForwards)) return false;
+            } else if (key == "paths") {
+                if (!ParseQuicPaths(peer.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
@@ -499,6 +527,51 @@ private:
         } while (Consume(','));
         if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
         return Consume('}') || Error("malformed peer object");
+    }
+
+    bool ParseQuicPaths(std::vector<TqQuicPathConfig>& paths) {
+        paths.clear();
+        if (!Consume('[')) return Error("paths must be an array");
+        if (Consume(']')) return true;
+        do {
+            TqQuicPathConfig path;
+            if (!ParseQuicPathObject(path)) return false;
+            paths.push_back(std::move(path));
+        } while (Consume(','));
+        return Consume(']') || Error("malformed paths array");
+    }
+
+    bool ParseQuicPathObject(TqQuicPathConfig& path) {
+        if (!Consume('{')) return Error("path must be an object");
+        bool hasName = false;
+        bool hasLocal = false;
+        bool hasPeer = false;
+        bool hasConnections = false;
+        if (Consume('}')) return Error("path fields are required");
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) return Error("malformed path object");
+            if (key == "name") {
+                hasName = true;
+                if (!ParseString(path.Name)) return Error("invalid path.name");
+            } else if (key == "local") {
+                hasLocal = true;
+                if (!ParseString(path.LocalAddress)) return Error("invalid path.local");
+            } else if (key == "peer") {
+                hasPeer = true;
+                if (!ParseString(path.Peer)) return Error("invalid path.peer");
+            } else if (key == "connections") {
+                hasConnections = true;
+                if (!ParseUint32(path.Connections)) return Error("invalid path.connections");
+            } else {
+                return Error("unknown path key: " + key);
+            }
+        } while (Consume(','));
+        if (!Consume('}')) return Error("malformed path object");
+        if (!hasName || !hasLocal || !hasPeer || !hasConnections) {
+            return Error("path name, local, peer and connections are required");
+        }
+        return true;
     }
 
     bool ParsePortForwardPort(const std::string& value, size_t portStart, uint16_t& port) {
@@ -880,6 +953,7 @@ void ApplyPeerPatch(TqPeerConfig& peer, const TqPeerPatch& patch) {
     if (patch.HasSocksListen) peer.SocksListen = patch.SocksListen;
     if (patch.HasHttpListen) peer.HttpListen = patch.HttpListen;
     if (patch.HasPortForwards) peer.PortForwards = patch.PortForwards;
+    if (patch.HasQuicPaths) peer.QuicPaths = patch.QuicPaths;
     if (patch.HasQuicConnections) peer.QuicConnections = patch.QuicConnections;
     if (patch.HasCompress) peer.Compress = patch.Compress;
     if (patch.HasEnabled) peer.Enabled = patch.Enabled;
@@ -934,12 +1008,28 @@ bool SamePortForwards(const std::vector<TqPortForwardConfig>& a, const std::vect
     return true;
 }
 
+bool SameQuicPaths(const std::vector<TqQuicPathConfig>& a, const std::vector<TqQuicPathConfig>& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].Name != b[i].Name ||
+            a[i].LocalAddress != b[i].LocalAddress ||
+            a[i].Peer != b[i].Peer ||
+            a[i].Connections != b[i].Connections) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SameBridgeActivePeer(const TqPeerConfig& a, const TqPeerConfig& b) {
     return a.PeerId == b.PeerId &&
         a.QuicPeer == b.QuicPeer &&
         a.SocksListen == b.SocksListen &&
         a.HttpListen == b.HttpListen &&
         SamePortForwards(a.PortForwards, b.PortForwards) &&
+        SameQuicPaths(a.QuicPaths, b.QuicPaths) &&
         a.QuicConnections == b.QuicConnections &&
         a.Compress == b.Compress;
 }
@@ -949,6 +1039,7 @@ bool PeerDataPlaneChanged(const TqPeerConfig& a, const TqPeerConfig& b) {
         a.SocksListen != b.SocksListen ||
         a.HttpListen != b.HttpListen ||
         !SamePortForwards(a.PortForwards, b.PortForwards) ||
+        !SameQuicPaths(a.QuicPaths, b.QuicPaths) ||
         a.QuicConnections != b.QuicConnections ||
         a.Compress != b.Compress;
 }
@@ -1035,6 +1126,7 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
         metrics.SocksListen = peer.SocksListen;
         metrics.HttpListen = peer.HttpListen;
         metrics.PortForwards = peer.PortForwards;
+        metrics.QuicPaths = peer.QuicPaths;
         metrics.LastError = adapterErr;
         if (!peer.Enabled) {
             metrics.State = "disabled";
@@ -1089,6 +1181,7 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
                 peer.LastConnectedAt = live.LastConnectedAt;
                 peer.State = live.State;
                 peer.PortForwards = item.second.PortForwards;
+                peer.QuicPaths = item.second.QuicPaths;
             }
         }
         snapshot.Peers.push_back(peer);

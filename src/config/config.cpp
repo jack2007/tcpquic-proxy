@@ -157,14 +157,30 @@ bool IsValidQuicPathLocalAddress(const std::string& value) {
     if (value.empty()) {
         return false;
     }
-    bool hasNonWhitespace = false;
+
+    uint32_t octet = 0;
+    uint32_t octets = 0;
+    bool haveDigit = false;
     for (char ch : value) {
-        if (ch == ',' || ch == ':' || std::isspace(static_cast<unsigned char>(ch))) {
+        if (std::isdigit(static_cast<unsigned char>(ch))) {
+            const uint32_t digit = static_cast<uint32_t>(ch - '0');
+            if (octet > 25 || (octet == 25 && digit > 5)) {
+                return false;
+            }
+            octet = octet * 10 + digit;
+            haveDigit = true;
+        } else if (ch == '.') {
+            if (!haveDigit || octets >= 3) {
+                return false;
+            }
+            ++octets;
+            octet = 0;
+            haveDigit = false;
+        } else {
             return false;
         }
-        hasNonWhitespace = true;
     }
-    return hasNonWhitespace;
+    return haveDigit && octets == 3;
 }
 
 bool SplitHostPortValue(const std::string& value, std::string& host, uint16_t& port) {
