@@ -727,24 +727,38 @@ private:
         if (Consume('}')) {
             return Error("path fields are required");
         }
+        bool hasName = false;
+        bool hasLocal = false;
+        bool hasPeer = false;
+        bool hasConnections = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) {
                 return Error("malformed path object");
             }
             if (key == "name") {
+                hasName = true;
                 if (!ParseString(path.Name)) return Error("invalid path.name");
             } else if (key == "local") {
+                hasLocal = true;
                 if (!ParseString(path.LocalAddress)) return Error("invalid path.local");
             } else if (key == "peer") {
+                hasPeer = true;
                 if (!ParseString(path.Peer)) return Error("invalid path.peer");
             } else if (key == "connections") {
+                hasConnections = true;
                 if (!ParseUint32(path.Connections)) return Error("invalid path.connections");
             } else {
                 return Error(("unknown path key: " + key).c_str());
             }
         } while (Consume(','));
-        return Consume('}') || Error("malformed path object");
+        if (!Consume('}')) {
+            return Error("malformed path object");
+        }
+        if (!hasName || !hasLocal || !hasPeer || !hasConnections) {
+            return Error("path name, local, peer and connections are required");
+        }
+        return true;
     }
 
     bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
