@@ -325,6 +325,41 @@ Usage: tcpquic-proxy client|server [options]
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
 
+### 多网口 QUIC 绑定
+
+server 端仍只使用 `--listen` / `server.proto_listen` 配置 QUIC 监听地址。配置 `0.0.0.0:443` 时，程序会枚举本机非本地 IPv4 地址，并对每个地址分别启动 MsQuic listener；显式配置 `ip:port` 列表时，只绑定列表中的指定地址。
+
+```bash
+tcpquic-proxy server --listen 0.0.0.0:443 --cert server.crt --key server.key --allow-targets 10.0.0.0/8
+tcpquic-proxy server --listen 36.1.1.10:443,59.1.1.10:443 --cert server.crt --key server.key --allow-targets 10.0.0.0/8
+```
+
+client 未配置 `paths` 时，`--peer` / router `quic_peer` 支持地址列表。连接槽按 `--connections` / `quic_connections` 数量创建，并 round-robin 分配到多个 peer 地址；本地出口由系统路由决定，程序不会强制选择本地网口。
+
+```bash
+tcpquic-proxy client --peer 36.1.1.10:443,59.1.1.10:443 --connections 8 --ca ca.crt
+```
+
+client 配置 `paths` 时，每条 path 显式描述 `local -> peer`。配置后会忽略 peer 级 `quic_peer` 和 `quic_connections`，总 QUIC connection 数等于所有 path 的 `connections` 之和。
+
+```json
+{
+  "version": 1,
+  "peers": [
+    {
+      "peer_id": "server-b",
+      "paths": [
+        { "name": "cmcc", "local": "10.10.1.2", "peer": "36.1.1.10:443", "connections": 4 },
+        { "name": "ctcc", "local": "10.20.1.2", "peer": "59.1.1.10:443", "connections": 4 }
+      ],
+      "socks_listen": "127.0.0.1:1080"
+    }
+  ]
+}
+```
+
+TCP tunnel 调度粒度是一个 TCP 连接。一个 TCP 连接会绑定到一条 QUIC connection，生命周期内不跨 slot 迁移；多个并发 TCP 连接会在同一 peer 的已连接 slot 间 round-robin 分摊。因此，`connections` 同时决定 path 上的 QUIC 连接数，也是默认 tunnel 分配权重。
+
 ## Admin HTTP API
 
 Admin HTTP 通过 `--admin-listen host:port` 开启；不配置该参数时不会启动。当前实现只允许绑定 loopback 地址，适合本机运维脚本或 SSH tunnel 访问。
