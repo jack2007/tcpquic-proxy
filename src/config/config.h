@@ -24,9 +24,17 @@ struct TqPortForwardConfig {
     uint16_t TargetPort{0};
 };
 
+struct TqQuicPathConfig {
+    std::string Name;
+    std::string LocalAddress;
+    std::string Peer;
+    uint32_t Connections{0};
+};
+
 struct TqPeerConfig {
     std::string PeerId;
     std::string QuicPeer;
+    std::vector<TqQuicPathConfig> QuicPaths;
     std::string SocksListen;
     std::string HttpListen;
     std::vector<TqPortForwardConfig> PortForwards;
@@ -52,6 +60,7 @@ struct TqConfig {
     std::string SocksListen = "127.0.0.1:1080";
     std::string HttpListen = "127.0.0.1:8080";
     std::string QuicPeer;
+    std::vector<TqQuicPathConfig> QuicPaths;
     std::vector<TqPortForwardConfig> PortForwards;
     std::string ConfigPath;
     std::string ClientConfigPath;

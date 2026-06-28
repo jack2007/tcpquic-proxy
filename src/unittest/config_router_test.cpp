@@ -340,6 +340,41 @@ int main() {
     {
         TqRouterConfig router;
         std::string err;
+        if (!Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"36.1.1.10:443,59.1.1.10:443","socks_listen":"127.0.0.1:11001","quic_connections":8}]})json", router, err)) return 300;
+        if (router.Peers.size() != 1) return 301;
+        if (router.Peers[0].QuicPeer != "36.1.1.10:443,59.1.1.10:443") return 302;
+        if (router.Peers[0].QuicConnections != 8) return 303;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (!Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","socks_listen":"127.0.0.1:11001","paths":[{"name":"cmcc","local":"10.0.0.2:0","peer":"36.1.1.10:443","connections":4},{"name":"ctcc","local":"10.0.0.3:0","peer":"59.1.1.10:443","connections":4}]}]})json", router, err)) return 304;
+        if (router.Peers.size() != 1) return 305;
+        if (router.Peers[0].QuicPaths.size() != 2) return 306;
+        if (router.Peers[0].QuicPaths[0].Name != "cmcc") return 307;
+        if (router.Peers[0].QuicPaths[0].LocalAddress != "10.0.0.2:0") return 308;
+        if (router.Peers[0].QuicPaths[0].Peer != "36.1.1.10:443") return 309;
+        if (router.Peers[0].QuicPaths[0].Connections != 4) return 310;
+        if (router.Peers[0].QuicPaths[1].Name != "ctcc") return 311;
+        if (router.Peers[0].QuicPaths[1].LocalAddress != "10.0.0.3:0") return 312;
+        if (router.Peers[0].QuicPaths[1].Peer != "59.1.1.10:443") return 313;
+        if (router.Peers[0].QuicPaths[1].Connections != 4) return 314;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","socks_listen":"127.0.0.1:11001","paths":[{"name":"cmcc","local":"10.0.0.2:0","peer":"36.1.1.10:443","connections":0}]}]})json", router, err)) return 315;
+        if (err.find("path connections out of range") == std::string::npos) return 316;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
+        if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","socks_listen":"127.0.0.1:11001","paths":[{"name":"cmcc","local":"10.0.0.2:0","peer":"36.1.1.10:443","connections":4},{"name":"cmcc","local":"10.0.0.3:0","peer":"59.1.1.10:443","connections":4}]}]})json", router, err)) return 317;
+        if (err.find("duplicate path name") == std::string::npos) return 318;
+    }
+    {
+        TqRouterConfig router;
+        std::string err;
         if (Load(R"json({"version":1,"peers":[{"peer_id":"agent-b","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","quic_connections":0}]})json", router, err)) return 44;
         if (err.find("quic_connections") == std::string::npos) return 45;
     }
@@ -699,6 +734,26 @@ int main() {
             if (ParseRuntimeConfig(body, cfg, err)) return 233;
             if (err.find(cases[i].expectedError) == std::string::npos) return 234;
         }
+    }
+    {
+        TqConfig cfg;
+        std::string err;
+        if (!ParseRuntimeConfig(R"json({
+            "tls":{"ca":"ca.crt"},
+            "peers":[{
+                "id":"primary",
+                "socks_listen":"127.0.0.1:11080",
+                "paths":[
+                    {"name":"cmcc","local":"10.0.0.2:0","peer":"36.1.1.10:443","connections":4},
+                    {"name":"ctcc","local":"10.0.0.3:0","peer":"59.1.1.10:443","connections":4}
+                ]
+            }]
+        })json", cfg, err)) return 319;
+        if (cfg.Router.Peers.size() != 1) return 320;
+        if (!cfg.Router.Peers[0].QuicPeer.empty()) return 321;
+        if (cfg.Router.Peers[0].QuicPaths.size() != 2) return 322;
+        if (cfg.Router.Peers[0].QuicPaths[0].Name != "cmcc") return 323;
+        if (cfg.Router.Peers[0].QuicPaths[1].Peer != "59.1.1.10:443") return 324;
     }
     {
         std::string file = WriteTempConfig(R"json({

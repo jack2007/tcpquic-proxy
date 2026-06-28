@@ -139,6 +139,20 @@ bool IsHostPort(const std::string& value) {
     return port != 0;
 }
 
+bool IsHostPortList(const std::string& value) {
+    std::vector<std::string> endpoints;
+    SplitCommaList(value, endpoints);
+    if (endpoints.empty()) {
+        return false;
+    }
+    for (const auto& endpoint : endpoints) {
+        if (!IsHostPort(endpoint)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SplitHostPortValue(const std::string& value, std::string& host, uint16_t& port) {
     host.clear();
     port = 0;
@@ -607,6 +621,8 @@ private:
                 if (!ParseString(peer.HttpListen)) return Error("invalid peer.http_listen");
             } else if (key == "port_forwards") {
                 if (!ParsePortForwards(peer.PortForwards)) return false;
+            } else if (key == "paths") {
+                if (!ParseQuicPaths(peer.QuicPaths)) return false;
             } else if (key == "proto_connections") {
                 protoConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid peer.proto_connections");
@@ -665,6 +681,8 @@ private:
                 if (!ParseString(peer.HttpListen)) return Error("invalid http_listen");
             } else if (key == "port_forwards") {
                 if (!ParsePortForwards(peer.PortForwards)) return false;
+            } else if (key == "paths") {
+                if (!ParseQuicPaths(peer.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
@@ -682,6 +700,51 @@ private:
             return Error("quic_connections out of range");
         }
         return Consume('}') || Error("malformed peer object");
+    }
+
+    bool ParseQuicPaths(std::vector<TqQuicPathConfig>& paths) {
+        paths.clear();
+        if (!Consume('[')) {
+            return Error("paths must be an array");
+        }
+        if (Consume(']')) {
+            return true;
+        }
+        do {
+            TqQuicPathConfig path;
+            if (!ParseQuicPathObject(path)) {
+                return false;
+            }
+            paths.push_back(std::move(path));
+        } while (Consume(','));
+        return Consume(']') || Error("malformed paths array");
+    }
+
+    bool ParseQuicPathObject(TqQuicPathConfig& path) {
+        if (!Consume('{')) {
+            return Error("path must be an object");
+        }
+        if (Consume('}')) {
+            return Error("path fields are required");
+        }
+        do {
+            std::string key;
+            if (!ParseString(key) || !Consume(':')) {
+                return Error("malformed path object");
+            }
+            if (key == "name") {
+                if (!ParseString(path.Name)) return Error("invalid path.name");
+            } else if (key == "local") {
+                if (!ParseString(path.LocalAddress)) return Error("invalid path.local");
+            } else if (key == "peer") {
+                if (!ParseString(path.Peer)) return Error("invalid path.peer");
+            } else if (key == "connections") {
+                if (!ParseUint32(path.Connections)) return Error("invalid path.connections");
+            } else {
+                return Error(("unknown path key: " + key).c_str());
+            }
+        } while (Consume(','));
+        return Consume('}') || Error("malformed path object");
     }
 
     bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
@@ -1712,7 +1775,26 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
     for (const auto& peer : router.Peers) {
         if (peer.PeerId.empty()) { err = "peer_id is required"; return false; }
         if (!peerIds.insert(peer.PeerId).second) { err = "duplicate peer_id: " + peer.PeerId; return false; }
-        if (!IsHostPort(peer.QuicPeer)) { err = "invalid quic_peer for " + peer.PeerId; return false; }
+        if (peer.QuicPaths.empty()) {
+            if (!IsHostPortList(peer.QuicPeer)) { err = "invalid quic_peer for " + peer.PeerId; return false; }
+        } else {
+            std::set<std::string> pathNames;
+            uint32_t pathConnections = 0;
+            for (const auto& path : peer.QuicPaths) {
+                if (path.Name.empty()) { err = "path name is required for " + peer.PeerId; return false; }
+                if (!pathNames.insert(path.Name).second) { err = "duplicate path name: " + path.Name; return false; }
+                if (path.LocalAddress.empty() || path.LocalAddress.find(',') != std::string::npos) {
+                    err = "invalid path local for " + peer.PeerId;
+                    return false;
+                }
+                if (!IsHostPort(path.Peer)) { err = "invalid path peer for " + peer.PeerId; return false; }
+                if (path.Connections == 0 || path.Connections > 128 || pathConnections > 128 - path.Connections) {
+                    err = "path connections out of range for " + peer.PeerId;
+                    return false;
+                }
+                pathConnections += path.Connections;
+            }
+        }
         if (peer.SocksListen.empty() && peer.HttpListen.empty() && peer.PortForwards.empty()) {
             err = "at least one ingress is required for " + peer.PeerId;
             return false;
