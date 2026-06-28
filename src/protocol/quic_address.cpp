@@ -61,7 +61,7 @@ std::string TqTrimListItem(const std::string& value) {
 }
 
 bool TqIsIpv4Wildcard(const TqEndpoint& endpoint) {
-    return endpoint.Host == "*" || endpoint.Host == "0.0.0.0";
+    return endpoint.Host == "0.0.0.0";
 }
 
 bool TqIsIpv6Wildcard(const TqEndpoint& endpoint) {
@@ -327,6 +327,19 @@ bool TqResolveServerListenList(const std::string& value, std::vector<TqResolvedL
     std::unordered_set<std::string> seen;
     std::vector<TqResolvedListen> resolved;
     for (const TqEndpoint& endpoint : endpoints) {
+        if (endpoint.Host == "*") {
+            QUIC_ADDR address{};
+            if (!TqMakeQuicAddr(endpoint, address)) {
+                err = "invalid listen address: " + TqFormatEndpoint(endpoint);
+                return false;
+            }
+            const std::string text = TqFormatEndpoint(endpoint);
+            if (seen.insert(TqQuicAddressKey(address, text)).second) {
+                resolved.push_back(TqResolvedListen{text, address});
+            }
+            continue;
+        }
+
         if (TqIsIpv4Wildcard(endpoint) || TqIsIpv6Wildcard(endpoint)) {
             const QUIC_ADDRESS_FAMILY family =
                 TqIsIpv4Wildcard(endpoint) ? QUIC_ADDRESS_FAMILY_INET : QUIC_ADDRESS_FAMILY_INET6;

@@ -90,6 +90,12 @@ function(tcpquic_link_mimalloc target)
     endif()
 endfunction()
 
+function(tcpquic_link_quic_address_deps target)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE Iphlpapi)
+    endif()
+endfunction()
+
 set(TCPQUIC_PLATFORM_SOURCES)
 if(WIN32)
     list(APPEND TCPQUIC_PLATFORM_SOURCES platform/platform_socket_win.cpp)
@@ -185,6 +191,7 @@ if(WIN32)
 endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
+tcpquic_link_quic_address_deps(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
@@ -280,12 +287,14 @@ set_property(TARGET tcpquic_tuning_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_quic_settings_test
     unittest/quic_settings_test.cpp
+    protocol/quic_address.cpp
     protocol/quic_session.cpp
     config/tuning.cpp
     unittest/trace_proxy_stub.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_quic_settings_test)
+tcpquic_link_quic_address_deps(tcpquic_quic_settings_test)
 target_link_libraries(tcpquic_quic_settings_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
         target_link_libraries(tcpquic_quic_settings_test PRIVATE msquic_platform)
@@ -697,6 +706,7 @@ add_executable(tcpquic_config_router_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_config_router_test)
+tcpquic_link_quic_address_deps(tcpquic_config_router_test)
 target_link_libraries(tcpquic_config_router_test PRIVATE spdlog::spdlog)
 set_property(TARGET tcpquic_config_router_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_config_router_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -803,12 +813,14 @@ set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
 add_executable(tcpquic_quic_session_reconnect_test
     unittest/quic_session_reconnect_test.cpp
+    protocol/quic_address.cpp
     protocol/quic_session.cpp
     config/tuning.cpp
     unittest/trace_proxy_stub.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_quic_session_reconnect_test)
+tcpquic_link_quic_address_deps(tcpquic_quic_session_reconnect_test)
 target_link_libraries(tcpquic_quic_session_reconnect_test PRIVATE Threads::Threads inc warnings msquic logging base_link)
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_quic_session_reconnect_test PRIVATE msquic_platform)

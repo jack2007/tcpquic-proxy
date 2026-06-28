@@ -400,6 +400,15 @@ int main() {
         if (listens[0].Text != "[::1]:443") return 346;
     }
     {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("*:443", listens, err)) return 349;
+        if (listens.size() != 1) return 350;
+        if (QuicAddrGetFamily(&listens[0].Address) != QUIC_ADDRESS_FAMILY_UNSPEC) return 351;
+        if (QuicAddrGetPort(&listens[0].Address) != 443) return 352;
+        if (listens[0].Text != "*:443") return 353;
+    }
+    {
         TqServerMetrics metrics;
         metrics.Listen = "0.0.0.0:443";
         metrics.ResolvedListens = {"10.0.0.2:443", "10.0.0.3:443"};
