@@ -122,6 +122,8 @@ int main() {
         if (html.find("transferred_bytes") != std::string_view::npos) return 305;
         if (css.find(".sidebar") == std::string_view::npos) return 306;
         if (js.find("sessionStorage") == std::string_view::npos) return 307;
+        if (css.find(".span-4") == std::string_view::npos) return 308;
+        if (css.find(".span-8") == std::string_view::npos) return 309;
     }
 
     {
