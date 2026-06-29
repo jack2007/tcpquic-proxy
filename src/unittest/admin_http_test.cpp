@@ -171,6 +171,10 @@ int main() {
         if (js.find("renderServerConnections") == std::string_view::npos) return 361;
         if (js.find("renderServerTunnels") == std::string_view::npos) return 362;
         if (js.find("renderServerAcl") == std::string_view::npos) return 363;
+        if (js.find("remoteHostFromAddress") == std::string_view::npos) return 364;
+        if (js.find("startsWith('[')") == std::string_view::npos) return 365;
+        if (js.find("lastIndexOf(':')") == std::string_view::npos) return 366;
+        if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;
     }
 
     {

@@ -408,8 +408,26 @@ constexpr std::string_view kConsoleJs = R"JS(
       renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
     }
 
+    function remoteHostFromAddress(remoteAddress) {
+      const value = String(remoteAddress || '').trim();
+      if (!value) return 'unknown';
+      if (value.startsWith('[')) {
+        const end = value.indexOf(']');
+        return end > 1 ? value.slice(1, end) : value;
+      }
+      const firstColon = value.indexOf(':');
+      if (firstColon === -1) return value;
+      const lastColon = value.lastIndexOf(':');
+      if (firstColon === lastColon) return value.slice(0, lastColon) || 'unknown';
+      const suffix = value.slice(lastColon + 1);
+      if (value[lastColon - 1] !== ':' && /^[0-9]+$/.test(suffix)) {
+        return value.slice(0, lastColon) || 'unknown';
+      }
+      return value;
+    }
+
     function peerNameFromRemote(remoteAddress) {
-      const host = String(remoteAddress || '').split(':')[0] || 'unknown';
+      const host = remoteHostFromAddress(remoteAddress);
       return `peer-${host}`;
     }
 
@@ -469,9 +487,11 @@ constexpr std::string_view kConsoleJs = R"JS(
 
     async function renderServerAcl() {
       const [config, metrics] = await Promise.all([api('/server/config'), api('/metrics')]);
+      const allowTargets = Array.isArray(config.allow_targets) ? config.allow_targets : [];
+      const denyTargets = Array.isArray(config.deny_targets) ? config.deny_targets : [];
       renderRows(document.getElementById('server-acl-rules'), [
-        { type: 'allow_targets', targets: (config.allow_targets || []).join(', ') },
-        { type: 'deny_targets', targets: (config.deny_targets || []).join(', ') }
+        { type: 'allow_targets', targets: allowTargets.join(', ') },
+        { type: 'deny_targets', targets: denyTargets.join(', ') }
       ], ['type','targets']);
       document.getElementById('server-acl-denied').textContent = text(metrics.acl_denied);
     }
