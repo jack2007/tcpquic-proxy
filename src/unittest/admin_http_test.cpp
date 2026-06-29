@@ -141,6 +141,11 @@ int main() {
         if (js.find("catch (error) {\n        healthPill.innerHTML = '<span class=\"dot warn\"></span><strong>health</strong> degraded';\n        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;") == std::string_view::npos) return 318;
         if (js.find("button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));") == std::string_view::npos) return 319;
         if (js.find("renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);\n      if (!tbody) return;") == std::string_view::npos) return 320;
+        if (js.find("peerMode: 'create'") == std::string_view::npos) return 321;
+        if (js.find("function beginCreatePeer()") == std::string_view::npos) return 322;
+        if (js.find("document.getElementById('peer-create').onclick = beginCreatePeer;") == std::string_view::npos) return 323;
+        if (js.find("document.getElementById('peer-create').onclick = () => runClientAction(createPeer)") != std::string_view::npos) return 324;
+        if (js.find("if (consoleState.peerMode === 'create')") == std::string_view::npos) return 325;
         if (html.find("client-overview") == std::string_view::npos) return 334;
         if (html.find("client-peers") == std::string_view::npos) return 335;
         if (html.find("client-connections") == std::string_view::npos) return 336;
@@ -702,6 +707,33 @@ int main() {
         if (response.find("\"role\":\"client\"") == std::string::npos) return 177;
         if (response.find("\"token_present\":true") == std::string::npos) return 178;
         if (response.find("\"token\":\"") != std::string::npos) return 179;
+    }
+    {
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.Role = "server";
+        std::string err;
+        TqAdminHttpServer server("0.0.0.0:0", [&](const TqHttpRequest&) {
+            return TqJsonResponse(500, "{\"handler_called\":true}");
+        }, options);
+        if (!server.Start(err)) return 405;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 406;
+
+        TqSocketHandle fd = TqConnectLocal(port);
+        if (!TqSocketValid(fd)) return 407;
+        const std::string request = "GET /api/v1/admin HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+            server.AuthTokenForTesting() + "\r\n\r\n";
+        if (!TqSendAll(fd, request)) return 408;
+        std::string response;
+        if (!TqRecvUntilClosed(fd, response)) return 409;
+        TqCloseSocket(fd);
+        server.Stop();
+        if (!TqHttpStatusIs(response, 200)) return 410;
+        if (response.find("\"listen\":\"0.0.0.0:") == std::string::npos) return 411;
+        if (response.find("\"loopback_only\":false") == std::string::npos) return 412;
+        if (response.find("\"loopback_only\":true") != std::string::npos) return 413;
     }
     {
         TqAdminHttpServerOptions options;

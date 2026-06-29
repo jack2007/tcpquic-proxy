@@ -86,6 +86,22 @@ bool TqParseHostPort(const std::string& listen, TqHostPort& out, bool allowZero 
     return true;
 }
 
+bool TqAdminBindHostIsLoopback(std::string host) {
+    host = TqAsciiLower(TqTrim(std::move(host)));
+    if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+        host = host.substr(1, host.size() - 2);
+    }
+    return host == "localhost" ||
+        host == "::1" ||
+        host == "0:0:0:0:0:0:0:1" ||
+        host.rfind("127.", 0) == 0;
+}
+
+std::string TqAdminListenHost(const std::string& listen) {
+    const size_t pos = listen.rfind(':');
+    return pos == std::string::npos ? listen : listen.substr(0, pos);
+}
+
 const char* TqReasonPhrase(int status) {
     switch (status) {
     case 200:
@@ -421,6 +437,7 @@ std::string TqAdminStatusBody(
     const std::string& tokenFile) {
     const bool authEnabled = auth != nullptr;
     const bool tokenPresent = auth && !auth->Token().empty();
+    const bool loopbackOnly = TqAdminBindHostIsLoopback(TqAdminListenHost(listen));
     std::ostringstream out;
     out << "{"
         << "\"role\":\"" << TqAdminStatusEscape(options.Role) << "\","
@@ -437,7 +454,7 @@ std::string TqAdminStatusBody(
         << "\"keep_alive\":false"
         << "},"
         << "\"security\":{"
-        << "\"loopback_only\":true,"
+        << "\"loopback_only\":" << (loopbackOnly ? "true" : "false") << ","
         << "\"tls\":false"
         << "}"
         << "}";

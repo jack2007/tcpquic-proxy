@@ -192,6 +192,7 @@ constexpr std::string_view kConsoleJs = R"JS(
       token: sessionStorage.getItem('tcpquic_admin_token') || '',
       role: 'client',
       page: '',
+      peerMode: 'create',
       paused: false,
       refreshTimer: 0
     };
@@ -300,6 +301,7 @@ constexpr std::string_view kConsoleJs = R"JS(
     }
 
     function setPeerForm(peer = {}) {
+      consoleState.peerMode = peer && peer.peer_id ? 'edit' : 'create';
       document.getElementById('peer-id').value = peer.peer_id || '';
       document.getElementById('peer-quic-peer').value = peer.quic_peer || '';
       document.getElementById('peer-paths').value = JSON.stringify(peer.paths || [], null, 2);
@@ -324,14 +326,19 @@ constexpr std::string_view kConsoleJs = R"JS(
       return payload;
     }
 
-    async function createPeer() {
-      await api('/peers', { method: 'POST', body: peerFormPayload() });
-      await renderClientPeers();
+    function beginCreatePeer() {
+      setPeerForm();
+      consoleState.peerMode = 'create';
     }
 
     async function savePeer() {
       const payload = peerFormPayload();
-      await api(`/peers/${encodeURIComponent(payload.peer_id)}`, { method: 'PUT', body: payload });
+      if (consoleState.peerMode === 'create') {
+        await api('/peers', { method: 'POST', body: payload });
+      } else {
+        await api(`/peers/${encodeURIComponent(payload.peer_id)}`, { method: 'PUT', body: payload });
+      }
+      consoleState.peerMode = 'edit';
       await renderClientPeers();
     }
 
@@ -689,7 +696,7 @@ constexpr std::string_view kConsoleJs = R"JS(
       };
       document.getElementById('logout').onclick = logout;
       document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
-      document.getElementById('peer-create').onclick = () => runClientAction(createPeer);
+      document.getElementById('peer-create').onclick = beginCreatePeer;
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
       const configSave = document.getElementById('config-save');
       if (configSave) configSave.onclick = () => runClientAction(saveConfig);
