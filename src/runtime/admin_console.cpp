@@ -171,7 +171,8 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
 </html>
 )HTML";
 
-constexpr std::string_view kConsoleJs = R"JS(
+static constexpr char kConsoleJsStorage[] =
+    R"JS_PART1(
     const pageDefs = {
       client: [
         ['login','🔐','Login','info'], ['client-overview','📊','Overview','ok'], ['client-peers','🧭','Peers','ok'], ['client-connections','🔗','Connections','warn'], ['client-tunnels','↔','Tunnels','ok'], ['relay','⚙','Relay','info'], ['config','📝','Config','warn'], ['diagnostics','🧪','Diagnostics','info']
@@ -431,7 +432,8 @@ constexpr std::string_view kConsoleJs = R"JS(
 
     async function renderClientTunnels() {
       const data = await api('/tunnels');
-      renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
+)JS_PART1"
+    R"JS_PART2(      renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
     }
 
     function remoteHostFromAddress(remoteAddress) {
@@ -726,7 +728,8 @@ constexpr std::string_view kConsoleJs = R"JS(
         if (event.key === 'Enter') login();
       };
       document.getElementById('logout').onclick = logout;
-      document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
+)JS_PART2"
+    R"JS_PART3(      document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
       document.getElementById('peer-create').onclick = beginCreatePeer;
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
       const configSave = document.getElementById('config-save');
@@ -762,8 +765,9 @@ constexpr std::string_view kConsoleJs = R"JS(
       consoleState.refreshTimer = setInterval(refreshCurrentPage, 3000);
     }
 
-    bootConsole();
-  )JS";
+    bootConsole();)JS_PART3";
+
+constexpr std::string_view kConsoleJs(kConsoleJsStorage);
 
 } // namespace
 
