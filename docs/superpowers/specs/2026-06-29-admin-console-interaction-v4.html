@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>raypx2 Admin Console Interaction Design v4</title>
+  <style>
+    :root {
+      --bg:#f5f7f8; --panel:#fff; --line:#d8dee4; --text:#172026; --muted:#64717d;
+      --green:#15803d; --red:#b42318; --amber:#b45309; --blue:#2563eb; --ink:#22313a;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:0}
+    .shell{display:grid;grid-template-columns:232px 1fr;min-height:100vh}
+    .sidebar{background:#111820;color:#eef3f7;padding:18px 14px;display:flex;flex-direction:column;gap:14px}
+    .brand{padding:4px 8px 12px;border-bottom:1px solid rgba(255,255,255,.16)}
+    .brand h1{font-size:18px;line-height:1.2;margin:0 0 6px}
+    .brand p{margin:0;color:#a9b6c2;font-size:12px;line-height:1.45}
+    .role-switch{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+    .role-switch button,.nav button{all:unset;cursor:pointer;border-radius:6px}
+    .role-switch button{padding:8px 10px;text-align:center;font-size:13px;color:#cbd5df;background:rgba(255,255,255,.07)}
+    .role-switch button.active{background:#eef3f7;color:#111820;font-weight:700}
+    .nav{display:grid;gap:4px}
+    .nav button{padding:10px;color:#cad4dd;font-size:13px;display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:center}
+    .nav button:hover{background:rgba(255,255,255,.08)}
+    .nav button.active{background:#eef3f7;color:#111820;font-weight:650}
+    .dot{width:8px;height:8px;border-radius:50%;background:#94a3b8}.dot.ok{background:#22c55e}.dot.warn{background:#f59e0b}.dot.info{background:#38bdf8}
+    .main{min-width:0;display:grid;grid-template-rows:auto 1fr}
+    .topbar{min-height:58px;background:var(--panel);border-bottom:1px solid var(--line);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:14px}
+    .status,.actions,.filters{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+    .pill{display:inline-flex;align-items:center;gap:6px;min-height:26px;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--muted);font-size:12px;white-space:nowrap}
+    .pill strong{color:var(--text)}
+    .btn{border:1px solid var(--line);background:#fff;color:var(--text);border-radius:6px;min-height:32px;padding:6px 10px;font-size:13px;cursor:pointer;white-space:nowrap}
+    .btn.primary{border-color:#1d4ed8;background:var(--blue);color:#fff}.btn.danger{border-color:#efb4ad;color:var(--red);background:#fff7f6}
+    .content{padding:18px 20px 28px;overflow:auto}
+    .page{display:none;gap:14px}.page.active{display:grid}
+    .title-row{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+    h2{margin:0 0 4px;font-size:20px;line-height:1.25}h3{margin:0 0 8px;font-size:14px}
+    .subtitle{margin:0;color:var(--muted);font-size:13px;line-height:1.45;max-width:1000px}
+    .grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px}
+    .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;min-width:0}
+    .span-3{grid-column:span 3}.span-4{grid-column:span 4}.span-5{grid-column:span 5}.span-6{grid-column:span 6}.span-7{grid-column:span 7}.span-8{grid-column:span 8}.span-12{grid-column:span 12}
+    .metric{display:grid;gap:6px}.metric .label{color:var(--muted);font-size:12px}.metric .value{font-size:24px;line-height:1.1;font-weight:720}.metric .note{color:var(--muted);font-size:12px}
+    .toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+    input,select,textarea{border:1px solid var(--line);border-radius:6px;background:#fff;color:var(--text);font:inherit;font-size:13px;min-height:32px;padding:6px 9px}
+    textarea{width:100%;min-height:236px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.5}
+    .table-scroll{overflow:auto}
+    table{width:100%;border-collapse:collapse;font-size:12px}
+    th,td{border-bottom:1px solid var(--line);padding:9px 8px;text-align:left;vertical-align:middle;white-space:nowrap}
+    th{color:var(--muted);font-weight:650;background:#f8fafb}
+    .state{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:999px;border:1px solid var(--line);font-size:12px;background:#fff}
+    .state.ok{color:var(--green);border-color:#b7e1c1;background:#f1fbf4}.state.warn{color:var(--amber);border-color:#f6d49d;background:#fff8eb}.state.err{color:var(--red);border-color:#f2b8b1;background:#fff6f5}
+    .peer-layout{display:grid;grid-template-columns:minmax(0,.96fr) minmax(560px,1.04fr);gap:12px;align-items:start}
+    .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:12px;align-items:start}
+    .drawer{background:#fbfcfd;border:1px solid var(--line);border-radius:8px;padding:14px;display:grid;gap:12px;min-width:0}
+    .form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{display:grid;gap:4px}.field.full{grid-column:1/-1}.field label{color:var(--muted);font-size:12px}
+    .steps{display:grid;gap:8px;margin:0;padding:0;list-style:none}.steps li{display:grid;grid-template-columns:28px 1fr;gap:8px;align-items:start;font-size:13px;color:var(--ink);line-height:1.4}
+    .num{display:inline-flex;width:22px;height:22px;align-items:center;justify-content:center;border-radius:50%;background:#e8eef4;font-size:12px;font-weight:700}
+    .callout{border:1px solid #f1cc8f;background:#fff8eb;color:#7c3d00;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.45}
+    .confirm{border:1px solid #f0b4ad;background:#fff7f6;border-radius:8px;padding:12px;display:grid;gap:8px;font-size:13px;line-height:1.45}
+    .json-preview{background:#111820;color:#d8e5ed;border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:280px}
+    @media(max-width:1180px){.peer-layout,.split{grid-template-columns:1fr}.span-3,.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}}
+    @media(max-width:940px){.shell{grid-template-columns:1fr}.sidebar{position:sticky;top:0;z-index:2}.nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav button{grid-template-columns:1fr;gap:4px;justify-items:start}}
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <h1>raypx2 Admin Console</h1>
+        <p>v4: 只展示当前 Admin API 可直接获得的信息。</p>
+      </div>
+      <div class="role-switch">
+        <button id="role-client" class="active" data-role="client">client</button>
+        <button id="role-server" data-role="server">server</button>
+      </div>
+      <nav class="nav" id="nav"></nav>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div class="status">
+          <span class="pill" id="role-pill"><strong>role</strong> client</span>
+          <span class="pill"><span class="dot ok"></span><strong>health</strong> healthy</span>
+          <span class="pill"><strong>refresh</strong> 3s auto</span>
+        </div>
+        <div class="actions"><button class="btn">Pause refresh</button><button class="btn">Refresh now</button><button class="btn danger">Logout</button></div>
+      </header>
+      <section class="content">
+        <section id="login" class="page">
+          <div class="title-row"><div><h2>Login</h2><p class="subtitle">用户名固定为 raypx2，密码为 admin token 文件 JSON 中的 token。</p></div></div>
+          <div class="grid">
+            <div class="card span-5"><h3>登录</h3><div class="form"><div class="field full"><label>用户名</label><input value="raypx2"></div><div class="field full"><label>Admin token</label><input value="••••••••••••••••"></div><div class="field full"><button class="btn primary">Login with /api/v1/admin</button></div></div></div>
+            <div class="card span-7"><h3>边界</h3><ul class="steps"><li><span class="num">1</span><span>静态资源无需认证，API 仍强制 Bearer token。</span></li><li><span class="num">2</span><span>token 只保存在 sessionStorage。</span></li><li><span class="num">3</span><span>非 loopback 绑定必须提示管理面暴露风险。</span></li></ul></div>
+          </div>
+        </section>
+
+        <section id="client-overview" class="page">
+          <div class="title-row"><div><h2>Overview - client</h2><p class="subtitle">client 视角有 Overview、Peers、Connections、Tunnels 四个业务页面；Overview 汇总 peer -> connection -> tunnel 层级。</p></div></div>
+          <div class="grid">
+            <div class="card span-3 metric"><span class="label">Peers</span><span class="value">4</span><span class="note">3 enabled</span></div>
+            <div class="card span-3 metric"><span class="label">Connections</span><span class="value">8</span><span class="note">7 connected, 1 reconnecting</span></div>
+            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value">126</span><span class="note">from /api/v1/tunnels</span></div>
+            <div class="card span-3 metric"><span class="label">Active streams</span><span class="value">126</span><span class="note">sum of peers</span></div>
+            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>socks_listen</th><th>http_listen</th><th>last_error</th></tr></thead><tbody><tr><td>dgx-a</td><td><span class="state ok">healthy</span></td><td>true</td><td>4/4</td><td>92</td><td>14820</td><td>1</td><td>127.0.0.1:1080</td><td>127.0.0.1:8080</td><td>-</td></tr><tr><td>dgx-b</td><td><span class="state warn">connecting</span></td><td>true</td><td>3/4</td><td>34</td><td>6402</td><td>5</td><td>127.0.0.1:1081</td><td>-</td><td>path-b timeout</td></tr></tbody></table></div>
+          </div>
+        </section>
+
+        <section id="client-peers" class="page">
+          <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div><button class="btn primary">Create peer</button></div>
+          <div class="peer-layout">
+            <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>paths</th><th>socks_listen</th><th>http_listen</th><th>connections</th><th>actions</th></tr></thead><tbody><tr><td>dgx-a</td><td><span class="state ok">healthy</span></td><td>true</td><td>10.201.1.2:4433,10.201.1.3:4433</td><td>0</td><td>127.0.0.1:1080</td><td>127.0.0.1:8080</td><td>4/4</td><td><button class="btn">Edit</button> <button class="btn danger">Delete</button></td></tr><tr><td>dgx-b</td><td><span class="state warn">connecting</span></td><td>true</td><td>-</td><td>2</td><td>127.0.0.1:1081</td><td>-</td><td>3/4</td><td><button class="btn">Edit</button> <button class="btn danger">Delete</button></td></tr></tbody></table></div>
+            <aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input value="dgx-new"></div><div class="field full"><label>peers address - quic_peer 模式</label><input value="10.201.1.2:4433,10.201.1.3:4433"></div><div class="field full"><label>paths 模式</label><textarea style="min-height:96px">[
+  {"name":"path-a","local":"10.201.1.1","peer":"10.201.1.2:4433","connections":2},
+  {"name":"path-b","local":"10.201.2.1","peer":"10.201.2.2:4433","connections":2}
+]</textarea></div><div class="field"><label>socks_listen</label><input value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea style="min-height:72px">[
+  {"listen":"127.0.0.1:2222","target_host":"10.8.0.9","target_port":22}
+]</textarea></div><div class="field"><label>enabled</label><select><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn">Cancel</button><button class="btn">JSON advanced</button><button class="btn primary">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供 Drain/Abort。</span><button class="btn danger">Delete</button></div></aside>
+          </div>
+        </section>
+
+        <section id="client-connections" class="page">
+          <div class="title-row"><div><h2>Connections - client</h2><p class="subtitle">只查询展示，无 Add/Delete/Reconnect/Abort；字段来自 /api/v1/peers/{peer_id}/connections。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>conn-0</td><td>dgx-b</td><td>0</td><td>12</td><td>true</td><td>false</td><td><span class="state ok">connected</span></td><td>path-a</td><td>10.201.1.1</td><td>10.201.1.2:4433</td><td>18</td><td>-</td></tr><tr><td>conn-1</td><td>dgx-b</td><td>1</td><td>15</td><td>false</td><td>true</td><td><span class="state warn">reconnecting</span></td><td>path-b</td><td>10.201.2.1</td><td>10.201.2.2:4433</td><td>0</td><td>handshake timeout</td></tr></tbody></table></div>
+        </section>
+
+        <section id="client-tunnels" class="page">
+          <div class="title-row"><div><h2>Tunnels - client</h2><p class="subtitle">只查询展示；只使用当前 /api/v1/tunnels 已返回字段，不展示 source。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>target</th><th>role</th><th>ingress</th><th>compress</th><th>created_at</th><th>duration_ms</th><th>tcp_read_bytes</th><th>tcp_write_bytes</th><th>pending_bytes</th><th>relay_backend</th><th>worker_index</th><th>last_error</th></tr></thead><tbody><tr><td>tun-82341</td><td>dgx-a</td><td>conn-0</td><td>10.8.0.9:22</td><td>client</td><td>socks</td><td>zstd</td><td>2026-06-29T09:31:22Z</td><td>1080000</td><td>987842331</td><td>982113002</td><td>2202000</td><td>linux-epoll</td><td>3</td><td>-</td></tr></tbody></table></div>
+        </section>
+
+        <section id="server-overview" class="page">
+          <div class="title-row"><div><h2>Overview - server</h2><p class="subtitle">server 视角同样按 peer -> connection -> tunnel 展示；peer 是运行时聚合概念，不是可配置资源。</p></div></div>
+          <div class="grid">
+            <div class="card span-3 metric"><span class="label">Peers</span><span class="value">2</span><span class="note">remote peers linked</span></div>
+            <div class="card span-3 metric"><span class="label">Connections</span><span class="value">6</span><span class="note">accepted QUIC connections</span></div>
+            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value">96</span><span class="note">server-side active</span></div>
+            <div class="card span-3 metric"><span class="label">ACL denied</span><span class="value">3</span><span class="note">aggregate counter</span></div>
+            <div class="card span-7 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td>4</td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td>2</td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
+            <div class="card span-5"><h3>Peer 来源</h3><div class="callout">首版 server peer 从现有 server connection 的 remote_address 聚合得到；如果现有 API 返回 tunnel.peer_id 可优先显示该值。该设计不要求修改通信协议。</div></div>
+          </div>
+        </section>
+
+        <section id="server-peers" class="page">
+          <div class="title-row"><div><h2>Peers - server</h2><p class="subtitle">server peer 是只读运行时视图：展示当前有多少远端 peer 与本 server 有连接，以及每个 peer 下的 connection/tunnel 汇总。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td>4</td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td>2</td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
+          <div class="callout">server 不支持配置 peer，因此这里没有 Create/Edit/Delete。peer 名称由当前 server connection 的 remote_address 聚合得到。</div>
+        </section>
+
+        <section id="server-connections" class="page">
+          <div class="title-row"><div><h2>Connections - server</h2><p class="subtitle">server 端连接不展示 Reconnecting；第一版不区分 connecting 和 connected，列表展示当前 server 已登记/可观测连接。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>srv-21</td><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td><span class="state ok">connected</span></td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>srv-22</td><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td><span class="state ok">connected</span></td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
+          <div class="callout">当前 `TqServerConnectionSnapshot` 已有 remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
+        </section>
+
+        <section id="server-tunnels" class="page">
+          <div class="title-row"><div><h2>Tunnels - server</h2><p class="subtitle">只查询展示。当前 server tunnel snapshot 没有 remote source 字段，因此本页不展示 remote source；可通过 connection_id 跳到 Connections 查看 connection remote_address。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>state</th><th>target</th><th>role</th><th>duration_ms</th><th>active</th></tr></thead><tbody><tr><td>srv-tun-9012</td><td>peer-10.201.1.1</td><td>srv-21</td><td><span class="state ok">active</span></td><td>10.8.0.9:22</td><td>server</td><td>1320000</td><td>true</td></tr><tr><td>srv-tun-9014</td><td>peer-10.201.2.1</td><td>srv-22</td><td><span class="state ok">active</span></td><td>10.8.0.10:443</td><td>server</td><td>180000</td><td>true</td></tr></tbody></table></div>
+        </section>
+
+        <section id="server-acl" class="page">
+          <div class="title-row"><div><h2>ACL - server</h2><p class="subtitle">server 独有页面。只读展示 server config 中的 allow_targets/deny_targets 和 metrics 中的 acl_denied。</p></div></div>
+          <div class="grid">
+            <div class="card span-7 table-scroll"><h3>规则摘要</h3><table><thead><tr><th>type</th><th>targets</th></tr></thead><tbody><tr><td><span class="state ok">allow_targets</span></td><td>10.8.0.0/16, 172.16.0.0/16</td></tr><tr><td><span class="state err">deny_targets</span></td><td>10.9.0.0/16</td></tr></tbody></table></div>
+            <div class="card span-5"><h3>统计</h3><div class="metric"><span class="label">acl_denied</span><span class="value">3</span><span class="note">from /api/v1/metrics</span></div></div>
+            <div class="card span-12"><div class="callout">当前 API 不提供逐条命中历史或最近拒绝列表，因此首版不展示 matches、last_match、time、reason 等字段。</div></div>
+          </div>
+        </section>
+
+        <section id="relay" class="page"><div class="title-row"><div><h2>Relay</h2><p class="subtitle">client/server 共享页面，展示 relay backend、worker 聚合、pending bytes 和平台能力边界。</p></div></div><div class="grid"><div class="card span-3 metric"><span class="label">Backend</span><span class="value" style="font-size:20px">linux-epoll</span><span class="note">platform-specific</span></div><div class="card span-3 metric"><span class="label">Active relays</span><span class="value">126</span><span class="note">workers: 8</span></div><div class="card span-3 metric"><span class="label">Pending bytes</span><span class="value">84MiB</span><span class="note">aggregate</span></div><div class="card span-3 metric"><span class="label">Errors</span><span class="value">0</span><span class="note">last refresh</span></div></div></section>
+        <section id="config" class="page"><div class="title-row"><div><h2>Config</h2><p class="subtitle">client 可编辑 router config；server 首版只读展示 runtime/server config 和 ACL 配置。</p></div></div><div class="split"><div class="card"><textarea>{
+  "role": "client",
+  "peers": { "dgx-a": { "enabled": true, "quic_connections": 4 } }
+}</textarea></div><aside class="drawer"><h3>提交规则</h3><ul class="steps"><li><span class="num">1</span><span>client 支持 JSON validate/submit。</span></li><li><span class="num">2</span><span>server 配置首版只读，不提供编辑按钮。</span></li></ul></aside></div></section>
+        <section id="diagnostics" class="page"><div class="title-row"><div><h2>Diagnostics</h2><p class="subtitle">client/server 共享页面，展示诊断状态和 allocator dump。</p></div></div><div class="grid"><div class="card span-6"><h3>状态</h3><table><thead><tr><th>item</th><th>status</th></tr></thead><tbody><tr><td>trace</td><td><span class="state ok">enabled</span></td></tr><tr><td>allocator</td><td><span class="state ok">mimalloc available</span></td></tr></tbody></table></div><div class="card span-6"><div class="confirm"><strong>Allocator dump</strong><span>显式确认后调用 /api/v1/memory/allocator:dump。</span><button class="btn danger">Run allocator dump</button></div></div></div></section>
+      </section>
+    </main>
+  </div>
+  <script>
+    const pageDefs = {
+      client: [
+        ['login','🔐','Login','info'], ['client-overview','📊','Overview','ok'], ['client-peers','🧭','Peers','ok'], ['client-connections','🔗','Connections','warn'], ['client-tunnels','↔','Tunnels','ok'], ['relay','⚙','Relay','info'], ['config','📝','Config','warn'], ['diagnostics','🧪','Diagnostics','info']
+      ],
+      server: [
+        ['login','🔐','Login','info'], ['server-overview','📊','Overview','ok'], ['server-peers','🧭','Peers','ok'], ['server-connections','🔗','Connections','ok'], ['server-tunnels','↔','Tunnels','ok'], ['server-acl','🛡','ACL','warn'], ['relay','⚙','Relay','info'], ['config','📝','Config','warn'], ['diagnostics','🧪','Diagnostics','info']
+      ]
+    };
+    let role = 'client';
+    const nav = document.getElementById('nav');
+    const rolePill = document.getElementById('role-pill');
+    const pages = Array.from(document.querySelectorAll('.page'));
+    function show(pageId) {
+      pages.forEach(p => p.classList.toggle('active', p.id === pageId));
+      Array.from(nav.querySelectorAll('button')).forEach(b => b.classList.toggle('active', b.dataset.page === pageId));
+      if (window.recordEvent) window.recordEvent({ type:'click', choice: role + ':' + pageId, text: pageId });
+    }
+    function renderNav(firstPage) {
+      nav.innerHTML = '';
+      pageDefs[role].forEach(([id, icon, label, tone]) => {
+        const b = document.createElement('button');
+        b.dataset.page = id;
+        b.innerHTML = `<span>${icon}</span><span>${label}</span><span class="dot ${tone}"></span>`;
+        b.onclick = () => show(id);
+        nav.appendChild(b);
+      });
+      rolePill.innerHTML = `<strong>role</strong> ${role}`;
+      show(firstPage || pageDefs[role][1][0]);
+    }
+    document.querySelectorAll('.role-switch button').forEach(b => {
+      b.onclick = () => {
+        role = b.dataset.role;
+        document.querySelectorAll('.role-switch button').forEach(x => x.classList.toggle('active', x === b));
+        renderNav();
+      };
+    });
+    renderNav('client-overview');
+  </script>
+</body>
+</html>
