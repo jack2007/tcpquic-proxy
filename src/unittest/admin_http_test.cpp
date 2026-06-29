@@ -616,6 +616,68 @@ int main() {
     }
     {
         TqAdminHttpServerOptions options;
+        options.AdminThreads = 2;
+        options.TokenFile = TqSecureTokenFile("console-smoke").string();
+        options.Role = "server";
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [&](const TqHttpRequest& req) {
+            if (req.Method == "GET" && req.Path == "/health") {
+                return TqJsonResponse(200, "{\"role\":\"server\",\"status\":\"healthy\",\"uptime_seconds\":1}");
+            }
+            if (req.Method == "GET" && req.Path == "/metrics") {
+                return TqJsonResponse(200, "{\"status\":\"healthy\",\"acl_denied\":0}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/connections") {
+                return TqJsonResponse(200, "{\"connections\":[]}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/tunnels") {
+                return TqJsonResponse(200, "{\"tunnels\":[]}");
+            }
+            if (req.Method == "GET" && req.Path == "/server/config") {
+                return TqJsonResponse(200, "{\"role\":\"server\",\"allow_targets\":[\"0.0.0.0/0\"],\"deny_targets\":[]}");
+            }
+            return TqJsonResponse(404, "{}");
+        }, options);
+        if (!server.Start(err)) return 396;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 397;
+
+        auto sendRequest = [&](const std::string& requestText, std::string& out) -> int {
+            TqSocketHandle requestFd = TqConnectLocal(port);
+            if (!TqSocketValid(requestFd)) return 398;
+            if (!TqSendAll(requestFd, requestText)) {
+                TqCloseSocket(requestFd);
+                return 399;
+            }
+            if (!TqRecvUntilClosed(requestFd, out)) {
+                TqCloseSocket(requestFd);
+                return 400;
+            }
+            TqCloseSocket(requestFd);
+            return 0;
+        };
+
+        int smokeResult = 0;
+        std::string consoleResponse;
+        smokeResult = sendRequest("GET /console/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", consoleResponse);
+        if (smokeResult == 0 && !TqHttpStatusIs(consoleResponse, 200)) smokeResult = 401;
+        if (smokeResult == 0 && consoleResponse.find("server-acl") == std::string::npos) smokeResult = 402;
+
+        std::string configResponse;
+        if (smokeResult == 0) {
+            const std::string configRequest =
+                "GET /api/v1/server/config HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " +
+                server.AuthTokenForTesting() + "\r\n\r\n";
+            smokeResult = sendRequest(configRequest, configResponse);
+        }
+        if (smokeResult == 0 && !TqHttpStatusIs(configResponse, 200)) smokeResult = 403;
+        if (smokeResult == 0 && configResponse.find("\"allow_targets\"") == std::string::npos) smokeResult = 404;
+
+        server.Stop();
+        if (smokeResult != 0) return smokeResult;
+    }
+    {
+        TqAdminHttpServerOptions options;
         options.AdminThreads = 1;
         options.EnableTokenAuth = true;
         options.Role = "client";
