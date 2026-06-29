@@ -194,6 +194,15 @@ int main() {
         if (html.find("diagnostics-json") == std::string_view::npos) return 380;
         if (html.find("allocator-dump") == std::string_view::npos) return 381;
         if (html.find("allocator-json") == std::string_view::npos) return 382;
+        if (html.find("server overview") != std::string_view::npos) return 387;
+        if (html.find("Server Overview") != std::string_view::npos) return 388;
+        if (html.find("Drain</button>") != std::string_view::npos) return 389;
+        if (html.find("Abort</button>") != std::string_view::npos) return 390;
+        if (html.find("Add highest slot") != std::string_view::npos) return 391;
+        if (html.find("<th>connected_at</th>") != std::string_view::npos) return 392;
+        if (html.find("<th>disconnected_at</th>") != std::string_view::npos) return 393;
+        if (html.find("<th>transferred_bytes</th>") != std::string_view::npos) return 394;
+        if (html.find("<strong>listen</strong>") != std::string_view::npos) return 395;
     }
 
     {
