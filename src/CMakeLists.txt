@@ -981,7 +981,7 @@ add_executable(tcpquic_admin_http_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_admin_http_test)
-target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads cpp_httplib)
+target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads inc cpp_httplib)
 if(WIN32)
     target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(tcpquic_admin_http_test PRIVATE ws2_32)
