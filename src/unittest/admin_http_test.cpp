@@ -130,6 +130,11 @@ int main() {
         if (js.find("sessionStorage") == std::string_view::npos) return 307;
         if (css.find(".span-4") == std::string_view::npos) return 308;
         if (css.find(".span-8") == std::string_view::npos) return 309;
+        if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
+        if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
+        if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
+        if (js.find("api('/admin'") == std::string_view::npos) return 313;
+        if (js.find("setInterval(refreshCurrentPage, 3000)") == std::string_view::npos) return 314;
     }
 
     {

@@ -86,16 +86,16 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
       <header class="topbar">
         <div class="status">
           <span class="pill" id="role-pill"><strong>role</strong> client</span>
-          <span class="pill"><span class="dot ok"></span><strong>health</strong> healthy</span>
-          <span class="pill"><strong>refresh</strong> 3s auto</span>
+          <span class="pill" id="health-pill"><span class="dot ok"></span><strong>health</strong> healthy</span>
+          <span class="pill" id="refresh-pill"><strong>refresh</strong> 3s auto</span>
         </div>
-        <div class="actions"><button class="btn">Pause refresh</button><button class="btn">Refresh now</button><button class="btn danger">Logout</button></div>
+        <div class="actions"><button class="btn" id="pause-refresh">Pause refresh</button><button class="btn" id="refresh-now">Refresh now</button><button class="btn danger" id="logout">Logout</button></div>
       </header>
       <section class="content">
         <section id="login" class="page">
           <div class="title-row"><div><h2>Login</h2><p class="subtitle">用户名固定为 raypx2，密码为 admin token 文件 JSON 中的 token。</p></div></div>
           <div class="grid">
-            <div class="card span-5"><h3>登录</h3><div class="form"><div class="field full"><label>用户名</label><input value="raypx2"></div><div class="field full"><label>Admin token</label><input value="••••••••••••••••"></div><div class="field full"><button class="btn primary">Login with /api/v1/admin</button></div></div></div>
+            <div class="card span-5"><h3>登录</h3><div class="form"><div class="field full"><label>用户名</label><input id="login-username" value="raypx2"></div><div class="field full"><label>Admin token</label><input id="login-token" type="password" autocomplete="current-password"></div><div class="field full"><button class="btn primary" id="login-submit">Login with /api/v1/admin</button></div><div class="callout" id="login-error"></div></div></div>
             <div class="card span-7"><h3>边界</h3><ul class="steps"><li><span class="num">1</span><span>静态资源无需认证，API 仍强制 Bearer token。</span></li><li><span class="num">2</span><span>token 只保存在 sessionStorage。</span></li><li><span class="num">3</span><span>非 loopback 绑定必须提示管理面暴露风险。</span></li></ul></div>
           </div>
         </section>
@@ -195,40 +195,176 @@ constexpr std::string_view kConsoleJs = R"JS(
         ['login','🔐','Login','info'], ['server-overview','📊','Overview','ok'], ['server-peers','🧭','Peers','ok'], ['server-connections','🔗','Connections','ok'], ['server-tunnels','↔','Tunnels','ok'], ['server-acl','🛡','ACL','warn'], ['relay','⚙','Relay','info'], ['config','📝','Config','warn'], ['diagnostics','🧪','Diagnostics','info']
       ]
     };
-    let role = sessionStorage.getItem('tcpquic.admin.role') || 'client';
+
+    const consoleState = {
+      token: sessionStorage.getItem('tcpquic_admin_token') || '',
+      role: 'client',
+      page: '',
+      paused: false,
+      refreshTimer: 0
+    };
+
     const nav = document.getElementById('nav');
     const rolePill = document.getElementById('role-pill');
+    const healthPill = document.getElementById('health-pill');
+    const refreshPill = document.getElementById('refresh-pill');
+    const loginError = document.getElementById('login-error');
     const pages = Array.from(document.querySelectorAll('.page'));
-    function show(pageId) {
-      pages.forEach(p => p.classList.toggle('active', p.id === pageId));
-      Array.from(nav.querySelectorAll('button')).forEach(b => b.classList.toggle('active', b.dataset.page === pageId));
-      sessionStorage.setItem('tcpquic.admin.page', pageId);
-      if (window.recordEvent) window.recordEvent({ type:'click', choice: role + ':' + pageId, text: pageId });
+
+    async function api(path, options = {}) {
+      const headers = Object.assign({}, options.headers || {});
+      if (consoleState.token) headers.Authorization = `Bearer ${consoleState.token}`;
+      if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+      const request = Object.assign({}, options, { headers });
+      const response = await fetch(`/api/v1${path}`, request);
+      const raw = await response.text();
+      let data = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch (_) {
+        data = { raw };
+      }
+      if (response.status === 401) {
+        sessionStorage.removeItem('tcpquic_admin_token');
+        consoleState.token = '';
+        showPage('login');
+      }
+      if (!response.ok) {
+        const message = data && data.error && data.error.message ? data.error.message : `HTTP ${response.status}`;
+        throw new Error(message);
+      }
+      healthPill.innerHTML = '<span class="dot ok"></span><strong>health</strong> healthy';
+      return data;
     }
-    function renderNav(firstPage) {
-      nav.innerHTML = '';
-      pageDefs[role].forEach(([id, icon, label, tone]) => {
-        const b = document.createElement('button');
-        b.dataset.page = id;
-        b.innerHTML = `<span>${icon}</span><span>${label}</span><span class="dot ${tone}"></span>`;
-        b.onclick = () => show(id);
-        nav.appendChild(b);
+
+    function setLoginError(message) {
+      loginError.textContent = message || '';
+      loginError.style.display = message ? 'block' : 'none';
+    }
+
+    function overviewPage(role) {
+      return role === 'server' ? 'server-overview' : 'client-overview';
+    }
+
+    function setRole(role) {
+      consoleState.role = role === 'server' ? 'server' : 'client';
+      document.querySelectorAll('.role-switch button').forEach(button => {
+        button.classList.toggle('active', button.dataset.role === consoleState.role);
       });
-      rolePill.innerHTML = `<strong>role</strong> ${role}`;
-      sessionStorage.setItem('tcpquic.admin.role', role);
-      show(firstPage || pageDefs[role][1][0]);
+      rolePill.innerHTML = `<strong>role</strong> ${consoleState.role}`;
+      sessionStorage.setItem('tcpquic.admin.role', consoleState.role);
+      renderNav();
     }
-    document.querySelectorAll('.role-switch button').forEach(b => {
-      b.classList.toggle('active', b.dataset.role === role);
-      b.onclick = () => {
-        role = b.dataset.role;
-        document.querySelectorAll('.role-switch button').forEach(x => x.classList.toggle('active', x === b));
-        renderNav();
+
+    function showPage(pageId) {
+      const knownPage = pages.some(page => page.id === pageId) ? pageId : overviewPage(consoleState.role);
+      consoleState.page = knownPage;
+      pages.forEach(page => page.classList.toggle('active', page.id === knownPage));
+      Array.from(nav.querySelectorAll('button')).forEach(button => {
+        button.classList.toggle('active', button.dataset.page === knownPage);
+      });
+      sessionStorage.setItem('tcpquic.admin.page', knownPage);
+      if (window.recordEvent) window.recordEvent({ type:'click', choice: consoleState.role + ':' + knownPage, text: knownPage });
+    }
+
+    function renderNav() {
+      nav.innerHTML = '';
+      pageDefs[consoleState.role].forEach(([id, icon, label, tone]) => {
+        const button = document.createElement('button');
+        button.dataset.page = id;
+        button.innerHTML = `<span>${icon}</span><span>${label}</span><span class="dot ${tone}"></span>`;
+        button.onclick = () => showPage(id);
+        nav.appendChild(button);
+      });
+    }
+
+    async function refreshPage(pageId) {
+      if (!consoleState.token || pageId === 'login') return;
+    }
+
+    async function refreshCurrentPage() {
+      if (consoleState.paused || !consoleState.token) return;
+      try {
+        refreshPill.innerHTML = '<strong>refresh</strong> updating';
+        await refreshPage(consoleState.page);
+        refreshPill.innerHTML = '<strong>refresh</strong> 3s auto';
+      } catch (error) {
+        healthPill.innerHTML = '<span class="dot warn"></span><strong>health</strong> degraded';
+        refreshPill.innerHTML = `<strong>refresh</strong> ${error.message}`;
+      }
+    }
+
+    async function login() {
+      const username = document.getElementById('login-username').value.trim();
+      const token = document.getElementById('login-token').value;
+      setLoginError('');
+      if (username === 'raypx2') {
+        consoleState.token = token;
+      } else {
+        consoleState.token = '';
+        setLoginError('用户名必须是 raypx2。');
+        return;
+      }
+      try {
+        const admin = await api('/admin');
+        sessionStorage.setItem('tcpquic_admin_token', token);
+        setRole(admin.role);
+        showPage(overviewPage(consoleState.role));
+        await refreshCurrentPage();
+      } catch (error) {
+        sessionStorage.removeItem('tcpquic_admin_token');
+        consoleState.token = '';
+        showPage('login');
+        setLoginError(error.message);
+      }
+    }
+
+    function logout() {
+      sessionStorage.removeItem('tcpquic_admin_token');
+      consoleState.token = '';
+      showPage('login');
+    }
+
+    async function bootConsole() {
+      setLoginError('');
+      document.getElementById('login-submit').onclick = login;
+      document.getElementById('login-token').onkeydown = event => {
+        if (event.key === 'Enter') login();
       };
-    });
-    const savedPage = sessionStorage.getItem('tcpquic.admin.page');
-    const rolePages = pageDefs[role].map(([id]) => id);
-    renderNav(rolePages.includes(savedPage) ? savedPage : pageDefs[role][1][0]);
+      document.getElementById('logout').onclick = logout;
+      document.getElementById('refresh-now').onclick = refreshCurrentPage;
+      document.getElementById('pause-refresh').onclick = () => {
+        consoleState.paused = !consoleState.paused;
+        document.getElementById('pause-refresh').textContent = consoleState.paused ? 'Resume refresh' : 'Pause refresh';
+        refreshPill.innerHTML = consoleState.paused ? '<strong>refresh</strong> paused' : '<strong>refresh</strong> 3s auto';
+      };
+      document.querySelectorAll('.role-switch button').forEach(button => {
+        button.onclick = () => {
+          setRole(button.dataset.role);
+          showPage(overviewPage(consoleState.role));
+        };
+      });
+
+      const savedRole = sessionStorage.getItem('tcpquic.admin.role') || 'client';
+      setRole(savedRole);
+      const savedPage = sessionStorage.getItem('tcpquic.admin.page');
+      const validPages = pageDefs[consoleState.role].map(([id]) => id);
+      if (consoleState.token) {
+        showPage(validPages.includes(savedPage) && savedPage !== 'login' ? savedPage : overviewPage(consoleState.role));
+        try {
+          const admin = await api('/admin');
+          setRole(admin.role);
+          showPage(overviewPage(consoleState.role));
+        } catch (_) {
+          showPage('login');
+        }
+      } else {
+        showPage('login');
+      }
+      consoleState.refreshTimer = setInterval(refreshCurrentPage, 3000);
+    }
+
+    bootConsole();
   )JS";
 
 } // namespace
