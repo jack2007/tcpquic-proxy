@@ -167,12 +167,9 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
           </div>
         </section>
 
-        <section id="relay" class="page"><div class="title-row"><div><h2>Relay</h2><p class="subtitle">client/server 共享页面，展示 relay backend、worker 聚合、pending bytes 和平台能力边界。</p></div></div><div class="grid"><div class="card span-3 metric"><span class="label">Backend</span><span class="value" style="font-size:20px">linux-epoll</span><span class="note">platform-specific</span></div><div class="card span-3 metric"><span class="label">Active relays</span><span class="value">126</span><span class="note">workers: 8</span></div><div class="card span-3 metric"><span class="label">Pending bytes</span><span class="value">84MiB</span><span class="note">aggregate</span></div><div class="card span-3 metric"><span class="label">Errors</span><span class="value">0</span><span class="note">last refresh</span></div></div></section>
-        <section id="config" class="page"><div class="title-row"><div><h2>Config</h2><p class="subtitle">client 可编辑 router config；server 首版只读展示 runtime/server config 和 ACL 配置。</p></div></div><div class="split"><div class="card"><textarea>{
-  "role": "client",
-  "peers": { "dgx-a": { "enabled": true, "quic_connections": 4 } }
-}</textarea></div><aside class="drawer"><h3>提交规则</h3><ul class="steps"><li><span class="num">1</span><span>client 支持 JSON validate/submit。</span></li><li><span class="num">2</span><span>server 配置首版只读，不提供编辑按钮。</span></li></ul></aside></div></section>
-        <section id="diagnostics" class="page"><div class="title-row"><div><h2>Diagnostics</h2><p class="subtitle">client/server 共享页面，展示诊断状态和 allocator dump。</p></div></div><div class="grid"><div class="card span-6"><h3>状态</h3><table><thead><tr><th>item</th><th>status</th></tr></thead><tbody><tr><td>trace</td><td><span class="state ok">enabled</span></td></tr><tr><td>allocator</td><td><span class="state ok">mimalloc available</span></td></tr></tbody></table></div><div class="card span-6"><div class="confirm"><strong>Allocator dump</strong><span>显式确认后调用 /api/v1/memory/allocator:dump。</span><button class="btn danger">Run allocator dump</button></div></div></div></section>
+        <section id="relay" class="page"><div class="title-row"><div><h2>Relay</h2><p class="subtitle">client/server 共享页面，展示 relay backend、worker 聚合、pending bytes 和平台能力边界。</p></div></div><div class="grid"><div class="card span-3 metric"><span class="label">Backend</span><span class="value" id="relay-backend" style="font-size:20px">-</span><span class="note">platform-specific</span></div><div class="card span-3 metric"><span class="label">Active relays</span><span class="value" id="relay-active">-</span><span class="note">workers aggregate</span></div><div class="card span-3 metric"><span class="label">Pending bytes</span><span class="value" id="relay-pending">-</span><span class="note">aggregate</span></div><div class="card span-3 metric"><span class="label">Errors</span><span class="value" id="relay-errors">-</span><span class="note">last refresh</span></div></div></section>
+        <section id="config" class="page"><div class="title-row"><div><h2>Config</h2><p class="subtitle">client 可编辑 router config；server 首版只读展示 runtime/server config 和 ACL 配置。</p></div><button class="btn primary" id="config-save">Save config</button></div><div class="split"><div class="card"><textarea id="config-json">{}</textarea></div><aside class="drawer"><h3>提交规则</h3><ul class="steps"><li><span class="num">1</span><span>client 支持 JSON validate/submit。</span></li><li><span class="num">2</span><span>server 配置首版只读，不提供编辑按钮。</span></li></ul></aside></div></section>
+        <section id="diagnostics" class="page"><div class="title-row"><div><h2>Diagnostics</h2><p class="subtitle">client/server 共享页面，展示诊断状态和 allocator dump。</p></div></div><div class="grid"><div class="card span-6"><h3>状态</h3><pre class="json-preview" id="diagnostics-json">{}</pre></div><div class="card span-6"><div class="confirm"><strong>Allocator dump</strong><span>显式确认后调用 /api/v1/memory/allocator:dump。</span><button class="btn danger" id="allocator-dump">Run allocator dump</button></div><pre class="json-preview" id="allocator-json">{}</pre></div></div></section>
       </section>
     </main>
   </div>
@@ -254,7 +251,10 @@ constexpr std::string_view kConsoleJs = R"JS(
         const message = data && data.error && data.error.message ? data.error.message :
           (data && typeof data.error === 'string' ? data.error :
           (data && data.message ? data.message : `HTTP ${response.status}`));
-        throw new Error(message);
+        const error = new Error(message);
+        error.code = data && data.error && data.error.code ? data.error.code :
+          (data && data.code ? data.code : '');
+        throw error;
       }
       healthPill.innerHTML = '<span class="dot ok"></span><strong>health</strong> healthy';
       return data;
@@ -496,6 +496,78 @@ constexpr std::string_view kConsoleJs = R"JS(
       document.getElementById('server-acl-denied').textContent = text(metrics.acl_denied);
     }
 
+    function renderPanelError(elementId, err) {
+      const element = document.getElementById(elementId);
+      if (!element) return;
+      const message = err && (err.code === 'not_supported' || err.message === 'not_supported')
+        ? '当前平台不支持该明细'
+        : text(err && err.message ? err.message : err);
+      element.textContent = message;
+    }
+
+    function formatJson(data) {
+      return JSON.stringify(data, null, 2);
+    }
+
+    function firstDefined(...values) {
+      return values.find(value => value !== undefined && value !== null);
+    }
+
+    async function renderRelay() {
+      try {
+        const data = await api('/relay/metrics');
+        document.getElementById('relay-backend').textContent = text(firstDefined(data.backend, data.relay_backend));
+        document.getElementById('relay-active').textContent = text(firstDefined(data.active_relays, data.active, data.active_count));
+        document.getElementById('relay-pending').textContent = text(firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
+        document.getElementById('relay-errors').textContent = text(firstDefined(data.errors, data.error_count, data.last_error));
+      } catch (error) {
+        renderPanelError('relay-errors', error);
+        throw error;
+      }
+    }
+
+    async function renderConfig() {
+      const saveButton = document.getElementById('config-save');
+      const editor = document.getElementById('config-json');
+      if (saveButton) {
+        saveButton.style.display = consoleState.role === 'server' ? 'none' : '';
+      }
+      try {
+        const data = await api(consoleState.role === 'server' ? '/server/config' : '/config');
+        if (editor) editor.value = formatJson(data);
+      } catch (error) {
+        renderPanelError('config-json', error);
+        throw error;
+      }
+    }
+
+    async function saveConfig() {
+      const editor = document.getElementById('config-json');
+      const payload = JSON.parse(editor ? editor.value : '{}');
+      await api('/config', { method: 'PUT', body: payload });
+      await renderConfig();
+    }
+
+    async function renderDiagnostics() {
+      try {
+        const data = await api('/diagnostics');
+        document.getElementById('diagnostics-json').textContent = formatJson(data);
+      } catch (error) {
+        renderPanelError('diagnostics-json', error);
+        throw error;
+      }
+    }
+
+    async function runAllocatorDump() {
+      try {
+        const data = await api('/memory/allocator:dump', { method: 'POST' });
+        document.getElementById('allocator-json').textContent = formatJson(data);
+      } catch (error) {
+        renderPanelError('allocator-json', error);
+        throw error;
+      }
+    }
+
     function overviewPage(role) {
       return role === 'server' ? 'server-overview' : 'client-overview';
     }
@@ -546,6 +618,9 @@ constexpr std::string_view kConsoleJs = R"JS(
       if (pageId === 'server-connections') return renderServerConnections();
       if (pageId === 'server-tunnels') return renderServerTunnels();
       if (pageId === 'server-acl') return renderServerAcl();
+      if (pageId === 'relay') return renderRelay();
+      if (pageId === 'config') return renderConfig();
+      if (pageId === 'diagnostics') return renderDiagnostics();
     }
 
     async function refreshCurrentPage() {
@@ -606,6 +681,8 @@ constexpr std::string_view kConsoleJs = R"JS(
       document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
       document.getElementById('peer-create').onclick = () => runClientAction(createPeer);
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
+      document.getElementById('config-save').onclick = () => runClientAction(saveConfig);
+      document.getElementById('allocator-dump').onclick = () => runClientAction(runAllocatorDump);
       document.getElementById('peer-delete').onclick = () => {
         const peerId = document.getElementById('peer-id').value.trim();
         if (peerId) runClientAction(() => deletePeer(peerId));

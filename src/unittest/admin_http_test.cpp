@@ -175,6 +175,21 @@ int main() {
         if (js.find("startsWith('[')") == std::string_view::npos) return 365;
         if (js.find("lastIndexOf(':')") == std::string_view::npos) return 366;
         if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;
+        if (js.find("renderRelay") == std::string_view::npos) return 368;
+        if (js.find("renderConfig") == std::string_view::npos) return 369;
+        if (js.find("renderDiagnostics") == std::string_view::npos) return 370;
+        if (js.find("allocator:dump") == std::string_view::npos) return 371;
+        if (js.find("not_supported") == std::string_view::npos) return 372;
+        if (js.find("JSON.stringify") == std::string_view::npos) return 373;
+        if (html.find("relay-backend") == std::string_view::npos) return 374;
+        if (html.find("relay-active") == std::string_view::npos) return 375;
+        if (html.find("relay-pending") == std::string_view::npos) return 376;
+        if (html.find("relay-errors") == std::string_view::npos) return 377;
+        if (html.find("config-json") == std::string_view::npos) return 378;
+        if (html.find("config-save") == std::string_view::npos) return 379;
+        if (html.find("diagnostics-json") == std::string_view::npos) return 380;
+        if (html.find("allocator-dump") == std::string_view::npos) return 381;
+        if (html.find("allocator-json") == std::string_view::npos) return 382;
     }
 
     {
