@@ -130,19 +130,19 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
             <div class="card span-3 metric"><span class="label">Connections</span><span class="value" id="server-overview-connection-count">0</span><span class="note">accepted QUIC connections</span></div>
             <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value" id="server-overview-tunnel-count">0</span><span class="note">server-side active</span></div>
             <div class="card span-3 metric"><span class="label">ACL denied</span><span class="value" id="server-overview-acl-denied">0</span><span class="note">aggregate counter</span></div>
-            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-overview-peers"></tbody></table></div>
+            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-overview-peers"></tbody></table></div>
           </div>
         </section>
 
         <section id="server-peers" class="page">
           <div class="title-row"><div><h2>Peers - server</h2><p class="subtitle">server peer 是只读运行时视图：展示当前有多少远端 peer 与本 server 有连接，以及每个 peer 下的 connection/tunnel 汇总。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-peers-rows"></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-peers-rows"></tbody></table></div>
           <div class="callout">server 不支持配置 peer，因此这里没有 Create/Edit/Delete。peer 名称由当前 server connection 的 remote_address 聚合得到。</div>
         </section>
 
         <section id="server-connections" class="page">
           <div class="title-row"><div><h2>Connections - server</h2><p class="subtitle">server 端连接不展示 Reconnecting；第一版不区分 connecting 和 connected，列表展示当前 server 已登记/可观测连接。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
           <div class="callout">当前 TqServerConnectionSnapshot 已有 remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
         </section>
 
@@ -470,13 +470,13 @@ constexpr std::string_view kConsoleJs = R"JS(
           remote_address: connection.remote_address,
           connections: 0,
           active_streams: 0,
-          total_streams: 0,
+          total_streams_opened: 0,
           active_tunnels: 0,
           last_error: ''
         };
         item.connections += 1;
         item.active_streams += Number(connection.active_streams || 0);
-        item.total_streams += Number(connection.total_streams || 0);
+        item.total_streams_opened += Number(connection.total_streams || 0);
         item.active_tunnels += Number(connection.active_tunnels || 0);
         item.last_error = item.last_error || connection.last_error || '';
         groups.set(key, item);
@@ -496,18 +496,21 @@ constexpr std::string_view kConsoleJs = R"JS(
       document.getElementById('server-overview-connection-count').textContent = connRows.length;
       document.getElementById('server-overview-tunnel-count').textContent = (tunnels.tunnels || []).length;
       document.getElementById('server-overview-acl-denied').textContent = text(metrics.acl_denied);
-      renderRows(document.getElementById('server-overview-peers'), peerRows, ['peer','remote_address','connections','active_streams','total_streams','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-overview-peers'), peerRows, ['peer','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerPeers() {
       const data = await api('/server/connections');
-      renderRows(document.getElementById('server-peers-rows'), groupServerPeers(data.connections || []), ['peer','remote_address','connections','active_streams','total_streams','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-peers-rows'), groupServerPeers(data.connections || []), ['peer','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerConnections() {
       const data = await api('/server/connections');
-      const rows = (data.connections || []).map(row => Object.assign({ peer: peerNameFromRemote(row.remote_address) }, row));
-      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','remote_address','state','active_streams','total_streams','active_tunnels','last_error']);
+      const rows = (data.connections || []).map(row => Object.assign({
+        peer: peerNameFromRemote(row.remote_address),
+        total_streams_opened: row.total_streams
+      }, row));
+      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','remote_address','state','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerTunnels() {
@@ -552,10 +555,20 @@ constexpr std::string_view kConsoleJs = R"JS(
       return values.find(value => value !== undefined && value !== null);
     }
 
+    function platformRelayBackend(data) {
+      return firstDefined(
+        data.linux_relay_backend,
+        data.darwin_relay_backend,
+        data.windows_relay_backend,
+        data.backend,
+        data.relay_backend
+      );
+    }
+
     async function renderRelay() {
       try {
         const data = await api('/relay/metrics');
-        setElementText('relay-backend', firstDefined(data.backend, data.relay_backend));
+        setElementText('relay-backend', platformRelayBackend(data));
         setElementText('relay-active', firstDefined(data.active_relays, data.active, data.active_count));
         setElementText('relay-pending', firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
         setElementText('relay-errors', firstDefined(data.errors, data.error_count, data.last_error));

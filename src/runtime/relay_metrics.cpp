@@ -172,7 +172,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     TqRelayMetricsSnapshot metrics;
 #if defined(__linux__)
     const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
-    metrics.Backend = "worker";
+    metrics.Backend = "epoll";
     metrics.Wakeups = snapshot.WakeupWrites;
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = snapshot.PendingEvents;
@@ -310,7 +310,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
 #elif defined(__APPLE__)
     const auto snapshot = TqDarwinRelayRuntime::Instance().Snapshot();
-    metrics.Backend = "worker";
+    metrics.Backend = "kqueue";
     metrics.Wakeups = snapshot.Wakeups;
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = snapshot.PendingEvents;
@@ -368,7 +368,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
             hotScore = score;
         }
     }
-    metrics.Backend = "worker";
+    metrics.Backend = "iocp";
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = 0;
     metrics.EventQueueFullErrors = 0;

@@ -179,6 +179,7 @@ int main() {
         if (html.find("server-connections") == std::string_view::npos) return 351;
         if (html.find("server-tunnels") == std::string_view::npos) return 352;
         if (html.find("server-acl") == std::string_view::npos) return 353;
+        if (html.find("<th>total_streams_opened</th>") == std::string_view::npos) return 429;
         if (html.find("remote source") == std::string_view::npos) return 354;
         if (html.find("remote_identity") != std::string_view::npos) return 355;
         if (html.find("first_seen") != std::string_view::npos) return 356;
@@ -194,8 +195,15 @@ int main() {
         if (js.find("lastIndexOf(':')") == std::string_view::npos) return 366;
         if (js.find("peerNameAddressPart(remoteAddress)") == std::string_view::npos) return 427;
         if (js.find("return `peer-${peerNameAddressPart(remoteAddress)}`;") == std::string_view::npos) return 428;
+        if (js.find("item.total_streams_opened += Number(connection.total_streams || 0);") == std::string_view::npos) return 430;
+        if (js.find("total_streams_opened: row.total_streams") == std::string_view::npos) return 431;
         if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;
         if (js.find("renderRelay") == std::string_view::npos) return 368;
+        if (js.find("function platformRelayBackend(data)") == std::string_view::npos) return 432;
+        if (js.find("data.linux_relay_backend") == std::string_view::npos) return 433;
+        if (js.find("data.darwin_relay_backend") == std::string_view::npos) return 434;
+        if (js.find("data.windows_relay_backend") == std::string_view::npos) return 435;
+        if (js.find("setElementText('relay-backend', platformRelayBackend(data));") == std::string_view::npos) return 436;
         if (js.find("renderConfig") == std::string_view::npos) return 369;
         if (js.find("renderDiagnostics") == std::string_view::npos) return 370;
         if (js.find("allocator:dump") == std::string_view::npos) return 371;
