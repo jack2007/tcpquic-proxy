@@ -135,6 +135,9 @@ int main() {
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
         if (js.find("api('/admin'") == std::string_view::npos) return 313;
         if (js.find("setInterval(refreshCurrentPage, 3000)") == std::string_view::npos) return 314;
+        if (js.find("JSON.stringify") == std::string_view::npos) return 315;
+        if (js.find("typeof data.error === 'string'") == std::string_view::npos) return 316;
+        if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
     }
 
     {

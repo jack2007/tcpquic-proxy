@@ -211,11 +211,37 @@ constexpr std::string_view kConsoleJs = R"JS(
     const loginError = document.getElementById('login-error');
     const pages = Array.from(document.querySelectorAll('.page'));
 
+    function hasContentType(headers) {
+      return Object.keys(headers).some(name => name.toLowerCase() === 'content-type');
+    }
+
+    function isPlainJsonBody(body) {
+      return Array.isArray(body) || Object.prototype.toString.call(body) === '[object Object]';
+    }
+
+    function isSpecialBody(body) {
+      return typeof body === 'string' ||
+        (typeof FormData !== 'undefined' && body instanceof FormData) ||
+        (typeof Blob !== 'undefined' && body instanceof Blob) ||
+        (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) ||
+        (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) ||
+        (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView && ArrayBuffer.isView(body)) ||
+        (typeof ReadableStream !== 'undefined' && body instanceof ReadableStream);
+    }
+
     async function api(path, options = {}) {
       const headers = Object.assign({}, options.headers || {});
-      if (consoleState.token) headers.Authorization = `Bearer ${consoleState.token}`;
-      if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
       const request = Object.assign({}, options, { headers });
+      if (consoleState.token) headers.Authorization = `Bearer ${consoleState.token}`;
+      if (request.body !== undefined && request.body !== null) {
+        const shouldUseJsonContentType = !isSpecialBody(request.body);
+        if (isPlainJsonBody(request.body)) {
+          request.body = JSON.stringify(request.body);
+        }
+        if (shouldUseJsonContentType && !hasContentType(headers)) {
+          headers['Content-Type'] = 'application/json';
+        }
+      }
       const response = await fetch(`/api/v1${path}`, request);
       const raw = await response.text();
       let data = {};
@@ -230,7 +256,9 @@ constexpr std::string_view kConsoleJs = R"JS(
         showPage('login');
       }
       if (!response.ok) {
-        const message = data && data.error && data.error.message ? data.error.message : `HTTP ${response.status}`;
+        const message = data && data.error && data.error.message ? data.error.message :
+          (data && typeof data.error === 'string' ? data.error :
+          (data && data.message ? data.message : `HTTP ${response.status}`));
         throw new Error(message);
       }
       healthPill.innerHTML = '<span class="dot ok"></span><strong>health</strong> healthy';
@@ -284,6 +312,11 @@ constexpr std::string_view kConsoleJs = R"JS(
 
     async function refreshCurrentPage() {
       if (consoleState.paused || !consoleState.token) return;
+      await refreshCurrentPageNow();
+    }
+
+    async function refreshCurrentPageNow() {
+      if (!consoleState.token) return;
       try {
         refreshPill.innerHTML = '<strong>refresh</strong> updating';
         await refreshPage(consoleState.page);
@@ -332,7 +365,7 @@ constexpr std::string_view kConsoleJs = R"JS(
         if (event.key === 'Enter') login();
       };
       document.getElementById('logout').onclick = logout;
-      document.getElementById('refresh-now').onclick = refreshCurrentPage;
+      document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
       document.getElementById('pause-refresh').onclick = () => {
         consoleState.paused = !consoleState.paused;
         document.getElementById('pause-refresh').textContent = consoleState.paused ? 'Resume refresh' : 'Pause refresh';
