@@ -91,6 +91,12 @@ bool TqHttpStatusIs(const std::string& response, int status) {
     return response.find(prefix) == 0;
 }
 
+bool TqHttpHeaderIs(const std::string& response, const std::string& name, const std::string& value) {
+    const std::string header = name + ": " + value + "\r\n";
+    const size_t headerEnd = response.find("\r\n\r\n");
+    return headerEnd != std::string::npos && response.find(header) < headerEnd;
+}
+
 std::filesystem::path TqSecureTokenFile(const std::string& name) {
     static unsigned counter = 0;
     std::filesystem::path dir = std::filesystem::temp_directory_path() /
@@ -460,6 +466,46 @@ int main() {
         if (!TqRecvUntilClosed(unauthFd, unauthResponse)) return 98;
         TqCloseSocket(unauthFd);
         if (!TqHttpStatusIs(unauthResponse, 401)) return 99;
+
+        TqSocketHandle rootFd = TqConnectLocal(port);
+        if (!TqSocketValid(rootFd)) return 180;
+        if (!TqSendAll(rootFd, "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 181;
+        std::string rootResponse;
+        if (!TqRecvUntilClosed(rootFd, rootResponse)) return 182;
+        TqCloseSocket(rootFd);
+        if (!TqHttpStatusIs(rootResponse, 302)) return 183;
+        if (!TqHttpHeaderIs(rootResponse, "Location", "/console/")) return 184;
+
+        TqSocketHandle consoleFd = TqConnectLocal(port);
+        if (!TqSocketValid(consoleFd)) return 185;
+        if (!TqSendAll(consoleFd, "GET /console/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 186;
+        std::string consoleResponse;
+        if (!TqRecvUntilClosed(consoleFd, consoleResponse)) return 187;
+        TqCloseSocket(consoleFd);
+        if (!TqHttpStatusIs(consoleResponse, 200)) return 188;
+        if (!TqHttpHeaderIs(consoleResponse, "Content-Type", "text/html")) return 189;
+        if (consoleResponse.find("raypx2 Admin Console") == std::string::npos) return 190;
+        if (consoleResponse.find("<strong>listen</strong>") != std::string::npos) return 191;
+
+        TqSocketHandle cssFd = TqConnectLocal(port);
+        if (!TqSocketValid(cssFd)) return 192;
+        if (!TqSendAll(cssFd, "GET /console/style.css HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 193;
+        std::string cssResponse;
+        if (!TqRecvUntilClosed(cssFd, cssResponse)) return 194;
+        TqCloseSocket(cssFd);
+        if (!TqHttpStatusIs(cssResponse, 200)) return 195;
+        if (!TqHttpHeaderIs(cssResponse, "Content-Type", "text/css")) return 196;
+        if (cssResponse.find(".sidebar") == std::string::npos) return 197;
+
+        TqSocketHandle jsFd = TqConnectLocal(port);
+        if (!TqSocketValid(jsFd)) return 198;
+        if (!TqSendAll(jsFd, "GET /console/app.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 199;
+        std::string jsResponse;
+        if (!TqRecvUntilClosed(jsFd, jsResponse)) return 200;
+        TqCloseSocket(jsFd);
+        if (!TqHttpStatusIs(jsResponse, 200)) return 201;
+        if (!TqHttpHeaderIs(jsResponse, "Content-Type", "application/javascript")) return 202;
+        if (jsResponse.find("sessionStorage") == std::string::npos) return 203;
 
         TqSocketHandle authFd = TqConnectLocal(port);
         if (!TqSocketValid(authFd)) return 100;

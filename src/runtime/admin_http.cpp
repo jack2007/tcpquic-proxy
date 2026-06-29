@@ -1,6 +1,7 @@
 #include "admin_http.h"
 
 #include "admin_auth.h"
+#include "admin_console.h"
 #include "platform_socket.h"
 
 #include "httplib.h"
@@ -317,6 +318,39 @@ void TqSetJson(httplib::Response& res, int status, const std::string& body) {
     res.status = status;
     res.set_header("Connection", "close");
     res.set_content(body, "application/json");
+}
+
+void TqSetText(httplib::Response& res, int status, std::string_view body, const char* contentType) {
+    res.status = status;
+    res.set_header("Connection", "close");
+    res.set_content(body.data(), body.size(), contentType);
+}
+
+void TqSetRedirect(httplib::Response& res, const char* location) {
+    res.status = 302;
+    res.set_header("Connection", "close");
+    res.set_header("Location", location);
+    res.set_content("", "text/plain");
+}
+
+bool TqHandleConsoleStatic(const httplib::Request& req, httplib::Response& res) {
+    if (req.path == "/" || req.path == "/console") {
+        TqSetRedirect(res, "/console/");
+        return true;
+    }
+    if (req.path == "/console/") {
+        TqSetText(res, 200, TqAdminConsoleHtml(), "text/html");
+        return true;
+    }
+    if (req.path == "/console/style.css") {
+        TqSetText(res, 200, TqAdminConsoleCss(), "text/css");
+        return true;
+    }
+    if (req.path == "/console/app.js") {
+        TqSetText(res, 200, TqAdminConsoleJs(), "application/javascript");
+        return true;
+    }
+    return false;
 }
 
 void TqSetLegacyResponse(httplib::Response& res, const std::string& raw) {
@@ -657,6 +691,9 @@ std::string TqAdminHttpServer::AuthTokenForTesting() const {
 
 void TqAdminHttpServer::ConfigureRoutes() {
     auto dispatch = [this](const httplib::Request& req, httplib::Response& res) {
+        if (TqHandleConsoleStatic(req, res)) {
+            return;
+        }
         if (!TqIsV1Prefix(req.path)) {
             TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
             return;
