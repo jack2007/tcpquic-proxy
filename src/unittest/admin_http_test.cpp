@@ -181,6 +181,10 @@ int main() {
         if (js.find("allocator:dump") == std::string_view::npos) return 371;
         if (js.find("not_supported") == std::string_view::npos) return 372;
         if (js.find("JSON.stringify") == std::string_view::npos) return 373;
+        if (js.find("setElementText") == std::string_view::npos) return 383;
+        if (js.find("setElementJson") == std::string_view::npos) return 384;
+        if (js.find("if (configSave)") == std::string_view::npos) return 385;
+        if (js.find("if (allocatorDump)") == std::string_view::npos) return 386;
         if (html.find("relay-backend") == std::string_view::npos) return 374;
         if (html.find("relay-active") == std::string_view::npos) return 375;
         if (html.find("relay-pending") == std::string_view::npos) return 376;

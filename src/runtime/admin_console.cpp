@@ -509,6 +509,16 @@ constexpr std::string_view kConsoleJs = R"JS(
       return JSON.stringify(data, null, 2);
     }
 
+    function setElementText(id, value) {
+      const element = document.getElementById(id);
+      if (element) element.textContent = text(value);
+    }
+
+    function setElementJson(id, value) {
+      const element = document.getElementById(id);
+      if (element) element.textContent = formatJson(value);
+    }
+
     function firstDefined(...values) {
       return values.find(value => value !== undefined && value !== null);
     }
@@ -516,10 +526,10 @@ constexpr std::string_view kConsoleJs = R"JS(
     async function renderRelay() {
       try {
         const data = await api('/relay/metrics');
-        document.getElementById('relay-backend').textContent = text(firstDefined(data.backend, data.relay_backend));
-        document.getElementById('relay-active').textContent = text(firstDefined(data.active_relays, data.active, data.active_count));
-        document.getElementById('relay-pending').textContent = text(firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
-        document.getElementById('relay-errors').textContent = text(firstDefined(data.errors, data.error_count, data.last_error));
+        setElementText('relay-backend', firstDefined(data.backend, data.relay_backend));
+        setElementText('relay-active', firstDefined(data.active_relays, data.active, data.active_count));
+        setElementText('relay-pending', firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
+        setElementText('relay-errors', firstDefined(data.errors, data.error_count, data.last_error));
       } catch (error) {
         renderPanelError('relay-errors', error);
         throw error;
@@ -551,7 +561,7 @@ constexpr std::string_view kConsoleJs = R"JS(
     async function renderDiagnostics() {
       try {
         const data = await api('/diagnostics');
-        document.getElementById('diagnostics-json').textContent = formatJson(data);
+        setElementJson('diagnostics-json', data);
       } catch (error) {
         renderPanelError('diagnostics-json', error);
         throw error;
@@ -561,7 +571,7 @@ constexpr std::string_view kConsoleJs = R"JS(
     async function runAllocatorDump() {
       try {
         const data = await api('/memory/allocator:dump', { method: 'POST' });
-        document.getElementById('allocator-json').textContent = formatJson(data);
+        setElementJson('allocator-json', data);
       } catch (error) {
         renderPanelError('allocator-json', error);
         throw error;
@@ -681,8 +691,10 @@ constexpr std::string_view kConsoleJs = R"JS(
       document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
       document.getElementById('peer-create').onclick = () => runClientAction(createPeer);
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
-      document.getElementById('config-save').onclick = () => runClientAction(saveConfig);
-      document.getElementById('allocator-dump').onclick = () => runClientAction(runAllocatorDump);
+      const configSave = document.getElementById('config-save');
+      if (configSave) configSave.onclick = () => runClientAction(saveConfig);
+      const allocatorDump = document.getElementById('allocator-dump');
+      if (allocatorDump) allocatorDump.onclick = () => runClientAction(runAllocatorDump);
       document.getElementById('peer-delete').onclick = () => {
         const peerId = document.getElementById('peer-id').value.trim();
         if (peerId) runClientAction(() => deletePeer(peerId));
