@@ -138,6 +138,9 @@ int main() {
         if (js.find("JSON.stringify") == std::string_view::npos) return 315;
         if (js.find("typeof data.error === 'string'") == std::string_view::npos) return 316;
         if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
+        if (js.find("catch (error) {\n        healthPill.innerHTML = '<span class=\"dot warn\"></span><strong>health</strong> degraded';\n        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;") == std::string_view::npos) return 318;
+        if (js.find("button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));") == std::string_view::npos) return 319;
+        if (js.find("renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);\n      if (!tbody) return;") == std::string_view::npos) return 320;
         if (html.find("client-overview") == std::string_view::npos) return 334;
         if (html.find("client-peers") == std::string_view::npos) return 335;
         if (html.find("client-connections") == std::string_view::npos) return 336;

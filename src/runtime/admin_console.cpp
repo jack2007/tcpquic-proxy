@@ -374,6 +374,7 @@ constexpr std::string_view kConsoleJs = R"JS(
       consoleState.clientPeers = rows;
       const tbody = document.getElementById('client-peers-rows');
       renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);
+      if (!tbody) return;
       tbody.querySelectorAll('tr').forEach((tr, index) => {
         const peerId = rows[index] && rows[index].peer_id ? rows[index].peer_id : '';
         const td = document.createElement('td');
@@ -387,7 +388,7 @@ constexpr std::string_view kConsoleJs = R"JS(
         };
       });
       tbody.querySelectorAll('[data-delete-peer]').forEach(button => {
-        button.onclick = () => deletePeer(button.dataset.deletePeer);
+        button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));
       });
     }
 
@@ -468,7 +469,7 @@ constexpr std::string_view kConsoleJs = R"JS(
         refreshPill.innerHTML = '<strong>refresh</strong> 3s auto';
       } catch (error) {
         healthPill.innerHTML = '<span class="dot warn"></span><strong>health</strong> degraded';
-        refreshPill.innerHTML = `<strong>refresh</strong> ${error.message}`;
+        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;
       }
     }
 
