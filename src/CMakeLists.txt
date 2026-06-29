@@ -123,6 +123,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/listen_socket.cpp
     tunnel/tunnel_reaper.cpp
     runtime/admin_auth.cpp
+    runtime/admin_console.cpp
     runtime/admin_http.cpp
     runtime/admin_memory.cpp
     runtime/admin_config.cpp
@@ -975,6 +976,7 @@ set_property(TARGET tcpquic_client_ingress_state_test APPEND PROPERTY BUILD_RPAT
 add_executable(tcpquic_admin_http_test
     unittest/admin_http_test.cpp
     runtime/admin_auth.cpp
+    runtime/admin_console.cpp
     runtime/admin_http.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )

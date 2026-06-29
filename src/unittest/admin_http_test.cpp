@@ -1,5 +1,6 @@
 #include "admin_http.h"
 #include "admin_auth.h"
+#include "admin_console.h"
 #include "platform_socket.h"
 
 #include <cstring>
@@ -107,6 +108,20 @@ int main() {
     TqSocketStartup startup;
     if (!startup.Ok()) {
         return 1;
+    }
+
+    {
+        const std::string_view html = TqAdminConsoleHtml();
+        const std::string_view css = TqAdminConsoleCss();
+        const std::string_view js = TqAdminConsoleJs();
+        if (html.find("raypx2 Admin Console") == std::string_view::npos) return 300;
+        if (html.find("role-pill") == std::string_view::npos) return 301;
+        if (html.find("<strong>listen</strong>") != std::string_view::npos) return 302;
+        if (html.find("Create/Edit Peer") == std::string_view::npos) return 303;
+        if (html.find("remote_identity") != std::string_view::npos) return 304;
+        if (html.find("transferred_bytes") != std::string_view::npos) return 305;
+        if (css.find(".sidebar") == std::string_view::npos) return 306;
+        if (js.find("sessionStorage") == std::string_view::npos) return 307;
     }
 
     {
