@@ -998,6 +998,7 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     runtime/admin_config.cpp
     runtime/memory_stats.cpp
     runtime/admin_auth.cpp
+    runtime/admin_console.cpp
     runtime/admin_http.cpp
     tunnel/tunnel_registry.cpp
     config/config.cpp
