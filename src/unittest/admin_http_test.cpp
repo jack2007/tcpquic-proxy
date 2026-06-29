@@ -156,6 +156,21 @@ int main() {
         if (js.find("renderClientPeers") == std::string_view::npos) return 346;
         if (js.find("renderClientConnections") == std::string_view::npos) return 347;
         if (js.find("renderClientTunnels") == std::string_view::npos) return 348;
+        if (html.find("server-overview") == std::string_view::npos) return 349;
+        if (html.find("server-peers") == std::string_view::npos) return 350;
+        if (html.find("server-connections") == std::string_view::npos) return 351;
+        if (html.find("server-tunnels") == std::string_view::npos) return 352;
+        if (html.find("server-acl") == std::string_view::npos) return 353;
+        if (html.find("remote source") == std::string_view::npos) return 354;
+        if (html.find("remote_identity") != std::string_view::npos) return 355;
+        if (html.find("first_seen") != std::string_view::npos) return 356;
+        if (html.find("last_seen") != std::string_view::npos) return 357;
+        if (html.find("transferred_bytes") != std::string_view::npos) return 358;
+        if (js.find("renderServerOverview") == std::string_view::npos) return 359;
+        if (js.find("renderServerPeers") == std::string_view::npos) return 360;
+        if (js.find("renderServerConnections") == std::string_view::npos) return 361;
+        if (js.find("renderServerTunnels") == std::string_view::npos) return 362;
+        if (js.find("renderServerAcl") == std::string_view::npos) return 363;
     }
 
     {

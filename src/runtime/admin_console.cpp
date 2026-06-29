@@ -133,37 +133,36 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
         <section id="server-overview" class="page">
           <div class="title-row"><div><h2>Overview - server</h2><p class="subtitle">server 视角同样按 peer -> connection -> tunnel 展示；peer 是运行时聚合概念，不是可配置资源。</p></div></div>
           <div class="grid">
-            <div class="card span-3 metric"><span class="label">Peers</span><span class="value">2</span><span class="note">remote peers linked</span></div>
-            <div class="card span-3 metric"><span class="label">Connections</span><span class="value">6</span><span class="note">accepted QUIC connections</span></div>
-            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value">96</span><span class="note">server-side active</span></div>
-            <div class="card span-3 metric"><span class="label">ACL denied</span><span class="value">3</span><span class="note">aggregate counter</span></div>
-            <div class="card span-7 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td>4</td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td>2</td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
-            <div class="card span-5"><h3>Peer 来源</h3><div class="callout">首版 server peer 从现有 server connection 的 remote_address 聚合得到；如果现有 API 返回 tunnel.peer_id 可优先显示该值。该设计不要求修改通信协议。</div></div>
+            <div class="card span-3 metric"><span class="label">Peers</span><span class="value" id="server-overview-peer-count">0</span><span class="note">remote peers linked</span></div>
+            <div class="card span-3 metric"><span class="label">Connections</span><span class="value" id="server-overview-connection-count">0</span><span class="note">accepted QUIC connections</span></div>
+            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value" id="server-overview-tunnel-count">0</span><span class="note">server-side active</span></div>
+            <div class="card span-3 metric"><span class="label">ACL denied</span><span class="value" id="server-overview-acl-denied">0</span><span class="note">aggregate counter</span></div>
+            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-overview-peers"></tbody></table></div>
           </div>
         </section>
 
         <section id="server-peers" class="page">
           <div class="title-row"><div><h2>Peers - server</h2><p class="subtitle">server peer 是只读运行时视图：展示当前有多少远端 peer 与本 server 有连接，以及每个 peer 下的 connection/tunnel 汇总。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td>4</td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td>2</td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-peers-rows"></tbody></table></div>
           <div class="callout">server 不支持配置 peer，因此这里没有 Create/Edit/Delete。peer 名称由当前 server connection 的 remote_address 聚合得到。</div>
         </section>
 
         <section id="server-connections" class="page">
           <div class="title-row"><div><h2>Connections - server</h2><p class="subtitle">server 端连接不展示 Reconnecting；第一版不区分 connecting 和 connected，列表展示当前 server 已登记/可观测连接。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>srv-21</td><td>peer-10.201.1.1</td><td>10.201.1.1:53221</td><td><span class="state ok">connected</span></td><td>42</td><td>816</td><td>42</td><td>-</td></tr><tr><td>srv-22</td><td>peer-10.201.2.1</td><td>10.201.2.1:53228</td><td><span class="state ok">connected</span></td><td>28</td><td>211</td><td>28</td><td>-</td></tr></tbody></table></div>
-          <div class="callout">当前 `TqServerConnectionSnapshot` 已有 remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
+          <div class="callout">当前 TqServerConnectionSnapshot 已有 remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
         </section>
 
         <section id="server-tunnels" class="page">
           <div class="title-row"><div><h2>Tunnels - server</h2><p class="subtitle">只查询展示。当前 server tunnel snapshot 没有 remote source 字段，因此本页不展示 remote source；可通过 connection_id 跳到 Connections 查看 connection remote_address。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>state</th><th>target</th><th>role</th><th>duration_ms</th><th>active</th></tr></thead><tbody><tr><td>srv-tun-9012</td><td>peer-10.201.1.1</td><td>srv-21</td><td><span class="state ok">active</span></td><td>10.8.0.9:22</td><td>server</td><td>1320000</td><td>true</td></tr><tr><td>srv-tun-9014</td><td>peer-10.201.2.1</td><td>srv-22</td><td><span class="state ok">active</span></td><td>10.8.0.10:443</td><td>server</td><td>180000</td><td>true</td></tr></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>state</th><th>target</th><th>role</th><th>duration_ms</th><th>active</th></tr></thead><tbody id="server-tunnels-rows"></tbody></table></div>
         </section>
 
         <section id="server-acl" class="page">
           <div class="title-row"><div><h2>ACL - server</h2><p class="subtitle">server 独有页面。只读展示 server config 中的 allow_targets/deny_targets 和 metrics 中的 acl_denied。</p></div></div>
           <div class="grid">
-            <div class="card span-7 table-scroll"><h3>规则摘要</h3><table><thead><tr><th>type</th><th>targets</th></tr></thead><tbody><tr><td><span class="state ok">allow_targets</span></td><td>10.8.0.0/16, 172.16.0.0/16</td></tr><tr><td><span class="state err">deny_targets</span></td><td>10.9.0.0/16</td></tr></tbody></table></div>
-            <div class="card span-5"><h3>统计</h3><div class="metric"><span class="label">acl_denied</span><span class="value">3</span><span class="note">from /api/v1/metrics</span></div></div>
+            <div class="card span-7 table-scroll"><h3>规则摘要</h3><table><thead><tr><th>type</th><th>targets</th></tr></thead><tbody id="server-acl-rules"></tbody></table></div>
+            <div class="card span-5"><h3>统计</h3><div class="metric"><span class="label">acl_denied</span><span class="value" id="server-acl-denied">0</span><span class="note">from /api/v1/metrics</span></div></div>
             <div class="card span-12"><div class="callout">当前 API 不提供逐条命中历史或最近拒绝列表，因此首版不展示 matches、last_match、time、reason 等字段。</div></div>
           </div>
         </section>
@@ -409,6 +408,74 @@ constexpr std::string_view kConsoleJs = R"JS(
       renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
     }
 
+    function peerNameFromRemote(remoteAddress) {
+      const host = String(remoteAddress || '').split(':')[0] || 'unknown';
+      return `peer-${host}`;
+    }
+
+    function groupServerPeers(connections) {
+      const groups = new Map();
+      for (const connection of connections) {
+        const key = peerNameFromRemote(connection.remote_address);
+        const item = groups.get(key) || {
+          peer: key,
+          remote_address: connection.remote_address,
+          connections: 0,
+          active_streams: 0,
+          total_streams: 0,
+          active_tunnels: 0,
+          last_error: ''
+        };
+        item.connections += 1;
+        item.active_streams += Number(connection.active_streams || 0);
+        item.total_streams += Number(connection.total_streams || 0);
+        item.active_tunnels += Number(connection.active_tunnels || 0);
+        item.last_error = item.last_error || connection.last_error || '';
+        groups.set(key, item);
+      }
+      return Array.from(groups.values());
+    }
+
+    async function renderServerOverview() {
+      const [metrics, connections, tunnels] = await Promise.all([
+        api('/metrics'),
+        api('/server/connections'),
+        api('/server/tunnels')
+      ]);
+      const connRows = connections.connections || [];
+      const peerRows = groupServerPeers(connRows);
+      document.getElementById('server-overview-peer-count').textContent = peerRows.length;
+      document.getElementById('server-overview-connection-count').textContent = connRows.length;
+      document.getElementById('server-overview-tunnel-count').textContent = (tunnels.tunnels || []).length;
+      document.getElementById('server-overview-acl-denied').textContent = text(metrics.acl_denied);
+      renderRows(document.getElementById('server-overview-peers'), peerRows, ['peer','remote_address','connections','active_streams','total_streams','active_tunnels','last_error']);
+    }
+
+    async function renderServerPeers() {
+      const data = await api('/server/connections');
+      renderRows(document.getElementById('server-peers-rows'), groupServerPeers(data.connections || []), ['peer','remote_address','connections','active_streams','total_streams','active_tunnels','last_error']);
+    }
+
+    async function renderServerConnections() {
+      const data = await api('/server/connections');
+      const rows = (data.connections || []).map(row => Object.assign({ peer: peerNameFromRemote(row.remote_address) }, row));
+      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','remote_address','state','active_streams','total_streams','active_tunnels','last_error']);
+    }
+
+    async function renderServerTunnels() {
+      const data = await api('/server/tunnels');
+      renderRows(document.getElementById('server-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','state','target','role','duration_ms','active']);
+    }
+
+    async function renderServerAcl() {
+      const [config, metrics] = await Promise.all([api('/server/config'), api('/metrics')]);
+      renderRows(document.getElementById('server-acl-rules'), [
+        { type: 'allow_targets', targets: (config.allow_targets || []).join(', ') },
+        { type: 'deny_targets', targets: (config.deny_targets || []).join(', ') }
+      ], ['type','targets']);
+      document.getElementById('server-acl-denied').textContent = text(metrics.acl_denied);
+    }
+
     function overviewPage(role) {
       return role === 'server' ? 'server-overview' : 'client-overview';
     }
@@ -454,6 +521,11 @@ constexpr std::string_view kConsoleJs = R"JS(
       if (pageId === 'client-peers') return renderClientPeers();
       if (pageId === 'client-connections') return renderClientConnections();
       if (pageId === 'client-tunnels') return renderClientTunnels();
+      if (pageId === 'server-overview') return renderServerOverview();
+      if (pageId === 'server-peers') return renderServerPeers();
+      if (pageId === 'server-connections') return renderServerConnections();
+      if (pageId === 'server-tunnels') return renderServerTunnels();
+      if (pageId === 'server-acl') return renderServerAcl();
     }
 
     async function refreshCurrentPage() {
