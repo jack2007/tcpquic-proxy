@@ -453,8 +453,12 @@ constexpr std::string_view kConsoleJs = R"JS(
     }
 
     function peerNameFromRemote(remoteAddress) {
-      const host = remoteHostFromAddress(remoteAddress);
-      return `peer-${host}`;
+      return `peer-${peerNameAddressPart(remoteAddress)}`;
+    }
+
+    function peerNameAddressPart(remoteAddress) {
+      const value = String(remoteAddress || '').trim();
+      return value || 'unknown';
     }
 
     function groupServerPeers(connections) {

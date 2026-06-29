@@ -1,5 +1,6 @@
 #include "server_admin.h"
 #include "quic_session.h"
+#include "relay_metrics.h"
 #include "tunnel_registry.h"
 
 #include <string>
@@ -28,12 +29,49 @@ void TqAppendJsonString(std::ostringstream& out, const char* name, const std::st
 }
 
 std::string TqJsonResponse(int status, const std::string& json) {
-    const char* reason = status == 200 ? "OK" : (status == 202 ? "Accepted" : "Not Found");
+    const char* reason = status == 200 ? "OK" :
+        (status == 202 ? "Accepted" :
+        (status == 503 ? "Service Unavailable" : "Not Found"));
     return "HTTP/1.1 " + std::to_string(status) + " " + reason + "\r\n\r\n" + json;
 }
 
 std::string TqServerMetricsJson(const TqServerMetrics&, uint64_t) {
     return "{\"role\":\"server\"}";
+}
+
+TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
+    TqRelayMetricsSnapshot metrics;
+    metrics.Backend = "test";
+    metrics.ActiveRelays = 7;
+    metrics.PendingBytes = 1234;
+    metrics.TcpReadBytes = 11;
+    metrics.TcpWriteBytes = 22;
+    metrics.Errors = 3;
+    return metrics;
+}
+
+std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
+    return {};
+}
+
+std::string TqRelayActiveRelaysJson() {
+    return "{\"capabilities\":{\"detail\":false},\"relays\":[]}";
+}
+
+std::string TqRelayActiveRelayJson(const std::string&, bool& found, bool& supported) {
+    found = false;
+    supported = false;
+    return "{}";
+}
+
+std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
+    supported = workerId == "aggregate";
+    found = supported;
+    return "{\"worker_id\":\"aggregate\"}";
+}
+
+void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot&) {
+    out << ",\"linux_relay_backend\":\"test\"";
 }
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
@@ -151,6 +189,26 @@ int main() {
 
     std::string clientTunnel = TqHandleServerAdmin(Request("GET", "/server/tunnels/client-tun"), metrics, 10);
     if (clientTunnel.find("HTTP/1.1 404 Not Found") == std::string::npos) return 139;
+
+    std::string relayMetrics = TqHandleServerAdmin(Request("GET", "/relay/metrics"), metrics, 10);
+    if (relayMetrics.find("HTTP/1.1 200 OK") == std::string::npos) return 149;
+    if (relayMetrics.find("\"backend\":\"test\"") == std::string::npos) return 150;
+    if (relayMetrics.find("\"active_relays\":7") == std::string::npos) return 151;
+
+    std::string relayWorkers = TqHandleServerAdmin(Request("GET", "/relay/workers"), metrics, 10);
+    if (relayWorkers.find("HTTP/1.1 200 OK") == std::string::npos) return 152;
+    if (relayWorkers.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 153;
+
+    std::string activeRelays = TqHandleServerAdmin(Request("GET", "/relay/active-relays"), metrics, 10);
+    if (activeRelays.find("HTTP/1.1 200 OK") == std::string::npos) return 154;
+    if (activeRelays.find("\"relays\":[") == std::string::npos) return 155;
+
+    std::string aggregateWorker = TqHandleServerAdmin(Request("GET", "/relay/workers/aggregate"), metrics, 10);
+    if (aggregateWorker.find("HTTP/1.1 200 OK") == std::string::npos) return 156;
+
+    std::string missingRelay = TqHandleServerAdmin(Request("GET", "/relay/active-relays/relay-missing"), metrics, 10);
+    if (missingRelay.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 157;
+    if (missingRelay.find("\"code\":\"not_supported\"") == std::string::npos) return 158;
 
     g_tunnelAbortCalled = false;
     g_tunnelDrainCalled = false;

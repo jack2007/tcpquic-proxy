@@ -24,6 +24,44 @@ std::string ErrorJson(const std::string& err) {
     return out.str();
 }
 
+std::string StructuredErrorJson(const std::string& code, const std::string& message) {
+    std::ostringstream out;
+    out << "{\"error\":{";
+    TqAppendJsonString(out, "code", code);
+    out << ',';
+    TqAppendJsonString(out, "message", message);
+    out << "}}";
+    return out.str();
+}
+
+std::string RelayMetricsJson() {
+    std::ostringstream out;
+    out << '{';
+    const auto metrics = TqSnapshotRelayMetrics();
+    TqAppendJsonString(out, "backend", metrics.Backend);
+    out << ",\"active_relays\":" << metrics.ActiveRelays;
+    out << ",\"pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << ",\"errors\":" << metrics.Errors;
+    TqAppendRelayMetricsJson(out, metrics);
+    out << '}';
+    return out.str();
+}
+
+std::string RelayWorkersJson() {
+    const auto metrics = TqSnapshotRelayMetrics();
+    std::ostringstream out;
+    out << "{\"workers\":[{\"worker_id\":\"aggregate\",";
+    TqAppendJsonString(out, "backend", metrics.Backend);
+    out << ",\"active_relays\":" << metrics.ActiveRelays;
+    out << ",\"pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << "}]}";
+    return out.str();
+}
+
 void AppendServerConnectionJson(std::ostringstream& out, const TqServerConnectionSnapshot& connection) {
     out << '{';
     TqAppendJsonString(out, "connection_id", connection.ConnectionId);
@@ -188,6 +226,53 @@ std::string TqHandleServerAdmin(
     }
     if (req.Method == "GET" && req.Path == "/diagnostics") {
         return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
+    }
+    if (req.Method == "GET" && req.Path == "/relay/metrics") {
+        return TqJsonResponse(200, RelayMetricsJson());
+    }
+    if (req.Method == "GET" && req.Path == "/relay/active-relays") {
+        return TqJsonResponse(200, TqRelayActiveRelaysJson());
+    }
+    if (req.Method == "GET" && req.Path.compare(0, 21, "/relay/active-relays/") == 0) {
+        const std::string encodedRelayId = req.Path.substr(21);
+        std::string relayId;
+        if (encodedRelayId.empty() || encodedRelayId.find('/') != std::string::npos ||
+            !DecodePathSegment(encodedRelayId, relayId) || relayId.empty()) {
+            return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
+        }
+        bool found = false;
+        bool supported = false;
+        const std::string body = TqRelayActiveRelayJson(relayId, found, supported);
+        if (!supported) {
+            return TqJsonResponse(503, StructuredErrorJson(
+                "not_supported", "relay active relay detail is not supported by this backend"));
+        }
+        if (!found) {
+            return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
+        }
+        return TqJsonResponse(200, body);
+    }
+    if (req.Method == "GET" && req.Path == "/relay/workers") {
+        return TqJsonResponse(200, RelayWorkersJson());
+    }
+    if (req.Method == "GET" && req.Path.compare(0, 15, "/relay/workers/") == 0) {
+        const std::string encodedWorkerId = req.Path.substr(15);
+        std::string workerId;
+        if (encodedWorkerId.empty() || encodedWorkerId.find('/') != std::string::npos ||
+            !DecodePathSegment(encodedWorkerId, workerId) || workerId.empty()) {
+            return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
+        }
+        bool found = false;
+        bool supported = false;
+        const std::string body = TqRelayWorkerDetailJson(workerId, found, supported);
+        if (!supported) {
+            return TqJsonResponse(503, StructuredErrorJson(
+                "not_supported", "relay worker detail is not supported by this backend"));
+        }
+        if (!found) {
+            return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
+        }
+        return TqJsonResponse(200, body);
     }
     if (req.Method == "GET" && (req.Path == "/server" || req.Path == "/server/metrics")) {
         return TqJsonResponse(200, TqServerMetricsJson(metrics, uptimeSeconds));

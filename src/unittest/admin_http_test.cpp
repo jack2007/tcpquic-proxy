@@ -192,6 +192,8 @@ int main() {
         if (js.find("remoteHostFromAddress") == std::string_view::npos) return 364;
         if (js.find("startsWith('[')") == std::string_view::npos) return 365;
         if (js.find("lastIndexOf(':')") == std::string_view::npos) return 366;
+        if (js.find("peerNameAddressPart(remoteAddress)") == std::string_view::npos) return 427;
+        if (js.find("return `peer-${peerNameAddressPart(remoteAddress)}`;") == std::string_view::npos) return 428;
         if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;
         if (js.find("renderRelay") == std::string_view::npos) return 368;
         if (js.find("renderConfig") == std::string_view::npos) return 369;
