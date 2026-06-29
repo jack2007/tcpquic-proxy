@@ -259,12 +259,25 @@ int main() {
         if (!TqValidateAdminListen("127.0.0.1:19091", err)) return 12;
         if (!TqValidateAdminListen("localhost:19091", err)) return 13;
         if (!TqValidateAdminListen("::1:19091", err)) return 21;
-        if (TqValidateAdminListen("0.0.0.0:19091", err)) return 14;
-        if (err.find("loopback") == std::string::npos) return 15;
+        if (!TqValidateAdminListen("0.0.0.0:19091", err)) return 14;
+        if (!TqValidateAdminListen("172.16.10.80:19091", err)) return 15;
+        if (!TqValidateAdminListen("192.168.1.10:19091", err)) return 310;
         if (TqValidateAdminListen("127.0.0.1:notaport", err)) return 22;
+        if (TqValidateAdminListen(":19091", err)) return 311;
         if (TqValidateAdminListen("127.0.0.1:0", err)) return 23;
         if (TqValidateAdminListen("127.0.0.1:65536", err)) return 24;
         if (TqValidateAdminListen("127.0.0.1:", err)) return 25;
+    }
+    {
+        std::string err;
+        TqAdminHttpServer server("0.0.0.0:0", [&](const TqHttpRequest&) {
+            return TqJsonResponse(200, "{}");
+        });
+        if (!server.Start(err)) return 312;
+        if (server.ListenAddress().rfind("0.0.0.0:", 0) != 0) return 313;
+        const uint16_t port = TqPortFromListenAddress(server.ListenAddress());
+        if (port == 0) return 314;
+        server.Stop();
     }
     {
         const std::string expected = TqJsonResponse(200, "{\"ok\":true}");

@@ -120,11 +120,7 @@ bool TqValidateAdminBindListen(const std::string& listen, std::string& err) {
         err = "admin listen must be host:port";
         return false;
     }
-    if (hostPort.Host == "127.0.0.1" || hostPort.Host == "localhost" || hostPort.Host == "::1") {
-        return true;
-    }
-    err = "admin listen must bind loopback in this stage";
-    return false;
+    return true;
 }
 
 std::string TqLowerHeaderName(std::string text) {
@@ -566,12 +562,7 @@ bool TqValidateAdminListen(const std::string& listen, std::string& err) {
         err = "admin listen port must be in range 1..65535";
         return false;
     }
-    std::string host = listen.substr(0, pos);
-    if (host == "127.0.0.1" || host == "localhost" || host == "::1") {
-        return true;
-    }
-    err = "admin listen must bind loopback in this stage";
-    return false;
+    return true;
 }
 
 TqAdminHttpServer::TqAdminHttpServer(std::string listen, TqHttpHandler handler) :
