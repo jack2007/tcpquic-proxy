@@ -138,6 +138,21 @@ int main() {
         if (js.find("JSON.stringify") == std::string_view::npos) return 315;
         if (js.find("typeof data.error === 'string'") == std::string_view::npos) return 316;
         if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
+        if (html.find("client-overview") == std::string_view::npos) return 334;
+        if (html.find("client-peers") == std::string_view::npos) return 335;
+        if (html.find("client-connections") == std::string_view::npos) return 336;
+        if (html.find("client-tunnels") == std::string_view::npos) return 337;
+        if (html.find("peers address - quic_peer") == std::string_view::npos) return 338;
+        if (html.find("paths 模式") == std::string_view::npos) return 339;
+        if (html.find("127.0.0.1:1080") == std::string_view::npos) return 340;
+        if (html.find("127.0.0.1:8080") == std::string_view::npos) return 341;
+        if (html.find("connected_at") != std::string_view::npos) return 342;
+        if (html.find("disconnected_at") != std::string_view::npos) return 343;
+        if (html.find("<th>source</th>") != std::string_view::npos) return 344;
+        if (js.find("renderClientOverview") == std::string_view::npos) return 345;
+        if (js.find("renderClientPeers") == std::string_view::npos) return 346;
+        if (js.find("renderClientConnections") == std::string_view::npos) return 347;
+        if (js.find("renderClientTunnels") == std::string_view::npos) return 348;
     }
 
     {

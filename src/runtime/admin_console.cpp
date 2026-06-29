@@ -103,35 +103,31 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
         <section id="client-overview" class="page">
           <div class="title-row"><div><h2>Overview - client</h2><p class="subtitle">client 视角有 Overview、Peers、Connections、Tunnels 四个业务页面；Overview 汇总 peer -> connection -> tunnel 层级。</p></div></div>
           <div class="grid">
-            <div class="card span-3 metric"><span class="label">Peers</span><span class="value">4</span><span class="note">3 enabled</span></div>
-            <div class="card span-3 metric"><span class="label">Connections</span><span class="value">8</span><span class="note">7 connected, 1 reconnecting</span></div>
-            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value">126</span><span class="note">from /api/v1/tunnels</span></div>
-            <div class="card span-3 metric"><span class="label">Active streams</span><span class="value">126</span><span class="note">sum of peers</span></div>
-            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>socks_listen</th><th>http_listen</th><th>last_error</th></tr></thead><tbody><tr><td>dgx-a</td><td><span class="state ok">healthy</span></td><td>true</td><td>4/4</td><td>92</td><td>14820</td><td>1</td><td>127.0.0.1:1080</td><td>127.0.0.1:8080</td><td>-</td></tr><tr><td>dgx-b</td><td><span class="state warn">connecting</span></td><td>true</td><td>3/4</td><td>34</td><td>6402</td><td>5</td><td>127.0.0.1:1081</td><td>-</td><td>path-b timeout</td></tr></tbody></table></div>
+            <div class="card span-3 metric"><span class="label">Peers</span><span class="value" id="client-overview-peer-count">0</span><span class="note">enabled peers from /api/v1/peers</span></div>
+            <div class="card span-3 metric"><span class="label">Connections</span><span class="value" id="client-overview-connection-count">0</span><span class="note">sum of connection_count</span></div>
+            <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value" id="client-overview-tunnel-count">0</span><span class="note">from /api/v1/tunnels</span></div>
+            <div class="card span-3 metric"><span class="label">Active streams</span><span class="value" id="client-overview-stream-count">0</span><span class="note">sum of peers</span></div>
+            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>socks_listen</th><th>http_listen</th><th>last_error</th></tr></thead><tbody id="client-overview-peers"></tbody></table></div>
           </div>
         </section>
 
         <section id="client-peers" class="page">
-          <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div><button class="btn primary">Create peer</button></div>
+          <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div><button class="btn primary" id="peer-create">Create peer</button></div>
           <div class="peer-layout">
-            <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>paths</th><th>socks_listen</th><th>http_listen</th><th>connections</th><th>actions</th></tr></thead><tbody><tr><td>dgx-a</td><td><span class="state ok">healthy</span></td><td>true</td><td>10.201.1.2:4433,10.201.1.3:4433</td><td>0</td><td>127.0.0.1:1080</td><td>127.0.0.1:8080</td><td>4/4</td><td><button class="btn">Edit</button> <button class="btn danger">Delete</button></td></tr><tr><td>dgx-b</td><td><span class="state warn">connecting</span></td><td>true</td><td>-</td><td>2</td><td>127.0.0.1:1081</td><td>-</td><td>3/4</td><td><button class="btn">Edit</button> <button class="btn danger">Delete</button></td></tr></tbody></table></div>
-            <aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input value="dgx-new"></div><div class="field full"><label>peers address - quic_peer 模式</label><input value="10.201.1.2:4433,10.201.1.3:4433"></div><div class="field full"><label>paths 模式</label><textarea style="min-height:96px">[
-  {"name":"path-a","local":"10.201.1.1","peer":"10.201.1.2:4433","connections":2},
-  {"name":"path-b","local":"10.201.2.1","peer":"10.201.2.2:4433","connections":2}
-]</textarea></div><div class="field"><label>socks_listen</label><input value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea style="min-height:72px">[
-  {"listen":"127.0.0.1:2222","target_host":"10.8.0.9","target_port":22}
-]</textarea></div><div class="field"><label>enabled</label><select><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn">Cancel</button><button class="btn">JSON advanced</button><button class="btn primary">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供 Drain/Abort。</span><button class="btn danger">Delete</button></div></aside>
+            <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>socks_listen</th><th>http_listen</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-peers-rows"></tbody></table></div>
+            <aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input id="peer-id" value=""></div><div class="field full"><label>peers address - quic_peer 模式</label><input id="peer-quic-peer" value=""></div><div class="field full"><label>paths 模式</label><textarea id="peer-paths" style="min-height:96px">[]</textarea></div><div class="field"><label>socks_listen</label><input id="peer-socks-listen" value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input id="peer-http-listen" value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea id="peer-port-forwards" style="min-height:72px">[]</textarea></div><div class="field"><label>enabled</label><select id="peer-enabled"><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn" id="peer-cancel">Cancel</button><button class="btn" id="peer-json-advanced">JSON advanced</button><button class="btn primary" id="peer-save">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供连接控制操作。</span><button class="btn danger" id="peer-delete">Delete</button></div></aside>
           </div>
         </section>
 
         <section id="client-connections" class="page">
-          <div class="title-row"><div><h2>Connections - client</h2><p class="subtitle">只查询展示，无 Add/Delete/Reconnect/Abort；字段来自 /api/v1/peers/{peer_id}/connections。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody><tr><td>conn-0</td><td>dgx-b</td><td>0</td><td>12</td><td>true</td><td>false</td><td><span class="state ok">connected</span></td><td>path-a</td><td>10.201.1.1</td><td>10.201.1.2:4433</td><td>18</td><td>-</td></tr><tr><td>conn-1</td><td>dgx-b</td><td>1</td><td>15</td><td>false</td><td>true</td><td><span class="state warn">reconnecting</span></td><td>path-b</td><td>10.201.2.1</td><td>10.201.2.2:4433</td><td>0</td><td>handshake timeout</td></tr></tbody></table></div>
+          <div class="title-row"><div><h2>Connections - client</h2><p class="subtitle">只查询展示，不提供连接控制操作；字段来自 /api/v1/peers/{peer_id}/connections。</p></div></div>
+          <div class="toolbar"><input id="client-connections-peer" placeholder="peer_id" value=""></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="client-connections-rows"></tbody></table></div>
         </section>
 
         <section id="client-tunnels" class="page">
           <div class="title-row"><div><h2>Tunnels - client</h2><p class="subtitle">只查询展示；只使用当前 /api/v1/tunnels 已返回字段，不展示 source。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>target</th><th>role</th><th>ingress</th><th>compress</th><th>created_at</th><th>duration_ms</th><th>tcp_read_bytes</th><th>tcp_write_bytes</th><th>pending_bytes</th><th>relay_backend</th><th>worker_index</th><th>last_error</th></tr></thead><tbody><tr><td>tun-82341</td><td>dgx-a</td><td>conn-0</td><td>10.8.0.9:22</td><td>client</td><td>socks</td><td>zstd</td><td>2026-06-29T09:31:22Z</td><td>1080000</td><td>987842331</td><td>982113002</td><td>2202000</td><td>linux-epoll</td><td>3</td><td>-</td></tr></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>target</th><th>state</th><th>role</th><th>ingress</th><th>compress</th><th>created_at</th><th>duration_ms</th><th>tcp_read_bytes</th><th>tcp_write_bytes</th><th>pending_bytes</th><th>relay_backend</th><th>worker_index</th><th>last_error</th></tr></thead><tbody id="client-tunnels-rows"></tbody></table></div>
         </section>
 
         <section id="server-overview" class="page">
@@ -265,9 +261,151 @@ constexpr std::string_view kConsoleJs = R"JS(
       return data;
     }
 
+    function text(value) {
+      if (value === undefined || value === null || value === '') return '-';
+      if (typeof value === 'object') {
+        try {
+          return JSON.stringify(value);
+        } catch (_) {
+          return String(value);
+        }
+      }
+      return String(value);
+    }
+
+    function escapeHtml(value) {
+      return text(value).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[ch]));
+    }
+
+    function renderRows(tbody, rows, columns) {
+      if (!tbody) return;
+      tbody.innerHTML = rows.map(row => `<tr>${columns.map(column => {
+        const value = typeof column === 'function' ? column(row) : row[column];
+        return `<td>${escapeHtml(value)}</td>`;
+      }).join('')}</tr>`).join('');
+    }
+
+    function sum(items, field) {
+      return items.reduce((total, item) => total + Number(item[field] || 0), 0);
+    }
+
     function setLoginError(message) {
       loginError.textContent = message || '';
       loginError.style.display = message ? 'block' : 'none';
+    }
+
+    function setPeerForm(peer = {}) {
+      document.getElementById('peer-id').value = peer.peer_id || '';
+      document.getElementById('peer-quic-peer').value = peer.quic_peer || '';
+      document.getElementById('peer-paths').value = JSON.stringify(peer.paths || [], null, 2);
+      document.getElementById('peer-socks-listen').value = peer.socks_listen || '127.0.0.1:1080';
+      document.getElementById('peer-http-listen').value = peer.http_listen || '127.0.0.1:8080';
+      document.getElementById('peer-port-forwards').value = JSON.stringify(peer.port_forwards || [], null, 2);
+      document.getElementById('peer-enabled').value = peer.enabled === false ? 'false' : 'true';
+    }
+
+    function peerFormPayload() {
+      const pathsText = document.getElementById('peer-paths').value.trim();
+      const forwardsText = document.getElementById('peer-port-forwards').value.trim();
+      const payload = {
+        peer_id: document.getElementById('peer-id').value.trim(),
+        quic_peer: document.getElementById('peer-quic-peer').value.trim(),
+        socks_listen: document.getElementById('peer-socks-listen').value.trim(),
+        http_listen: document.getElementById('peer-http-listen').value.trim(),
+        enabled: document.getElementById('peer-enabled').value === 'true'
+      };
+      if (pathsText) payload.paths = JSON.parse(pathsText);
+      if (forwardsText) payload.port_forwards = JSON.parse(forwardsText);
+      return payload;
+    }
+
+    async function createPeer() {
+      await api('/peers', { method: 'POST', body: peerFormPayload() });
+      await renderClientPeers();
+    }
+
+    async function savePeer() {
+      const payload = peerFormPayload();
+      await api(`/peers/${encodeURIComponent(payload.peer_id)}`, { method: 'PUT', body: payload });
+      await renderClientPeers();
+    }
+
+    async function deletePeer(peerId) {
+      await api(`/peers/${encodeURIComponent(peerId)}`, { method: 'DELETE', body: { mode: 'reject-if-active' } });
+      await renderClientPeers();
+    }
+
+    async function runClientAction(action) {
+      try {
+        refreshPill.innerHTML = '<strong>refresh</strong> updating';
+        await action();
+        refreshPill.innerHTML = '<strong>refresh</strong> 3s auto';
+      } catch (error) {
+        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;
+      }
+    }
+
+    async function renderClientOverview() {
+      const [health, metrics, peers, tunnels] = await Promise.all([
+        api('/health'),
+        api('/metrics'),
+        api('/peers'),
+        api('/tunnels')
+      ]);
+      void metrics;
+      document.getElementById('health-pill').innerHTML = `<span class="dot ok"></span><strong>health</strong> ${escapeHtml(health.status)}`;
+      const peerList = peers.peers || [];
+      document.getElementById('client-overview-peer-count').textContent = peerList.length;
+      document.getElementById('client-overview-connection-count').textContent = sum(peerList, 'connection_count');
+      document.getElementById('client-overview-tunnel-count').textContent = (tunnels.tunnels || []).length;
+      document.getElementById('client-overview-stream-count').textContent = sum(peerList, 'active_streams');
+      renderRows(document.getElementById('client-overview-peers'), peerList, ['peer_id','state','enabled','connection_count','connected_connections','active_streams','total_streams','reconnects','socks_listen','http_listen','last_error']);
+    }
+
+    async function renderClientPeers() {
+      const data = await api('/peers');
+      const rows = data.peers || [];
+      consoleState.clientPeers = rows;
+      const tbody = document.getElementById('client-peers-rows');
+      renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);
+      tbody.querySelectorAll('tr').forEach((tr, index) => {
+        const peerId = rows[index] && rows[index].peer_id ? rows[index].peer_id : '';
+        const td = document.createElement('td');
+        td.innerHTML = `<button class="btn" data-edit-peer="${escapeHtml(peerId)}">Edit</button> <button class="btn danger" data-delete-peer="${escapeHtml(peerId)}">Delete</button>`;
+        tr.appendChild(td);
+      });
+      tbody.querySelectorAll('[data-edit-peer]').forEach(button => {
+        button.onclick = () => {
+          const peer = (consoleState.clientPeers || []).find(item => item.peer_id === button.dataset.editPeer);
+          if (peer) setPeerForm(peer);
+        };
+      });
+      tbody.querySelectorAll('[data-delete-peer]').forEach(button => {
+        button.onclick = () => deletePeer(button.dataset.deletePeer);
+      });
+    }
+
+    async function renderClientConnections() {
+      const peerId = document.getElementById('client-connections-peer').value.trim();
+      const tbody = document.getElementById('client-connections-rows');
+      if (!peerId) {
+        renderRows(tbody, [], []);
+        return;
+      }
+      const data = await api(`/peers/${encodeURIComponent(peerId)}/connections`);
+      const rows = (data.connections || []).map(row => Object.assign({ peer_id: peerId }, row));
+      renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error']);
+    }
+
+    async function renderClientTunnels() {
+      const data = await api('/tunnels');
+      renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
     }
 
     function overviewPage(role) {
@@ -301,13 +439,20 @@ constexpr std::string_view kConsoleJs = R"JS(
         const button = document.createElement('button');
         button.dataset.page = id;
         button.innerHTML = `<span>${icon}</span><span>${label}</span><span class="dot ${tone}"></span>`;
-        button.onclick = () => showPage(id);
+        button.onclick = () => {
+          showPage(id);
+          refreshCurrentPage();
+        };
         nav.appendChild(button);
       });
     }
 
     async function refreshPage(pageId) {
       if (!consoleState.token || pageId === 'login') return;
+      if (pageId === 'client-overview') return renderClientOverview();
+      if (pageId === 'client-peers') return renderClientPeers();
+      if (pageId === 'client-connections') return renderClientConnections();
+      if (pageId === 'client-tunnels') return renderClientTunnels();
     }
 
     async function refreshCurrentPage() {
@@ -366,6 +511,17 @@ constexpr std::string_view kConsoleJs = R"JS(
       };
       document.getElementById('logout').onclick = logout;
       document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
+      document.getElementById('peer-create').onclick = () => runClientAction(createPeer);
+      document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
+      document.getElementById('peer-delete').onclick = () => {
+        const peerId = document.getElementById('peer-id').value.trim();
+        if (peerId) runClientAction(() => deletePeer(peerId));
+      };
+      document.getElementById('peer-cancel').onclick = () => setPeerForm();
+      document.getElementById('peer-json-advanced').onclick = () => setPeerForm(peerFormPayload());
+      document.getElementById('client-connections-peer').onkeydown = event => {
+        if (event.key === 'Enter') runClientAction(renderClientConnections);
+      };
       document.getElementById('pause-refresh').onclick = () => {
         consoleState.paused = !consoleState.paused;
         document.getElementById('pause-refresh').textContent = consoleState.paused ? 'Resume refresh' : 'Pause refresh';
@@ -375,6 +531,7 @@ constexpr std::string_view kConsoleJs = R"JS(
         button.onclick = () => {
           setRole(button.dataset.role);
           showPage(overviewPage(consoleState.role));
+          refreshCurrentPage();
         };
       });
 
