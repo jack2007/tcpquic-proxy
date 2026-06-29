@@ -1507,3 +1507,143 @@ Type and path consistency:
 - New functions are consistently named `TqAdminConsoleHtml`, `TqAdminConsoleCss`, `TqAdminConsoleJs`.
 - New files live under `src/runtime/`, matching existing Admin HTTP ownership.
 - Test target remains `tcpquic_admin_http_test`, with focused runtime tests `tcpquic_router_runtime_test` and `tcpquic_server_admin_test`.
+
+---
+
+### Task 11: Apply Admin Console Usage Feedback
+
+**Goal:** 修正实测中发现的基础交互问题：移除 client/server 角色切换、调整 client peers 为上下布局、让 client connections 默认聚合展示全部连接并提供只读详情。
+
+**Files:**
+- Modify: `docs/superpowers/specs/2026-06-29-admin-console-design.md`
+- Modify: `docs/superpowers/plans/2026-06-29-admin-console.md`
+- Modify: `src/runtime/admin_console.cpp`
+- Test: `src/unittest/admin_http_test.cpp`
+
+- [ ] **Step 1: Update design document**
+
+Record the approved usage-feedback design in `docs/superpowers/specs/2026-06-29-admin-console-design.md`:
+
+- Login role comes from `/api/v1/admin`; sidebar must not show or support client/server switching.
+- client Peers uses a vertical layout: peers table, then `Create/Edit Peer` form, then the bottom `Create Peer` button.
+- client Connections loads all peer connections by calling `/api/v1/peers` and then `/api/v1/peers/{peer_id}/connections`; each row has a read-only `Detail` button that calls `/api/v1/peers/{peer_id}/connections/{connection_id}`.
+- Do not add new Admin API routes or core protocol fields.
+
+- [ ] **Step 2: Write failing static contract tests**
+
+In `src/unittest/admin_http_test.cpp`, extend the existing `TqAdminConsoleHtml()` / `TqAdminConsoleJs()` checks with assertions that fail against the old UI:
+
+```cpp
+        if (html.find("role-switch") != std::string_view::npos) return 414;
+        if (js.find("querySelectorAll('.role-switch button')") != std::string_view::npos) return 415;
+        if (js.find("sessionStorage.setItem('tcpquic.admin.role'") != std::string_view::npos) return 416;
+        if (html.find("<div class=\"peer-layout\">") != std::string_view::npos) return 417;
+        if (html.find("<section class=\"peer-form-panel\"") == std::string_view::npos) return 418;
+        if (html.find("<div class=\"peer-create-footer\"><button class=\"btn primary\" id=\"peer-create\">Create Peer</button></div>") == std::string_view::npos) return 419;
+        if (html.find("id=\"client-connections-peer\"") != std::string_view::npos) return 420;
+        if (html.find("<th>actions</th>") == std::string_view::npos) return 421;
+        if (html.find("id=\"client-connection-detail\"") == std::string_view::npos) return 422;
+        if (js.find("async function loadAllClientConnections()") == std::string_view::npos) return 423;
+        if (js.find("renderClientConnectionDetail") == std::string_view::npos) return 424;
+```
+
+- [ ] **Step 3: Verify RED**
+
+Run:
+
+```bash
+rtk cmake --build build-glibc --target tcpquic_admin_http_test -j
+rtk ./build-glibc/bin/Release/tcpquic_admin_http_test
+```
+
+Expected: build succeeds and the test fails with one of the new return codes because the old role switch / peers layout / connection filtering is still present.
+
+- [ ] **Step 4: Implement role-fixed sidebar**
+
+In `src/runtime/admin_console.cpp`:
+
+- Remove the `<div class="role-switch">...` block from HTML.
+- Keep `rolePill` as status only.
+- Replace `setRole(role)` with a role setter that only accepts `/api/v1/admin` role and renders the matching nav.
+- Remove `sessionStorage` persistence for `tcpquic.admin.role`.
+- Remove `.role-switch` CSS selectors.
+
+- [ ] **Step 5: Implement vertical client Peers layout**
+
+In `src/runtime/admin_console.cpp`:
+
+- Move the `Create peer` button out of the title row.
+- Replace `peer-layout` with a vertical sequence:
+  - peers table card
+  - `<section class="peer-form-panel">` containing the current `Create/Edit Peer` form
+  - `<div class="peer-create-footer">` containing the bottom `Create Peer` button.
+- Keep `Edit` and `Delete` as the only peer row actions.
+- Keep `Create Peer` as `beginCreatePeer`, not an immediate API submit.
+
+- [ ] **Step 6: Implement all-client-connections view and detail**
+
+In `src/runtime/admin_console.cpp`:
+
+- Remove the `client-connections-peer` input and its key handler.
+- Add a `Detail` action column to the client connections table.
+- Implement:
+
+```javascript
+async function loadAllClientConnections() {
+  const peers = await api('/peers');
+  const peerRows = peers.peers || [];
+  const nested = await Promise.all(peerRows.map(async peer => {
+    const peerId = peer.peer_id || '';
+    const data = await api(`/peers/${encodeURIComponent(peerId)}/connections`);
+    return (data.connections || []).map(row => Object.assign({ peer_id: peerId }, row));
+  }));
+  return nested.flat();
+}
+```
+
+- Render all rows from `loadAllClientConnections()`.
+- Add a `renderClientConnectionDetail(peerId, connectionId)` function that fetches `/peers/{peer_id}/connections/{connection_id}` and writes formatted JSON into `#client-connection-detail`.
+
+- [ ] **Step 7: Verify GREEN**
+
+Run:
+
+```bash
+rtk cmake --build build-glibc --target tcpquic_admin_http_test -j
+rtk ./build-glibc/bin/Release/tcpquic_admin_http_test
+```
+
+Expected: both commands exit `0`.
+
+- [ ] **Step 8: Full affected verification**
+
+Run:
+
+```bash
+rtk cmake --build build-glibc --target tcpquic-proxy tcpquic_admin_http_test tcpquic_router_runtime_test tcpquic_server_admin_test -j
+rtk ./build-glibc/bin/Release/tcpquic_admin_http_test
+rtk ./build-glibc/bin/Release/tcpquic_router_runtime_test
+rtk ./build-glibc/bin/Release/tcpquic_server_admin_test
+rtk scripts/check-admin-console-v4.sh
+rtk git diff --check
+```
+
+Expected: all commands exit `0`; the guard prints `admin console v4 guard passed`.
+
+- [ ] **Step 9: Review and commit**
+
+Check:
+
+```bash
+rtk git status --short
+rtk git diff -- src/runtime/admin_console.cpp src/unittest/admin_http_test.cpp docs/superpowers/specs/2026-06-29-admin-console-design.md docs/superpowers/plans/2026-06-29-admin-console.md
+```
+
+Expected: only the four files above are part of this task, except pre-existing unrelated workspace changes.
+
+Commit:
+
+```bash
+rtk git add docs/superpowers/specs/2026-06-29-admin-console-design.md docs/superpowers/plans/2026-06-29-admin-console.md src/runtime/admin_console.cpp src/unittest/admin_http_test.cpp
+rtk git commit -m "Refine admin console role and client layouts"
+```
