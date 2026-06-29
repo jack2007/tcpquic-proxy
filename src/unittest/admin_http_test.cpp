@@ -497,6 +497,15 @@ int main() {
         if (!TqHttpHeaderIs(cssResponse, "Content-Type", "text/css")) return 196;
         if (cssResponse.find(".sidebar") == std::string::npos) return 197;
 
+        TqSocketHandle putCssFd = TqConnectLocal(port);
+        if (!TqSocketValid(putCssFd)) return 204;
+        if (!TqSendAll(putCssFd, "PUT /console/style.css HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 205;
+        std::string putCssResponse;
+        if (!TqRecvUntilClosed(putCssFd, putCssResponse)) return 206;
+        TqCloseSocket(putCssFd);
+        if (!TqHttpStatusIs(putCssResponse, 404)) return 207;
+        if (putCssResponse.find(".sidebar") != std::string::npos) return 208;
+
         TqSocketHandle jsFd = TqConnectLocal(port);
         if (!TqSocketValid(jsFd)) return 198;
         if (!TqSendAll(jsFd, "GET /console/app.js HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")) return 199;

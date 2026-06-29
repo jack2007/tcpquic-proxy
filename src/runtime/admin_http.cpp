@@ -334,6 +334,9 @@ void TqSetRedirect(httplib::Response& res, const char* location) {
 }
 
 bool TqHandleConsoleStatic(const httplib::Request& req, httplib::Response& res) {
+    if (req.method != "GET") {
+        return false;
+    }
     if (req.path == "/" || req.path == "/console") {
         TqSetRedirect(res, "/console/");
         return true;
