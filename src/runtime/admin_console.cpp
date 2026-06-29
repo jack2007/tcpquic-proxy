@@ -14,10 +14,7 @@ constexpr std::string_view kConsoleCss = R"CSS(
     .brand{padding:4px 8px 12px;border-bottom:1px solid rgba(255,255,255,.16)}
     .brand h1{font-size:18px;line-height:1.2;margin:0 0 6px}
     .brand p{margin:0;color:#a9b6c2;font-size:12px;line-height:1.45}
-    .role-switch{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-    .role-switch button,.nav button{all:unset;cursor:pointer;border-radius:6px}
-    .role-switch button{padding:8px 10px;text-align:center;font-size:13px;color:#cbd5df;background:rgba(255,255,255,.07)}
-    .role-switch button.active{background:#eef3f7;color:#111820;font-weight:700}
+    .nav button{all:unset;cursor:pointer;border-radius:6px}
     .nav{display:grid;gap:4px}
     .nav button{padding:10px;color:#cad4dd;font-size:13px;display:grid;grid-template-columns:22px 1fr auto;gap:8px;align-items:center}
     .nav button:hover{background:rgba(255,255,255,.08)}
@@ -48,7 +45,8 @@ constexpr std::string_view kConsoleCss = R"CSS(
     th{color:var(--muted);font-weight:650;background:#f8fafb}
     .state{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:999px;border:1px solid var(--line);font-size:12px;background:#fff}
     .state.ok{color:var(--green);border-color:#b7e1c1;background:#f1fbf4}.state.warn{color:var(--amber);border-color:#f6d49d;background:#fff8eb}.state.err{color:var(--red);border-color:#f2b8b1;background:#fff6f5}
-    .peer-layout{display:grid;grid-template-columns:minmax(0,.96fr) minmax(560px,1.04fr);gap:12px;align-items:start}
+    .peer-form-panel{display:grid;gap:12px}
+    .peer-create-footer{display:flex;justify-content:flex-end}
     .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:12px;align-items:start}
     .drawer{background:#fbfcfd;border:1px solid var(--line);border-radius:8px;padding:14px;display:grid;gap:12px;min-width:0}
     .form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{display:grid;gap:4px}.field.full{grid-column:1/-1}.field label{color:var(--muted);font-size:12px}
@@ -57,7 +55,7 @@ constexpr std::string_view kConsoleCss = R"CSS(
     .callout{border:1px solid #f1cc8f;background:#fff8eb;color:#7c3d00;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.45}
     .confirm{border:1px solid #f0b4ad;background:#fff7f6;border-radius:8px;padding:12px;display:grid;gap:8px;font-size:13px;line-height:1.45}
     .json-preview{background:#111820;color:#d8e5ed;border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:280px}
-    @media(max-width:1180px){.peer-layout,.split{grid-template-columns:1fr}.span-3,.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}}
+    @media(max-width:1180px){.split{grid-template-columns:1fr}.span-3,.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}}
     @media(max-width:940px){.shell{grid-template-columns:1fr}.sidebar{position:sticky;top:0;z-index:2}.nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav button{grid-template-columns:1fr;gap:4px;justify-items:start}}
   )CSS";
 
@@ -75,10 +73,6 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
       <div class="brand">
         <h1>raypx2 Admin Console</h1>
         <p>v4: 只展示当前 Admin API 可直接获得的信息。</p>
-      </div>
-      <div class="role-switch">
-        <button id="role-client" class="active" data-role="client">client</button>
-        <button id="role-server" data-role="server">server</button>
       </div>
       <nav class="nav" id="nav"></nav>
     </aside>
@@ -112,17 +106,16 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
         </section>
 
         <section id="client-peers" class="page">
-          <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div><button class="btn primary" id="peer-create">Create peer</button></div>
-          <div class="peer-layout">
-            <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>socks_listen</th><th>http_listen</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-peers-rows"></tbody></table></div>
-            <aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input id="peer-id" value=""></div><div class="field full"><label>peers address - quic_peer 模式</label><input id="peer-quic-peer" value=""></div><div class="field full"><label>paths 模式</label><textarea id="peer-paths" style="min-height:96px">[]</textarea></div><div class="field"><label>socks_listen</label><input id="peer-socks-listen" value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input id="peer-http-listen" value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea id="peer-port-forwards" style="min-height:72px">[]</textarea></div><div class="field"><label>enabled</label><select id="peer-enabled"><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn" id="peer-cancel">Cancel</button><button class="btn" id="peer-json-advanced">JSON advanced</button><button class="btn primary" id="peer-save">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供连接控制操作。</span><button class="btn danger" id="peer-delete">Delete</button></div></aside>
-          </div>
+          <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>socks_listen</th><th>http_listen</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-peers-rows"></tbody></table></div>
+          <section class="peer-form-panel"><aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input id="peer-id" value=""></div><div class="field full"><label>peers address - quic_peer 模式</label><input id="peer-quic-peer" value=""></div><div class="field full"><label>paths 模式</label><textarea id="peer-paths" style="min-height:96px">[]</textarea></div><div class="field"><label>socks_listen</label><input id="peer-socks-listen" value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input id="peer-http-listen" value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea id="peer-port-forwards" style="min-height:72px">[]</textarea></div><div class="field"><label>enabled</label><select id="peer-enabled"><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn" id="peer-cancel">Cancel</button><button class="btn" id="peer-json-advanced">JSON advanced</button><button class="btn primary" id="peer-save">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供连接控制操作。</span><button class="btn danger" id="peer-delete">Delete</button></div></aside></section>
+          <div class="peer-create-footer"><button class="btn primary" id="peer-create">Create Peer</button></div>
         </section>
 
         <section id="client-connections" class="page">
-          <div class="title-row"><div><h2>Connections - client</h2><p class="subtitle">只查询展示，不提供连接控制操作；字段来自 /api/v1/peers/{peer_id}/connections。</p></div></div>
-          <div class="toolbar"><input id="client-connections-peer" placeholder="peer_id" value=""></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="client-connections-rows"></tbody></table></div>
+          <div class="title-row"><div><h2>Connections - client</h2><p class="subtitle">只查询展示，不提供连接控制操作；页面聚合所有 peer 的 /api/v1/peers/{peer_id}/connections。</p></div></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-connections-rows"></tbody></table></div>
+          <div class="card"><h3>Connection detail</h3><pre class="json-preview" id="client-connection-detail">{}</pre></div>
         </section>
 
         <section id="client-tunnels" class="page">
@@ -291,6 +284,11 @@ constexpr std::string_view kConsoleJs = R"JS(
       }).join('')}</tr>`).join('');
     }
 
+    function renderJson(id, value) {
+      const element = document.getElementById(id);
+      if (element) element.textContent = JSON.stringify(value || {}, null, 2);
+    }
+
     function sum(items, field) {
       return items.reduce((total, item) => total + Number(item[field] || 0), 0);
     }
@@ -399,15 +397,36 @@ constexpr std::string_view kConsoleJs = R"JS(
     }
 
     async function renderClientConnections() {
-      const peerId = document.getElementById('client-connections-peer').value.trim();
+      const rows = await loadAllClientConnections();
       const tbody = document.getElementById('client-connections-rows');
-      if (!peerId) {
-        renderRows(tbody, [], []);
-        return;
-      }
-      const data = await api(`/peers/${encodeURIComponent(peerId)}/connections`);
-      const rows = (data.connections || []).map(row => Object.assign({ peer_id: peerId }, row));
       renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error']);
+      if (!tbody) return;
+      tbody.querySelectorAll('tr').forEach((tr, index) => {
+        const row = rows[index] || {};
+        const td = document.createElement('td');
+        td.innerHTML = `<button class="btn" data-peer-id="${escapeHtml(row.peer_id)}" data-connection-id="${escapeHtml(row.connection_id)}">Detail</button>`;
+        tr.appendChild(td);
+      });
+      tbody.querySelectorAll('[data-connection-id]').forEach(button => {
+        button.onclick = () => renderClientConnectionDetail(button.dataset.peerId, button.dataset.connectionId);
+      });
+    }
+
+    async function loadAllClientConnections() {
+      const peers = await api('/peers');
+      const peerRows = peers.peers || [];
+      const nested = await Promise.all(peerRows.map(async peer => {
+        const peerId = peer.peer_id || '';
+        if (!peerId) return [];
+        const data = await api(`/peers/${encodeURIComponent(peerId)}/connections`);
+        return (data.connections || []).map(row => Object.assign({}, row, { peer_id: peerId }));
+      }));
+      return nested.flat();
+    }
+
+    async function renderClientConnectionDetail(peerId, connectionId) {
+      const data = await api(`/peers/${encodeURIComponent(peerId)}/connections/${encodeURIComponent(connectionId)}`);
+      renderJson('client-connection-detail', data);
     }
 
     async function renderClientTunnels() {
@@ -522,8 +541,7 @@ constexpr std::string_view kConsoleJs = R"JS(
     }
 
     function setElementJson(id, value) {
-      const element = document.getElementById(id);
-      if (element) element.textContent = formatJson(value);
+      renderJson(id, value);
     }
 
     function firstDefined(...values) {
@@ -591,11 +609,7 @@ constexpr std::string_view kConsoleJs = R"JS(
 
     function setRole(role) {
       consoleState.role = role === 'server' ? 'server' : 'client';
-      document.querySelectorAll('.role-switch button').forEach(button => {
-        button.classList.toggle('active', button.dataset.role === consoleState.role);
-      });
       rolePill.innerHTML = `<strong>role</strong> ${consoleState.role}`;
-      sessionStorage.setItem('tcpquic.admin.role', consoleState.role);
       renderNav();
     }
 
@@ -708,32 +722,20 @@ constexpr std::string_view kConsoleJs = R"JS(
       };
       document.getElementById('peer-cancel').onclick = () => setPeerForm();
       document.getElementById('peer-json-advanced').onclick = () => setPeerForm(peerFormPayload());
-      document.getElementById('client-connections-peer').onkeydown = event => {
-        if (event.key === 'Enter') runClientAction(renderClientConnections);
-      };
       document.getElementById('pause-refresh').onclick = () => {
         consoleState.paused = !consoleState.paused;
         document.getElementById('pause-refresh').textContent = consoleState.paused ? 'Resume refresh' : 'Pause refresh';
         refreshPill.innerHTML = consoleState.paused ? '<strong>refresh</strong> paused' : '<strong>refresh</strong> 3s auto';
       };
-      document.querySelectorAll('.role-switch button').forEach(button => {
-        button.onclick = () => {
-          setRole(button.dataset.role);
-          showPage(overviewPage(consoleState.role));
-          refreshCurrentPage();
-        };
-      });
 
-      const savedRole = sessionStorage.getItem('tcpquic.admin.role') || 'client';
-      setRole(savedRole);
       const savedPage = sessionStorage.getItem('tcpquic.admin.page');
-      const validPages = pageDefs[consoleState.role].map(([id]) => id);
       if (consoleState.token) {
-        showPage(validPages.includes(savedPage) && savedPage !== 'login' ? savedPage : overviewPage(consoleState.role));
         try {
           const admin = await api('/admin');
           setRole(admin.role);
-          showPage(overviewPage(consoleState.role));
+          const validPages = pageDefs[consoleState.role].map(([id]) => id);
+          showPage(validPages.includes(savedPage) && savedPage !== 'login' ? savedPage : overviewPage(consoleState.role));
+          await refreshCurrentPage();
         } catch (_) {
           showPage('login');
         }
