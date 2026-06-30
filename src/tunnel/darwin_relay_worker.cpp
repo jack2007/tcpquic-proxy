@@ -1,6 +1,8 @@
 #if defined(__APPLE__)
 
 #include "darwin_relay_worker.h"
+#include "quic_receive_guard.h"
+#include "trace.h"
 
 #include <sys/socket.h>
 #include <sys/event.h>
@@ -9,8 +11,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cassert>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -2694,6 +2698,44 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             return QUIC_STATUS_SUCCESS;
         }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        if (TqIsMsQuicFakeFinReceive(
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                event->RECEIVE.Flags)) {
+            TqTraceLinuxRelayStreamState state{};
+            {
+                std::lock_guard<std::mutex> relayLock(relay->Mutex);
+                state.WorkerIndex = worker->Config.WorkerIndex;
+                state.RelayId = relay->Id;
+                state.OutstandingQuicSends = relay->PendingQuicSends.size();
+                state.OutstandingQuicSendBytes = relay->InFlightQuicSendBytes;
+                state.PendingTcpWriteQueue = relay->PendingTcpWrites.size();
+                state.PendingTcpWriteBytes = relay->PendingTcpWriteBytes;
+                state.PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
+                state.TcpReadBytes = relay->TcpReadBytes;
+                state.TcpWriteBytes = relay->TcpWriteBytes;
+                state.TcpReadClosed = relay->TcpReadClosed;
+                state.TcpWriteClosed = relay->TcpWriteClosed;
+                state.QuicSendFinSubmitted = relay->QuicSendFinSubmitted;
+                state.QuicSendFinCompleted = relay->QuicSendFinCompleted;
+            }
+            TqTraceRelayStreamEvent(
+                "darwin",
+                worker->Config.WorkerIndex,
+                relay->Id,
+                "receive_fake_fin",
+                0,
+                0,
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                static_cast<uint32_t>(event->RECEIVE.Flags),
+                true,
+                state);
+            assert(false && "MsQuic delivered FIN-only receive without known final size");
+            std::abort();
+        }
         if (!worker->QueueDeferredQuicReceive(
                 relay,
                 stream,

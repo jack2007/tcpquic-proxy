@@ -1,10 +1,12 @@
 #include "linux_relay_worker.h"
 
 #include <msquic.hpp>
+#include "quic_receive_guard.h"
 #include "trace.h"
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <climits>
 #include <cerrno>
@@ -3535,10 +3537,28 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
+        const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        if (TqIsMsQuicFakeFinReceive(
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                event->RECEIVE.Flags)) {
+            TraceRelayStreamEvent(
+                relay,
+                "receive_fake_fin",
+                0,
+                0,
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                static_cast<uint32_t>(event->RECEIVE.Flags),
+                true);
+            assert(false && "MsQuic delivered FIN-only receive without known final size");
+            std::abort();
+        }
         if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
         }
-        const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
         if (fin) {
             TraceRelayStreamEvent(
                 relay,

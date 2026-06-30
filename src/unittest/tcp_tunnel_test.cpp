@@ -1,5 +1,6 @@
 #include "platform_socket.h"
 #include "quic_session.h"
+#include "quic_receive_guard.h"
 #include "speed_test.h"
 #include "relay.h"
 #if defined(__linux__)
@@ -1659,6 +1660,16 @@ static int TestClientOpenOwnerDefersShutdownCompleteDelete() {
     return 0;
 }
 
+static int TestDetectsMsQuicFakeFinReceive() {
+    if (!TqIsMsQuicFakeFinReceive(UINT64_MAX, 0, 0, QUIC_RECEIVE_FLAG_FIN)) return 228;
+    if (TqIsMsQuicFakeFinReceive(42, 0, 0, QUIC_RECEIVE_FLAG_FIN)) return 229;
+    if (TqIsMsQuicFakeFinReceive(UINT64_MAX, 1, 0, QUIC_RECEIVE_FLAG_FIN)) return 230;
+    if (TqIsMsQuicFakeFinReceive(UINT64_MAX, 0, 1, QUIC_RECEIVE_FLAG_FIN)) return 231;
+    if (TqIsMsQuicFakeFinReceive(UINT64_MAX, 0, 0, QUIC_RECEIVE_FLAG_NONE)) return 232;
+
+    return 0;
+}
+
 int main() {
     if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
@@ -1669,6 +1680,7 @@ int main() {
     if (int rc = TestTunnelRegistryAbortCallbackCanRegisterSameContext()) return rc;
     if (int rc = TestConnectionAbortClosesTunnelTcp()) return rc;
     if (int rc = TestClientOpenOwnerDefersShutdownCompleteDelete()) return rc;
+    if (int rc = TestDetectsMsQuicFakeFinReceive()) return rc;
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;

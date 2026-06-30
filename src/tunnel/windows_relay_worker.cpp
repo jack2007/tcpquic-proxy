@@ -3,12 +3,15 @@
 #if defined(_WIN32)
 
 #include "msquic.hpp"
+#include "quic_receive_guard.h"
 #include "relay_buffer.h"
 #include "trace.h"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -3474,12 +3477,33 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
         return QUIC_STATUS_SUCCESS;
     }
 
-    if (binding->Closing.load(std::memory_order_acquire)) {
-        return QUIC_STATUS_SUCCESS;
-    }
-
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+        if (TqIsMsQuicFakeFinReceive(
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                event->RECEIVE.Flags)) {
+            auto relay = worker->FindRelayById(binding->RelayId);
+            TqTraceRelayStreamEvent(
+                "windows",
+                worker->WorkerIndex_,
+                binding->RelayId,
+                "receive_fake_fin",
+                0,
+                0,
+                event->RECEIVE.AbsoluteOffset,
+                event->RECEIVE.TotalBufferLength,
+                event->RECEIVE.BufferCount,
+                static_cast<uint32_t>(event->RECEIVE.Flags),
+                true,
+                worker->BuildRelayTraceState(relay));
+            assert(false && "MsQuic delivered FIN-only receive without known final size");
+            std::abort();
+        }
+        if (binding->Closing.load(std::memory_order_acquire)) {
+            return QUIC_STATUS_SUCCESS;
+        }
         auto view = worker->BuildDeferredQuicReceiveView(
             *binding,
             stream,
@@ -3499,6 +3523,10 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             return QUIC_STATUS_PENDING;
         }
         worker->CompleteRemainingReceiveOwnership(*view);
+        return QUIC_STATUS_SUCCESS;
+    }
+
+    if (binding->Closing.load(std::memory_order_acquire)) {
         return QUIC_STATUS_SUCCESS;
     }
 
