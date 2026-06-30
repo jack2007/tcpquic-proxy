@@ -1187,9 +1187,9 @@ void TqPrintUsage(FILE* out) {
         "                              Cap bytes per Linux relay TCP write flush\n"
         "\n"
         "Diagnostics:\n"
-        "  --trace                      Event + periodic debug trace (spdlog file log)\n"
-        "  --trace-interval <sec>       Periodic stats interval when --trace (default 10)\n"
-        "  --trace-level <info|debug>   Trace file log level when --trace (default info)\n"
+        "  --trace                      Event + periodic trace (enabled by default)\n"
+        "  --trace-interval <sec>       Periodic stats interval for trace log (default 30)\n"
+        "  --trace-level <info|debug>   Trace file log level (default info)\n"
         "  --diag-stats                 Low-overhead periodic stderr stats\n"
         "  --diag-stats-interval <sec>  Periodic stderr stats interval (default 5)\n");
 }

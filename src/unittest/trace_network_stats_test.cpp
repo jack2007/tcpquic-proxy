@@ -1,11 +1,59 @@
 #include "trace.h"
 
+#include "exe_path.h"
 #include "msquic.hpp"
 #include "relay_metrics.h"
 
+#include <cstdio>
+#include <fstream>
 #include <string>
 
 const MsQuicApi* MsQuic = nullptr;
+
+std::string ReadFile(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+std::string ClientTraceLogPath() {
+    std::string exeDir;
+    if (!TqGetExecutableDirectory(exeDir)) {
+        exeDir = ".";
+    }
+    return exeDir + "/log/client.log";
+}
+
+bool LogContainsRelayBackpressure(TqConfig::TraceLevel level) {
+    const std::string logPath = ClientTraceLogPath();
+    std::remove(logPath.c_str());
+    if (!TqTraceInit(TqMode::Client, 0, level)) {
+        return true;
+    }
+    TqTraceRelayBackpressureEvent("linux", 3, 77, "pause", "threshold", 4096, 2048, 1024, 8192);
+    TqTraceShutdown();
+    return ReadFile(logPath.c_str()).find("event=relay_backpressure") != std::string::npos;
+}
+
+TqTraceLinuxRelayStreamState MakeRelayStateForFormattingTest() {
+    TqTraceLinuxRelayStreamState state{};
+    state.WorkerIndex = 7;
+    state.RelayId = 42;
+    state.OutstandingQuicSends = 3;
+    state.OutstandingQuicSendBytes = 65536;
+    state.PendingTcpWriteQueue = 2;
+    state.PendingTcpWriteBytes = 1048576;
+    state.PendingQuicReceiveBytes = 131072;
+    state.TcpReadBytes = 73400320;
+    state.TcpWriteBytes = 59873689;
+    state.TcpWriteErrno = 0;
+    state.TcpReadClosed = true;
+    state.TcpWriteClosed = false;
+    state.QuicSendFinSubmitted = true;
+    state.QuicSendFinCompleted = false;
+    state.TcpWriteShutdownQueued = true;
+    state.StreamDetached = false;
+    return state;
+}
 
 int main() {
     QUIC_STATISTICS_V2 quicStats{};
@@ -120,23 +168,7 @@ int main() {
     }
 
     const std::string relayLine = TqFormatTraceLinuxRelayStreamShutdownLine(
-        TqTraceLinuxRelayStreamState{
-            7,
-            42,
-            3,
-            65536,
-            2,
-            1048576,
-            131072,
-            73400320,
-            59873689,
-            0,
-            true,
-            false,
-            true,
-            false,
-            true,
-            false});
+        MakeRelayStateForFormattingTest());
 
     if (relayLine.find("event=linux_relay_stream_shutdown") == std::string::npos) {
         return 5;
@@ -164,26 +196,16 @@ int main() {
         return 7;
     }
 
+    TqTraceLinuxRelayStreamState windowsRelayState{};
+    windowsRelayState.RelayId = 99;
+    windowsRelayState.OutstandingQuicSends = 1;
+    windowsRelayState.OutstandingQuicSendBytes = 4096;
+    windowsRelayState.PendingQuicReceiveBytes = 8192;
+    windowsRelayState.StreamDetached = true;
     const std::string windowsRelayLine = TqFormatTraceRelayStateLine(
         "relay_stream_shutdown",
         "windows",
-        TqTraceLinuxRelayStreamState{
-            0,
-            99,
-            1,
-            4096,
-            0,
-            0,
-            8192,
-            0,
-            0,
-            0,
-            false,
-            false,
-            false,
-            false,
-            false,
-            true});
+        windowsRelayState);
     if (windowsRelayLine.find("event=relay_stream_shutdown") == std::string::npos) {
         return 9;
     }
@@ -203,6 +225,12 @@ int main() {
         metricsLine.find("active_relays=3") == std::string::npos ||
         metricsLine.find("fatal_relay_resets=1") == std::string::npos) {
         return 11;
+    }
+    if (LogContainsRelayBackpressure(TqConfig::TraceLevel::Info)) {
+        return 18;
+    }
+    if (!LogContainsRelayBackpressure(TqConfig::TraceLevel::Debug)) {
+        return 19;
     }
 
     return 0;

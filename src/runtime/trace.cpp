@@ -1040,7 +1040,7 @@ void TqTraceRelayBackpressureEvent(
     if (!TqTraceEnabled()) {
         return;
     }
-    LogInfo(
+    LogDebug(
         "event=relay_backpressure backend=%s worker=%u relay=%llu action=%s reason=%s outstanding_quic_send_bytes=%llu pause_threshold=%llu resume_threshold=%llu read_ahead=%llu",
         backend != nullptr ? backend : "?",
         workerIndex,
@@ -1379,7 +1379,7 @@ extern "C" void TqTraceLinuxRelayBackpressureEvent(
     if (!TqTraceEnabled()) {
         return;
     }
-    LogInfo(
+    LogDebug(
         "event=relay_backpressure worker=%u relay=%llu action=%s reason=%s outstanding_quic_send_bytes=%llu pause_threshold=%llu resume_threshold=%llu read_ahead=%llu",
         workerIndex,
         static_cast<unsigned long long>(relayId),

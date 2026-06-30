@@ -100,9 +100,9 @@ struct TqConfig {
         Debug,
     };
 
-    bool Trace{false};
+    bool Trace{true};
     TraceLevel TraceLogLevel{TraceLevel::Info};
-    uint32_t TraceIntervalSec{10};
+    uint32_t TraceIntervalSec{30};
     bool DiagStats{false};
     uint32_t DiagStatsIntervalSec{5};
 };

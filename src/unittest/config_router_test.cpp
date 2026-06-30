@@ -681,6 +681,8 @@ int main() {
         std::string err;
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 156;
         if (cfg.QuicKeepAliveIntervalMs != 5000) return 157;
+        if (!cfg.Trace) return 205;
+        if (cfg.TraceIntervalSec != 30) return 206;
     }
     {
         const char* args[] = {
@@ -691,7 +693,7 @@ int main() {
         std::string err;
         if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 170;
         if (!cfg.DiagStats) return 171;
-        if (cfg.Trace) return 172;
+        if (!cfg.Trace) return 172;
         if (cfg.DiagStatsIntervalSec != 5) return 173;
     }
     {
@@ -1041,6 +1043,23 @@ int main() {
         if (cfg.QuicProfile != TqQuicProfile::LowLatency) return 99;
         if (cfg.HandshakeThreads != 4) return 100;
         if (!cfg.Trace || cfg.TraceIntervalSec != 2) return 101;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},
+            "trace":{"enabled":false},
+            "peers":[{
+                "id":"primary",
+                "proto_peer":"127.0.0.1:4433",
+                "socks_listen":"127.0.0.1:11080"
+            }]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 207;
+        if (cfg.Trace) return 208;
+        if (cfg.TraceIntervalSec != 30) return 209;
     }
     {
         const char* args[] = {
