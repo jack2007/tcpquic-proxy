@@ -97,6 +97,20 @@ bool TqHttpHeaderIs(const std::string& response, const std::string& name, const 
     return headerEnd != std::string::npos && response.find(header) < headerEnd;
 }
 
+std::string TqTestToken(char ch) {
+    return std::string(64, ch);
+}
+
+void TqWriteTextFile(const std::filesystem::path& path, const std::string& body) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << body;
+}
+
+std::string TqReadTextFile(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 std::filesystem::path TqSecureTokenFile(const std::string& name) {
     static unsigned counter = 0;
     std::filesystem::path dir = std::filesystem::temp_directory_path() /
@@ -300,6 +314,97 @@ int main() {
 #endif
         if (!auth.CleanupTokenFile(tokenFile.string())) return 92;
         if (std::filesystem::exists(tokenFile)) return 93;
+    }
+    {
+        const std::filesystem::path tokenFile = TqSecureTokenFile("persistent-reuse");
+        const std::string token = TqTestToken('a');
+        const std::string original =
+            "{\n"
+            "  \"version\":1,\n"
+            "  \"token_type\":\"Bearer\",\n"
+            "  \"token\":\"" + token + "\",\n"
+            "  \"listen\":\"127.0.0.1:19999\",\n"
+            "  \"pid\":1,\n"
+            "  \"created_at_unix\":1\n"
+            "}\n";
+        TqWriteTextFile(tokenFile, original);
+
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.TokenFile = tokenFile.string();
+        options.PersistTokenFile = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [](const TqHttpRequest&) {
+            return TqJsonResponse(200, "{}");
+        }, options);
+        if (!server.Start(err)) return 440;
+        if (server.AuthTokenForTesting() != token) return 441;
+        server.Stop();
+        if (!std::filesystem::exists(tokenFile)) return 442;
+        if (TqReadTextFile(tokenFile) != original) return 443;
+    }
+    {
+        const std::filesystem::path tokenFile = TqSecureTokenFile("persistent-invalid");
+        const std::string invalid = "{\"version\":1,\"token_type\":\"Bearer\",\"token\":\"short\"}\n";
+        TqWriteTextFile(tokenFile, invalid);
+
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.TokenFile = tokenFile.string();
+        options.PersistTokenFile = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [](const TqHttpRequest&) {
+            return TqJsonResponse(200, "{}");
+        }, options);
+        if (server.Start(err)) return 444;
+        if (err.find("invalid admin token file") == std::string::npos) return 445;
+        if (TqReadTextFile(tokenFile) != invalid) return 446;
+    }
+    {
+        const std::filesystem::path tokenFile = TqSecureTokenFile("persistent-missing");
+        std::filesystem::remove(tokenFile);
+
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.TokenFile = tokenFile.string();
+        options.PersistTokenFile = true;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [](const TqHttpRequest&) {
+            return TqJsonResponse(200, "{}");
+        }, options);
+        if (!server.Start(err)) return 447;
+        const std::string token = server.AuthTokenForTesting();
+        if (token.size() != 64) return 448;
+        const std::string body = TqReadTextFile(tokenFile);
+        if (body.find("\"token\":\"" + token + "\"") == std::string::npos) return 449;
+        server.Stop();
+        if (!std::filesystem::exists(tokenFile)) return 450;
+    }
+    {
+        const std::filesystem::path tokenFile = TqSecureTokenFile("nonpersistent-regenerate");
+        const std::string oldToken = TqTestToken('b');
+        TqWriteTextFile(tokenFile,
+            "{\"version\":1,\"token_type\":\"Bearer\",\"token\":\"" + oldToken + "\"}\n");
+
+        TqAdminHttpServerOptions options;
+        options.AdminThreads = 1;
+        options.EnableTokenAuth = true;
+        options.TokenFile = tokenFile.string();
+        options.PersistTokenFile = false;
+        std::string err;
+        TqAdminHttpServer server("127.0.0.1:0", [](const TqHttpRequest&) {
+            return TqJsonResponse(200, "{}");
+        }, options);
+        if (!server.Start(err)) return 451;
+        const std::string newToken = server.AuthTokenForTesting();
+        if (newToken == oldToken) return 452;
+        const std::string body = TqReadTextFile(tokenFile);
+        if (body.find("\"token\":\"" + newToken + "\"") == std::string::npos) return 453;
+        server.Stop();
+        if (std::filesystem::exists(tokenFile)) return 454;
     }
     {
         TqAdminAuth::SetRuntimeBinaryName("/opt/tcpquic/bin/custom-raypx2");

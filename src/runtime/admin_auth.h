@@ -8,6 +8,7 @@ class TqAdminAuth {
 public:
     bool InitializeToken();
     bool Authorize(const TqHttpRequest& req) const;
+    bool LoadTokenFile(const std::string& path, std::string& err);
     bool WriteTokenFile(const std::string& path, const std::string& listen, std::string& err);
     bool CleanupTokenFile(const std::string& path) const;
     const std::string& Token() const { return TokenValue; }

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -181,6 +182,21 @@ bool TqConstantTimeEquals(const std::string& a, const std::string& b) {
     return diff == 0;
 }
 
+bool TqIsTokenHex(const std::string& token) {
+    if (token.size() != 64) {
+        return false;
+    }
+    for (char ch : token) {
+        const bool digit = ch >= '0' && ch <= '9';
+        const bool lower = ch >= 'a' && ch <= 'f';
+        const bool upper = ch >= 'A' && ch <= 'F';
+        if (!digit && !lower && !upper) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool TqFileContainsTokenOrPid(const std::string& path, const std::string& token) {
     std::ifstream in(path);
     if (!in) {
@@ -192,6 +208,238 @@ bool TqFileContainsTokenOrPid(const std::string& path, const std::string& token)
     }
     return body.find("\"pid\":" + std::to_string(TqCurrentPid())) != std::string::npos;
 }
+
+class TqTokenJsonParser {
+public:
+    explicit TqTokenJsonParser(const std::string& text, std::string& err) : Text(text), Err(err) {}
+
+    bool Parse(std::string& token) {
+        token.clear();
+        bool hasVersion = false;
+        bool hasType = false;
+        bool hasToken = false;
+        uint64_t version = 0;
+        std::string tokenType;
+
+        SkipWs();
+        if (!Consume('{')) {
+            return Error("token file must be a JSON object");
+        }
+        SkipWs();
+        if (Consume('}')) {
+            return Error("token file is missing required fields");
+        }
+        for (;;) {
+            std::string key;
+            if (!ParseString(key)) {
+                return false;
+            }
+            SkipWs();
+            if (!Consume(':')) {
+                return Error("expected ':' after token file key");
+            }
+            SkipWs();
+            if (key == "version") {
+                if (!ParseUint(version)) {
+                    return false;
+                }
+                hasVersion = true;
+            } else if (key == "token_type") {
+                if (!ParseString(tokenType)) {
+                    return false;
+                }
+                hasType = true;
+            } else if (key == "token") {
+                if (!ParseString(token)) {
+                    return false;
+                }
+                hasToken = true;
+            } else {
+                if (!SkipValue()) {
+                    return false;
+                }
+            }
+            SkipWs();
+            if (Consume('}')) {
+                break;
+            }
+            if (!Consume(',')) {
+                return Error("expected ',' or '}' in token file");
+            }
+            SkipWs();
+        }
+        SkipWs();
+        if (Pos != Text.size()) {
+            return Error("unexpected data after token file JSON");
+        }
+        if (!hasVersion || !hasType || !hasToken) {
+            return Error("token file is missing required fields");
+        }
+        if (version != 1) {
+            return Error("unsupported token file version");
+        }
+        if (tokenType != "Bearer") {
+            return Error("unsupported token type");
+        }
+        if (!TqIsTokenHex(token)) {
+            return Error("invalid token value");
+        }
+        return true;
+    }
+
+private:
+    bool ParseString(std::string& value) {
+        value.clear();
+        if (!Consume('"')) {
+            return Error("expected JSON string");
+        }
+        while (Pos < Text.size()) {
+            const char ch = Text[Pos++];
+            if (ch == '"') {
+                return true;
+            }
+            if (static_cast<unsigned char>(ch) < 0x20) {
+                return Error("invalid control character in JSON string");
+            }
+            if (ch != '\\') {
+                value.push_back(ch);
+                continue;
+            }
+            if (Pos >= Text.size()) {
+                return Error("unterminated escape sequence");
+            }
+            const char esc = Text[Pos++];
+            switch (esc) {
+            case '"':
+            case '\\':
+            case '/':
+                value.push_back(esc);
+                break;
+            case 'b':
+                value.push_back('\b');
+                break;
+            case 'f':
+                value.push_back('\f');
+                break;
+            case 'n':
+                value.push_back('\n');
+                break;
+            case 'r':
+                value.push_back('\r');
+                break;
+            case 't':
+                value.push_back('\t');
+                break;
+            case 'u':
+                if (!ParseUnicodeEscape(value)) {
+                    return false;
+                }
+                break;
+            default:
+                return Error("invalid escape sequence");
+            }
+        }
+        return Error("unterminated JSON string");
+    }
+
+    bool ParseUnicodeEscape(std::string& value) {
+        if (Pos + 4 > Text.size()) {
+            return Error("invalid unicode escape");
+        }
+        uint32_t code = 0;
+        for (int i = 0; i < 4; ++i) {
+            const int hex = HexValue(Text[Pos++]);
+            if (hex < 0) {
+                return Error("invalid unicode escape");
+            }
+            code = (code << 4) | static_cast<uint32_t>(hex);
+        }
+        if (code <= 0x7f) {
+            value.push_back(static_cast<char>(code));
+        } else {
+            return Error("non-ascii unicode escape is not supported in token file");
+        }
+        return true;
+    }
+
+    bool ParseUint(uint64_t& value) {
+        if (Pos >= Text.size() || Text[Pos] < '0' || Text[Pos] > '9') {
+            return Error("expected unsigned integer");
+        }
+        uint64_t parsed = 0;
+        while (Pos < Text.size() && Text[Pos] >= '0' && Text[Pos] <= '9') {
+            const uint64_t digit = static_cast<uint64_t>(Text[Pos] - '0');
+            if (parsed > (UINT64_MAX - digit) / 10) {
+                return Error("integer value is too large");
+            }
+            parsed = (parsed * 10) + digit;
+            ++Pos;
+        }
+        value = parsed;
+        return true;
+    }
+
+    bool SkipValue() {
+        if (Pos >= Text.size()) {
+            return Error("expected JSON value");
+        }
+        if (Text[Pos] == '"') {
+            std::string ignored;
+            return ParseString(ignored);
+        }
+        uint64_t ignoredNumber = 0;
+        if (Text[Pos] >= '0' && Text[Pos] <= '9') {
+            return ParseUint(ignoredNumber);
+        }
+        if (Text.compare(Pos, 4, "true") == 0) {
+            Pos += 4;
+            return true;
+        }
+        if (Text.compare(Pos, 5, "false") == 0) {
+            Pos += 5;
+            return true;
+        }
+        if (Text.compare(Pos, 4, "null") == 0) {
+            Pos += 4;
+            return true;
+        }
+        return Error("unsupported JSON value in token file");
+    }
+
+    bool Consume(char expected) {
+        if (Pos < Text.size() && Text[Pos] == expected) {
+            ++Pos;
+            return true;
+        }
+        return false;
+    }
+
+    void SkipWs() {
+        while (Pos < Text.size()) {
+            const char ch = Text[Pos];
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                return;
+            }
+            ++Pos;
+        }
+    }
+
+    int HexValue(char ch) const {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    }
+
+    bool Error(const std::string& err) {
+        Err = err;
+        return false;
+    }
+
+    const std::string& Text;
+    std::string& Err;
+    size_t Pos{0};
+};
 
 bool TqEnsureSecureTokenParentDir(const std::filesystem::path& parent, bool parentExisted, std::string& err) {
     if (parent.empty()) {
@@ -346,6 +594,26 @@ bool TqAdminAuth::Authorize(const TqHttpRequest& req) const {
         return false;
     }
     return TqConstantTimeEquals(value.substr(std::strlen(kPrefix)), TokenValue);
+}
+
+bool TqAdminAuth::LoadTokenFile(const std::string& path, std::string& err) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        err = "failed to open admin token file";
+        return false;
+    }
+    std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!in.good() && !in.eof()) {
+        err = "failed to read admin token file";
+        return false;
+    }
+    std::string token;
+    TqTokenJsonParser parser(body, err);
+    if (!parser.Parse(token)) {
+        return false;
+    }
+    TokenValue = token;
+    return true;
 }
 
 bool TqAdminAuth::WriteTokenFile(const std::string& path, const std::string& listen, std::string& err) {

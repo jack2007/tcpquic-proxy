@@ -180,7 +180,7 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
 | `tls.key` | server | TLS server private key PEM path. Required in server mode; ignored in client mode. |
 | `tls.ca` | client | CA certificate PEM path used to verify the server certificate. Required in client mode; optional and unused in server mode. |
 | `admin.listen` | client/server | Admin HTTP listen address. |
-| `admin.token_file` | client/server | Admin Bearer token JSON file path. |
+| `admin.token_file` | client/server | Admin Bearer token JSON file path. When set, an existing valid token JSON is reused across restarts; a missing file is created; an invalid file fails startup. When omitted, the runtime default token file is regenerated for each process. |
 | `admin.threads` | client/server | Fixed Admin HTTP worker threads, range 1..32, default 2. |
 | `proto.profile` | client/server | `max-throughput` or `low-latency`. |
 | `proto.disable_1rtt_encryption` | client/server | Insecure lab-only QUIC 1-RTT encryption disable switch. Defaults to `true`; set `false` to enable packet encryption. |

@@ -32,6 +32,7 @@ struct TqAdminHttpServerOptions {
     std::string TokenFile;
     std::string Role;
     bool EnableTokenAuth{false};
+    bool PersistTokenFile{false};
 };
 
 namespace httplib {

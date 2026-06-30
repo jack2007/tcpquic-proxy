@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -631,15 +632,27 @@ bool TqAdminHttpServer::Start(std::string& err) {
     });
     ConfigureRoutes();
 
+    bool loadedExistingTokenFile = false;
     const bool tokenAuthEnabled = Options.EnableTokenAuth || !Options.TokenFile.empty();
     if (tokenAuthEnabled) {
         Auth.reset(new TqAdminAuth());
-        if (!Auth->InitializeToken()) {
+        TokenFilePath = Options.TokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath() : Options.TokenFile;
+        const bool shouldLoadExistingToken = Options.PersistTokenFile && std::filesystem::exists(TokenFilePath);
+        if (shouldLoadExistingToken) {
+            std::string loadErr;
+            if (!Auth->LoadTokenFile(TokenFilePath, loadErr)) {
+                err = "invalid admin token file: " + loadErr;
+                Server.reset();
+                Auth.reset();
+                return false;
+            }
+            loadedExistingTokenFile = true;
+        } else if (!Auth->InitializeToken()) {
             err = "failed to generate admin token";
             Server.reset();
+            Auth.reset();
             return false;
         }
-        TokenFilePath = Options.TokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath() : Options.TokenFile;
     }
 
     int boundPort = 0;
@@ -670,7 +683,8 @@ bool TqAdminHttpServer::Start(std::string& err) {
         return false;
     }
 
-    if (Auth && !Auth->WriteTokenFile(TokenFilePath, BoundListen, err)) {
+    const bool shouldWriteTokenFile = Auth && !loadedExistingTokenFile;
+    if (shouldWriteTokenFile && !Auth->WriteTokenFile(TokenFilePath, BoundListen, err)) {
         Stop();
         return false;
     }
@@ -685,7 +699,7 @@ void TqAdminHttpServer::Stop() {
     if (Thread.joinable()) {
         Thread.join();
     }
-    if (Auth && !TokenFilePath.empty()) {
+    if (Auth && !Options.PersistTokenFile && !TokenFilePath.empty()) {
         (void)Auth->CleanupTokenFile(TokenFilePath);
     }
     Started = false;

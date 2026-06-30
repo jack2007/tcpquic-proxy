@@ -6,7 +6,7 @@
 
 - 公开路径前缀固定为 `/api/v1`。Admin HTTP server 会先校验该前缀，再剥离 `/api/v1` 转发给内部 handler。
 - 只允许绑定 loopback：`127.0.0.1:<port>`、`localhost:<port>`、`::1:<port>`。启动参数为 `--admin-listen` 或配置 `admin.listen`。
-- 默认开启 Bearer Token 鉴权。Token 文件由 `--admin-token-file` 或配置 `admin.token_file` 指定；省略时使用按进程/角色生成的默认路径。
+- 默认开启 Bearer Token 鉴权。Token 文件由 `--admin-token-file` 或配置 `admin.token_file` 指定；显式 token 文件存在且 JSON 合法时会复用，缺失时会创建，不合法时启动失败。省略时使用按进程/角色生成的默认路径，并且每次启动重新生成 token JSON。
 - 请求和响应均为 JSON。路径参数使用单个 path segment，若包含特殊字符需要 percent-encode；实现会拒绝空 segment、非法 `%xx`、以及包含 `/` 的 segment。
 - 当前 HTTP server 白名单只接受 `/api/v1/*`。代码中仍存在少量 legacy 内部路径解析，例如 `/peers/{id}/enable`，但经公开 Admin HTTP 入口会被白名单拦截，应使用本文档中的 colon action 形式。
 - 常见错误：

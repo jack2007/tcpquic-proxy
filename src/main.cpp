@@ -99,6 +99,7 @@ TqAdminHttpServerOptions TqMakeAdminOptions(const TqConfig& cfg) {
     const char* role = cfg.Mode == TqMode::Client ? "client" : "server";
     options.Role = role;
     options.TokenFile = cfg.AdminTokenFile.empty() ? TqAdminAuth::DefaultTokenFilePath(role) : cfg.AdminTokenFile;
+    options.PersistTokenFile = !cfg.AdminTokenFile.empty();
     options.EnableTokenAuth = true;
     return options;
 }
