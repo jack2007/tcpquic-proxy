@@ -230,6 +230,36 @@ static int TestConnectionSnapshotAndSlotControls() {
     return 0;
 }
 
+static int TestPickConnectionWithIdReturnsSlotId() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(2);
+
+    auto* first = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1000));
+    auto* second = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1001));
+    session.MarkSlotConnectedForTest(0, first);
+    session.MarkSlotConnectedForTest(1, second);
+
+    const auto picked = session.PickConnectionWithId();
+    if (picked.Connection != first && picked.Connection != second) return 130;
+    if (picked.Connection == first && picked.ConnectionId != "conn-0") return 131;
+    if (picked.Connection == second && picked.ConnectionId != "conn-1") return 132;
+
+    session.Stop();
+    return 0;
+}
+
+static int TestPickConnectionWithIdReturnsEmptyWhenDisconnected() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+
+    const auto picked = session.PickConnectionWithId();
+    if (picked.Connection != nullptr) return 140;
+    if (!picked.ConnectionId.empty()) return 141;
+
+    session.Stop();
+    return 0;
+}
+
 static int TestQuicPathSlotExpansion() {
     TqConfig cfg;
     cfg.QuicPaths.push_back(TqQuicPathConfig{"cmcc", "10.10.1.2", "36.1.1.10:443", 2});
@@ -656,6 +686,8 @@ int main() {
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
+    if (int rc = TestPickConnectionWithIdReturnsSlotId()) return rc;
+    if (int rc = TestPickConnectionWithIdReturnsEmptyWhenDisconnected()) return rc;
     if (int rc = TestQuicPathSlotExpansion()) return rc;
     if (int rc = TestQuicPeerListSlotExpansionRoundRobin()) return rc;
     if (int rc = TestQuicPathModeRejectsSlotTopologyMutation()) return rc;

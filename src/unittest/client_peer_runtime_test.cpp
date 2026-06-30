@@ -345,6 +345,24 @@ static int TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen() {
     return 0;
 }
 
+static int TestSnapshotPeerMetricsIncludesStreamTotals() {
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.SocksListen = "127.0.0.1:0";
+    cfg.QuicConnections = 1;
+
+    TqClientIngressReactor ingress;
+    auto runtime = std::make_shared<TqClientPeerRuntime>("peer-streams", cfg, &ingress);
+    runtime->IncrementTotalStreamsForTest(3);
+
+    const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
+    if (metrics.PeerId != "peer-streams") return 2101;
+    if (metrics.TotalStreams != 3) return 2102;
+    if (metrics.ActiveStreams != 0) return 2103;
+    return 0;
+}
+
 int main() {
     if (int rc = TestPrimaryPeerConfigUsesCliFields()) return rc;
     if (int rc = TestPeerConfigOverlayUsesPeerOverrides()) return rc;
@@ -352,5 +370,6 @@ int main() {
     if (int rc = TestConnectionStateCallbackDoesNotSynchronouslyOpenListeners()) return rc;
     if (int rc = TestStopAcceptingDoesNotHangBehindPendingListenerApply()) return rc;
     if (int rc = TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen()) return rc;
+    if (int rc = TestSnapshotPeerMetricsIncludesStreamTotals()) return rc;
     return 0;
 }

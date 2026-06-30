@@ -1,6 +1,7 @@
 #include "tunnel_registry.h"
 
 #include <atomic>
+#include <algorithm>
 #include <string>
 #include <thread>
 
@@ -45,6 +46,28 @@ int main() {
     if (tunnels[0].Compress != "zstd") return 7;
     if (tunnels[0].RelayBackend != "linux") return 8;
     if (tunnels[0].WorkerIndex != 2) return 9;
+
+    auto* clientConnection = reinterpret_cast<MsQuicConnection*>(0x2);
+    int clientContext = 0;
+    TqRegisterConnectionTunnel(clientConnection, &clientContext, &Abort, &Drain);
+    TqTunnelRegistryMetadata clientMetadata;
+    clientMetadata.PeerId = "primary";
+    clientMetadata.ConnectionId = "conn-0";
+    clientMetadata.Target = "www.google.com:443";
+    clientMetadata.Role = "client";
+    clientMetadata.Ingress = "socks";
+    clientMetadata.Compress = "zstd";
+    clientMetadata.RelayBackend = "linux";
+    TqUpdateConnectionTunnelMetadata(clientConnection, &clientContext, clientMetadata);
+
+    auto clientTunnels = TqSnapshotTunnels();
+    auto clientIt = std::find_if(clientTunnels.begin(), clientTunnels.end(), [](const TqTunnelSnapshot& tunnel) {
+        return tunnel.Target == "www.google.com:443";
+    });
+    if (clientIt == clientTunnels.end()) return 27;
+    if (clientIt->PeerId != "primary") return 28;
+    if (clientIt->ConnectionId != "conn-0") return 29;
+    TqUnregisterConnectionTunnel(clientConnection, &clientContext);
 
     TqTunnelSnapshot one;
     if (!TqGetTunnelSnapshot("tun-1", one)) return 10;

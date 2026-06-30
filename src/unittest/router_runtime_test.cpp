@@ -168,6 +168,8 @@ public:
     std::vector<std::string> ReconnectedConnections;
     std::vector<std::string> DeletedConnections;
     std::vector<std::string> AbortedConnectionTunnels;
+    uint64_t ActiveStreams{0};
+    uint64_t TotalStreams{0};
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
@@ -197,6 +199,8 @@ public:
         (void)peerId;
         out.ConnectionCount = 4;
         out.ConnectedConnections = ConnectedConnections;
+        out.ActiveStreams = ActiveStreams;
+        out.TotalStreams = TotalStreams;
         out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
         return true;
     }
@@ -405,6 +409,31 @@ int main() {
         if (metrics.find("\"connection_count\":4") == std::string::npos) return 107;
         if (metrics.find("\"connected_connections\":2") == std::string::npos) return 108;
         if (metrics.find("\"state\":\"healthy\"") == std::string::npos) return 109;
+    }
+    {
+        FakeAdapter adapter;
+        adapter.ActiveStreams = 2;
+        adapter.TotalStreams = 5;
+        adapter.ConnectedConnections = 1;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        cfg.Peers.push_back(Peer("agent-metrics-peers", "127.0.0.1:11020"));
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 2301;
+        TqHttpRequest list = Request("GET", "/peers", "");
+        std::string listResp = adapterRuntime.HandleAdmin(list);
+        const std::string listBody = JsonBody(listResp);
+        if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 2302;
+        if (listBody.find("\"peer_id\":\"agent-metrics-peers\"") == std::string::npos) return 2308;
+        if (listBody.find("\"active_streams\":2") == std::string::npos) return 2303;
+        if (listBody.find("\"total_streams\":5") == std::string::npos) return 2304;
+        TqHttpRequest get = Request("GET", "/peers/agent-metrics-peers", "");
+        std::string getResp = adapterRuntime.HandleAdmin(get);
+        const std::string getBody = JsonBody(getResp);
+        if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 2305;
+        if (getBody.find("\"peer_id\":\"agent-metrics-peers\"") == std::string::npos) return 2309;
+        if (getBody.find("\"active_streams\":2") == std::string::npos) return 2306;
+        if (getBody.find("\"total_streams\":5") == std::string::npos) return 2307;
     }
     {
         FakeAdapter adapter;

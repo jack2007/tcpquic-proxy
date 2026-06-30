@@ -49,6 +49,11 @@ struct TqServerConnectionSnapshot {
     std::string LastError;
 };
 
+struct TqClientPickedConnection {
+    MsQuicConnection* Connection{nullptr};
+    std::string ConnectionId;
+};
+
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections();
 bool TqGetServerConnectionSnapshot(const std::string& connectionId, TqServerConnectionSnapshot& out);
 bool TqAbortServerConnectionTunnels(const std::string& connectionId);
@@ -80,6 +85,7 @@ public:
     void Stop();
     MsQuicConnection* GetConnection();
     MsQuicConnection* PickConnection();
+    TqClientPickedConnection PickConnectionWithId();
     MsQuicConnection* PickConnectionAt(size_t index);
     MsQuicConnection* PickConnectionFrom(size_t firstIndex);
     bool EnsureConnected(std::chrono::milliseconds timeout = std::chrono::seconds(10));

@@ -469,13 +469,29 @@ using StartAsyncSignature = TqClientTunnelOpenHandle* (*)(
     const TqConfig&,
     TqClientTunnelOpenComplete);
 
+using StartAsyncWithMetadataSignature = TqClientTunnelOpenHandle* (*)(
+    MsQuicConnection*,
+    const TunnelRequest&,
+    TqSocketHandle,
+    const TqConfig&,
+    TqClientTunnelOpenComplete,
+    TqClientTunnelMetadata);
+
 using CancelSignature = void (*)(TqClientTunnelOpenHandle*);
 using AcceptSignature = bool (*)(TqClientTunnelOpenHandle*);
 using RejectSignature = void (*)(TqClientTunnelOpenHandle*);
 
 static_assert(
-    std::is_same_v<decltype(&TqStartClientTunnelAsync), StartAsyncSignature>,
+    std::is_same_v<
+        decltype(static_cast<StartAsyncSignature>(&TqStartClientTunnelAsync)),
+        StartAsyncSignature>,
     "TqStartClientTunnelAsync signature must remain stable");
+
+static_assert(
+    std::is_same_v<
+        decltype(static_cast<StartAsyncWithMetadataSignature>(&TqStartClientTunnelAsync)),
+        StartAsyncWithMetadataSignature>,
+    "TqStartClientTunnelAsync metadata overload must be available");
 
 static_assert(
     std::is_same_v<decltype(&TqCancelClientTunnelOpen), CancelSignature>,

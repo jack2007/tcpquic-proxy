@@ -4,12 +4,18 @@
 #include "tcp_tunnel.h"
 
 #include <functional>
+#include <string>
 
 struct TqClientTunnelOpenHandle;
 struct MsQuicConnection;
 
 using TqClientTunnelOpenComplete =
     std::function<void(TqClientTunnelOpenHandle*, TqTunnelStartResult)>;
+
+struct TqClientTunnelMetadata {
+    std::string PeerId;
+    std::string ConnectionId;
+};
 
 // Starts a client tunnel OPEN without blocking for the peer OPEN response.
 //
@@ -36,6 +42,14 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
     TqClientTunnelOpenComplete onComplete);
+
+TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg,
+    TqClientTunnelOpenComplete onComplete,
+    TqClientTunnelMetadata metadata);
 
 void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle);
 // Returns true only if the successful OPEN was accepted and relay was either

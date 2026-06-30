@@ -103,6 +103,12 @@ TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
     metrics.ConnectionCount = Quic ? Quic->ConnectionCount() : 0;
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     metrics.State = metrics.ConnectedConnections > 0 ? "healthy" : "connecting";
+    if (Quic) {
+        for (const auto& connection : Quic->SnapshotConnections()) {
+            metrics.ActiveStreams += connection.ActiveTunnels;
+        }
+    }
+    metrics.TotalStreams = TotalStreams.load(std::memory_order_relaxed);
     return metrics;
 }
 
@@ -476,6 +482,10 @@ void TqClientPeerRuntime::SetBeforeOpenIngressForTest(std::function<void()> hook
     std::lock_guard<std::mutex> guard(ListenerMutex);
     BeforeOpenIngressForTest = std::move(hook);
 }
+
+void TqClientPeerRuntime::IncrementTotalStreamsForTest(uint64_t count) {
+    TotalStreams.fetch_add(count, std::memory_order_relaxed);
+}
 #endif
 
 void TqClientPeerRuntime::CloseListeners() {
@@ -505,11 +515,11 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
     const TunnelRequest& req,
     TqSocketHandle fd,
     TqClientTunnelOpenComplete onComplete) {
-    MsQuicConnection* conn = nullptr;
+    TqClientPickedConnection picked;
     {
         std::lock_guard<std::mutex> guard(TunnelStartMutex);
-        conn = Quic ? Quic->PickConnection() : nullptr;
-        if (conn == nullptr) {
+        picked = Quic ? Quic->PickConnectionWithId() : TqClientPickedConnection{};
+        if (picked.Connection == nullptr) {
             if (LogMode == TqClientPeerLogMode::Primary) {
                 std::fprintf(stderr, "tcpquic-proxy: no connected QUIC peer available for tunnel\n");
             } else {
@@ -520,7 +530,20 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
             return static_cast<TqClientTunnelOpenHandle*>(nullptr);
         }
     }
-    return TqStartClientTunnelAsync(conn, req, fd, Config, std::move(onComplete));
+    TqClientTunnelMetadata metadata;
+    metadata.PeerId = PeerId;
+    metadata.ConnectionId = picked.ConnectionId;
+    auto* handle = TqStartClientTunnelAsync(
+        picked.Connection,
+        req,
+        fd,
+        Config,
+        std::move(onComplete),
+        std::move(metadata));
+    if (handle != nullptr) {
+        TotalStreams.fetch_add(1, std::memory_order_relaxed);
+    }
+    return handle;
 }
 
 TqClientRuntimeManager::TqClientRuntimeManager(TqConfig baseConfig, TqClientPeerLogMode logMode)

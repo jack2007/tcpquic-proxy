@@ -10,6 +10,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -85,6 +86,7 @@ public:
     void ScheduleConnectionStateApplyForTest(uint32_t connectedCount);
     bool ApplyConnectionStateForTest(uint32_t connectedCount, std::string& err, bool requireConnected);
     void SetBeforeOpenIngressForTest(std::function<void()> hook);
+    void IncrementTotalStreamsForTest(uint64_t count = 1);
 #endif
 
 private:
@@ -118,6 +120,7 @@ private:
     bool ListenersOpening{false};
     bool DesiredListenersOpen{false};
     bool PendingListenerUpdate{false};
+    std::atomic<uint64_t> TotalStreams{0};
 #ifdef TQ_UNIT_TESTING
     std::function<void()> BeforeOpenIngressForTest;
 #endif

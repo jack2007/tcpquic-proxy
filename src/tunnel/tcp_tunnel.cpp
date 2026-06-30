@@ -480,6 +480,11 @@ public:
         Stream = stream;
     }
 
+    void SetClientMetadata(TqClientTunnelMetadata metadata) {
+        PeerId = std::move(metadata.PeerId);
+        ConnectionId = std::move(metadata.ConnectionId);
+    }
+
     void SetAsyncClientOpenHandle(TqClientTunnelOpenHandle* handle, uint8_t flags) {
         std::lock_guard<std::mutex> guard(Lock);
         AsyncClientOpenHandle = handle;
@@ -1017,7 +1022,10 @@ public:
         TqTunnelRegistryMetadata metadata;
         metadata.Target = TraceTarget;
         metadata.Role = Role == TqTunnelRole::ClientOpen ? "client" : "server";
-        if (Role == TqTunnelRole::ServerOpen) {
+        if (Role == TqTunnelRole::ClientOpen) {
+            metadata.PeerId = PeerId;
+            metadata.ConnectionId = ConnectionId;
+        } else if (Role == TqTunnelRole::ServerOpen) {
             const uint32_t serverConnId = TqLookupServerConnectionId(QuicConn);
             if (serverConnId != 0) {
                 metadata.ConnectionId = "srv-" + std::to_string(serverConnId);
@@ -1830,6 +1838,8 @@ private:
     std::atomic<bool> ServerOpenDispatched{false};
     uint64_t TraceTunnelId{0};
     std::string TraceTarget;
+    std::string PeerId;
+    std::string ConnectionId;
     bool TraceRelayStarted{false};
     bool TraceTargetTcpOpen{false};
     bool TraceClosedEmitted{false};
@@ -1970,7 +1980,8 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
-    TqClientTunnelOpenComplete onComplete) {
+    TqClientTunnelOpenComplete onComplete,
+    TqClientTunnelMetadata metadata) {
     const std::string requestedTarget = std::string(req.Host) + ":" + std::to_string(req.Port);
     if (!TqSocketValid(clientTcpFd)) {
         TqTunnelDebugLog(
@@ -2039,6 +2050,7 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     }
 
     context->SetStream(stream);
+    context->SetClientMetadata(std::move(metadata));
     context->RegisterWithConnectionIfNeeded();
 
     const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
@@ -2085,6 +2097,21 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     }
 
     return handle;
+}
+
+TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
+    MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg,
+    TqClientTunnelOpenComplete onComplete) {
+    return TqStartClientTunnelAsync(
+        conn,
+        req,
+        clientTcpFd,
+        cfg,
+        std::move(onComplete),
+        TqClientTunnelMetadata{});
 }
 
 void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle) {

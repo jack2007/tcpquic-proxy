@@ -645,19 +645,26 @@ MsQuicConnection* QuicClientSession::GetConnection() {
 }
 
 MsQuicConnection* QuicClientSession::PickConnection() {
+    return PickConnectionWithId().Connection;
+}
+
+TqClientPickedConnection QuicClientSession::PickConnectionWithId() {
     std::lock_guard<std::mutex> guard(State->Lock);
     if (State->Slots.empty()) {
-        return nullptr;
+        return {};
     }
     const size_t count = State->Slots.size();
     for (size_t attempt = 0; attempt < count; ++attempt) {
         const size_t index = PickIndex.fetch_add(1) % count;
         auto& slot = State->Slots[index];
         if (auto* connection = PickableConnectionLocked(slot)) {
-            return connection;
+            TqClientPickedConnection picked;
+            picked.Connection = connection;
+            picked.ConnectionId = slot.ConnectionId.empty() ? MakeConnectionId(index) : slot.ConnectionId;
+            return picked;
         }
     }
-    return nullptr;
+    return {};
 }
 
 MsQuicConnection* QuicClientSession::PickConnectionAt(size_t index) {
