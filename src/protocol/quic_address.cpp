@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <unordered_set>
 
 #if defined(_WIN32)
@@ -82,6 +83,45 @@ std::string TqQuicAddressKey(const QUIC_ADDR& address, const std::string& text) 
     return std::to_string(static_cast<int>(QuicAddrGetFamily(&address))) + "|" + text;
 }
 
+std::string TqServerBindGroupKey(const QUIC_ADDR& address) {
+    return std::to_string(static_cast<int>(QuicAddrGetFamily(&address))) + "|" +
+        std::to_string(QuicAddrGetPort(&address));
+}
+
+bool TqIsWildcardAddress(const QUIC_ADDR& address) {
+    const QUIC_ADDRESS_FAMILY family = QuicAddrGetFamily(&address);
+    if (family == QUIC_ADDRESS_FAMILY_UNSPEC) {
+        return true;
+    }
+    if (family == QUIC_ADDRESS_FAMILY_INET) {
+        return address.Ipv4.sin_addr.s_addr == INADDR_ANY;
+    }
+    if (family == QUIC_ADDRESS_FAMILY_INET6) {
+        return IN6_IS_ADDR_UNSPECIFIED(&address.Ipv6.sin6_addr);
+    }
+    return false;
+}
+
+bool TqMakeWildcardAddrForFamily(QUIC_ADDRESS_FAMILY family, uint16_t port, QUIC_ADDR& address) {
+    std::memset(&address, 0, sizeof(address));
+    QuicAddrSetFamily(&address, family);
+    QuicAddrSetPort(&address, port);
+    std::string ignored;
+    return TqFormatQuicAddress(address, ignored);
+}
+
+bool TqAppendUniqueResolvedListen(
+    const std::string& text,
+    const QUIC_ADDR& address,
+    std::vector<TqResolvedListen>& resolved,
+    std::unordered_set<std::string>& seen) {
+    if (seen.insert(TqQuicAddressKey(address, text)).second) {
+        resolved.push_back(TqResolvedListen{text, address});
+        return true;
+    }
+    return false;
+}
+
 bool TqAppendResolvedListen(
     const TqEndpoint& endpoint,
     std::vector<TqResolvedListen>& resolved,
@@ -96,10 +136,7 @@ bool TqAppendResolvedListen(
         return false;
     }
 
-    if (seen.insert(TqQuicAddressKey(address, text)).second) {
-        resolved.push_back(TqResolvedListen{text, address});
-    }
-    return true;
+    return TqAppendUniqueResolvedListen(text, address, resolved, seen);
 }
 
 #if defined(_WIN32)
@@ -378,6 +415,77 @@ bool TqResolveServerListenList(const std::string& value, std::vector<TqResolvedL
 
     listens = std::move(resolved);
     return true;
+}
+
+std::vector<TqResolvedListen> TqBuildServerListenerBindList(const std::vector<TqResolvedListen>& resolvedListens) {
+    struct Group {
+        std::vector<const TqResolvedListen*> Listens;
+    };
+
+    std::map<std::string, Group> groups;
+    for (const TqResolvedListen& listen : resolvedListens) {
+        groups[TqServerBindGroupKey(listen.Address)].Listens.push_back(&listen);
+    }
+
+    std::vector<TqResolvedListen> binds;
+    std::unordered_set<std::string> seen;
+    for (const auto& item : groups) {
+        const std::vector<const TqResolvedListen*>& group = item.second.Listens;
+        if (group.empty()) {
+            continue;
+        }
+
+        const TqResolvedListen& first = *group.front();
+        const QUIC_ADDRESS_FAMILY family = QuicAddrGetFamily(&first.Address);
+        const uint16_t port = QuicAddrGetPort(&first.Address);
+
+        bool hasWildcard = false;
+        for (const TqResolvedListen* listen : group) {
+            hasWildcard = hasWildcard || TqIsWildcardAddress(listen->Address);
+        }
+
+        if (group.size() > 1 && !hasWildcard) {
+            QUIC_ADDR wildcard{};
+            if (TqMakeWildcardAddrForFamily(family, port, wildcard)) {
+                std::string text;
+                if (TqFormatQuicAddress(wildcard, text)) {
+                    TqAppendUniqueResolvedListen(text, wildcard, binds, seen);
+                    continue;
+                }
+            }
+        }
+
+        for (const TqResolvedListen* listen : group) {
+            TqAppendUniqueResolvedListen(listen->Text, listen->Address, binds, seen);
+        }
+    }
+
+    return binds;
+}
+
+bool TqServerListenAllowsLocalAddress(const std::vector<TqResolvedListen>& resolvedListens, const QUIC_ADDR* localAddress) {
+    if (localAddress == nullptr) {
+        return false;
+    }
+
+    const uint16_t localPort = QuicAddrGetPort(localAddress);
+    const QUIC_ADDRESS_FAMILY localFamily = QuicAddrGetFamily(localAddress);
+    for (const TqResolvedListen& listen : resolvedListens) {
+        if (QuicAddrGetPort(&listen.Address) != localPort) {
+            continue;
+        }
+        if (TqIsWildcardAddress(listen.Address)) {
+            const QUIC_ADDRESS_FAMILY listenFamily = QuicAddrGetFamily(&listen.Address);
+            if (listenFamily == QUIC_ADDRESS_FAMILY_UNSPEC || listenFamily == localFamily) {
+                return true;
+            }
+            continue;
+        }
+        if (QuicAddrCompare(&listen.Address, localAddress)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool TqBuildClientSlotPaths(const TqConfig& cfg, std::vector<TqClientSlotPath>& slots, std::string& err) {

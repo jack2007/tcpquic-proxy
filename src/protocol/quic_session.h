@@ -246,5 +246,6 @@ private:
     std::unique_ptr<MsQuicRegistration> Registration;
     std::unique_ptr<MsQuicConfiguration> Configuration;
     std::vector<std::unique_ptr<MsQuicListener>> Listeners;
+    std::vector<TqResolvedListen> AllowedListens;
     std::vector<std::string> ResolvedListens;
 };

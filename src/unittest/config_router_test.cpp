@@ -391,6 +391,70 @@ int main() {
         if (listens.size() != 2) return 341;
         if (listens[0].Text != "36.1.1.10:443") return 342;
         if (listens[1].Text != "59.1.1.10:443") return 343;
+        const std::vector<TqResolvedListen> binds = TqBuildServerListenerBindList(listens);
+        if (binds.size() != 1) return 1200;
+        if (QuicAddrGetFamily(&binds[0].Address) != QUIC_ADDRESS_FAMILY_INET) return 1201;
+        if (QuicAddrGetPort(&binds[0].Address) != 443) return 1202;
+        QUIC_ADDR ipv4Wildcard{};
+        if (!TqMakeQuicAddr(TqEndpoint{"0.0.0.0", 443}, ipv4Wildcard)) return 1213;
+        if (!QuicAddrCompare(&binds[0].Address, &ipv4Wildcard)) return 1214;
+        QUIC_ADDR cmcc{};
+        QUIC_ADDR ctcc{};
+        QUIC_ADDR other{};
+        QUIC_ADDR wrongPort{};
+        if (!TqMakeQuicAddr(TqEndpoint{"36.1.1.10", 443}, cmcc)) return 1203;
+        if (!TqMakeQuicAddr(TqEndpoint{"59.1.1.10", 443}, ctcc)) return 1204;
+        if (!TqMakeQuicAddr(TqEndpoint{"10.0.0.99", 443}, other)) return 1205;
+        if (!TqMakeQuicAddr(TqEndpoint{"36.1.1.10", 8443}, wrongPort)) return 1206;
+        if (!TqServerListenAllowsLocalAddress(listens, &cmcc)) return 1207;
+        if (!TqServerListenAllowsLocalAddress(listens, &ctcc)) return 1208;
+        if (TqServerListenAllowsLocalAddress(listens, &other)) return 1209;
+        if (TqServerListenAllowsLocalAddress(listens, &wrongPort)) return 1210;
+        if (TqServerListenAllowsLocalAddress(listens, nullptr)) return 1215;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("36.1.1.10:443,59.1.1.10:8443", listens, err)) return 1211;
+        const std::vector<TqResolvedListen> binds = TqBuildServerListenerBindList(listens);
+        if (binds.size() != 2) return 1212;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("[2001:db8::1]:443,[2001:db8::2]:443", listens, err)) return 1216;
+        const std::vector<TqResolvedListen> binds = TqBuildServerListenerBindList(listens);
+        if (binds.size() != 1) return 1217;
+        QUIC_ADDR ipv6Wildcard{};
+        if (!TqMakeQuicAddr(TqEndpoint{"::", 443}, ipv6Wildcard)) return 1218;
+        if (!QuicAddrCompare(&binds[0].Address, &ipv6Wildcard)) return 1219;
+        QUIC_ADDR allowed{};
+        QUIC_ADDR denied{};
+        if (!TqMakeQuicAddr(TqEndpoint{"2001:db8::1", 443}, allowed)) return 1220;
+        if (!TqMakeQuicAddr(TqEndpoint{"2001:db8::3", 443}, denied)) return 1221;
+        if (!TqServerListenAllowsLocalAddress(listens, &allowed)) return 1222;
+        if (TqServerListenAllowsLocalAddress(listens, &denied)) return 1223;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("36.1.1.10:443,[2001:db8::1]:443", listens, err)) return 1224;
+        const std::vector<TqResolvedListen> binds = TqBuildServerListenerBindList(listens);
+        if (binds.size() != 2) return 1225;
+    }
+    {
+        std::vector<TqResolvedListen> listens;
+        std::string err;
+        if (!TqResolveServerListenList("*:443", listens, err)) return 1226;
+        QUIC_ADDR ipv4AnyAllowed{};
+        QUIC_ADDR ipv6AnyAllowed{};
+        QUIC_ADDR wrongPort{};
+        if (!TqMakeQuicAddr(TqEndpoint{"10.0.0.99", 443}, ipv4AnyAllowed)) return 1227;
+        if (!TqMakeQuicAddr(TqEndpoint{"2001:db8::99", 443}, ipv6AnyAllowed)) return 1228;
+        if (!TqMakeQuicAddr(TqEndpoint{"10.0.0.99", 8443}, wrongPort)) return 1229;
+        if (!TqServerListenAllowsLocalAddress(listens, &ipv4AnyAllowed)) return 1230;
+        if (!TqServerListenAllowsLocalAddress(listens, &ipv6AnyAllowed)) return 1231;
+        if (TqServerListenAllowsLocalAddress(listens, &wrongPort)) return 1232;
     }
     {
         std::vector<TqResolvedListen> listens;

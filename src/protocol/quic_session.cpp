@@ -1704,8 +1704,14 @@ bool QuicServerSession::Start(const TqConfig& cfg) {
         return false;
     }
 
+    const std::vector<TqResolvedListen> bindListens = TqBuildServerListenerBindList(resolvedListens);
+    {
+        std::lock_guard<std::mutex> guard(Lock);
+        AllowedListens = resolvedListens;
+    }
+
     MsQuicAlpn alpn(TqAlpn);
-    for (const TqResolvedListen& listen : resolvedListens) {
+    for (const TqResolvedListen& listen : bindListens) {
         auto listener = std::make_unique<MsQuicListener>(
             *Registration,
             CleanUpManual,
@@ -1761,6 +1767,7 @@ void QuicServerSession::Stop() {
         registrationLocal = std::move(Registration);
         configurationLocal = std::move(Configuration);
         listenersLocal = std::move(Listeners);
+        AllowedListens.clear();
         ResolvedListens.clear();
     }
 
@@ -1801,6 +1808,19 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         return QUIC_STATUS_SUCCESS;
     }
 
+    bool disable1RttEncryption = false;
+    {
+        std::lock_guard<std::mutex> guard(session->Lock);
+        const QUIC_ADDR* localAddress =
+            event->NEW_CONNECTION.Info ? event->NEW_CONNECTION.Info->LocalAddress : nullptr;
+        if (session->Stopping ||
+            !session->Configuration ||
+            !TqServerListenAllowsLocalAddress(session->AllowedListens, localAddress)) {
+            return QUIC_STATUS_INVALID_STATE;
+        }
+        disable1RttEncryption = session->Config.QuicDisable1RttEncryption;
+    }
+
     TqTraceQuicIncoming();
 
     auto* connection = new (std::nothrow) MsQuicConnection(
@@ -1812,17 +1832,21 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         return QUIC_STATUS_OUT_OF_MEMORY;
     }
 
-    if (session->Config.QuicDisable1RttEncryption &&
+    if (disable1RttEncryption &&
         !TqSetDisable1RttEncryption(connection, "server")) {
         connection->Handle = nullptr;
         delete connection;
         return QUIC_STATUS_INVALID_STATE;
     }
 
-    if (QUIC_FAILED(connection->SetConfiguration(*session->Configuration))) {
-        connection->Handle = nullptr;
-        delete connection;
-        return QUIC_STATUS_INVALID_STATE;
+    {
+        std::lock_guard<std::mutex> guard(session->Lock);
+        if (session->Stopping || !session->Configuration ||
+            QUIC_FAILED(connection->SetConfiguration(*session->Configuration))) {
+            connection->Handle = nullptr;
+            delete connection;
+            return QUIC_STATUS_INVALID_STATE;
+        }
     }
 
     QuicServerSession::ConnectionHandler handler;

@@ -1,4 +1,6 @@
 build/
+.superpowers/
+.claude/settings.local.json
 .worktrees/
 .cache/
 *.o

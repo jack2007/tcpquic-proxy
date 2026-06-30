@@ -30,5 +30,7 @@ bool TqParseEndpoint(const std::string& value, TqEndpoint& endpoint);
 bool TqParseEndpointList(const std::string& value, std::vector<TqEndpoint>& endpoints, std::string& err);
 bool TqMakeQuicAddr(const TqEndpoint& endpoint, QUIC_ADDR& address);
 bool TqResolveServerListenList(const std::string& value, std::vector<TqResolvedListen>& listens, std::string& err);
+std::vector<TqResolvedListen> TqBuildServerListenerBindList(const std::vector<TqResolvedListen>& resolvedListens);
+bool TqServerListenAllowsLocalAddress(const std::vector<TqResolvedListen>& resolvedListens, const QUIC_ADDR* localAddress);
 bool TqBuildClientSlotPaths(const TqConfig& cfg, std::vector<TqClientSlotPath>& slots, std::string& err);
 std::string TqFormatEndpoint(const TqEndpoint& endpoint);
