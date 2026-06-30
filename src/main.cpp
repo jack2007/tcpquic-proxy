@@ -209,7 +209,7 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
 }
 
 int RunClient(const TqConfig& cfg) {
-    if (cfg.Router.Peers.empty()) {
+    if (cfg.Router.Peers.empty() && !cfg.QuicPeer.empty()) {
         return RunSinglePeerClient(cfg);
     }
 

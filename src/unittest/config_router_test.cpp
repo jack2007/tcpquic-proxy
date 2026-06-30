@@ -745,6 +745,38 @@ int main() {
         if (err.find("--ca") == std::string::npos) return 181;
     }
     {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--ca",
+            "ca.crt",
+            "--admin-listen",
+            "127.0.0.1:19091"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "admin-only client parse failed: %s\n", err.c_str());
+            return 325;
+        }
+        if (!cfg.Router.Peers.empty()) return 326;
+        if (!cfg.QuicPeer.empty()) return 327;
+        if (cfg.QuicCa != "ca.crt") return 328;
+        if (cfg.AdminListen != "127.0.0.1:19091") return 329;
+    }
+    {
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--ca",
+            "ca.crt",
+            "--socks-listen",
+            "127.0.0.1:11080"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 330;
+        if (err.find("--peer") == std::string::npos) return 331;
+    }
+    {
         TqRouterConfig router;
         std::string err;
         if (Load(R"json({"version":1,"peers":[{"peer_id":"bad","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001","quic_reconnect_interval_ms":5000}]})json", router, err)) return 71;

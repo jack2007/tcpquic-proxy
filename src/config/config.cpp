@@ -1249,6 +1249,8 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     }
 
     bool quicPeerSpecified = false;
+    bool socksListenSpecified = false;
+    bool httpListenSpecified = false;
     bool speedTestSpecified = false;
     for (int i = 2; i < argc; ++i) {
         const char* arg = argv[i];
@@ -1276,6 +1278,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.SocksListen = value;
+            socksListenSpecified = true;
         } else if (GetOptionValue(arg, "--http-listen", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--http-listen", err);
@@ -1284,6 +1287,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.HttpListen = value;
+            httpListenSpecified = true;
         } else if (GetOptionValue(arg, "--peer", value)) {
             quicPeerSpecified = true;
             if (value == nullptr) {
@@ -1712,47 +1716,54 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     }
 
     if (cfg.Mode == TqMode::Client) {
-        if (cfg.Router.Peers.empty() && !RequireNonEmpty(cfg.QuicPeer, "--peer", err)) {
-            return false;
-        }
         if (cfg.Router.Peers.empty()) {
-            std::set<std::string> listens;
-            if (cfg.SocksListen.empty() && cfg.HttpListen.empty() && cfg.PortForwards.empty()) {
-                err = "at least one ingress is required";
+            const bool hasLegacyIngress =
+                socksListenSpecified || httpListenSpecified || !cfg.PortForwards.empty();
+            const bool hasLegacySinglePeer =
+                quicPeerSpecified || !cfg.QuicPeer.empty() || hasLegacyIngress ||
+                cfg.SpeedTestMode != TqSpeedTestMode::None;
+            if (hasLegacySinglePeer && !RequireNonEmpty(cfg.QuicPeer, "--peer", err)) {
                 return false;
             }
-            if (!cfg.SocksListen.empty()) {
-                if (!IsHostPort(cfg.SocksListen)) {
-                    err = "invalid socks listen";
+            if (hasLegacySinglePeer) {
+                std::set<std::string> listens;
+                if (cfg.SocksListen.empty() && cfg.HttpListen.empty() && cfg.PortForwards.empty()) {
+                    err = "at least one ingress is required";
                     return false;
                 }
-                if (!listens.insert(cfg.SocksListen).second) {
-                    err = "duplicate listen: " + cfg.SocksListen;
-                    return false;
+                if (!cfg.SocksListen.empty()) {
+                    if (!IsHostPort(cfg.SocksListen)) {
+                        err = "invalid socks listen";
+                        return false;
+                    }
+                    if (!listens.insert(cfg.SocksListen).second) {
+                        err = "duplicate listen: " + cfg.SocksListen;
+                        return false;
+                    }
                 }
-            }
-            if (!cfg.HttpListen.empty()) {
-                if (!IsHostPort(cfg.HttpListen)) {
-                    err = "invalid http listen";
-                    return false;
+                if (!cfg.HttpListen.empty()) {
+                    if (!IsHostPort(cfg.HttpListen)) {
+                        err = "invalid http listen";
+                        return false;
+                    }
+                    if (!listens.insert(cfg.HttpListen).second) {
+                        err = "duplicate listen: " + cfg.HttpListen;
+                        return false;
+                    }
                 }
-                if (!listens.insert(cfg.HttpListen).second) {
-                    err = "duplicate listen: " + cfg.HttpListen;
-                    return false;
-                }
-            }
-            for (const auto& forward : cfg.PortForwards) {
-                if (!IsHostPort(forward.Listen)) {
-                    err = "invalid port_forward.listen";
-                    return false;
-                }
-                if (!IsValidPortForwardTarget(forward)) {
-                    err = "invalid port_forward.target";
-                    return false;
-                }
-                if (!listens.insert(forward.Listen).second) {
-                    err = "duplicate listen: " + forward.Listen;
-                    return false;
+                for (const auto& forward : cfg.PortForwards) {
+                    if (!IsHostPort(forward.Listen)) {
+                        err = "invalid port_forward.listen";
+                        return false;
+                    }
+                    if (!IsValidPortForwardTarget(forward)) {
+                        err = "invalid port_forward.target";
+                        return false;
+                    }
+                    if (!listens.insert(forward.Listen).second) {
+                        err = "duplicate listen: " + forward.Listen;
+                        return false;
+                    }
                 }
             }
         }
