@@ -74,8 +74,7 @@ TqMemoryAllocatorStats TqSnapshotMemoryAllocatorStats() {
 #if TCPQUIC_USE_MIMALLOC
     out.MimallocEnabled = true;
 
-    mi_stats_t stats;
-    mi_stats_init(&stats);
+    mi_stats_t_decl(stats);
     if (!mi_stats_get(&stats)) {
         return out;
     }
