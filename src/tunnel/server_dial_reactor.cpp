@@ -22,8 +22,6 @@
 
 namespace {
 
-constexpr int kConnectAttemptTimeoutMs = 10000;
-
 TqAcl AllowAllAcl() {
     TqAcl acl;
     acl.AllowCidrs = {"0.0.0.0/0", "::/0"};
@@ -618,7 +616,7 @@ struct TqServerDialReactor::Impl {
 #ifdef TQ_UNIT_TESTING
         return Hooks.ConnectTimeoutMs;
 #else
-        return kConnectAttemptTimeoutMs;
+        return 10000;
 #endif
     }
 

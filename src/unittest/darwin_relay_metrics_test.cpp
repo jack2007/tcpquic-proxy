@@ -65,10 +65,10 @@ void EventizedSnapshotCountsActiveRelay() {
 
 int main() {
     TqRelayMetricsSnapshot runtimeSnapshot = TqSnapshotRelayMetrics();
-    Check(std::string(runtimeSnapshot.Backend) == "worker", "runtimeSnapshot.Backend == worker");
+    Check(std::string(runtimeSnapshot.Backend) == "kqueue", "runtimeSnapshot.Backend == kqueue");
 
     TqRelayMetricsSnapshot metrics{};
-    metrics.Backend = "worker";
+    metrics.Backend = "kqueue";
     metrics.OutstandingQuicSendBytes = 11;
     metrics.TcpReadBatches = 22;
     metrics.TcpWriteBatches = 33;
@@ -84,7 +84,7 @@ int main() {
     std::ostringstream out;
     TqAppendRelayMetricsJson(out, metrics);
     const std::string json = out.str();
-    CheckContains(json, "\"linux_relay_backend\":\"worker\"");
+    CheckContains(json, "\"linux_relay_backend\":\"kqueue\"");
     CheckContains(json, "\"linux_relay_outstanding_quic_send_bytes\":11");
     CheckContains(json, "\"linux_relay_tcp_read_batches\":22");
     CheckContains(json, "\"linux_relay_tcp_write_batches\":33");

@@ -543,6 +543,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 
     add_executable(tcpquic_darwin_relay_worker_queue_test
         unittest/darwin_relay_worker_queue_test.cpp
+        unittest/trace_proxy_stub.cpp
         tunnel/darwin_relay_worker.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
@@ -557,6 +558,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 
     add_executable(tcpquic_darwin_relay_worker_io_test
         unittest/darwin_relay_worker_io_test.cpp
+        unittest/trace_proxy_stub.cpp
         tunnel/darwin_relay_worker.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
@@ -571,6 +573,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 
     add_executable(tcpquic_darwin_relay_metrics_test
         unittest/darwin_relay_metrics_test.cpp
+        unittest/trace_proxy_stub.cpp
         runtime/relay_metrics.cpp
         tunnel/darwin_relay_worker.cpp
         tunnel/relay_alloc.cpp
