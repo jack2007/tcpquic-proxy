@@ -43,7 +43,7 @@ find_package(Threads REQUIRED)
 
 add_library(cpp_httplib INTERFACE)
 target_include_directories(cpp_httplib INTERFACE
-    ${CMAKE_SOURCE_DIR}/third_party/cpp-httplib)
+    ${TCPQUIC_CPP_HTTPLIB_SOURCE_DIR})
 if(MSVC)
     target_compile_options(cpp_httplib INTERFACE /wd4127)
 endif()

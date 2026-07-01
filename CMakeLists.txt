@@ -17,6 +17,11 @@ if(NOT EXISTS "${TCPQUIC_ZSTD_SOURCE_DIR}/lib/zstd.h")
     message(FATAL_ERROR "zstd submodule missing. Run: git submodule update --init --recursive")
 endif()
 
+set(TCPQUIC_CPP_HTTPLIB_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cpp-httplib" CACHE PATH "cpp-httplib source tree")
+if(NOT EXISTS "${TCPQUIC_CPP_HTTPLIB_SOURCE_DIR}/httplib.h")
+    message(FATAL_ERROR "cpp-httplib submodule missing. Run: git submodule update --init --recursive third_party/cpp-httplib")
+endif()
+
 set(QUIC_BUILD_TOOLS OFF CACHE BOOL "Build msquic tools" FORCE)
 set(QUIC_ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 

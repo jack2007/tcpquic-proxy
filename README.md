@@ -41,8 +41,9 @@
 | [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS（msquic 子模块，**首次构建从源码编译**） |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） |
 
-当前 pin：msquic `v2.5.2-24-g0efce2bc9`、zstd `v1.5.7`、c-ares `v1.34.6`。
+当前 pin：zstd `v1.5.7`、c-ares `v1.34.6`、cpp-httplib `v0.48.0`。
 
 **不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 也会由 CMake 一并构建。
 

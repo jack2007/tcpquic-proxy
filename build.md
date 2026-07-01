@@ -52,6 +52,7 @@ sudo apt install git cmake build-essential perl
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `v1.5.7` |
 | [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `v1.2.1-2576-gd1d1b6ff` |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `v1.34.6` |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `v0.48.0` |
 
 ### mimalloc（third_party，默认静态启用）
 
@@ -103,7 +104,7 @@ cd tcpquic-proxy
 git submodule update --init --recursive
 ```
 
-此步骤会拉取 msquic、zstd、spdlog、c-ares 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
+此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
 
 验证子模块：
 
@@ -111,7 +112,7 @@ git submodule update --init --recursive
 git submodule status
 ```
 
-应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares` 等均为已检出 commit，而非 `-` 前缀的空目录。
+应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib` 等均为已检出 commit，而非 `-` 前缀的空目录。
 
 ### Step 3：选择构建目录
 
@@ -144,12 +145,13 @@ cmake -S . -B build \
 
 配置阶段 CMake 会依次：
 
-1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog` 是否存在；
+1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib` 是否存在；
 2. 设置 `QUIC_TLS_LIB=quictls`，`QUIC_BUILD_SHARED=OFF`（可通过 `TCPQUIC_MSQUIC_SHARED=ON` 改回动态库）；
 3. `add_subdirectory(third_party/msquic)` → 构建单体 `libmsquic.a`（含 quictls）；
 4. `add_subdirectory(third_party/zstd/build/cmake)` → 构建 libzstd；
 5. `add_subdirectory(third_party/spdlog)` → 构建 spdlog 静态库；
-6. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 与单元测试目标。
+6. 定义 `cpp_httplib` header-only INTERFACE target；
+7. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 与单元测试目标。
 
 ### Step 5：编译主程序
 
@@ -221,6 +223,7 @@ CMakeLists.txt (根)
 ├── third_party/msquic/          → libmsquic.a（默认）或 libmsquic.so（TCPQUIC_MSQUIC_SHARED=ON）
 ├── third_party/zstd/build/cmake → libzstd (static)
 ├── third_party/spdlog/          → spdlog (static)
+├── third_party/cpp-httplib/     → cpp_httplib (header-only INTERFACE)
 └── src/CMakeLists.txt
     ├── tcpquic-proxy            → 主程序
     ├── tcpquic_*_test           → 单元测试

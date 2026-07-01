@@ -13,3 +13,6 @@
 [submodule "third_party/c-ares"]
 	path = third_party/c-ares
 	url = https://github.com/c-ares/c-ares
+[submodule "third_party/cpp-httplib"]
+	path = third_party/cpp-httplib
+	url = https://github.com/yhirose/cpp-httplib.git
