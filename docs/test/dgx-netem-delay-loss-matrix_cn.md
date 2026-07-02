@@ -287,7 +287,7 @@ order,direction,delay_ms,loss_pct,run,iperf_rc,sent_mbps,received_mbps,baseline_
 
 ## 证书准备
 
-本测试固定使用仓库 `cert/` 目录下的长期开发/测试 mTLS 证书，不生成临时证书。
+本测试固定使用仓库 `cert/` 目录下的长期开发/测试 CA 和 server 证书，不生成临时证书。
 
 本机证书路径：
 

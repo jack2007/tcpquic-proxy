@@ -139,7 +139,8 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
     // QUIC listen endpoint.
     "proto_listen": "0.0.0.0:4433",
 
-    // Target ACL. Required in server mode.
+    // Target ACL. If omitted, the CLI/runtime default is 0.0.0.0/0.
+    // Production configs should set the smallest CIDR allowlist explicitly.
     "allow_targets": ["127.0.0.1/32", "10.0.0.0/8"],
     "deny_targets": ["169.254.0.0/16"]
   },
@@ -198,7 +199,7 @@ Use multiple `port_forwards` array items to configure multiple local forwards.
 | `client.download_sink_test` | client | Built-in download sink test duration. Requires exactly one enabled peer. |
 | `client.upload_test` | client | Built-in upload speed-test duration. Requires exactly one enabled peer. |
 | `server.proto_listen` | server | QUIC listen endpoint. Required in server mode. |
-| `server.allow_targets` | server | Required target ACL, string array or comma-separated string. |
+| `server.allow_targets` | server | Target ACL, string array or comma-separated string. If omitted, defaults to `0.0.0.0/0`; production configs should set it explicitly. |
 | `server.deny_targets` | server | Optional deny ACL. |
 | `compression.mode` | client/server | `auto`, `zstd`, or `off`. |
 | `compression.level` | client/server | Zstd compression level. |

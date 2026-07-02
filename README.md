@@ -10,7 +10,7 @@
 - 高延迟、丢包环境下利用 QUIC + BBR 改善传输
 - 可选 zstd 流式压缩降低有效字节数
 
-详细设计见 [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](docs/finished/specs/2026-06-06-tcpquic-proxy-design.md)。
+更多配置、线程模型、证书和系统测试说明见下方 [相关文档](#相关文档)。
 
 ## 架构
 
@@ -42,8 +42,9 @@
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） |
+| [mimalloc](https://github.com/microsoft/mimalloc) | `third_party/mimalloc` | relay buffer 显式 allocator（默认静态启用） |
 
-当前 pin：zstd `v1.5.7`、c-ares `v1.34.6`、cpp-httplib `v0.48.0`。
+当前子模块状态：msquic `9f8380759`、zstd `5233c58e`、c-ares `c93e50f3`、spdlog `8671ca4d`、cpp-httplib `9d159bb4`、mimalloc `30b2d9d8`。
 
 **不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 也会由 CMake 一并构建。
 
@@ -67,7 +68,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 ### 运行时
 
-`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread、libnuma 等），**不依赖** 系统安装的 libzstd / libssl / libmsquic / libc-ares。默认将 msquic（含 quictls）、zstd、c-ares、spdlog **静态链入** 主程序，部署时只需拷贝单个 `tcpquic-proxy` 可执行文件。
+`tcpquic-proxy` 二进制依赖 Linux/POSIX 标准接口（socket、pthread、libnuma 等），**不依赖** 系统安装的 libzstd / libssl / libmsquic / libc-ares。默认将 msquic（含 quictls）、zstd、c-ares、spdlog、mimalloc **静态链入** 主程序，部署时只需拷贝单个 `tcpquic-proxy` 可执行文件。
 
 ### 测试与脚本（不链接进二进制）
 
@@ -85,6 +86,8 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 |------|------|------|
 | `TCPQUIC_MSQUIC_SHARED` | `OFF` | 设为 `ON` 时构建 `libmsquic.so` 动态库（旧行为） |
 | `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF`（强制） | 固定使用 vendored quictls crypto，不使用系统 `libcrypto` |
+| `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc，项目 allocator、zstd、c-ares 走显式 hook |
+| `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch：`AUTO` / `ON` / `OFF` |
 
 本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。
 
@@ -96,11 +99,17 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 ```bash
 git submodule update --init --recursive
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \  -DCMAKE_C_COMPILER=/usr/bin/gcc10-gcc \
-  -DCMAKE_CXX_COMPILER=/usr/bin/gcc10-g++
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target tcpquic-proxy -j$(nproc)
 ```
 
+旧 RHEL / Amazon Linux 2 等默认编译器过低的环境再显式指定 GCC 10：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_C_COMPILER=/usr/bin/gcc10-gcc \
+  -DCMAKE_CXX_COMPILER=/usr/bin/gcc10-g++
+```
 
 产物：`build/bin/Release/tcpquic-proxy`
 
@@ -198,8 +207,8 @@ client 再用正常 TCP-over-QUIC tunnel 连接该端口，因此不需要额外
 
 输出中的 upload 吞吐以 server bytes 为主，download 吞吐以 client local bytes 为主。
 speed test 的默认 `--compress auto` 会在测试 tunnel 内按 `off` 处理；如需验证压缩路径，
-显式传入 `--compress zstd`。详细说明和 caveat 见
-[`docs/finished/built-in-speed-test-20260612.md`](docs/finished/built-in-speed-test-20260612.md)。
+显式传入 `--compress zstd`。`--download-test`、`--download-sink-test` 和 `--upload-test`
+均要求 client 单 peer 模式，不能与 router `--client-config` 同时使用。
 
 ### 并发隧道压测
 
@@ -220,7 +229,7 @@ TUNNELS=128 QUIC_CONNECTIONS=8 COMPRESS=zstd ./scripts/test-tcpquic-concurrent.s
 TUNNELS=100 COMPRESS=zstd ./scripts/test-tcpquic-proxy-dgx.sh
 ```
 
-默认对端 `jack@169.254.59.196`，本机出口 `169.254.250.230`；可通过 `PEER`、`TARGET`、`BIND` 覆盖。2026-06-10 Linux 验证记录见 [`docs/finished/linux-verification-2026-06-10.md`](docs/finished/linux-verification-2026-06-10.md)。
+默认对端 `jack@169.254.59.196`，本机出口 `169.254.250.230`；可通过 `PEER`、`TARGET`、`BIND` 覆盖。DGX 多网口和 netem 测试记录见 `docs/test/`。
 
 ### 性能基线
 
@@ -310,10 +319,11 @@ Usage: tcpquic-proxy client|server [options]
 | `--reconnect-interval-ms` | client | `3000` | QUIC slot reconnect interval, range `1000..60000` |
 | `--keepalive-ms` | client/server | `5000` | QUIC keepalive interval, range `1000..15000` |
 | `--download-test` | client | 空 | 内置端到端 download 吞吐测试秒数 |
+| `--download-sink-test` | client | 空 | 内置 download sink 吞吐测试秒数 |
 | `--upload-test` | client | 空 | 内置端到端 upload 吞吐测试秒数 |
-| `--compress` | 双方 | `auto` | `auto` / `zstd` / `off` |
+| `--compress` | 双方 | `off` | `auto` / `zstd` / `off` |
 | `--compress-level` | 双方 | `1` | zstd 压缩等级 |
-| `--allow-targets` | server | （必填） | 逗号分隔 CIDR 白名单 |
+| `--allow-targets` | server | `0.0.0.0/0` | 逗号分隔 CIDR 白名单；生产环境应显式收窄 |
 | `--deny-targets` | server | 空 | 逗号分隔 CIDR 黑名单 |
 | `--admin-listen` | 双方 | 空 | Admin HTTP 监听地址；当前只允许 loopback：`127.0.0.1`、`localhost`、`::1` |
 | `--admin-token-file` | 双方 | pid 默认路径 | Admin Bearer token JSON 文件路径 |
@@ -322,7 +332,7 @@ Usage: tcpquic-proxy client|server [options]
 
 - Client SOCKS5 / HTTP CONNECT listeners are open only while the peer has at least one connected QUIC connection. If all QUIC connections for a peer drop, that peer's local listeners close and reopen after reconnect.
 - Client 侧每条 QUIC connection 默认使用独立的本地 UDP 临时端口，而不是所有连接共用一个 UDP 端口，也不是按 peer/server 共用一个端口。例如 `--connections 4` 连接同一个 server 时，通常会形成 4 个不同的 `client_ip:client_udp_port -> server_ip:server_udp_port` 五元组。这样符合多连接设计目标：服务端网卡 RSS/多队列通常会按五元组哈希分发报文；如果同一源 IP + 源 UDP 端口承载所有连接，报文容易落到同一个网卡队列。客户端每条连接使用不同随机 UDP 端口，可以让多条 QUIC 连接更容易分散到不同队列，从而提升整体 I/O 吞吐能力。
-- `--download-test` 和 `--upload-test` 只允许 client 单 peer 模式使用，不能与 `--warmup-mb` 或 router `--client-config` 同时使用。
+- `--download-test`、`--download-sink-test` 和 `--upload-test` 只允许 client 单 peer 模式使用，不能与 router `--client-config` 同时使用。
 - 非法 CIDR 在启动时直接报错（不会静默忽略）。
 - 不支持 `--compress-min-size`（压缩在 OPEN 阶段协商，per-stream 流式）。
 
@@ -511,7 +521,7 @@ Admin API 当前有本机 Bearer token 鉴权但没有 TLS；仍依赖 loopback 
 - **ALPN：** `tcpquic-tunnel/1`
 - **本地绑定：** SOCKS / HTTP 默认仅 `127.0.0.1`。
 - **ACL（server 侧）：**
-  - `--allow-targets` 为空则拒绝所有拨号。
+  - `--allow-targets` 未配置时默认补为 `0.0.0.0/0`；生产环境应显式配置最小 CIDR 白名单。
   - `--deny-targets` 优先于 allow。
   - IP 字面量直接匹配 CIDR。
   - 域名由 B 侧 DNS 解析，对所有 A/AAAA 候选逐一校验；任一命中 deny 或无 allow 则拒绝。
@@ -549,7 +559,6 @@ src/
 ├── ingress/                  # SOCKS5 / HTTP CONNECT 本地入口
 ├── tunnel/                   # TCP ↔ QUIC Stream 隧道与平台 relay worker
 ├── runtime/                  # admin、metrics、router runtime、线程池、warmup
-├── docs/                     # 与源码实现紧密相关的说明
 └── unittest/                 # 单元测试
 ```
 
@@ -561,10 +570,10 @@ src/
 - SOCKS5 CONNECT（NO AUTH）、HTTP CONNECT 隧道
 - 动态目标（B 侧 DNS + TCP 拨号）
 - 客户端验证服务端证书、CIDR ACL、zstd 流式压缩
+- 本地端口转发、多 peer 配置、Admin HTTP API、跨平台 relay worker
 
 **未实现（规格预留）：**
 
-- SOCKS / HTTP 用户凭证认证
 - QUIC 断连后在途隧道透明迁移（断连会关闭在途流，QUIC 自动重连）
 - UDP 代理、普通 HTTP 代理（非 CONNECT）
 
@@ -572,12 +581,10 @@ src/
 
 | 文档 | 说明 |
 |------|------|
-| [`docs/finished/specs/2026-06-06-tcpquic-proxy-design.md`](docs/finished/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
-| [`docs/finished/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md`](docs/finished/specs/2026-06-09-tcpquic-proxy-repo-restructure-design.md) | 独立仓库重构设计 |
-| [`docs/finished/built-in-speed-test-20260612.md`](docs/finished/built-in-speed-test-20260612.md) | 内置 speed test 用法与结果解读 |
-| [`docs/finished/plans/2026-06-06-tcpquic-proxy.md`](docs/finished/plans/2026-06-06-tcpquic-proxy.md) | 实现计划 |
-| [`docs/finished/plans/2026-06-06-tcpquic-thread-model.md`](docs/finished/plans/2026-06-06-tcpquic-thread-model.md) | 线程模型 |
-| [`docs/finished/plans/2026-06-06-tcpquic-adaptive-tuning.md`](docs/finished/plans/2026-06-06-tcpquic-adaptive-tuning.md) | 自适应调参 |
-| [`docs/finished/plans/2026-06-07-tcpquic-remaining-work.md`](docs/finished/plans/2026-06-07-tcpquic-remaining-work.md) | 剩余工作 |
-| [`docs/finished/plans/2026-06-09-tcpquic-proxy-repo-restructure.md`](docs/finished/plans/2026-06-09-tcpquic-proxy-repo-restructure.md) | 独立仓库迁移计划 |
-| [`docs/tcpquic_next_steps.md`](docs/tcpquic_next_steps.md) | 后续步骤 |
+| [`build.md`](build.md) | 构建依赖、CMake 选项和部署说明 |
+| [`docs/config_guide_cn.md`](docs/config_guide_cn.md) | JSON 配置文件说明 |
+| [`docs/tls-cert.md`](docs/tls-cert.md) | TLS 证书模式和当前选择 |
+| [`docs/thread-model_cn.md`](docs/thread-model_cn.md) | 线程模型 |
+| [`docs/admin-api/interface.md`](docs/admin-api/interface.md) | Admin HTTP API |
+| [`docs/memory-allocator.md`](docs/memory-allocator.md) | mimalloc 显式 allocator 设计 |
+| [`docs/system-test-design-tcpquic-proxy_cn.md`](docs/system-test-design-tcpquic-proxy_cn.md) | 系统测试设计 |

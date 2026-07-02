@@ -8,7 +8,7 @@
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| 主程序 | `build/bin/Release/tcpquic-proxy` | client / server 代理二进制（**静态链入 msquic + quictls + zstd + c-ares + spdlog**） |
+| 主程序 | `build/bin/Release/tcpquic-proxy` | client / server 代理二进制（**静态链入 msquic + quictls + zstd + c-ares + spdlog + mimalloc**） |
 | msquic 静态库（中间产物） | `build/msquic/bin/Release/libmsquic.a` | 单体归档库，已链入主程序，部署无需拷贝 |
 | 单元测试 | `build/bin/Release/tcpquic_*_test` | 各模块单元测试可执行文件 |
 | 压测工具（可选） | `build/msquic/bin/Release/secnetperf` | msquic 自带性能工具（需 `-DQUIC_BUILD_PERF=ON`） |
@@ -47,12 +47,12 @@ sudo apt install git cmake build-essential perl
 
 | 组件 | 子模块路径 | 用途 | 当前 pin（示例） |
 |------|-----------|------|------------------|
-| [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 协议栈 | `v2.5.2-24-g0efce2bc9` |
-| [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS/mTLS（msquic 嵌套子模块，**首次构建从源码编译**） | 随 msquic 子模块 |
-| [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `v1.5.7` |
-| [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `v1.2.1-2576-gd1d1b6ff` |
-| [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `v1.34.6` |
-| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `v0.48.0` |
+| [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 协议栈 | `9f8380759` |
+| [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS（msquic 嵌套子模块，**首次构建从源码编译**） | `ff36838b` |
+| [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `5233c58e` |
+| [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `8671ca4d` |
+| [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `c93e50f3` |
+| [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `9d159bb4` |
 
 ### mimalloc（third_party，默认静态启用）
 
@@ -71,7 +71,7 @@ sudo apt install git cmake build-essential perl
 
 - `libnuma`、`libstdc++`、`libgcc_s`、`libc`、`libm`（系统 glibc 环境）
 
-msquic（含 quictls）、zstd、c-ares、spdlog 均已静态编入 `tcpquic-proxy`。**默认部署只需拷贝单个可执行文件**，无需 `libmsquic.so`。
+msquic（含 quictls）、zstd、c-ares、spdlog、mimalloc 均已静态编入 `tcpquic-proxy`。**默认部署只需拷贝单个可执行文件**，无需 `libmsquic.so`。
 
 若使用 `-DTCPQUIC_MSQUIC_SHARED=ON` 构建，则需同时部署 `libmsquic.so*`（或通过 RPATH 指向 `build/msquic/bin/Release/`）。
 
@@ -81,7 +81,7 @@ msquic（含 quictls）、zstd、c-ares、spdlog 均已静态编入 `tcpquic-pro
 
 | 命令 | 用途 |
 |------|------|
-| `openssl` | 生成测试用 mTLS 证书 |
+| `openssl` | 生成测试用 CA 和 server 证书 |
 | `curl` | HTTP CONNECT / SOCKS5 端到端验证 |
 | `python3` | 诊断与压测脚本 |
 
@@ -104,7 +104,7 @@ cd tcpquic-proxy
 git submodule update --init --recursive
 ```
 
-此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
+此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib、mimalloc 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
 
 验证子模块：
 
@@ -112,7 +112,7 @@ git submodule update --init --recursive
 git submodule status
 ```
 
-应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib` 等均为已检出 commit，而非 `-` 前缀的空目录。
+应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib`、`third_party/mimalloc` 等均为已检出 commit，而非 `-` 前缀的空目录。
 
 ### Step 3：选择构建目录
 
@@ -145,7 +145,7 @@ cmake -S . -B build \
 
 配置阶段 CMake 会依次：
 
-1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib` 是否存在；
+1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib`、`third_party/mimalloc` 是否存在；
 2. 设置 `QUIC_TLS_LIB=quictls`，`QUIC_BUILD_SHARED=OFF`（可通过 `TCPQUIC_MSQUIC_SHARED=ON` 改回动态库）；
 3. `add_subdirectory(third_party/msquic)` → 构建单体 `libmsquic.a`（含 quictls）；
 4. `add_subdirectory(third_party/zstd/build/cmake)` → 构建 libzstd；
@@ -224,6 +224,7 @@ CMakeLists.txt (根)
 ├── third_party/zstd/build/cmake → libzstd (static)
 ├── third_party/spdlog/          → spdlog (static)
 ├── third_party/cpp-httplib/     → cpp_httplib (header-only INTERFACE)
+├── third_party/mimalloc/        → mimalloc-static（默认启用）
 └── src/CMakeLists.txt
     ├── tcpquic-proxy            → 主程序
     ├── tcpquic_*_test           → 单元测试
@@ -250,13 +251,15 @@ CMakeLists.txt (根)
 | `ZSTD_BUILD_PROGRAMS` | `OFF` | 不构建 zstd 命令行工具 |
 | `ZSTD_BUILD_TESTS` | `OFF` | 不构建 zstd 测试 |
 | `SPDLOG_BUILD_SHARED` | `OFF` | spdlog 静态库 |
+| `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc；ASAN 构建会自动关闭 |
+| `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch |
 
 ### 5.2 用户可覆盖的常用选项
 
 | 选项 | 默认 | 说明 |
 |------|------|------|
 | `CMAKE_BUILD_TYPE` | — | `Release` / `Debug` / `RelWithDebInfo` |
-| `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF` | `ON` 时 msquic 使用系统 libcrypto |
+| `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF`（强制） | 固定使用 vendored quictls crypto，用户不应覆盖 |
 | `QUIC_BUILD_PERF` | 视环境 | `ON` 时额外构建 `secnetperf` |
 | `MSQUIC_SOURCE_DIR` | `third_party/msquic` | 自定义 msquic 源码路径 |
 | `TCPQUIC_ZSTD_SOURCE_DIR` | `third_party/zstd` | 自定义 zstd 源码路径 |
@@ -347,7 +350,7 @@ cmake -S . -B build-x64 -A x64
 cmake --build build-x64 --config Release --target tcpquic-proxy
 ```
 
-产物：`build-x64\bin\Release\tcpquic-proxy.exe`（需同目录 `msquic.dll`）。
+产物：`build-x64\bin\Release\tcpquic-proxy.exe`。默认静态 msquic 构建不需要同目录 `msquic.dll`；仅 `-DTCPQUIC_MSQUIC_SHARED=ON` 时需要部署动态库。
 
 验证：
 
@@ -371,7 +374,7 @@ deploy/
 ```text
 deploy/
 ├── tcpquic-proxy
-└── libmsquic.so.2.5.9         # 来自 build/msquic/bin/Release/
+└── libmsquic.so*              # 来自 build/msquic/bin/Release/
 ```
 
 通过 [wdtq](https://github.com/) 等工具启动时，可指定：
@@ -400,8 +403,10 @@ export TCPQUIC_PROXY_BIN=/path/to/build/bin/Release/tcpquic-proxy
 | 文档 | 内容 |
 |------|------|
 | [README.md](README.md) | 项目概览、CLI、快速开始 |
-| [src/README.md](src/README.md) | 源码结构摘要 |
-| [docs/finished/specs/2026-06-06-tcpquic-proxy-design.md](docs/finished/specs/2026-06-06-tcpquic-proxy-design.md) | 设计规格 |
+| [docs/config_guide_cn.md](docs/config_guide_cn.md) | JSON 配置文件说明 |
+| [docs/tls-cert.md](docs/tls-cert.md) | TLS 证书模式 |
+| [docs/thread-model_cn.md](docs/thread-model_cn.md) | 线程模型 |
+| [docs/admin-api/interface.md](docs/admin-api/interface.md) | Admin HTTP API |
 
 ---
 

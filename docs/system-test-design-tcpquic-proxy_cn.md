@@ -43,7 +43,7 @@ application/client
 | 隧道映射 | 一个被接受的本地 TCP 连接映射为一个 QUIC 双向 Stream 和一个目标侧 TCP 连接。 |
 | OPEN 协议 | OPEN、OPEN_OK、OPEN_FAIL 保留目标 host、port、地址类型、压缩 flags 和错误语义。 |
 | Server dial | IP 字面量和 hostname 目标都遵循 ACL；hostname 由 server 侧通过 c-ares 解析，并过滤所有 A/AAAA 候选地址。 |
-| ACL | deny 优先于 allow；allow 为空时拒绝所有目标；非法 CIDR 在启动或配置应用时失败。 |
+| ACL | deny 优先于 allow；allow 未配置时 CLI/runtime 默认补为 `0.0.0.0/0`；生产测试应显式配置最小 allow；非法 CIDR 在启动或配置应用时失败。 |
 | 错误映射 | ACL、DNS、timeout、refused、internal error 映射到文档化的 SOCKS5 REP 和 HTTP 状态码。 |
 | 压缩 | `off`、`zstd`、`auto` 模式保持 payload 字节级完整，并暴露压缩/解压指标。 |
 | 连接池 | `--connections` / `proto.connections` 在 QUIC slots 上分配 tunnels，且不超过 stream 限制。 |
