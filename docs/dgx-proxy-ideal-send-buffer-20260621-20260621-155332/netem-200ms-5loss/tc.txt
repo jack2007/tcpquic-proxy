@@ -1,1 +1,0 @@
-qdisc netem 8069: root refcnt 425 limit 5000000 delay 200ms loss 5%

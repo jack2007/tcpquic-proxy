@@ -1,2 +1,0 @@
-speed_download=53792212
-curl_exit=28

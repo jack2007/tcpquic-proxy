@@ -1,8 +1,0 @@
-tcpquic-proxy QUIC execution profile: max-throughput
-tcpquic-proxy tuning: srw=2147483648 fcw=2147483648 iw=4000 initrtt=200ms relay_io=1048576 ideal_send=67108864 inflight=64 tcp_buf=16777216 relay_pending=67108864 tick_budget=67108864 read_batch=4194304 read_chunk=131072 max_pending_buffer=536870912 tcp_write_max=0 tcp_write_burst=0 quic_complete_batch=0 initial_read_ahead=134217728 relay_workers=8 ideal_backpressure=stream_event
-tcpquic-proxy relay memory budget: 8192 MB (pool scales by active tunnels)
-tcpquic-proxy relay backend: linux-epoll (8 workers)
-tcpquic-proxy: trace enabled (interval=5s, log under <exe>/log/)
-tcpquic-proxy: QUIC server listening on 169.254.59.196:4433
-tcpquic-proxy runtime: rtt=1ms throughput=0Mbps (pending) ideal_send=0 (pending) compress_ratio=0.0% (pending) samples=1
-tcpquic-proxy: QUIC server connection accepted from=169.254.250.230:48327 conn=1

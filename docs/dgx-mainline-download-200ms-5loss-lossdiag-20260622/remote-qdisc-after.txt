@@ -1,3 +1,0 @@
-qdisc netem 80b2: root refcnt 425 limit 5000000 delay 200ms loss 5%
- Sent 30754030320 bytes 20316332 pkt (dropped 24786, overlimits 0 requeues 284) 
- backlog 138b 1p requeues 284

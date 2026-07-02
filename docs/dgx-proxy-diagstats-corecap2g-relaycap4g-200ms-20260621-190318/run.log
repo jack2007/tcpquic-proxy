@@ -1,7 +1,0 @@
-[tcpquic-dgx-bench] peer egress interface toward 169.254.250.230: enp1s0f0np0
-[tcpquic-dgx-bench] peer netem: delay 200ms loss 5% limit 5000000
-[tcpquic-dgx-bench] netem qdisc dropped=11358 (limit=5000000)
-[tcpquic-dgx-bench] mode=tunnel_off iterations=1 payload_kind=repeat payload=20000MB duration=30s quic-connections=1
-[tcpquic-dgx-bench]   run 1/1: 4271.05 Mbps (curl exit 28)
-tunnel_off,533881707,4271.05,28
-[tcpquic-dgx-bench] done
