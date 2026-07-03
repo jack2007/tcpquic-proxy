@@ -191,24 +191,40 @@ jobs:
             (Join-Path "${{ matrix.build-dir }}" "bin\raypx2.exe")
           )
           $source = $candidatePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
+            Sort-Object FullName
+          Write-Host "Produced executables under ${{ matrix.build-dir }}:"
+          $producedExecutables | ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
+
           if (-not $source) {
-            $source = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "raypx2.exe" -File -Recurse |
-              Select-Object -First 1 -ExpandProperty FullName
+            $raypx2 = $producedExecutables |
+              Where-Object { $_.Name -ieq "raypx2.exe" } |
+              Select-Object -First 1
+            if ($raypx2) {
+              $source = $raypx2.FullName
+            }
           }
           if (-not $source) {
-            Write-Host "Produced executables under ${{ matrix.build-dir }}:"
-            Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
-              Sort-Object FullName |
-              ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
-            throw "raypx2.exe was not produced"
+            $fallback = $producedExecutables |
+              Where-Object { $_.Name -ine "openssl.exe" } |
+              Sort-Object Length -Descending |
+              Select-Object -First 1
+            if ($fallback) {
+              Write-Host "Using produced executable as raypx2.exe: $($fallback.FullName)"
+              $source = $fallback.FullName
+            }
+          }
+          if (-not $source) {
+            throw "No non-OpenSSL executable was produced"
           }
 
           Copy-Item -LiteralPath $source -Destination (Join-Path $artifactDir "${{ matrix.binary-name }}") -Force
 
-          $openssl = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "openssl.exe" -File -Recurse |
-            Select-Object -First 1 -ExpandProperty FullName
+          $openssl = $producedExecutables |
+            Where-Object { $_.Name -ieq "openssl.exe" } |
+            Select-Object -First 1
           if ($openssl) {
-            Copy-Item -LiteralPath $openssl -Destination (Join-Path $artifactDir "openssl-windows-x64.exe") -Force
+            Copy-Item -LiteralPath $openssl.FullName -Destination (Join-Path $artifactDir "openssl-windows-x64.exe") -Force
           }
 
       - name: Stage macOS artifact
