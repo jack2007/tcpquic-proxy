@@ -160,6 +160,10 @@ int main() {
         if (js.find("if (!tbody || rows.length === 0) return;") == std::string_view::npos) return 523;
         if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
         if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
+        if (js.find("function authenticatedPage(pageId)") == std::string_view::npos) return 524;
+        if (js.find("if (!consoleState.token && pageId !== 'login') return 'login';") == std::string_view::npos) return 525;
+        if (js.find("const knownPage = authenticatedPage(pageId);") == std::string_view::npos) return 526;
+        if (js.find("sessionStorage.removeItem('tcpquic.admin.page');") == std::string_view::npos) return 527;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
         if (js.find("api('/admin'") == std::string_view::npos) return 313;
         if (js.find("setInterval(refreshCurrentPage, 3000)") == std::string_view::npos) return 314;

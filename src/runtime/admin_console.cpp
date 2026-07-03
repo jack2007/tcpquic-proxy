@@ -691,8 +691,13 @@ static constexpr char kConsoleJsStorage[] =
       renderNav();
     }
 
+    function authenticatedPage(pageId) {
+      if (!consoleState.token && pageId !== 'login') return 'login';
+      return pages.some(page => page.id === pageId) ? pageId : overviewPage(consoleState.role);
+    }
+
     function showPage(pageId) {
-      const knownPage = pages.some(page => page.id === pageId) ? pageId : overviewPage(consoleState.role);
+      const knownPage = authenticatedPage(pageId);
       consoleState.page = knownPage;
       pages.forEach(page => page.classList.toggle('active', page.id === knownPage));
       Array.from(nav.querySelectorAll('button')).forEach(button => {
@@ -776,6 +781,7 @@ static constexpr char kConsoleJsStorage[] =
 
     function logout() {
       sessionStorage.removeItem('tcpquic_admin_token');
+      sessionStorage.removeItem('tcpquic.admin.page');
       consoleState.token = '';
       showPage('login');
     }
