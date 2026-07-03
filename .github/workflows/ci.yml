@@ -162,8 +162,17 @@ jobs:
           $buildExit = $LASTEXITCODE
           Get-Content -LiteralPath $buildLog | Write-Host
           if ($buildExit -ne 0) {
-            $tail = (Get-Content -LiteralPath $buildLog -Tail 80) -join "%0A"
-            Write-Output "::error title=CMake build tcpquic-proxy failed::$tail"
+            $lines = @(Get-Content -LiteralPath $buildLog)
+            $interesting = @($lines | Where-Object {
+              $_ -match "FAILED:|ninja:|error|Error|ERROR|fatal|Fatal|Can't|Cannot|No such|not found|Unknown|unsupported|failed|Failed"
+            })
+            if ($interesting.Count -eq 0) {
+              $interesting = @($lines | Select-Object -Last 40)
+            }
+            $summary = @($interesting | Select-Object -Last 40 | ForEach-Object {
+              if ($_.Length -gt 500) { $_.Substring(0, 500) + "..." } else { $_ }
+            }) -join "%0A"
+            Write-Output "::error title=CMake build tcpquic-proxy failed::$summary"
             throw "CMake build tcpquic-proxy failed with exit code $buildExit"
           }
           $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
