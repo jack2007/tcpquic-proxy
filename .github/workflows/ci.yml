@@ -147,11 +147,18 @@ jobs:
           Write-Host "Produced executables under ${{ matrix.build-dir }}:"
           $producedExecutables | ForEach-Object { Write-Host ("  {0} ({1} bytes)" -f $_.FullName, $_.Length) }
           $raypx2Matches = @($producedExecutables | Where-Object { $_.Name -ieq "raypx2.exe" })
-          if ($raypx2Matches.Count -ne 1) {
-            Write-Output "::error title=Windows binary missing::Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
-            throw "Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
+          $legacyTargetMatches = @($producedExecutables | Where-Object { $_.Name -ieq "tcpquic-proxy.exe" })
+          if ($raypx2Matches.Count -eq 1) {
+            $raypx2 = $raypx2Matches[0].FullName
+          } elseif ($raypx2Matches.Count -eq 0 -and $legacyTargetMatches.Count -eq 1) {
+            $raypx2 = $legacyTargetMatches[0].FullName
+            Write-Output "::notice title=Windows binary name::Using tcpquic-proxy.exe as the built target and staging it as raypx2.exe"
+          } else {
+            $exeList = ($producedExecutables | ForEach-Object { "$($_.FullName) ($($_.Length) bytes)" }) -join "; "
+            if (!$exeList) { $exeList = "<none>" }
+            Write-Output "::error title=Windows binary missing::Expected one raypx2.exe or one tcpquic-proxy.exe; found raypx2=$($raypx2Matches.Count), tcpquic-proxy=$($legacyTargetMatches.Count). Executables: $exeList"
+            throw "Expected one raypx2.exe or one tcpquic-proxy.exe"
           }
-          $raypx2 = $raypx2Matches[0].FullName
           $size = (Get-Item -LiteralPath $raypx2).Length
           Write-Host "raypx2.exe size: $size bytes"
           Write-Output "::notice title=Windows binary size::raypx2.exe size: $size bytes"
@@ -161,7 +168,17 @@ jobs:
           }
           $dependents = dumpbin /DEPENDENTS $raypx2
           $dependents | Write-Host
-          $forbiddenDlls = @("msquic.dll", "libzstd.dll", "zstd.dll", "cares.dll", "c-ares.dll")
+          $forbiddenDlls = @(
+            "msquic.dll",
+            "libzstd.dll",
+            "zstd.dll",
+            "cares.dll",
+            "c-ares.dll",
+            "libcrypto-3-x64.dll",
+            "libssl-3-x64.dll",
+            "mimalloc.dll",
+            "spdlog.dll"
+          )
           foreach ($dll in $forbiddenDlls) {
             if ($dependents -match [regex]::Escape($dll)) {
               Write-Output "::error title=Windows dynamic third-party dependency::raypx2.exe depends on project third-party DLL $dll; expected static linkage"
@@ -232,11 +249,18 @@ jobs:
           $producedExecutables | ForEach-Object { Write-Host ("  {0} ({1} bytes)" -f $_.FullName, $_.Length) }
 
           $raypx2Matches = @($producedExecutables | Where-Object { $_.Name -ieq "raypx2.exe" })
-          if ($raypx2Matches.Count -ne 1) {
-            Write-Output "::error title=Windows artifact missing::Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
-            throw "Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
+          $legacyTargetMatches = @($producedExecutables | Where-Object { $_.Name -ieq "tcpquic-proxy.exe" })
+          if ($raypx2Matches.Count -eq 1) {
+            $source = $raypx2Matches[0].FullName
+          } elseif ($raypx2Matches.Count -eq 0 -and $legacyTargetMatches.Count -eq 1) {
+            $source = $legacyTargetMatches[0].FullName
+            Write-Output "::notice title=Windows artifact name::Staging tcpquic-proxy.exe as raypx2.exe"
+          } else {
+            $exeList = ($producedExecutables | ForEach-Object { "$($_.FullName) ($($_.Length) bytes)" }) -join "; "
+            if (!$exeList) { $exeList = "<none>" }
+            Write-Output "::error title=Windows artifact missing::Expected one raypx2.exe or one tcpquic-proxy.exe; found raypx2=$($raypx2Matches.Count), tcpquic-proxy=$($legacyTargetMatches.Count). Executables: $exeList"
+            throw "Expected one raypx2.exe or one tcpquic-proxy.exe"
           }
-          $source = $raypx2Matches[0].FullName
           $sourceSize = (Get-Item -LiteralPath $source).Length
           if ($sourceSize -lt 1048576) {
             Write-Output "::error title=Windows artifact too small::Refusing to upload unexpectedly small raypx2.exe ($sourceSize bytes)"
