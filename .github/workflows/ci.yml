@@ -125,13 +125,40 @@ jobs:
           ccache --zero-stats
           cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
             -DCMAKE_C_COMPILER_LAUNCHER=ccache `
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
             -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0601" `
             -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0601" `
-            -DQUIC_STATIC_LINK_CRT=ON
+            -DBUILD_SHARED_LIBS=OFF `
+            -DTCPQUIC_MSQUIC_SHARED=OFF `
+            -DQUIC_BUILD_SHARED=OFF `
+            -DQUIC_STATIC_LINK_CRT=ON `
+            -DCARES_STATIC=ON `
+            -DCARES_SHARED=OFF `
+            -DCARES_MSVC_STATIC_RUNTIME=ON `
+            -DZSTD_BUILD_STATIC=ON `
+            -DZSTD_BUILD_SHARED=OFF
+          cmake -LAH -N "${{ matrix.build-dir }}" | Select-String -Pattern "^(BUILD_SHARED_LIBS|TCPQUIC_MSQUIC_SHARED|QUIC_BUILD_SHARED|CARES_STATIC|CARES_SHARED|ZSTD_BUILD_STATIC|ZSTD_BUILD_SHARED):"
           cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS
+          $raypx2 = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
+          if (!(Test-Path -LiteralPath $raypx2)) {
+            throw "Expected Windows production binary was not produced: $raypx2"
+          }
+          $size = (Get-Item -LiteralPath $raypx2).Length
+          Write-Host "raypx2.exe size: $size bytes"
+          if ($size -lt 1048576) {
+            throw "raypx2.exe is unexpectedly small; expected a statically linked production binary larger than 1 MiB"
+          }
+          $dependents = dumpbin /DEPENDENTS $raypx2
+          $dependents | Write-Host
+          $forbiddenDlls = @("msquic.dll", "libzstd.dll", "zstd.dll", "cares.dll", "c-ares.dll")
+          foreach ($dll in $forbiddenDlls) {
+            if ($dependents -match [regex]::Escape($dll)) {
+              throw "raypx2.exe depends on project third-party DLL $dll; expected static linkage"
+            }
+          }
           ccache --show-stats
 
       - name: Install macOS build tools
@@ -190,36 +217,18 @@ jobs:
           $artifactDir = Join-Path "artifacts" "${{ matrix.artifact-name }}"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 
-          $candidatePaths = @(
-            (Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"),
-            (Join-Path "${{ matrix.build-dir }}" "bin\raypx2.exe")
-          )
-          $source = $candidatePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
           $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
             Sort-Object FullName
           Write-Host "Produced executables under ${{ matrix.build-dir }}:"
-          $producedExecutables | ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
+          $producedExecutables | ForEach-Object { Write-Host ("  {0} ({1} bytes)" -f $_.FullName, $_.Length) }
 
-          if (-not $source) {
-            $raypx2 = $producedExecutables |
-              Where-Object { $_.Name -ieq "raypx2.exe" } |
-              Select-Object -First 1
-            if ($raypx2) {
-              $source = $raypx2.FullName
-            }
+          $source = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
+          if (!(Test-Path -LiteralPath $source)) {
+            throw "Expected Windows production binary was not produced: $source"
           }
-          if (-not $source) {
-            $fallback = $producedExecutables |
-              Where-Object { $_.Name -ine "openssl.exe" } |
-              Sort-Object Length -Descending |
-              Select-Object -First 1
-            if ($fallback) {
-              Write-Host "Using produced executable as raypx2.exe: $($fallback.FullName)"
-              $source = $fallback.FullName
-            }
-          }
-          if (-not $source) {
-            throw "No non-OpenSSL executable was produced"
+          $sourceSize = (Get-Item -LiteralPath $source).Length
+          if ($sourceSize -lt 1048576) {
+            throw "Refusing to upload unexpectedly small raypx2.exe ($sourceSize bytes)"
           }
 
           Copy-Item -LiteralPath $source -Destination (Join-Path $artifactDir "${{ matrix.binary-name }}") -Force
