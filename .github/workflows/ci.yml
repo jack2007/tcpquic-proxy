@@ -144,11 +144,14 @@ jobs:
           cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS
           $raypx2 = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
           if (!(Test-Path -LiteralPath $raypx2)) {
+            Write-Output "::error title=Windows binary missing::Expected Windows production binary was not produced: $raypx2"
             throw "Expected Windows production binary was not produced: $raypx2"
           }
           $size = (Get-Item -LiteralPath $raypx2).Length
           Write-Host "raypx2.exe size: $size bytes"
+          Write-Output "::notice title=Windows binary size::raypx2.exe size: $size bytes"
           if ($size -lt 1048576) {
+            Write-Output "::error title=Windows binary too small::raypx2.exe size: $size bytes; expected a statically linked production binary larger than 1 MiB"
             throw "raypx2.exe is unexpectedly small; expected a statically linked production binary larger than 1 MiB"
           }
           $dependents = dumpbin /DEPENDENTS $raypx2
@@ -156,6 +159,7 @@ jobs:
           $forbiddenDlls = @("msquic.dll", "libzstd.dll", "zstd.dll", "cares.dll", "c-ares.dll")
           foreach ($dll in $forbiddenDlls) {
             if ($dependents -match [regex]::Escape($dll)) {
+              Write-Output "::error title=Windows dynamic third-party dependency::raypx2.exe depends on project third-party DLL $dll; expected static linkage"
               throw "raypx2.exe depends on project third-party DLL $dll; expected static linkage"
             }
           }
@@ -224,10 +228,12 @@ jobs:
 
           $source = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
           if (!(Test-Path -LiteralPath $source)) {
+            Write-Output "::error title=Windows artifact missing::Expected Windows production binary was not produced: $source"
             throw "Expected Windows production binary was not produced: $source"
           }
           $sourceSize = (Get-Item -LiteralPath $source).Length
           if ($sourceSize -lt 1048576) {
+            Write-Output "::error title=Windows artifact too small::Refusing to upload unexpectedly small raypx2.exe ($sourceSize bytes)"
             throw "Refusing to upload unexpectedly small raypx2.exe ($sourceSize bytes)"
           }
 
