@@ -115,6 +115,20 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          function Invoke-Checked {
+            param(
+              [Parameter(Mandatory = $true)]
+              [string] $Label,
+              [Parameter(Mandatory = $true)]
+              [scriptblock] $Command
+            )
+            & $Command
+            if ($LASTEXITCODE -ne 0) {
+              Write-Output "::error title=$Label failed::$Label exited with code $LASTEXITCODE"
+              throw "$Label failed with exit code $LASTEXITCODE"
+            }
+          }
+
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           if (!$vsPath) {
@@ -123,25 +137,29 @@ jobs:
           Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
           ccache --zero-stats
-          cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
-            -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
-            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-            -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0601" `
-            -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0601" `
-            -DBUILD_SHARED_LIBS=OFF `
-            -DTCPQUIC_MSQUIC_SHARED=OFF `
-            -DQUIC_BUILD_SHARED=OFF `
-            -DQUIC_STATIC_LINK_CRT=ON `
-            -DCARES_STATIC=ON `
-            -DCARES_SHARED=OFF `
-            -DCARES_MSVC_STATIC_RUNTIME=ON `
-            -DZSTD_BUILD_STATIC=ON `
-            -DZSTD_BUILD_SHARED=OFF
+          Invoke-Checked "CMake configure" {
+            cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
+              -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_POLICY_DEFAULT_CMP0091=NEW `
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+              -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0601" `
+              -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0601" `
+              -DBUILD_SHARED_LIBS=OFF `
+              -DTCPQUIC_MSQUIC_SHARED=OFF `
+              -DQUIC_BUILD_SHARED=OFF `
+              -DQUIC_STATIC_LINK_CRT=ON `
+              -DCARES_STATIC=ON `
+              -DCARES_SHARED=OFF `
+              -DCARES_MSVC_STATIC_RUNTIME=ON `
+              -DZSTD_BUILD_STATIC=ON `
+              -DZSTD_BUILD_SHARED=OFF
+          }
           cmake -LAH -N "${{ matrix.build-dir }}" | Select-String -Pattern "^(BUILD_SHARED_LIBS|TCPQUIC_MSQUIC_SHARED|QUIC_BUILD_SHARED|CARES_STATIC|CARES_SHARED|ZSTD_BUILD_STATIC|ZSTD_BUILD_SHARED):"
-          cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS
+          Invoke-Checked "CMake build tcpquic-proxy" {
+            cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS --verbose
+          }
           $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
             Sort-Object FullName
           Write-Host "Produced executables under ${{ matrix.build-dir }}:"
