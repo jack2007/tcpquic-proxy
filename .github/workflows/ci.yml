@@ -36,13 +36,13 @@ jobs:
             binary-name: raypx2
           - name: Windows x64 (MSVC / Win7 API)
             platform: windows
-            runner: windows-2019
+            runner: windows-2022
             build-dir: build-windows-x64
             artifact-name: tcpquic-proxy-windows-x64
             binary-name: raypx2.exe
           - name: macOS Universal (x86_64 + arm64)
             platform: macos
-            runner: macos-14-large
+            runner: macos-15-intel
             build-dir: build-macos-universal
             artifact-name: tcpquic-proxy-macos-universal
             binary-name: raypx2
