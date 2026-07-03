@@ -151,6 +151,9 @@ int main() {
         if (html.find("data-theme=\"light\"") == std::string_view::npos) return 514;
         if (html.find("<aside class=\"sidebar\">") == std::string_view::npos) return 515;
         if (html.find("<main class=\"main\">") == std::string_view::npos) return 516;
+        if (js.find("function statusClass(value)") == std::string_view::npos) return 517;
+        if (js.find("function emptyRow(colspan, message)") == std::string_view::npos) return 518;
+        if (js.find("No rows returned") == std::string_view::npos) return 519;
         if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
         if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;

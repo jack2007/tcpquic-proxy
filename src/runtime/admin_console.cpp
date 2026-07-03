@@ -74,6 +74,7 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     th,td{border-bottom:1px solid var(--tq-line);padding:9px 8px;text-align:left;vertical-align:middle;white-space:nowrap}
     th{color:var(--tq-muted);font-weight:650;background:#f8fafb}
     tbody tr:hover{background:#fbfcfd}
+    .empty-cell{color:var(--tq-muted);text-align:center;padding:18px 8px;background:#fbfcfd}
     .state{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:999px;border:1px solid var(--tq-line);font-size:12px;background:#fff}
     .state.ok{color:var(--tq-green);border-color:#b7e1c1;background:#f1fbf4}.state.warn{color:var(--tq-amber);border-color:#f6d49d;background:#fff8eb}.state.err{color:var(--tq-red);border-color:#f2b8b1;background:#fff6f5}
     .peer-form-panel{display:grid;gap:12px}
@@ -309,11 +310,37 @@ static constexpr char kConsoleJsStorage[] =
       }[ch]));
     }
 
+    function stateClass(value) {
+      const normalized = String(value || '').toLowerCase();
+      if (['connected','healthy','ok','enabled','active','running'].some(word => normalized.includes(word))) return 'ok';
+      if (['error','failed','denied','disabled'].some(word => normalized.includes(word))) return 'err';
+      return 'warn';
+    }
+
+    function statusClass(value) {
+      return stateClass(value);
+    }
+
+    function emptyRow(colspan, message) {
+      return `<tr><td colspan="${colspan}" class="empty-cell">${escapeHtml(message || 'No rows returned')}</td></tr>`;
+    }
+
+    function formatCell(column, value) {
+      if (column === 'state' || column === 'status') {
+        return `<span class="state ${statusClass(value)}">${escapeHtml(value)}</span>`;
+      }
+      return escapeHtml(value);
+    }
+
     function renderRows(tbody, rows, columns) {
       if (!tbody) return;
+      if (!rows.length) {
+        tbody.innerHTML = emptyRow(columns.length, 'No rows returned');
+        return;
+      }
       tbody.innerHTML = rows.map(row => `<tr>${columns.map(column => {
         const value = typeof column === 'function' ? column(row) : row[column];
-        return `<td>${escapeHtml(value)}</td>`;
+        return `<td>${formatCell(column, value)}</td>`;
       }).join('')}</tr>`).join('');
     }
 
