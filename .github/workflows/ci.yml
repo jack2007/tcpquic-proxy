@@ -108,8 +108,22 @@ jobs:
         shell: pwsh
         run: |
           choco install ccache nasm ninja strawberryperl -y --no-progress
-          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $toolDirs = @(
+            "C:\ProgramData\chocolatey\bin",
+            "C:\Strawberry\perl\bin",
+            "C:\Program Files\NASM",
+            "C:\ProgramData\chocolatey\lib\nasm\tools"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          $nasmExe = Get-ChildItem -Path "C:\Program Files\NASM", "C:\ProgramData\chocolatey\lib\nasm" -Filter "nasm.exe" -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (!$nasmExe) {
+            throw "NASM was installed but nasm.exe could not be located"
+          }
+          $toolDirs += $nasmExe.DirectoryName
+          $toolDirs | Sort-Object -Unique | ForEach-Object {
+            $_ | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+          & $nasmExe.FullName -v
 
       - name: Build Windows MSVC binary
         if: matrix.platform == 'windows'
@@ -136,6 +150,20 @@ jobs:
           }
           Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
+          $toolDirs = @(
+            "C:\ProgramData\chocolatey\bin",
+            "C:\Strawberry\perl\bin",
+            "C:\Program Files\NASM",
+            "C:\ProgramData\chocolatey\lib\nasm\tools"
+          ) | Where-Object { Test-Path -LiteralPath $_ }
+          $nasmExe = Get-ChildItem -Path "C:\Program Files\NASM", "C:\ProgramData\chocolatey\lib\nasm" -Filter "nasm.exe" -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (!$nasmExe) {
+            throw "NASM was installed but nasm.exe could not be located"
+          }
+          $env:PATH = (($toolDirs + $nasmExe.DirectoryName | Sort-Object -Unique) -join ";") + ";$env:PATH"
+          nasm -v
+          perl -v
           ccache --zero-stats
           Invoke-Checked "CMake configure" {
             cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
