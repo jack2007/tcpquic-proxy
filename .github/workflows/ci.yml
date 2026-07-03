@@ -157,8 +157,14 @@ jobs:
               -DZSTD_BUILD_SHARED=OFF
           }
           cmake -LAH -N "${{ matrix.build-dir }}" | Select-String -Pattern "^(BUILD_SHARED_LIBS|TCPQUIC_MSQUIC_SHARED|QUIC_BUILD_SHARED|CARES_STATIC|CARES_SHARED|ZSTD_BUILD_STATIC|ZSTD_BUILD_SHARED):"
-          Invoke-Checked "CMake build tcpquic-proxy" {
-            cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS --verbose
+          $buildLog = Join-Path $PWD "windows-build.log"
+          cmd /c "cmake --build ""${{ matrix.build-dir }}"" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS --verbose > ""$buildLog"" 2>&1"
+          $buildExit = $LASTEXITCODE
+          Get-Content -LiteralPath $buildLog | Write-Host
+          if ($buildExit -ne 0) {
+            $tail = (Get-Content -LiteralPath $buildLog -Tail 80) -join "%0A"
+            Write-Output "::error title=CMake build tcpquic-proxy failed::$tail"
+            throw "CMake build tcpquic-proxy failed with exit code $buildExit"
           }
           $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
             Sort-Object FullName
