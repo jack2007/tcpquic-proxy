@@ -1,0 +1,70 @@
+--- a/third_party/msquic/src/platform/cert_capi.c
++++ b/third_party/msquic/src/platform/cert_capi.c
+@@ -162,6 +162,7 @@
+     }
+ }
+ 
++#if _WIN32_WINNT >= 0x0602
+ static
+ _Success_(return != NULL)
+ BCRYPT_ALG_HANDLE
+@@ -197,6 +198,7 @@
+         return NULL;
+     }
+ }
++#endif
+ 
+ #define CXPLAT_CERTIFICATE_MAX_HASH_SIZE 64
+ 
+@@ -1464,6 +1466,7 @@
+         return FALSE;
+     }
+ 
++#if _WIN32_WINNT >= 0x0602
+     BCRYPT_ALG_HANDLE HashProv = HashHandleFromTLS(SignatureAlgorithm);
+     if (HashProv == NULL) {
+         QuicTraceEvent(
+@@ -1473,6 +1476,23 @@
+             "Unsupported hash algorithm");
+         return FALSE;
+     }
++#else
++    BCRYPT_ALG_HANDLE HashProv = NULL;
++    NTSTATUS OpenHashStatus =
++        BCryptOpenAlgorithmProvider(
++            &HashProv,
++            HashAlg,
++            NULL,
++            0);
++    if (!NT_SUCCESS(OpenHashStatus)) {
++        QuicTraceEvent(
++            LibraryErrorStatus,
++            "[ lib] ERROR, %u, %s.",
++            OpenHashStatus,
++            "BCryptOpenAlgorithmProvider failed");
++        return FALSE;
++    }
++#endif
+ 
+     DWORD HashSize = HashSizeFromTLS(SignatureAlgorithm);
+     if (HashSize == 0 || HashSize > CXPLAT_CERTIFICATE_MAX_HASH_SIZE) {
+@@ -1481,6 +1501,9 @@
+             "[ lib] ERROR, %u, %s.",
+             SignatureAlgorithm,
+             "Unsupported hash size");
++#if _WIN32_WINNT < 0x0602
++        BCryptCloseAlgorithmProvider(HashProv, 0);
++#endif
+         return FALSE;
+     }
+ 
+@@ -1560,5 +1583,9 @@
+         BCryptDestroyKey(PublicKey);
+     }
+ 
++#if _WIN32_WINNT < 0x0602
++    BCryptCloseAlgorithmProvider(HashProv, 0);
++#endif
++
+     return Result;
+ }

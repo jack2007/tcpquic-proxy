@@ -164,8 +164,10 @@ jobs:
           $env:PATH = (($toolDirs + $nasmExe.DirectoryName | Sort-Object -Unique) -join ";") + ";$env:PATH"
           nasm -v
           perl -v
-          git apply --check ".github/patches/msquic-win7-rss-affinity.patch"
-          git apply ".github/patches/msquic-win7-rss-affinity.patch"
+          Get-ChildItem -Path ".github/patches" -Filter "*.patch" | Sort-Object Name | ForEach-Object {
+            git apply --check $_.FullName
+            git apply $_.FullName
+          }
           ccache --zero-stats
           Invoke-Checked "CMake configure" {
             cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
