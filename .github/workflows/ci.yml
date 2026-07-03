@@ -142,17 +142,19 @@ jobs:
           brew update
           brew install ccache ninja
 
-      - name: Configure macOS universal build
+      - name: Configure macOS architecture builds
         if: matrix.platform == 'macos'
         shell: bash
         run: |
           set -euxo pipefail
-          cmake -S . -B "${{ matrix.build-dir }}" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          for arch in x86_64 arm64; do
+            cmake -S . -B "${{ matrix.build-dir }}-${arch}" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+              -DCMAKE_OSX_ARCHITECTURES="${arch}" \
+              -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          done
 
       - name: Build macOS universal binary
         if: matrix.platform == 'macos'
@@ -160,7 +162,9 @@ jobs:
         run: |
           set -euxo pipefail
           ccache --zero-stats || true
-          cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel "$(sysctl -n hw.logicalcpu)"
+          for arch in x86_64 arm64; do
+            cmake --build "${{ matrix.build-dir }}-${arch}" --target tcpquic-proxy --parallel "$(sysctl -n hw.logicalcpu)"
+          done
           ccache --show-stats || true
 
       - name: Stage Linux artifact
@@ -233,12 +237,16 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p "artifacts/${{ matrix.artifact-name }}"
-          src="${{ matrix.build-dir }}/bin/Release/raypx2"
-          test -x "$src"
-          cp "$src" "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          src_x64="${{ matrix.build-dir }}-x86_64/bin/Release/raypx2"
+          src_arm64="${{ matrix.build-dir }}-arm64/bin/Release/raypx2"
+          test -x "$src_x64"
+          test -x "$src_arm64"
+          lipo -create "$src_x64" "$src_arm64" -output "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
           chmod +x "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
-          if [ -x "${{ matrix.build-dir }}/bin/Release/openssl" ]; then
-            cp "${{ matrix.build-dir }}/bin/Release/openssl" "artifacts/${{ matrix.artifact-name }}/openssl-macos-universal"
+          openssl_x64="${{ matrix.build-dir }}-x86_64/bin/Release/openssl"
+          openssl_arm64="${{ matrix.build-dir }}-arm64/bin/Release/openssl"
+          if [ -x "$openssl_x64" ] && [ -x "$openssl_arm64" ]; then
+            lipo -create "$openssl_x64" "$openssl_arm64" -output "artifacts/${{ matrix.artifact-name }}/openssl-macos-universal"
             chmod +x "artifacts/${{ matrix.artifact-name }}/openssl-macos-universal"
           fi
           lipo -info "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
