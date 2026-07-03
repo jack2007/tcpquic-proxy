@@ -145,6 +145,11 @@ endif()
 
 add_subdirectory("${MSQUIC_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/msquic")
 
+if(WIN32 AND MSVC AND TARGET msquic_platform)
+    target_compile_options(msquic_platform PRIVATE
+        "/FI${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows7_msquic_compat.h")
+endif()
+
 if(TCPQUIC_MSQUIC_MIMALLOC_ENABLED AND TARGET msquic_lib AND TARGET mimalloc-static)
     add_dependencies(msquic_lib mimalloc-static)
 endif()
