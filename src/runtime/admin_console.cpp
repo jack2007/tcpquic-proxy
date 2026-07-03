@@ -91,11 +91,12 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
   )CSS";
 
 constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>raypx2 Admin Console Interaction Design v4</title>
+  <meta name="color-scheme" content="light">
+  <title>raypx2 Admin Console</title>
   <link rel="stylesheet" href="/console/style.css">
 </head>
 <body>
@@ -103,7 +104,7 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
     <aside class="sidebar">
       <div class="brand">
         <h1>raypx2 Admin Console</h1>
-        <p>v4: 只展示当前 Admin API 可直接获得的信息。</p>
+        <p>Embedded operations console for the local Admin API.</p>
       </div>
       <nav class="nav" id="nav"></nav>
     </aside>
