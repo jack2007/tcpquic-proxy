@@ -1,0 +1,31 @@
+diff --git a/third_party/msquic/src/platform/datapath_winuser.c b/third_party/msquic/src/platform/datapath_winuser.c
+index 0000000..0000000 100644
+--- a/third_party/msquic/src/platform/datapath_winuser.c
++++ b/third_party/msquic/src/platform/datapath_winuser.c
+@@ -2694,8 +2694,10 @@ CxPlatDataPathSocketProcessAcceptCompletion(
+         CXPLAT_DBG_ASSERT(ListenerSocketProc->AcceptSocket != NULL);
+         AcceptSocketProc = &ListenerSocketProc->AcceptSocket->PerProcSockets[0];
+         CXPLAT_DBG_ASSERT(ListenerSocketProc->AcceptSocket == AcceptSocketProc->Parent);
++#if _WIN32_WINNT >= 0x0602
+         DWORD BytesReturned;
+         SOCKET_PROCESSOR_AFFINITY RssAffinity = { 0 };
++#endif
+         uint16_t PartitionIndex = 0;
+ 
+         ListenerSocketProc->AcceptSocket->LocalAddress =
+@@ -2746,6 +2748,7 @@ CxPlatDataPathSocketProcessAcceptCompletion(
+ 
+         CXPLAT_DATAPATH* Datapath = ListenerSocketProc->Parent->Datapath;
+ 
++#if _WIN32_WINNT >= 0x0602
+         Result =
+             WSAIoctl(
+                 AcceptSocketProc->Socket,
+@@ -2762,6 +2765,7 @@ CxPlatDataPathSocketProcessAcceptCompletion(
+                 ((uint16_t)CxPlatProcessorGroupInfo[RssAffinity.Processor.Group].Offset +
+                 (uint16_t)RssAffinity.Processor.Number) % Datapath->PartitionCount;
+         }
++#endif
+ 
+         AcceptSocketProc->DatapathProc =
+             &Datapath->Partitions[PartitionIndex]; // TODO - Something better?
