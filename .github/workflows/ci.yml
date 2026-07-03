@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPRESS: "1"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 (Ubuntu 20.04 / GLIBC 2.31)
+            platform: linux
+            runner: ubuntu-22.04
+            build-dir: build-linux-x64
+            artifact-name: tcpquic-proxy-linux-x64
+            binary-name: raypx2
+          - name: Windows x64 (MSVC / Win7 API)
+            platform: windows
+            runner: windows-2019
+            build-dir: build-windows-x64
+            artifact-name: tcpquic-proxy-windows-x64
+            binary-name: raypx2.exe
+          - name: macOS Universal (x86_64 + arm64)
+            platform: macos
+            runner: macos-14-large
+            build-dir: build-macos-universal
+            artifact-name: tcpquic-proxy-macos-universal
+            binary-name: raypx2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ matrix.platform }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ matrix.platform }}-
+
+      - name: Build Linux portable binary
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            -e CCACHE_DIR=/work/.ccache \
+            -e CCACHE_BASEDIR=/work \
+            -e CCACHE_COMPRESS=1 \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 \
+            bash -euxo pipefail -c '
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                ca-certificates \
+                ccache \
+                g++-10 \
+                gcc-10 \
+                git \
+                make \
+                ninja-build \
+                perl \
+                pkg-config \
+                python3-pip
+              python3 -m pip install --upgrade "cmake>=3.27,<4"
+              ccache --zero-stats || true
+              cmake -S . -B "${{ matrix.build-dir }}" -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=gcc-10 \
+                -DCMAKE_CXX_COMPILER=g++-10 \
+                -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+                -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+                -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+              cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel "$(nproc)"
+              ccache --show-stats || true
+            '
+
+      - name: Install Windows build tools
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          choco install ccache ninja strawberryperl -y --no-progress
+          "C:\ProgramData\chocolatey\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build Windows MSVC binary
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vsPath) {
+            throw "Visual Studio with MSVC x64 tools was not found"
+          }
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64"
+          ccache --zero-stats
+          cmake -S . -B "${{ matrix.build-dir }}" -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DCMAKE_C_FLAGS="/D_WIN32_WINNT=0x0601" `
+            -DCMAKE_CXX_FLAGS="/D_WIN32_WINNT=0x0601" `
+            -DQUIC_STATIC_LINK_CRT=ON
+          cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS
+          ccache --show-stats
+
+      - name: Install macOS build tools
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew update
+          brew install ccache ninja
+
+      - name: Configure macOS universal build
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S . -B "${{ matrix.build-dir }}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build macOS universal binary
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ccache --zero-stats || true
+          cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel "$(sysctl -n hw.logicalcpu)"
+          ccache --show-stats || true
+
+      - name: Stage Linux artifact
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "artifacts/${{ matrix.artifact-name }}"
+          src="${{ matrix.build-dir }}/bin/Release/raypx2"
+          test -x "$src"
+          cp "$src" "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          chmod +x "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          if [ -x "${{ matrix.build-dir }}/bin/Release/openssl" ]; then
+            cp "${{ matrix.build-dir }}/bin/Release/openssl" "artifacts/${{ matrix.artifact-name }}/openssl-linux-x64"
+            chmod +x "artifacts/${{ matrix.artifact-name }}/openssl-linux-x64"
+          fi
+          ldd "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}" || true
+
+      - name: Stage Windows artifact
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $artifactDir = "artifacts/${{ matrix.artifact-name }}"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+          $source = "${{ matrix.build-dir }}\bin\Release\raypx2.exe"
+          if (!(Test-Path $source)) {
+            $source = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "raypx2.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (!(Test-Path $source)) {
+            throw "raypx2.exe was not produced"
+          }
+          Copy-Item $source "$artifactDir\${{ matrix.binary-name }}"
+          $openssl = "${{ matrix.build-dir }}\bin\Release\openssl.exe"
+          if (Test-Path $openssl) {
+            Copy-Item $openssl "$artifactDir\openssl-windows-x64.exe"
+          }
+
+      - name: Stage macOS artifact
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "artifacts/${{ matrix.artifact-name }}"
+          src="${{ matrix.build-dir }}/bin/Release/raypx2"
+          test -x "$src"
+          cp "$src" "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          chmod +x "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          if [ -x "${{ matrix.build-dir }}/bin/Release/openssl" ]; then
+            cp "${{ matrix.build-dir }}/bin/Release/openssl" "artifacts/${{ matrix.artifact-name }}/openssl-macos-universal"
+            chmod +x "artifacts/${{ matrix.artifact-name }}/openssl-macos-universal"
+          fi
+          lipo -info "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}"
+          otool -l "artifacts/${{ matrix.artifact-name }}/${{ matrix.binary-name }}" | grep -A3 LC_BUILD_VERSION || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: artifacts/${{ matrix.artifact-name }}/
+          if-no-files-found: error
+          retention-days: 14
