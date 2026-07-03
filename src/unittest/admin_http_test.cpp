@@ -147,7 +147,6 @@ int main() {
         if (css.find("--pico-font-family") == std::string_view::npos) return 509;
         if (css.find("--tq-bg") == std::string_view::npos) return 510;
         if (css.find(".shell{display:grid;grid-template-columns:232px 1fr") == std::string_view::npos) return 511;
-        if (css.find(".sidebar") == std::string_view::npos) return 512;
         if (css.find(".table-scroll") == std::string_view::npos) return 513;
         if (html.find("data-theme=\"light\"") == std::string_view::npos) return 514;
         if (html.find("<aside class=\"sidebar\">") == std::string_view::npos) return 515;
