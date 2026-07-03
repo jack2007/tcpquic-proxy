@@ -144,6 +144,14 @@ int main() {
         if (js.find("sessionStorage") == std::string_view::npos) return 307;
         if (css.find(".span-4") == std::string_view::npos) return 308;
         if (css.find(".span-8") == std::string_view::npos) return 309;
+        if (css.find("--pico-font-family") == std::string_view::npos) return 509;
+        if (css.find("--tq-bg") == std::string_view::npos) return 510;
+        if (css.find(".shell{display:grid;grid-template-columns:232px 1fr") == std::string_view::npos) return 511;
+        if (css.find(".sidebar") == std::string_view::npos) return 512;
+        if (css.find(".table-scroll") == std::string_view::npos) return 513;
+        if (html.find("data-theme=\"light\"") == std::string_view::npos) return 514;
+        if (html.find("<aside class=\"sidebar\">") == std::string_view::npos) return 515;
+        if (html.find("<main class=\"main\">") == std::string_view::npos) return 516;
         if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
         if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
