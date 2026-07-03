@@ -164,6 +164,8 @@ int main() {
         if (js.find("if (!consoleState.token && pageId !== 'login') return 'login';") == std::string_view::npos) return 525;
         if (js.find("const knownPage = authenticatedPage(pageId);") == std::string_view::npos) return 526;
         if (js.find("sessionStorage.removeItem('tcpquic.admin.page');") == std::string_view::npos) return 527;
+        if (js.find("const navPages = consoleState.token ? pageDefs[consoleState.role] : pageDefs[consoleState.role].filter(([id]) => id === 'login');") == std::string_view::npos) return 528;
+        if (js.find("renderNav();\n      showPage('login');") == std::string_view::npos) return 529;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
         if (js.find("api('/admin'") == std::string_view::npos) return 313;
         if (js.find("setInterval(refreshCurrentPage, 3000)") == std::string_view::npos) return 314;

@@ -709,7 +709,8 @@ static constexpr char kConsoleJsStorage[] =
 
     function renderNav() {
       nav.innerHTML = '';
-      pageDefs[consoleState.role].forEach(([id, icon, label, tone]) => {
+      const navPages = consoleState.token ? pageDefs[consoleState.role] : pageDefs[consoleState.role].filter(([id]) => id === 'login');
+      navPages.forEach(([id, icon, label, tone]) => {
         const button = document.createElement('button');
         button.dataset.page = id;
         button.innerHTML = `<span>${icon}</span><span>${label}</span><span class="dot ${tone}"></span>`;
@@ -783,6 +784,7 @@ static constexpr char kConsoleJsStorage[] =
       sessionStorage.removeItem('tcpquic_admin_token');
       sessionStorage.removeItem('tcpquic.admin.page');
       consoleState.token = '';
+      renderNav();
       showPage('login');
     }
 
