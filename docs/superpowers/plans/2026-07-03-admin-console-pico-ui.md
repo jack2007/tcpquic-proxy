@@ -12,17 +12,17 @@
 
 ## File Structure
 
-- Create: `third_party/pico/pico.min.css`  
+- Create: `third_party/pico/pico.min.css`
   Vendored Pico CSS v2.1.1 source CSS. This is the human-readable source artifact for future upgrades.
-- Create: `third_party/pico/LICENSE.md`  
+- Create: `third_party/pico/LICENSE.md`
   Pico MIT license copied from the v2.1.1 tag.
-- Create: `third_party/pico/VERSION`  
+- Create: `third_party/pico/VERSION`
   Contains `v2.1.1` and the upstream URLs used to fetch the files.
-- Create: `src/runtime/admin_console_pico_css.inc`  
+- Create: `src/runtime/admin_console_pico_css.inc`
   Generated C++ byte-array include produced from `third_party/pico/pico.min.css`. This file is included by `admin_console.cpp`, so the final binary does not read CSS from disk.
-- Modify: `src/runtime/admin_console.cpp`  
+- Modify: `src/runtime/admin_console.cpp`
   Combine Pico CSS with Admin Console overrides. Keep the existing embedded HTML and JS in this file.
-- Modify: `src/unittest/admin_http_test.cpp`  
+- Modify: `src/unittest/admin_http_test.cpp`
   Add assertions proving the embedded CSS includes Pico variables, keeps Admin Console layout classes, and the HTML stays on the chosen left/right layout.
 
 ## Task 1: Lock UI Contract With Failing Assertions
