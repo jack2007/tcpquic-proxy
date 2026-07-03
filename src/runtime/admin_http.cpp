@@ -1,10 +1,18 @@
+#if defined(TCPQUIC_WINDOWS_TARGET_WIN7)
+// cpp-httplib and several Win32 headers in this TU need >= Win8 APIs.
+#undef _WIN32_WINNT
+#undef NTDDI_VERSION
+#define _WIN32_WINNT 0x0A00
+#define NTDDI_VERSION 0x0A000000
+#endif
+
 #include "admin_http.h"
 
 #include "admin_auth.h"
 #include "admin_console.h"
 #include "platform_socket.h"
 
-#include "httplib.h"
+#include "admin_httplib.h"
 
 #include <algorithm>
 #include <cctype>

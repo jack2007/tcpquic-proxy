@@ -31,9 +31,20 @@ set(QUIC_BUILD_SHARED ${TCPQUIC_MSQUIC_SHARED} CACHE BOOL "Builds msquic as a dy
 
 # Windows: skip XDP-for-Windows datapath; use socket raw path only.
 if(WIN32)
+    option(TCPQUIC_WINDOWS_TARGET_WIN7 "Build for Windows 7 through 11 (subsystem 6.01, API 0x0601)" ON)
+else()
+    set(TCPQUIC_WINDOWS_TARGET_WIN7 OFF CACHE BOOL "Build for Windows 7 through 11" FORCE)
+endif()
+
+if(WIN32)
     option(TCPQUIC_MSQUIC_DISABLE_XDP "Build msquic without Windows XDP datapath" ON)
 else()
     set(TCPQUIC_MSQUIC_DISABLE_XDP OFF CACHE BOOL "Build msquic without Windows XDP datapath" FORCE)
+endif()
+
+if(WIN32 AND TCPQUIC_WINDOWS_TARGET_WIN7)
+    message(STATUS "Windows target: Win7+ (_WIN32_WINNT=0x0601); raypx2 subsystem 6.01")
+    add_compile_definitions(_WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000)
 endif()
 
 # Always use bundled quictls; never Schannel/system TLS.
