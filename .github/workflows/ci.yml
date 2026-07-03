@@ -142,11 +142,16 @@ jobs:
             -DZSTD_BUILD_SHARED=OFF
           cmake -LAH -N "${{ matrix.build-dir }}" | Select-String -Pattern "^(BUILD_SHARED_LIBS|TCPQUIC_MSQUIC_SHARED|QUIC_BUILD_SHARED|CARES_STATIC|CARES_SHARED|ZSTD_BUILD_STATIC|ZSTD_BUILD_SHARED):"
           cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel $env:NUMBER_OF_PROCESSORS
-          $raypx2 = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
-          if (!(Test-Path -LiteralPath $raypx2)) {
-            Write-Output "::error title=Windows binary missing::Expected Windows production binary was not produced: $raypx2"
-            throw "Expected Windows production binary was not produced: $raypx2"
+          $producedExecutables = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
+            Sort-Object FullName
+          Write-Host "Produced executables under ${{ matrix.build-dir }}:"
+          $producedExecutables | ForEach-Object { Write-Host ("  {0} ({1} bytes)" -f $_.FullName, $_.Length) }
+          $raypx2Matches = @($producedExecutables | Where-Object { $_.Name -ieq "raypx2.exe" })
+          if ($raypx2Matches.Count -ne 1) {
+            Write-Output "::error title=Windows binary missing::Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
+            throw "Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
           }
+          $raypx2 = $raypx2Matches[0].FullName
           $size = (Get-Item -LiteralPath $raypx2).Length
           Write-Host "raypx2.exe size: $size bytes"
           Write-Output "::notice title=Windows binary size::raypx2.exe size: $size bytes"
@@ -226,11 +231,12 @@ jobs:
           Write-Host "Produced executables under ${{ matrix.build-dir }}:"
           $producedExecutables | ForEach-Object { Write-Host ("  {0} ({1} bytes)" -f $_.FullName, $_.Length) }
 
-          $source = Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"
-          if (!(Test-Path -LiteralPath $source)) {
-            Write-Output "::error title=Windows artifact missing::Expected Windows production binary was not produced: $source"
-            throw "Expected Windows production binary was not produced: $source"
+          $raypx2Matches = @($producedExecutables | Where-Object { $_.Name -ieq "raypx2.exe" })
+          if ($raypx2Matches.Count -ne 1) {
+            Write-Output "::error title=Windows artifact missing::Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
+            throw "Expected exactly one raypx2.exe, found $($raypx2Matches.Count)"
           }
+          $source = $raypx2Matches[0].FullName
           $sourceSize = (Get-Item -LiteralPath $source).Length
           if ($sourceSize -lt 1048576) {
             Write-Output "::error title=Windows artifact too small::Refusing to upload unexpectedly small raypx2.exe ($sourceSize bytes)"
