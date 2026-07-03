@@ -112,7 +112,12 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     @media(max-width:940px){.shell{grid-template-columns:1fr}.sidebar{position:sticky;top:0;z-index:2}.nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav button{grid-template-columns:1fr;gap:4px;justify-items:start}.topbar{align-items:flex-start;flex-direction:column}.content{padding:14px}}
   )CSS";
 
-constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
+// Embedded admin HTML must stay split across multiple raw string literals.
+// MSVC rejects a single literal longer than ~16380 bytes (error C2026). Adjacent
+// literals concatenate at compile time into kConsoleHtmlStorage; do NOT merge
+// HTML_PART1/HTML_PART2 back into one R"HTML(...)HTML" block.
+static constexpr char kConsoleHtmlStorage[] =
+    R"HTML_PART1(<!doctype html>
 <html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8">
@@ -176,7 +181,8 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
           <div class="title-row"><div><h2>Tunnels - client</h2><p class="subtitle">只查询展示；只使用当前 /api/v1/tunnels 已返回字段，不展示 source。</p></div></div>
           <div class="card table-scroll"><table><thead><tr><th>tunnel_id</th><th>peer_id</th><th>connection_id</th><th>target</th><th>state</th><th>role</th><th>ingress</th><th>compress</th><th>created_at</th><th>duration_ms</th><th>tcp_read_bytes</th><th>tcp_write_bytes</th><th>pending_bytes</th><th>relay_backend</th><th>worker_index</th><th>last_error</th></tr></thead><tbody id="client-tunnels-rows"></tbody></table></div>
         </section>
-
+)HTML_PART1"
+    R"HTML_PART2(
         <section id="server-overview" class="page">
           <div class="title-row"><div><h2>Overview - server</h2><p class="subtitle">server 视角同样按 peer -> connection -> tunnel 展示；peer 是运行时聚合概念，不是可配置资源。</p></div></div>
           <div class="grid">
@@ -223,8 +229,12 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
   <script src="/console/app.js"></script>
 </body>
 </html>
-)HTML";
+)HTML_PART2";
 
+constexpr std::string_view kConsoleHtml(kConsoleHtmlStorage);
+
+// Same MSVC C2026 limit as kConsoleHtmlStorage above. Keep JS_PART1/2/3 separate;
+// do NOT collapse into one raw string literal.
 static constexpr char kConsoleJsStorage[] =
     R"JS_PART1(
     const pageDefs = {
