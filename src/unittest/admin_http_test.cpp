@@ -154,6 +154,10 @@ int main() {
         if (js.find("function statusClass(value)") == std::string_view::npos) return 517;
         if (js.find("function emptyRow(colspan, message)") == std::string_view::npos) return 518;
         if (js.find("No rows returned") == std::string_view::npos) return 519;
+        if (js.find("function renderRows(tbody, rows, columns, emptyColspan = columns.length)") == std::string_view::npos) return 520;
+        if (js.find("renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error'], 13);") == std::string_view::npos) return 521;
+        if (js.find("renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error'], 13);") == std::string_view::npos) return 522;
+        if (js.find("if (!tbody || rows.length === 0) return;") == std::string_view::npos) return 523;
         if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
         if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
@@ -164,7 +168,6 @@ int main() {
         if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
         if (js.find("catch (error) {\n        healthPill.innerHTML = '<span class=\"dot warn\"></span><strong>health</strong> degraded';\n        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;") == std::string_view::npos) return 318;
         if (js.find("button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));") == std::string_view::npos) return 319;
-        if (js.find("renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);\n      if (!tbody) return;") == std::string_view::npos) return 320;
         if (js.find("peerMode: 'create'") == std::string_view::npos) return 321;
         if (js.find("function beginCreatePeer()") == std::string_view::npos) return 322;
         if (js.find("document.getElementById('peer-create').onclick = beginCreatePeer;") == std::string_view::npos) return 323;

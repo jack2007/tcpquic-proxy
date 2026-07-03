@@ -332,10 +332,10 @@ static constexpr char kConsoleJsStorage[] =
       return escapeHtml(value);
     }
 
-    function renderRows(tbody, rows, columns) {
+    function renderRows(tbody, rows, columns, emptyColspan = columns.length) {
       if (!tbody) return;
       if (!rows.length) {
-        tbody.innerHTML = emptyRow(columns.length, 'No rows returned');
+        tbody.innerHTML = emptyRow(emptyColspan, 'No rows returned');
         return;
       }
       tbody.innerHTML = rows.map(row => `<tr>${columns.map(column => {
@@ -437,8 +437,8 @@ static constexpr char kConsoleJsStorage[] =
       const rows = data.peers || [];
       consoleState.clientPeers = rows;
       const tbody = document.getElementById('client-peers-rows');
-      renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error']);
-      if (!tbody) return;
+      renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error'], 13);
+      if (!tbody || rows.length === 0) return;
       tbody.querySelectorAll('tr').forEach((tr, index) => {
         const peerId = rows[index] && rows[index].peer_id ? rows[index].peer_id : '';
         const td = document.createElement('td');
@@ -459,8 +459,8 @@ static constexpr char kConsoleJsStorage[] =
     async function renderClientConnections() {
       const rows = await loadAllClientConnections();
       const tbody = document.getElementById('client-connections-rows');
-      renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error']);
-      if (!tbody) return;
+      renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error'], 13);
+      if (!tbody || rows.length === 0) return;
       tbody.querySelectorAll('tr').forEach((tr, index) => {
         const row = rows[index] || {};
         const td = document.createElement('td');
