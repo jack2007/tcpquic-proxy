@@ -3264,6 +3264,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     TqLinuxRelayWorkerSnapshot snapshot{};
+    snapshot.WorkerIndex = Config.WorkerIndex;
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
     snapshot.PendingEvents = EventQueue.SizeApprox();
@@ -3814,4 +3815,14 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
             snapshot.LastQuicSendStatus != 0 ? snapshot.LastQuicSendStatus : total.LastQuicSendStatus;
     }
     return total;
+}
+
+std::vector<TqLinuxRelayWorkerSnapshot> TqLinuxRelayRuntime::SnapshotWorkers() const {
+    std::lock_guard<std::mutex> guard(Lock);
+    std::vector<TqLinuxRelayWorkerSnapshot> snapshots;
+    snapshots.reserve(Workers.size());
+    for (const auto& worker : Workers) {
+        snapshots.push_back(worker->Snapshot());
+    }
+    return snapshots;
 }

@@ -1,6 +1,28 @@
 #include "trace.h"
 #include "msquic.hpp"
 
+bool g_trace_stub_enabled = false;
+bool g_diag_stats_stub_enabled = false;
+unsigned g_trace_init_count = 0;
+unsigned g_trace_shutdown_count = 0;
+unsigned g_diag_stats_init_count = 0;
+unsigned g_diag_stats_shutdown_count = 0;
+uint32_t g_trace_stub_interval_sec = 0;
+uint32_t g_diag_stats_stub_interval_sec = 0;
+TqConfig::TraceLevel g_trace_stub_level = TqConfig::TraceLevel::Info;
+
+void TqTraceProxyStubReset() {
+    g_trace_stub_enabled = false;
+    g_diag_stats_stub_enabled = false;
+    g_trace_init_count = 0;
+    g_trace_shutdown_count = 0;
+    g_diag_stats_init_count = 0;
+    g_diag_stats_shutdown_count = 0;
+    g_trace_stub_interval_sec = 0;
+    g_diag_stats_stub_interval_sec = 0;
+    g_trace_stub_level = TqConfig::TraceLevel::Info;
+}
+
 void TqTraceProxyAccepted(TqTraceProxyProto, TqSocketHandle) {
 }
 
@@ -16,19 +38,55 @@ void TqTraceProxyTunnelFail(TqTraceProxyProto, const char*, TqOpenError) {
 void TqTraceProxyClosed(TqTraceProxyProto, TqSocketHandle) {
 }
 
-bool TqTraceInit(TqMode, uint32_t, TqConfig::TraceLevel) { return true; }
+bool TqTraceInit(TqMode, uint32_t intervalSec, TqConfig::TraceLevel level) {
+    g_trace_stub_enabled = true;
+    g_trace_stub_interval_sec = intervalSec;
+    g_trace_stub_level = level;
+    ++g_trace_init_count;
+    return true;
+}
 
 void TqTraceShutdown() {
+    g_trace_stub_enabled = false;
+    ++g_trace_shutdown_count;
 }
 
-bool TqTraceEnabled() { return false; }
+bool TqTraceEnabled() { return g_trace_stub_enabled; }
 
-bool TqDiagStatsInit(uint32_t) { return true; }
+bool TqDiagStatsInit(uint32_t intervalSec) {
+    g_diag_stats_stub_enabled = true;
+    g_diag_stats_stub_interval_sec = intervalSec;
+    ++g_diag_stats_init_count;
+    return true;
+}
 
 void TqDiagStatsShutdown() {
+    g_diag_stats_stub_enabled = false;
+    ++g_diag_stats_shutdown_count;
 }
 
-bool TqDiagStatsEnabled() { return false; }
+bool TqDiagStatsEnabled() { return g_diag_stats_stub_enabled; }
+
+bool TqApplyDiagnosticsRuntime(const TqConfig& cfg) {
+    if (cfg.Trace) {
+        if (TqTraceEnabled()) {
+            TqTraceShutdown();
+        }
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec, cfg.TraceLogLevel)) {
+            return false;
+        }
+    } else if (TqTraceEnabled()) {
+        TqTraceShutdown();
+    }
+    if (cfg.DiagStats) {
+        if (!TqDiagStatsInit(cfg.DiagStatsIntervalSec)) {
+            return false;
+        }
+    } else if (TqDiagStatsEnabled()) {
+        TqDiagStatsShutdown();
+    }
+    return true;
+}
 
 std::string TqTraceGlobalSnapshot() { return {}; }
 

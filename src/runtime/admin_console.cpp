@@ -68,6 +68,7 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     .metric{display:grid;gap:6px}.metric .label{color:var(--tq-muted);font-size:12px}.metric .value{font-size:24px;line-height:1.1;font-weight:720;color:var(--tq-text)}.metric .note{color:var(--tq-muted);font-size:12px}
     .toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
     input,select,textarea{width:100%;border-color:var(--tq-line);background:#fff;color:var(--tq-text);margin:0}
+    input[type="checkbox"]{width:auto;margin:0}
     textarea{min-height:236px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.5}
     .table-scroll{overflow:auto;background:var(--tq-panel)}
     table{width:100%;border-collapse:collapse;font-size:12px;margin:0}
@@ -82,12 +83,32 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:12px;align-items:start}
     .drawer{background:var(--tq-panel-soft);border:1px solid var(--tq-line);border-radius:8px;padding:14px;display:grid;gap:12px;min-width:0}
     .form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{display:grid;gap:4px}.field.full{grid-column:1/-1}.field label{color:var(--tq-muted);font-size:12px}
+    .diagnostics-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:stretch}
+    .diagnostics-control-card{display:grid;grid-template-rows:auto auto 1fr auto}
+    .diagnostics-control-form{display:grid;gap:11px;align-content:start}
+    .diagnostics-switch-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:32px}
+    .diagnostics-switch-text{display:grid;gap:2px}.diagnostics-switch-text strong{font-size:13px}.diagnostics-switch-text span{color:var(--tq-muted);font-size:12px}
+    .diagnostics-toggle{position:relative;display:inline-flex;align-items:center;width:44px;height:24px;flex:0 0 auto}
+    .diagnostics-toggle input{position:absolute;inset:0;opacity:0;cursor:pointer}
+    .diagnostics-toggle span{width:44px;height:24px;border:1px solid var(--tq-line-strong);border-radius:999px;background:#e8eef4;transition:background .15s,border-color .15s}
+    .diagnostics-toggle span::before{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(16,24,40,.18);transition:transform .15s}
+    .diagnostics-toggle input:checked + span{background:var(--tq-blue);border-color:var(--tq-blue)}
+    .diagnostics-toggle input:checked + span::before{transform:translateX(20px)}
+    .diagnostics-save-row{display:flex;gap:8px;justify-content:stretch;border-top:1px solid var(--tq-line);padding-top:12px;margin-top:2px}
+    .diagnostics-save-row .btn.primary{width:100%;min-width:132px}
+    .diagnostics-allocator-column{display:grid;grid-template-rows:auto 1fr;gap:12px;align-items:stretch}
+    .diagnostics-allocator-column .confirm{background:var(--tq-panel-soft);border-color:var(--tq-line);color:var(--tq-text)}
+    .allocator-result-card{display:grid}
+    .allocator-result-panel{background:var(--tq-panel);border:1px solid var(--tq-line);border-radius:8px;padding:12px;display:grid;gap:6px;font-size:12px;color:var(--tq-muted);align-content:start}
+    .allocator-result-panel strong{color:var(--tq-text);font-size:13px}
+    .allocator-metric-row{display:grid;grid-template-columns:1fr auto;gap:8px;border-top:1px solid var(--tq-line);padding-top:8px}
     .steps{display:grid;gap:8px;margin:0;padding:0;list-style:none}.steps li{display:grid;grid-template-columns:28px 1fr;gap:8px;align-items:start;font-size:13px;color:var(--tq-ink);line-height:1.4}
     .num{display:inline-flex;width:22px;height:22px;align-items:center;justify-content:center;border-radius:50%;background:#e8eef4;font-size:12px;font-weight:700}
     .callout{border:1px solid #f1cc8f;background:#fff8eb;color:#7c3d00;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.45}
     .confirm{border:1px solid #f0b4ad;background:#fff7f6;border-radius:8px;padding:12px;display:grid;gap:8px;font-size:13px;line-height:1.45}
-    .json-preview{background:#111820;color:#d8e5ed;border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:280px}
+    .json-preview{background:#f8fafb;color:var(--tq-text);border:1px solid var(--tq-line);border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:280px}
     @media(max-width:1180px){.split{grid-template-columns:1fr}.span-3,.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}}
+    @media(max-width:720px){.diagnostics-layout{grid-template-columns:1fr}.diagnostics-allocator-column{grid-template-rows:auto auto}}
     @media(max-width:940px){.shell{grid-template-columns:1fr}.sidebar{position:sticky;top:0;z-index:2}.nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav button{grid-template-columns:1fr;gap:4px;justify-items:start}.topbar{align-items:flex-start;flex-direction:column}.content{padding:14px}}
   )CSS";
 
@@ -193,9 +214,9 @@ constexpr std::string_view kConsoleHtml = R"HTML(<!doctype html>
           </div>
         </section>
 
-        <section id="relay" class="page"><div class="title-row"><div><h2>Relay</h2><p class="subtitle">client/server 共享页面，展示 relay backend、worker 聚合、pending bytes 和平台能力边界。</p></div></div><div class="grid"><div class="card span-3 metric"><span class="label">Backend</span><span class="value" id="relay-backend" style="font-size:20px">-</span><span class="note">platform-specific</span></div><div class="card span-3 metric"><span class="label">Active relays</span><span class="value" id="relay-active">-</span><span class="note">workers aggregate</span></div><div class="card span-3 metric"><span class="label">Pending bytes</span><span class="value" id="relay-pending">-</span><span class="note">aggregate</span></div><div class="card span-3 metric"><span class="label">Errors</span><span class="value" id="relay-errors">-</span><span class="note">last refresh</span></div></div></section>
-        <section id="config" class="page"><div class="title-row"><div><h2>Config</h2><p class="subtitle">client 可编辑 router config；server 首版只读展示 runtime/server config 和 ACL 配置。</p></div><button class="btn primary" id="config-save">Save config</button></div><div class="split"><div class="card"><textarea id="config-json">{}</textarea></div><aside class="drawer"><h3>提交规则</h3><ul class="steps"><li><span class="num">1</span><span>client 支持 JSON validate/submit。</span></li><li><span class="num">2</span><span>server 配置首版只读，不提供编辑按钮。</span></li></ul></aside></div></section>
-        <section id="diagnostics" class="page"><div class="title-row"><div><h2>Diagnostics</h2><p class="subtitle">client/server 共享页面，展示诊断状态和 allocator dump。</p></div></div><div class="grid"><div class="card span-6"><h3>状态</h3><pre class="json-preview" id="diagnostics-json">{}</pre></div><div class="card span-6"><div class="confirm"><strong>Allocator dump</strong><span>显式确认后调用 /api/v1/memory/allocator:dump。</span><button class="btn danger" id="allocator-dump">Run allocator dump</button></div><pre class="json-preview" id="allocator-json">{}</pre></div></div></section>
+        <section id="relay" class="page"><div class="title-row"><div><h2>Relay</h2><p class="subtitle">client/server 共享页面，展示 relay backend、worker 聚合、pending bytes 和平台能力边界。</p></div></div><div class="grid"><div class="card span-3 metric"><span class="label">Backend</span><span class="value" id="relay-backend" style="font-size:20px">-</span><span class="note">platform-specific</span></div><div class="card span-3 metric"><span class="label">Active relays</span><span class="value" id="relay-active">-</span><span class="note">workers aggregate</span></div><div class="card span-3 metric"><span class="label">Pending bytes</span><span class="value" id="relay-pending">-</span><span class="note">aggregate</span></div><div class="card span-3 metric"><span class="label">Errors</span><span class="value" id="relay-errors">-</span><span class="note">last refresh</span></div><div class="card span-4"><h3>Capabilities</h3><pre class="json-preview" id="relay-capabilities-json">{}</pre></div><div class="card span-8 table-scroll"><h3>Workers</h3><table><thead><tr><th>worker_id</th><th>backend</th><th>worker_index</th><th>active_relays</th><th>pending_bytes</th><th>tcp_read_bytes</th><th>tcp_write_bytes</th><th>errors</th></tr></thead><tbody id="relay-workers-rows"></tbody></table></div></div></section>
+        <section id="config" class="page"><div class="title-row"><div><h2>Config</h2><p class="subtitle">client 可编辑 router config；runtime patch 仅支持安全字段，启动级配置需要重启。</p></div><div class="actions"><button class="btn" id="runtime-config-save">Patch runtime</button><button class="btn primary" id="config-save">Save config</button></div></div><div class="split"><div class="card"><textarea id="config-json">{}</textarea></div><aside class="drawer"><h3>提交规则</h3><ul class="steps"><li><span class="num">1</span><span>client 支持 router JSON validate/submit。</span></li><li><span class="num">2</span><span>runtime patch 只提交 compression/tuning 安全字段。</span></li></ul></aside></div></section>
+        <section id="diagnostics" class="page"><div class="title-row"><div><h2>Diagnostics</h2><p class="subtitle">client/server 共享页面，更新 trace、diag-stats；allocator dump 作为独立运维动作。</p></div></div><div class="diagnostics-layout"><div class="card diagnostics-control-card"><h3>诊断控制</h3><p class="subtitle">表单值就是当前 diagnostics 配置；保存后直接刷新控件状态。</p><div class="diagnostics-control-form"><div class="diagnostics-switch-row"><div class="diagnostics-switch-text"><strong>trace</strong><span>写入 trace log</span></div><label class="diagnostics-toggle" aria-label="trace"><input id="diagnostics-trace" type="checkbox"><span></span></label></div><div class="field"><label>trace_interval_sec</label><input id="diagnostics-trace-interval" type="number" min="1" max="86400"></div><div class="field"><label>trace_level</label><select id="diagnostics-trace-level"><option value="info">info</option><option value="debug">debug</option></select></div><div class="diagnostics-switch-row"><div class="diagnostics-switch-text"><strong>diag_stats</strong><span>stderr 周期统计</span></div><label class="diagnostics-toggle" aria-label="diag_stats"><input id="diagnostics-diag-stats" type="checkbox"><span></span></label></div><div class="field"><label>diag_stats_interval_sec</label><input id="diagnostics-diag-interval" type="number" min="1" max="86400"></div></div><div class="diagnostics-save-row"><button class="btn primary" id="diagnostics-save">Save diagnostics</button></div></div><div class="diagnostics-allocator-column"><div class="card"><h3>Allocator dump</h3><div class="confirm"><strong>显式触发</strong><span>将 allocator 统计写到日志，并刷新下方结果摘要。</span><button class="btn danger" id="allocator-dump">Run allocator dump</button></div></div><div class="card allocator-result-card"><h3>Allocator 结果</h3><div class="allocator-result-panel" id="allocator-json"><strong>等待 allocator dump</strong><span>点击 Run allocator dump 后显示结果摘要。</span></div></div></div></div></section>
       </section>
     </main>
   </div>
@@ -626,13 +647,22 @@ static constexpr char kConsoleJsStorage[] =
       );
     }
 
+    function renderRelayCapabilities(capabilities) {
+      setElementJson('relay-capabilities-json', capabilities || {});
+    }
+
     async function renderRelay() {
       try {
-        const data = await api('/relay/metrics');
+        const [data, workers] = await Promise.all([
+          api('/relay/metrics'),
+          api('/relay/workers')
+        ]);
         setElementText('relay-backend', platformRelayBackend(data));
         setElementText('relay-active', firstDefined(data.active_relays, data.active, data.active_count));
         setElementText('relay-pending', firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
         setElementText('relay-errors', firstDefined(data.errors, data.error_count, data.last_error));
+        renderRelayCapabilities(workers.capabilities || {});
+        renderRows(document.getElementById('relay-workers-rows'), workers.workers || [], ['worker_id','backend','worker_index','active_relays','pending_bytes','tcp_read_bytes','tcp_write_bytes','errors'], 8);
       } catch (error) {
         renderPanelError('relay-errors', error);
         throw error;
@@ -654,6 +684,13 @@ static constexpr char kConsoleJsStorage[] =
       }
     }
 
+    async function saveRuntimeConfig() {
+      const editor = document.getElementById('config-json');
+      const payload = JSON.parse(editor ? editor.value : '{}');
+      await api('/runtime/config', { method: 'PATCH', body: payload });
+      await renderConfig();
+    }
+
     async function saveConfig() {
       const editor = document.getElementById('config-json');
       const payload = JSON.parse(editor ? editor.value : '{}');
@@ -662,19 +699,63 @@ static constexpr char kConsoleJsStorage[] =
     }
 
     async function renderDiagnostics() {
-      try {
-        const data = await api('/diagnostics');
-        setElementJson('diagnostics-json', data);
-      } catch (error) {
-        renderPanelError('diagnostics-json', error);
-        throw error;
-      }
+      const data = await api('/diagnostics');
+      const trace = document.getElementById('diagnostics-trace');
+      const traceInterval = document.getElementById('diagnostics-trace-interval');
+      const traceLevel = document.getElementById('diagnostics-trace-level');
+      const diagStats = document.getElementById('diagnostics-diag-stats');
+      const diagInterval = document.getElementById('diagnostics-diag-interval');
+      if (trace) trace.checked = !!data.trace;
+      if (traceInterval) traceInterval.value = text(data.trace_interval_sec || 30);
+      if (traceLevel) traceLevel.value = text(data.trace_level || 'info');
+      if (diagStats) diagStats.checked = !!data.diag_stats;
+      if (diagInterval) diagInterval.value = text(data.diag_stats_interval_sec || 5);
+    }
+
+    async function saveDiagnostics() {
+      const payload = {
+        trace: !!document.getElementById('diagnostics-trace').checked,
+        trace_interval_sec: Number(document.getElementById('diagnostics-trace-interval').value || 30),
+        trace_level: document.getElementById('diagnostics-trace-level').value || 'info',
+        diag_stats: !!document.getElementById('diagnostics-diag-stats').checked,
+        diag_stats_interval_sec: Number(document.getElementById('diagnostics-diag-interval').value || 5)
+      };
+      await api('/diagnostics', { method: 'PATCH', body: payload });
+      await renderDiagnostics();
+    }
+
+    function renderAllocatorResult(data) {
+      const element = document.getElementById('allocator-json');
+      if (!element) return;
+      const source = data && typeof data === 'object' ? data : {};
+      const hasValue = value => value !== undefined && value !== null && value !== '';
+      const rows = [];
+      const addRow = (label, value) => {
+        if (!hasValue(value)) return;
+        rows.push(`<div class="allocator-metric-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`);
+      };
+      const metricFields = [
+        ['bytes', 'bytes'],
+        ['total_bytes', 'total_bytes'],
+        ['active_bytes', 'active_bytes'],
+        ['allocated_bytes', 'allocated_bytes']
+      ];
+      addRow('status', source.status);
+      addRow('allocator', source.allocator);
+      addRow('message', source.message);
+      metricFields.forEach(([label, key]) => addRow(label, source[key]));
+      const summaryTitle = hasValue(source.status) ? source.status : 'dump requested';
+      const summaryText = hasValue(source.message)
+        ? source.message
+        : (hasValue(source.allocator) ? `Allocator: ${text(source.allocator)}` : 'Allocator dump request completed.');
+      const summary = `<strong>${escapeHtml(summaryTitle)}</strong><span>${escapeHtml(summaryText)}</span>`;
+      element.innerHTML = rows.length ? `${summary}${rows.join('')}` : '<strong>dump requested</strong><span>Allocator dump request completed.</span>';
     }
 
     async function runAllocatorDump() {
       try {
         const data = await api('/memory/allocator:dump', { method: 'POST' });
-        setElementJson('allocator-json', data);
+        renderAllocatorResult(data);
       } catch (error) {
         renderPanelError('allocator-json', error);
         throw error;
@@ -801,6 +882,10 @@ static constexpr char kConsoleJsStorage[] =
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
       const configSave = document.getElementById('config-save');
       if (configSave) configSave.onclick = () => runClientAction(saveConfig);
+      const runtimeConfigSave = document.getElementById('runtime-config-save');
+      if (runtimeConfigSave) runtimeConfigSave.onclick = () => runClientAction(saveRuntimeConfig);
+      const diagnosticsSave = document.getElementById('diagnostics-save');
+      if (diagnosticsSave) diagnosticsSave.onclick = () => runClientAction(saveDiagnostics);
       const allocatorDump = document.getElementById('allocator-dump');
       if (allocatorDump) allocatorDump.onclick = () => runClientAction(runAllocatorDump);
       document.getElementById('peer-delete').onclick = () => {

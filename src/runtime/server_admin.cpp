@@ -5,6 +5,7 @@
 #include "quic_session.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
+#include "trace.h"
 
 #include <algorithm>
 #include <mutex>
@@ -46,19 +47,6 @@ std::string RelayMetricsJson() {
     out << ",\"errors\":" << metrics.Errors;
     TqAppendRelayMetricsJson(out, metrics);
     out << '}';
-    return out.str();
-}
-
-std::string RelayWorkersJson() {
-    const auto metrics = TqSnapshotRelayMetrics();
-    std::ostringstream out;
-    out << "{\"workers\":[{\"worker_id\":\"aggregate\",";
-    TqAppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
-    out << "}]}";
     return out.str();
 }
 
@@ -224,8 +212,32 @@ std::string TqHandleServerAdmin(
         }
         return TqJsonResponse(200, TqServerRuntimeConfigJson(runtimeConfig, resolved, false));
     }
+    if (req.Method == "PATCH" && req.Path == "/runtime/config") {
+        TqConfig patchedConfig = runtimeConfig;
+        std::string err;
+        bool unsupported = false;
+        if (!TqApplyRuntimeConfigPatch(req.Body, patchedConfig, err, unsupported)) {
+            return TqJsonResponse(
+                unsupported ? 503 : 400,
+                unsupported ? TqStructuredErrorJson("not_supported", err) : ErrorJson(err));
+        }
+        return TqJsonResponse(200, TqRuntimeConfigJson(patchedConfig, false));
+    }
     if (req.Method == "GET" && req.Path == "/diagnostics") {
         return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
+    }
+    if (req.Method == "PATCH" && req.Path == "/diagnostics") {
+        TqConfig patchedConfig = runtimeConfig;
+        std::string err;
+        if (!TqApplyDiagnosticsPatch(req.Body, patchedConfig, err)) {
+            return TqJsonResponse(400, ErrorJson(err));
+        }
+        if (!TqApplyDiagnosticsRuntime(patchedConfig)) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson("not_supported", "failed to apply diagnostics runtime state"));
+        }
+        return TqJsonResponse(200, TqDiagnosticsJson(patchedConfig));
     }
     if (req.Method == "GET" && req.Path == "/relay/metrics") {
         return TqJsonResponse(200, RelayMetricsJson());
@@ -253,7 +265,7 @@ std::string TqHandleServerAdmin(
         return TqJsonResponse(200, body);
     }
     if (req.Method == "GET" && req.Path == "/relay/workers") {
-        return TqJsonResponse(200, RelayWorkersJson());
+        return TqJsonResponse(200, TqRelayWorkersJson());
     }
     if (req.Method == "GET" && req.Path.compare(0, 15, "/relay/workers/") == 0) {
         const std::string encodedWorkerId = req.Path.substr(15);

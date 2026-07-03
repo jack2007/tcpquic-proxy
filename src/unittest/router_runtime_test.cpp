@@ -10,8 +10,80 @@
 #include <thread>
 #include <vector>
 
+bool g_router_trace_enabled = false;
+bool g_router_diag_stats_enabled = false;
+unsigned g_router_trace_init_count = 0;
+unsigned g_router_trace_shutdown_count = 0;
+unsigned g_router_diag_stats_init_count = 0;
+unsigned g_router_diag_stats_shutdown_count = 0;
+uint32_t g_router_trace_interval_sec = 0;
+uint32_t g_router_diag_stats_interval_sec = 0;
+TqConfig::TraceLevel g_router_trace_level = TqConfig::TraceLevel::Info;
+
+void ResetTraceRuntimeStub() {
+    g_router_trace_enabled = false;
+    g_router_diag_stats_enabled = false;
+    g_router_trace_init_count = 0;
+    g_router_trace_shutdown_count = 0;
+    g_router_diag_stats_init_count = 0;
+    g_router_diag_stats_shutdown_count = 0;
+    g_router_trace_interval_sec = 0;
+    g_router_diag_stats_interval_sec = 0;
+    g_router_trace_level = TqConfig::TraceLevel::Info;
+}
+
+bool TqTraceInit(TqMode, uint32_t intervalSec, TqConfig::TraceLevel level) {
+    g_router_trace_enabled = true;
+    g_router_trace_interval_sec = intervalSec;
+    g_router_trace_level = level;
+    ++g_router_trace_init_count;
+    return true;
+}
+
+void TqTraceShutdown() {
+    g_router_trace_enabled = false;
+    ++g_router_trace_shutdown_count;
+}
+
 bool TqTraceEnabled() {
-    return false;
+    return g_router_trace_enabled;
+}
+
+bool TqDiagStatsInit(uint32_t intervalSec) {
+    g_router_diag_stats_enabled = true;
+    g_router_diag_stats_interval_sec = intervalSec;
+    ++g_router_diag_stats_init_count;
+    return true;
+}
+
+void TqDiagStatsShutdown() {
+    g_router_diag_stats_enabled = false;
+    ++g_router_diag_stats_shutdown_count;
+}
+
+bool TqDiagStatsEnabled() {
+    return g_router_diag_stats_enabled;
+}
+
+bool TqApplyDiagnosticsRuntime(const TqConfig& cfg) {
+    if (cfg.Trace) {
+        if (TqTraceEnabled()) {
+            TqTraceShutdown();
+        }
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec, cfg.TraceLogLevel)) {
+            return false;
+        }
+    } else if (TqTraceEnabled()) {
+        TqTraceShutdown();
+    }
+    if (cfg.DiagStats) {
+        if (!TqDiagStatsInit(cfg.DiagStatsIntervalSec)) {
+            return false;
+        }
+    } else if (TqDiagStatsEnabled()) {
+        TqDiagStatsShutdown();
+    }
+    return true;
 }
 
 std::atomic<unsigned> g_adminTunnelAbortCalls{0};
@@ -334,9 +406,30 @@ int main() {
     {
         TqConfig cfg;
         cfg.Router.ProxyAuth.push_back({"alice", "raw-proxy-password"});
+        cfg.SocksListen = "127.0.0.1:11080";
+        cfg.HttpListen = "127.0.0.1:18080";
+        cfg.QuicPeer = "127.0.0.1:14444";
+        cfg.QuicConnections = 3;
+        cfg.QuicConnectionStreamCount = 2048;
+        cfg.QuicKeepAliveIntervalMs = 7000;
+        cfg.SpeedTestMode = TqSpeedTestMode::Download;
+        cfg.SpeedTestDurationSec = 11;
+        cfg.HandshakeThreads = 6;
+        cfg.Compress = "zstd";
+        cfg.CompressLevel = 3;
         const std::string json = TqClientPublicConfigJson(cfg);
         if (json.find("\"password\":\"***\"") == std::string::npos) return 939;
         if (json.find("raw-proxy-password") != std::string::npos) return 952;
+        if (json.find("\"socks_listen\":\"127.0.0.1:11080\"") == std::string::npos) return 990;
+        if (json.find("\"http_listen\":\"127.0.0.1:18080\"") == std::string::npos) return 991;
+        if (json.find("\"proto\":{") == std::string::npos) return 992;
+        if (json.find("\"peer\":\"127.0.0.1:14444\"") == std::string::npos) return 993;
+        if (json.find("\"connections\":3") == std::string::npos) return 994;
+        if (json.find("\"connection_stream_count\":2048") == std::string::npos) return 995;
+        if (json.find("\"keep_alive_interval_ms\":7000") == std::string::npos) return 996;
+        if (json.find("\"speed_test\":{\"mode\":\"download\",\"duration_sec\":11}") == std::string::npos) return 997;
+        if (json.find("\"handshake_threads\":6") == std::string::npos) return 998;
+        if (json.find("\"compression\":{\"mode\":\"zstd\",\"level\":3}") == std::string::npos) return 999;
     }
     {
         TqConfig cfg;
@@ -360,11 +453,13 @@ int main() {
         TqConfig cfg;
         cfg.Trace = true;
         cfg.TraceIntervalSec = 7;
+        cfg.TraceLogLevel = TqConfig::TraceLevel::Debug;
         cfg.DiagStats = true;
         cfg.DiagStatsIntervalSec = 9;
         const std::string json = TqDiagnosticsJson(cfg);
         if (json.find("\"trace\":true") == std::string::npos) return 958;
         if (json.find("\"trace_interval_sec\":7") == std::string::npos) return 959;
+        if (json.find("\"trace_level\":\"debug\"") == std::string::npos) return 960;
         if (json.find("\"diag_stats\":true") == std::string::npos) return 981;
         if (json.find("\"diag_stats_interval_sec\":9") == std::string::npos) return 982;
     }
@@ -384,18 +479,82 @@ int main() {
         if (runtimeConfig.find("HTTP/1.1 200") == std::string::npos) return 983;
         if (runtimeConfig.find("\"proto_peer\":\"127.0.0.1:14460\"") == std::string::npos) return 984;
 
+        std::string patchRuntime = runtime.HandleAdmin(Request(
+            "PATCH",
+            "/runtime/config",
+            "{\"compression\":{\"mode\":\"zstd\",\"level\":2},\"tuning\":{\"max_memory_mb\":512}}"));
+        if (patchRuntime.find("HTTP/1.1 200 OK") == std::string::npos) return 9916;
+        if (patchRuntime.find("\"compress\":\"zstd\"") == std::string::npos) return 9917;
+        if (patchRuntime.find("\"compress_level\":2") == std::string::npos) return 9918;
+        if (patchRuntime.find("\"max_memory_mb\":512") == std::string::npos) return 9919;
+
+        std::string unsupportedRuntime = runtime.HandleAdmin(Request("PATCH", "/runtime/config", "{\"admin\":{\"listen\":\"127.0.0.1:18082\"}}"));
+        if (unsupportedRuntime.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 9920;
+        if (unsupportedRuntime.find("\"code\":\"not_supported\"") == std::string::npos) return 9921;
+        if (unsupportedRuntime.find("admin.listen") == std::string::npos) return 9922;
+
+        std::string invalidRuntime = runtime.HandleAdmin(Request("PATCH", "/runtime/config", "{\"compression\":{\"level\":0}}"));
+        if (invalidRuntime.find("HTTP/1.1 400") == std::string::npos) return 9923;
+        std::string afterInvalidRuntime = runtime.HandleAdmin(Request("GET", "/runtime/config", ""));
+        if (afterInvalidRuntime.find("\"compress\":\"zstd\"") == std::string::npos) return 9924;
+        if (afterInvalidRuntime.find("\"compress_level\":2") == std::string::npos) return 9925;
+
         std::string clientConfig = runtime.HandleAdmin(Request("GET", "/client/config", ""));
         if (clientConfig.find("\"peers\"") == std::string::npos) return 985;
+        if (clientConfig.find("\"connection_stream_count\"") == std::string::npos) return 9901;
+        if (clientConfig.find("\"keep_alive_interval_ms\"") == std::string::npos) return 9902;
+        if (clientConfig.find("\"handshake_threads\"") == std::string::npos) return 9903;
+        if (clientConfig.find("\"speed_test\"") == std::string::npos) return 9904;
 
         std::string peerConfig = runtime.HandleAdmin(Request("GET", "/peers/agent-public/config", ""));
         if (peerConfig.find("HTTP/1.1 200") == std::string::npos) return 986;
         if (peerConfig.find("\"id\":\"agent-public\"") == std::string::npos) return 987;
+        if (peerConfig.find("\"proxy_auth\"") != std::string::npos) return 9905;
 
         std::string missingPeerConfig = runtime.HandleAdmin(Request("GET", "/peers/missing/config", ""));
         if (missingPeerConfig.find("HTTP/1.1 404") == std::string::npos) return 989;
 
         std::string diag = runtime.HandleAdmin(Request("GET", "/diagnostics", ""));
         if (diag.find("\"diag_stats\"") == std::string::npos) return 988;
+
+        ResetTraceRuntimeStub();
+        std::string patchDiag = runtime.HandleAdmin(Request(
+            "PATCH",
+            "/diagnostics",
+            "{\"trace\":false,\"trace_interval_sec\":31,\"trace_level\":\"debug\",\"diag_stats\":true,\"diag_stats_interval_sec\":6}"));
+        if (patchDiag.find("HTTP/1.1 200 OK") == std::string::npos) return 9906;
+        if (patchDiag.find("\"trace\":false") == std::string::npos) return 9907;
+        if (patchDiag.find("\"trace_interval_sec\":31") == std::string::npos) return 9908;
+        if (patchDiag.find("\"trace_level\":\"debug\"") == std::string::npos) return 9909;
+        if (patchDiag.find("\"diag_stats\":true") == std::string::npos) return 9910;
+        if (patchDiag.find("\"diag_stats_interval_sec\":6") == std::string::npos) return 9911;
+        if (!g_router_diag_stats_enabled) return 9916;
+        if (g_router_diag_stats_init_count != 1) return 9917;
+        if (g_router_diag_stats_interval_sec != 6) return 9918;
+        if (g_router_trace_init_count != 0) return 9919;
+
+        std::string patchTrace = runtime.HandleAdmin(Request(
+            "PATCH",
+            "/diagnostics",
+            "{\"trace\":true,\"trace_interval_sec\":11,\"trace_level\":\"info\",\"diag_stats\":false}"));
+        if (patchTrace.find("HTTP/1.1 200 OK") == std::string::npos) return 9920;
+        if (!g_router_trace_enabled) return 9921;
+        if (g_router_trace_init_count != 1) return 9922;
+        if (g_router_trace_interval_sec != 11) return 9923;
+        if (g_router_trace_level != TqConfig::TraceLevel::Info) return 9924;
+        if (g_router_diag_stats_enabled) return 9925;
+        if (g_router_diag_stats_shutdown_count != 1) return 9926;
+
+        std::string invalidDiag = runtime.HandleAdmin(Request("PATCH", "/diagnostics", "{\"trace_interval_sec\":0}"));
+        if (invalidDiag.find("HTTP/1.1 400") == std::string::npos) return 9912;
+        std::string afterInvalidDiag = runtime.HandleAdmin(Request("GET", "/diagnostics", ""));
+        if (afterInvalidDiag.find("\"trace_interval_sec\":11") == std::string::npos) return 9913;
+
+        std::string invalidLevel = runtime.HandleAdmin(Request("PATCH", "/diagnostics", "{\"trace_level\":\"verbose\"}"));
+        if (invalidLevel.find("HTTP/1.1 400") == std::string::npos) return 9914;
+
+        std::string unknownDiag = runtime.HandleAdmin(Request("PATCH", "/diagnostics", "{\"unknown\":true}"));
+        if (unknownDiag.find("HTTP/1.1 400") == std::string::npos) return 9915;
     }
     {
         FakeAdapter adapter;
@@ -776,6 +935,38 @@ int main() {
     {
         FakeAdapter adapter;
         TqRouterRuntime adminRuntime(&adapter);
+        TqHttpRequest create = Request("POST", "/peers", "{\"id\":\"agent-alias\",\"proto_peer\":\"127.0.0.1:14470\",\"socks_listen\":\"127.0.0.1:11070\",\"proto_connections\":2,\"compress\":\"auto\",\"enabled\":true}");
+        std::string createResp = adminRuntime.HandleAdmin(create);
+        if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 333;
+        if (adapter.Started.size() != 1 || adapter.LastStartedPeer.PeerId != "agent-alias") return 334;
+        if (adapter.LastStartedPeer.QuicPeer != "127.0.0.1:14470") return 335;
+        if (adapter.LastStartedPeer.QuicConnections != 2) return 336;
+
+        TqHttpRequest replace = Request("PUT", "/peers/agent-alias", "{\"id\":\"agent-alias\",\"proto_peer\":\"127.0.0.1:14471\",\"socks_listen\":\"127.0.0.1:11071\",\"proto_connections\":3,\"compress\":\"zstd\",\"enabled\":true}");
+        std::string replaceResp = adminRuntime.HandleAdmin(replace);
+        if (replaceResp.find("HTTP/1.1 200 OK") == std::string::npos) return 337;
+        if (adapter.LastStartedPeer.QuicPeer != "127.0.0.1:14471") return 338;
+        if (adapter.LastStartedPeer.QuicConnections != 3) return 339;
+
+        TqHttpRequest patch = Request("PATCH", "/peers/agent-alias", "{\"proto_peer\":\"127.0.0.1:14472\",\"proto_connections\":4}");
+        std::string patchResp = adminRuntime.HandleAdmin(patch);
+        if (patchResp.find("HTTP/1.1 200 OK") == std::string::npos) return 340;
+        if (adapter.LastStartedPeer.QuicPeer != "127.0.0.1:14472") return 341;
+        if (adapter.LastStartedPeer.QuicConnections != 4) return 342;
+
+        TqHttpRequest conflictCreate = Request("POST", "/peers", "{\"peer_id\":\"agent-conflict\",\"id\":\"agent-conflict\",\"quic_peer\":\"127.0.0.1:14473\",\"socks_listen\":\"127.0.0.1:11073\"}");
+        std::string conflictCreateResp = adminRuntime.HandleAdmin(conflictCreate);
+        if (conflictCreateResp.find("HTTP/1.1 400") == std::string::npos) return 343;
+        if (conflictCreateResp.find("conflicting peer field aliases") == std::string::npos) return 344;
+
+        TqHttpRequest conflictPatch = Request("PATCH", "/peers/agent-alias", "{\"quic_connections\":5,\"proto_connections\":5}");
+        std::string conflictPatchResp = adminRuntime.HandleAdmin(conflictPatch);
+        if (conflictPatchResp.find("HTTP/1.1 400") == std::string::npos) return 345;
+        if (conflictPatchResp.find("conflicting peer field aliases") == std::string::npos) return 346;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adminRuntime(&adapter);
         const std::string createBody =
             "{\"peer_id\":\"agent-path-admin\","
             "\"quic_peer\":\"127.0.0.1:14461\","
@@ -1010,6 +1201,10 @@ int main() {
         std::string relayWorkersResp = adminRuntime.HandleAdmin(relayWorkers);
         if (relayWorkersResp.find("HTTP/1.1 200 OK") == std::string::npos) return 314;
         if (relayWorkersResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 315;
+        if (relayWorkersResp.find("\"capabilities\":{") == std::string::npos) return 347;
+        if (relayWorkersResp.find("\"worker_detail\":true") == std::string::npos) return 348;
+        if (relayWorkersResp.find("\"per_worker_active_relays\":false") == std::string::npos) return 349;
+        if (relayWorkersResp.find("\"errors\":") == std::string::npos) return 350;
 
         TqHttpRequest activeRelays = Request("GET", "/relay/active-relays", "");
         std::string activeRelaysResp = adminRuntime.HandleAdmin(activeRelays);
@@ -1035,12 +1230,15 @@ int main() {
         std::string aggregateWorkerResp = adminRuntime.HandleAdmin(aggregateWorker);
         if (aggregateWorkerResp.find("HTTP/1.1 200 OK") == std::string::npos) return 322;
         if (aggregateWorkerResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 323;
+        if (aggregateWorkerResp.find("\"worker_index\":0") == std::string::npos) return 351;
+        if (aggregateWorkerResp.find("\"relays\":[") == std::string::npos) return 352;
+        if (aggregateWorkerResp.find("\"errors\":") == std::string::npos) return 353;
 
         TqHttpRequest missingWorker = Request("GET", "/relay/workers/worker-1", "");
         std::string missingWorkerResp = adminRuntime.HandleAdmin(missingWorker);
         if (missingWorkerResp.find("HTTP/1.1 500 Internal Server Error") != std::string::npos) return 329;
-        if (missingWorkerResp.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 330;
-        if (missingWorkerResp.find("\"code\":\"not_supported\"") == std::string::npos) return 324;
+        if (missingWorkerResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 330;
+        if (missingWorkerResp.find("\"code\":\"not_found\"") == std::string::npos) return 324;
 
         TqHttpRequest workersEmptyId = Request("GET", "/relay/workers/", "");
         std::string workersEmptyIdResp = adminRuntime.HandleAdmin(workersEmptyId);

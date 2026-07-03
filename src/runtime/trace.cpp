@@ -888,6 +888,32 @@ bool TqDiagStatsEnabled() {
     return g_diagStatsEnabled.load(std::memory_order_relaxed);
 }
 
+bool TqApplyDiagnosticsRuntime(const TqConfig& cfg) {
+    static std::mutex runtimeMu;
+    std::lock_guard<std::mutex> guard(runtimeMu);
+
+    if (cfg.Trace) {
+        if (TqTraceEnabled()) {
+            TqTraceShutdown();
+        }
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec, cfg.TraceLogLevel)) {
+            return false;
+        }
+    } else if (TqTraceEnabled()) {
+        TqTraceShutdown();
+    }
+
+    if (cfg.DiagStats) {
+        if (!TqDiagStatsInit(cfg.DiagStatsIntervalSec)) {
+            return false;
+        }
+    } else if (TqDiagStatsEnabled()) {
+        TqDiagStatsShutdown();
+    }
+
+    return true;
+}
+
 std::string FormatTraceLinuxRelayStateLine(
     const char* eventName,
     const TqTraceLinuxRelayStreamState& state) {

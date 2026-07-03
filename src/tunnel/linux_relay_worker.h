@@ -76,6 +76,7 @@ struct TqLinuxRelaySendOperation {
 };
 
 struct TqLinuxRelayWorkerSnapshot {
+    uint32_t WorkerIndex{0};
     uint64_t EventsProcessed{0};
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
@@ -586,6 +587,7 @@ public:
     void Stop();
     TqLinuxRelayWorker* PickWorker();
     TqLinuxRelayWorkerSnapshot Snapshot() const;
+    std::vector<TqLinuxRelayWorkerSnapshot> SnapshotWorkers() const;
 
 private:
     TqLinuxRelayRuntime() = default;

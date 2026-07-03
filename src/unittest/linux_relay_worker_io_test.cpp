@@ -3286,5 +3286,16 @@ int main() {
         worker.Stop();
     }
 
+    {
+        TqTuningConfig tuning{};
+        tuning.LinuxRelayWorkerCount = 2;
+        assert(TqLinuxRelayRuntime::Instance().Start(tuning));
+        const auto snapshots = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
+        assert(snapshots.size() == 2);
+        assert(snapshots[0].WorkerIndex == 0);
+        assert(snapshots[1].WorkerIndex == 1);
+        TqLinuxRelayRuntime::Instance().Stop();
+    }
+
     return 0;
 }

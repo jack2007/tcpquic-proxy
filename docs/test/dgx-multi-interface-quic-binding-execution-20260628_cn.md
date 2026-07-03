@@ -323,6 +323,50 @@ bash docs/dgx-multi-interface-quic-binding-20260628-10net/run-dr03-10net.sh
 - 恢复后的 iperf probe 全部成功，client 等待退出全部成功。
 - 10 轮均未复现 admin timeout、iperf timeout 或 client stop 强制清理。
 
+### 5.6 F10 admin PATCH paths 热更新回归
+
+日期：2026-07-03
+
+执行脚本：
+
+```bash
+rtk bash scripts/run-dgx-f10-hot-update.sh
+```
+
+最终结果目录：
+
+`docs/test/dgx-multi-interface-hot-update-20260703-120343/`
+
+本轮环境：
+
+- 本机二进制：`build/bin/Release/raypx2`
+- 对端测试二进制：`/home/jack/tcpquic-dgx-bin/raypx2-f10-20260703-120343`
+- server 显式 listen：`10.201.1.2:4433,10.201.2.2:4433`
+- client 初始配置：`path-a` 4 条连接，保留 `quic_peer` 列表作为清空 paths 后的回退目标。
+- client admin：`127.0.0.1:18081`
+- 本地 port forward：`127.0.0.1:15445 -> 10.201.1.2:16001`
+
+执行结果：
+
+| 阶段 | 结果 | 证据 |
+|---|---:|---|
+| 初始 path-a | 4 条 connected | `admin/initial-connections.json` |
+| PATCH 到 path-a + path-b | 10 秒内 8 条 connected | `admin/after-patch-10s-connections.json`、`summary/connected-after-patch.json` |
+| iperf3 probe | `IPERF_RC=0` | `case/iperf.rc`、`case/iperf.stdout.json` |
+| 清空 paths 回退 peer-list | `paths_len=0`，`proto_peer=10.201.1.2:4433,10.201.2.2:4433` | `admin/after-clear-config.json` |
+
+吞吐摘要：
+
+- `sum_sent`：约 `30.95 Gbps`
+- `sum_received`：约 `29.81 Gbps`
+
+结论：
+
+- F10 配置热更新通过：admin `PATCH /api/v1/peers/dgx-f10` 可将单 path 运行时更新为双 path，10 秒内恢复到 8 条 connected。
+- PATCH 后短业务 probe 通过，说明热更新后的 tunnel 数据面可用。
+- 再次 PATCH 清空 `paths` 可回退到 peer-list 语义，配置快照中 `paths` 为空。
+- 本轮结束后本机和对端均无残留 `raypx2` / `iperf3` 进程。
+
 ## 6. 已清理状态
 
 - 本机无残留 `raypx2` 进程。

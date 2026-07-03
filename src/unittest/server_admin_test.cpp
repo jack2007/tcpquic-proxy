@@ -7,16 +7,93 @@
 #include <sstream>
 #include <vector>
 
+bool g_trace_stub_enabled = false;
+bool g_diag_stats_stub_enabled = false;
+unsigned g_trace_init_count = 0;
+unsigned g_trace_shutdown_count = 0;
+unsigned g_diag_stats_init_count = 0;
+unsigned g_diag_stats_shutdown_count = 0;
+uint32_t g_trace_stub_interval_sec = 0;
+uint32_t g_diag_stats_stub_interval_sec = 0;
+TqConfig::TraceLevel g_trace_stub_level = TqConfig::TraceLevel::Info;
+
+void TqTraceProxyStubReset() {
+    g_trace_stub_enabled = false;
+    g_diag_stats_stub_enabled = false;
+    g_trace_init_count = 0;
+    g_trace_shutdown_count = 0;
+    g_diag_stats_init_count = 0;
+    g_diag_stats_shutdown_count = 0;
+    g_trace_stub_interval_sec = 0;
+    g_diag_stats_stub_interval_sec = 0;
+    g_trace_stub_level = TqConfig::TraceLevel::Info;
+}
+
+bool TqTraceInit(TqMode, uint32_t intervalSec, TqConfig::TraceLevel level) {
+    g_trace_stub_enabled = true;
+    g_trace_stub_interval_sec = intervalSec;
+    g_trace_stub_level = level;
+    ++g_trace_init_count;
+    return true;
+}
+
+void TqTraceShutdown() {
+    g_trace_stub_enabled = false;
+    ++g_trace_shutdown_count;
+}
+
+bool TqTraceEnabled() {
+    return g_trace_stub_enabled;
+}
+
+bool TqDiagStatsInit(uint32_t intervalSec) {
+    g_diag_stats_stub_enabled = true;
+    g_diag_stats_stub_interval_sec = intervalSec;
+    ++g_diag_stats_init_count;
+    return true;
+}
+
+void TqDiagStatsShutdown() {
+    g_diag_stats_stub_enabled = false;
+    ++g_diag_stats_shutdown_count;
+}
+
+bool TqDiagStatsEnabled() {
+    return g_diag_stats_stub_enabled;
+}
+
+bool TqApplyDiagnosticsRuntime(const TqConfig& cfg) {
+    if (cfg.Trace) {
+        if (TqTraceEnabled()) {
+            TqTraceShutdown();
+        }
+        if (!TqTraceInit(cfg.Mode, cfg.TraceIntervalSec, cfg.TraceLogLevel)) {
+            return false;
+        }
+    } else if (TqTraceEnabled()) {
+        TqTraceShutdown();
+    }
+    if (cfg.DiagStats) {
+        if (!TqDiagStatsInit(cfg.DiagStatsIntervalSec)) {
+            return false;
+        }
+    } else if (TqDiagStatsEnabled()) {
+        TqDiagStatsShutdown();
+    }
+    return true;
+}
+
 namespace {
 
 bool g_abortCalled = false;
 bool g_tunnelAbortCalled = false;
 bool g_tunnelDrainCalled = false;
 
-TqHttpRequest Request(const std::string& method, const std::string& path) {
+TqHttpRequest Request(const std::string& method, const std::string& path, const std::string& body = "") {
     TqHttpRequest req;
     req.Method = method;
     req.Path = path;
+    req.Body = body;
     return req;
 }
 
@@ -67,7 +144,11 @@ std::string TqRelayActiveRelayJson(const std::string&, bool& found, bool& suppor
 std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
     supported = workerId == "aggregate";
     found = supported;
-    return "{\"worker_id\":\"aggregate\"}";
+    return "{\"worker_id\":\"aggregate\",\"worker_index\":0,\"errors\":3,\"relays\":[]}";
+}
+
+std::string TqRelayWorkersJson() {
+    return "{\"capabilities\":{\"active_relay_detail\":false,\"worker_detail\":true,\"per_worker_active_relays\":false},\"workers\":[{\"worker_id\":\"aggregate\",\"backend\":\"test\",\"worker_index\":0,\"active_relays\":7,\"pending_bytes\":1234,\"tcp_read_bytes\":11,\"tcp_write_bytes\":22,\"errors\":3}]}";
 }
 
 void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot&) {
@@ -198,6 +279,8 @@ int main() {
     std::string relayWorkers = TqHandleServerAdmin(Request("GET", "/relay/workers"), metrics, 10);
     if (relayWorkers.find("HTTP/1.1 200 OK") == std::string::npos) return 152;
     if (relayWorkers.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 153;
+    if (relayWorkers.find("\"capabilities\":{") == std::string::npos) return 154;
+    if (relayWorkers.find("\"worker_detail\":true") == std::string::npos) return 155;
 
     std::string activeRelays = TqHandleServerAdmin(Request("GET", "/relay/active-relays"), metrics, 10);
     if (activeRelays.find("HTTP/1.1 200 OK") == std::string::npos) return 154;
@@ -205,6 +288,8 @@ int main() {
 
     std::string aggregateWorker = TqHandleServerAdmin(Request("GET", "/relay/workers/aggregate"), metrics, 10);
     if (aggregateWorker.find("HTTP/1.1 200 OK") == std::string::npos) return 156;
+    if (aggregateWorker.find("\"relays\":[") == std::string::npos) return 157;
+    if (aggregateWorker.find("\"errors\":") == std::string::npos) return 158;
 
     std::string missingRelay = TqHandleServerAdmin(Request("GET", "/relay/active-relays/relay-missing"), metrics, 10);
     if (missingRelay.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 157;
@@ -251,8 +336,69 @@ int main() {
         if (config.find("HTTP/1.1 200") == std::string::npos) return 120;
         if (config.find("\"allow_targets\"") == std::string::npos) return 121;
 
+        std::string patchRuntime = TqHandleServerAdmin(
+            Request("PATCH", "/runtime/config", "{\"compression\":{\"mode\":\"zstd\",\"level\":2},\"tuning\":{\"max_memory_mb\":256}}"),
+            configMetrics,
+            10,
+            cfg);
+        if (patchRuntime.find("HTTP/1.1 200 OK") == std::string::npos) return 159;
+        if (patchRuntime.find("\"compress\":\"zstd\"") == std::string::npos) return 160;
+        if (patchRuntime.find("\"compress_level\":2") == std::string::npos) return 161;
+        if (patchRuntime.find("\"max_memory_mb\":256") == std::string::npos) return 162;
+
+        std::string unsupportedRuntime = TqHandleServerAdmin(
+            Request("PATCH", "/runtime/config", "{\"tls\":{\"cert\":\"server.crt\"}}"),
+            configMetrics,
+            10,
+            cfg);
+        if (unsupportedRuntime.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 163;
+        if (unsupportedRuntime.find("\"code\":\"not_supported\"") == std::string::npos) return 164;
+
         std::string diag = TqHandleServerAdmin(Request("GET", "/diagnostics"), configMetrics, 10, cfg);
         if (diag.find("\"trace\"") == std::string::npos) return 122;
+        if (diag.find("\"trace_level\":\"info\"") == std::string::npos) return 145;
+
+        TqTraceProxyStubReset();
+        std::string patchDiag = TqHandleServerAdmin(
+            Request(
+                "PATCH",
+                "/diagnostics",
+                "{\"trace\":false,\"trace_interval_sec\":12,\"trace_level\":\"debug\",\"diag_stats\":true,\"diag_stats_interval_sec\":4}"),
+            configMetrics,
+            10,
+            cfg);
+        if (patchDiag.find("HTTP/1.1 200 OK") == std::string::npos) return 146;
+        if (patchDiag.find("\"trace\":false") == std::string::npos) return 147;
+        if (patchDiag.find("\"trace_interval_sec\":12") == std::string::npos) return 148;
+        if (patchDiag.find("\"trace_level\":\"debug\"") == std::string::npos) return 149;
+        if (patchDiag.find("\"diag_stats\":true") == std::string::npos) return 150;
+        if (g_trace_stub_enabled) return 165;
+        if (!g_diag_stats_stub_enabled) return 166;
+        if (g_diag_stats_init_count != 1) return 167;
+        if (g_diag_stats_stub_interval_sec != 4) return 168;
+
+        std::string enableTrace = TqHandleServerAdmin(
+            Request(
+                "PATCH",
+                "/diagnostics",
+                "{\"trace\":true,\"trace_interval_sec\":8,\"trace_level\":\"debug\",\"diag_stats\":false}"),
+            configMetrics,
+            10,
+            cfg);
+        if (enableTrace.find("HTTP/1.1 200 OK") == std::string::npos) return 169;
+        if (!g_trace_stub_enabled) return 170;
+        if (g_trace_init_count != 1) return 171;
+        if (g_trace_stub_interval_sec != 8) return 172;
+        if (g_trace_stub_level != TqConfig::TraceLevel::Debug) return 173;
+        if (g_diag_stats_stub_enabled) return 174;
+        if (g_diag_stats_shutdown_count != 1) return 175;
+
+        std::string badDiag = TqHandleServerAdmin(
+            Request("PATCH", "/diagnostics", "{\"diag_stats_interval_sec\":0}"),
+            configMetrics,
+            10,
+            cfg);
+        if (badDiag.find("HTTP/1.1 400") == std::string::npos) return 151;
     }
     return 0;
 }

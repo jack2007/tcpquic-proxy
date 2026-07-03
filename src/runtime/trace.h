@@ -82,6 +82,7 @@ bool TqTraceEnabled();
 bool TqDiagStatsInit(uint32_t statsIntervalSec);
 void TqDiagStatsShutdown();
 bool TqDiagStatsEnabled();
+bool TqApplyDiagnosticsRuntime(const TqConfig& cfg);
 
 std::string TqTraceGlobalSnapshot();
 

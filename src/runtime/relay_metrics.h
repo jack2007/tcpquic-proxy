@@ -186,10 +186,23 @@ struct TqRelayActiveSnapshot {
     bool StreamDetached{false};
 };
 
+struct TqRelayWorkerSnapshot {
+    const char* Backend{"unsupported"};
+    uint32_t WorkerIndex{0};
+    std::string WorkerId;
+    uint64_t ActiveRelays{0};
+    uint64_t PendingBytes{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t Errors{0};
+};
+
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays();
+std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers();
 std::string TqRelayActiveRelaysJson();
 std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool& supported);
+std::string TqRelayWorkersJson();
 std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported);
 void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics);
 void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value);

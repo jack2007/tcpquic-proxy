@@ -2,6 +2,10 @@
 
 日期：2026-06-28
 
+配套执行计划：
+
+- `docs/test/dgx-multi-interface-hot-update-regression-plan-20260702_cn.md`
+
 ## 1. 范围和目标
 
 本文档用于验证 `raypx2` / `tcpquic-proxy` 的多网口 QUIC 绑定能力，重点覆盖 server 多地址监听、client peer 多地址连接、client `paths` 显式本地源地址绑定，以及同一 peer 多条 QUIC connection 被 TCP tunnel 复用后的吞吐和稳定性。
@@ -429,6 +433,8 @@ admin 断言重点字段：
 - 功能矩阵 F01-F10 全部执行并保存证据。
 - 至少完成一轮单 path 和双 path 的 download/upload 吞吐对比。
 - 至少完成 DR01、DR03、DR04、DR07 四个故障场景。
+- 同端口多 listen bind plan 本地 smoke 已通过。
+- admin PATCH 修改 `paths` 的 F10 热更新场景已执行并保存证据。
 - 所有失败都有 case 目录、日志、admin JSON 和结论。
 - 测试结束后两端 `raypx2`、`iperf3` 进程已清理，两个数据网口 qdisc 已清理。
 
@@ -438,6 +444,8 @@ admin 断言重点字段：
 
 - paths 模式下 slot 的 `local` 或 `peer` 与配置不一致。
 - server `0.0.0.0` 没有展开到两个数据网口，或显式 listen 列表仍绑定了管理网地址。
+- 同端口多具体 listen 回退为每地址一个 MsQuic listener。
+- admin PATCH 修改 `paths` 后出现连接恢复卡死、admin 超时或配置回滚失败。
 - 任一 listener 启动失败后 server 仍进入部分监听成功状态。
 - 单 path 故障导致健康 path 也无法新建 tunnel。
 - admin 无法定位 path 名称、本地地址和远端地址。

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace {
@@ -122,6 +123,37 @@ std::filesystem::path TqSecureTokenFile(const std::string& name) {
     return dir / "admin-token.json";
 }
 
+std::string_view TqTrimCssText(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\n' || text.front() == '\r' || text.front() == '\t')) {
+        text.remove_prefix(1);
+    }
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\n' || text.back() == '\r' || text.back() == '\t')) {
+        text.remove_suffix(1);
+    }
+    return text;
+}
+
+bool TqCssRuleHasDeclaration(std::string_view css, std::string_view selector, std::string_view declaration) {
+    size_t ruleStart = 0;
+    for (;;) {
+        const size_t openBrace = css.find('{', ruleStart);
+        if (openBrace == std::string_view::npos) {
+            return false;
+        }
+        const size_t closeBrace = css.find('}', openBrace + 1);
+        if (closeBrace == std::string_view::npos) {
+            return false;
+        }
+
+        const std::string_view ruleSelector = TqTrimCssText(css.substr(ruleStart, openBrace - ruleStart));
+        const std::string_view declarations = css.substr(openBrace + 1, closeBrace - openBrace - 1);
+        if (ruleSelector == selector && declarations.find(declaration) != std::string_view::npos) {
+            return true;
+        }
+        ruleStart = closeBrace + 1;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -148,6 +180,24 @@ int main() {
         if (css.find("--tq-bg") == std::string_view::npos) return 510;
         if (css.find(".shell{display:grid;grid-template-columns:232px 1fr") == std::string_view::npos) return 511;
         if (css.find(".table-scroll") == std::string_view::npos) return 513;
+        if (!TqCssRuleHasDeclaration(css, ".json-preview", "background:#f8fafb")) return 538;
+        if (!TqCssRuleHasDeclaration(css, ".json-preview", "color:var(--tq-text)")) return 539;
+        if (!TqCssRuleHasDeclaration(css, ".json-preview", "border:1px solid var(--tq-line)")) return 552;
+        if (TqCssRuleHasDeclaration(css, ".json-preview", "background:#111820")) return 553;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-layout", "display:grid")) return 540;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-layout", "grid-template-columns:minmax(0,1fr) minmax(0,1fr)")) return 541;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-allocator-column", "display:grid")) return 542;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-allocator-column", "grid-template-rows:auto 1fr")) return 545;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-control-card", "display:grid")) return 546;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-control-card", "grid-template-rows:auto auto 1fr auto")) return 554;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-control-form", "align-content:start")) return 555;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-toggle", "width:44px")) return 557;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-toggle input", "opacity:0")) return 558;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-toggle input:checked + span", "background:var(--tq-blue)")) return 559;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-allocator-column .confirm", "background:var(--tq-panel-soft)")) return 560;
+        if (!TqCssRuleHasDeclaration(css, ".allocator-result-panel", "background:var(--tq-panel)")) return 561;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-save-row .btn.primary", "width:100%")) return 547;
+        if (!TqCssRuleHasDeclaration(css, ".diagnostics-save-row .btn.primary", "min-width:132px")) return 548;
         if (html.find("data-theme=\"light\"") == std::string_view::npos) return 514;
         if (html.find("<aside class=\"sidebar\">") == std::string_view::npos) return 515;
         if (html.find("<main class=\"main\">") == std::string_view::npos) return 516;
@@ -179,6 +229,22 @@ int main() {
         if (js.find("document.getElementById('peer-create').onclick = beginCreatePeer;") == std::string_view::npos) return 323;
         if (js.find("document.getElementById('peer-create').onclick = () => runClientAction(createPeer)") != std::string_view::npos) return 324;
         if (js.find("if (consoleState.peerMode === 'create')") == std::string_view::npos) return 325;
+        if (html.find("id=\"diagnostics-save\"") == std::string_view::npos) return 530;
+        if (html.find("diagnostics-layout") == std::string_view::npos) return 543;
+        if (html.find("diagnostics-control-card") == std::string_view::npos) return 544;
+        if (html.find("diagnostics-allocator-column") == std::string_view::npos) return 549;
+        if (html.find("class=\"diagnostics-toggle\" aria-label=\"trace\"") == std::string_view::npos) return 562;
+        if (html.find("class=\"diagnostics-toggle\" aria-label=\"diag_stats\"") == std::string_view::npos) return 563;
+        if (html.find("diag_stats_interval_sec</label><input id=\"diagnostics-diag-interval\" type=\"number\" min=\"1\" max=\"86400\"></div></div><div class=\"diagnostics-save-row\"") == std::string_view::npos) return 556;
+        if (html.find("id=\"allocator-json\"") == std::string_view::npos) return 550;
+        if (html.find("id=\"diagnostics-json\"") != std::string_view::npos) return 551;
+        if (js.find("async function saveDiagnostics()") == std::string_view::npos) return 531;
+        if (js.find("api('/diagnostics', { method: 'PATCH', body: payload })") == std::string_view::npos) return 532;
+        if (js.find("api('/relay/workers')") == std::string_view::npos) return 533;
+        if (js.find("renderRelayCapabilities") == std::string_view::npos) return 534;
+        if (html.find("id=\"relay-workers-rows\"") == std::string_view::npos) return 535;
+        if (js.find("async function saveRuntimeConfig()") == std::string_view::npos) return 536;
+        if (js.find("api('/runtime/config', { method: 'PATCH', body: payload })") == std::string_view::npos) return 537;
         if (html.find("role-switch") != std::string_view::npos) return 414;
         if (js.find("querySelectorAll('.role-switch button')") != std::string_view::npos) return 415;
         if (js.find("sessionStorage.setItem('tcpquic.admin.role'") != std::string_view::npos) return 416;
@@ -252,7 +318,6 @@ int main() {
         if (html.find("relay-errors") == std::string_view::npos) return 377;
         if (html.find("config-json") == std::string_view::npos) return 378;
         if (html.find("config-save") == std::string_view::npos) return 379;
-        if (html.find("diagnostics-json") == std::string_view::npos) return 380;
         if (html.find("allocator-dump") == std::string_view::npos) return 381;
         if (html.find("allocator-json") == std::string_view::npos) return 382;
         if (html.find("server overview") != std::string_view::npos) return 387;
@@ -962,11 +1027,17 @@ int main() {
             if (req.Method == "GET" && req.Path == "/runtime/config") {
                 return TqJsonResponse(200, "{\"runtime_config\":true}");
             }
+            if (req.Method == "PATCH" && req.Path == "/runtime/config") {
+                return TqJsonResponse(200, "{\"runtime_config_patched\":true}");
+            }
             if (req.Method == "GET" && req.Path == "/client/config") {
                 return TqJsonResponse(200, "{\"client_config\":true}");
             }
             if (req.Method == "GET" && req.Path == "/diagnostics") {
                 return TqJsonResponse(200, "{\"diagnostics\":true}");
+            }
+            if (req.Method == "PATCH" && req.Path == "/diagnostics") {
+                return TqJsonResponse(200, "{\"diagnostics_patched\":true}");
             }
             if (req.Method == "GET" && req.Path == "/server/config") {
                 return TqJsonResponse(200, "{\"server_config\":true}");
@@ -1187,6 +1258,11 @@ int main() {
         if (!TqHttpStatusIs(runtimeConfigResponse, 200)) return 183;
         if (runtimeConfigResponse.find("\"runtime_config\":true") == std::string::npos) return 184;
 
+        std::string runtimeConfigPatchResponse;
+        if (const int code = sendAuthorized("PATCH", "/api/v1/runtime/config", runtimeConfigPatchResponse)) return code;
+        if (!TqHttpStatusIs(runtimeConfigPatchResponse, 200)) return 227;
+        if (runtimeConfigPatchResponse.find("\"runtime_config_patched\":true") == std::string::npos) return 228;
+
         std::string clientConfigResponse;
         if (const int code = sendAuthorized("GET", "/api/v1/client/config", clientConfigResponse)) return code;
         if (!TqHttpStatusIs(clientConfigResponse, 200)) return 185;
@@ -1196,6 +1272,11 @@ int main() {
         if (const int code = sendAuthorized("GET", "/api/v1/diagnostics", diagnosticsResponse)) return code;
         if (!TqHttpStatusIs(diagnosticsResponse, 200)) return 187;
         if (diagnosticsResponse.find("\"diagnostics\":true") == std::string::npos) return 188;
+
+        std::string diagnosticsPatchResponse;
+        if (const int code = sendAuthorized("PATCH", "/api/v1/diagnostics", diagnosticsPatchResponse)) return code;
+        if (!TqHttpStatusIs(diagnosticsPatchResponse, 200)) return 225;
+        if (diagnosticsPatchResponse.find("\"diagnostics_patched\":true") == std::string::npos) return 226;
 
         std::string serverConfigResponse;
         if (const int code = sendAuthorized("GET", "/api/v1/server/config", serverConfigResponse)) return code;

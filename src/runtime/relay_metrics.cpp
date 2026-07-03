@@ -97,8 +97,38 @@ void TqAppendRelayCapabilitiesJson(std::ostringstream& out) {
     out << "\"active_relay_detail\":"
         << (kRelayActiveRelayDetailSupported ? "true" : "false");
     out << ",\"worker_detail\":true";
+    out << ",\"per_worker_active_relays\":false";
     out << '}';
 }
+
+TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot() {
+    const auto metrics = TqSnapshotRelayMetrics();
+    TqRelayWorkerSnapshot aggregate{};
+    aggregate.Backend = metrics.Backend;
+    aggregate.WorkerIndex = 0;
+    aggregate.WorkerId = "aggregate";
+    aggregate.ActiveRelays = metrics.ActiveRelays;
+    aggregate.PendingBytes = metrics.PendingBytes;
+    aggregate.TcpReadBytes = metrics.TcpReadBytes;
+    aggregate.TcpWriteBytes = metrics.TcpWriteBytes;
+    aggregate.Errors = metrics.Errors;
+    return aggregate;
+}
+
+#if defined(__linux__)
+TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSnapshot& snapshot) {
+    TqRelayWorkerSnapshot worker{};
+    worker.Backend = "linux";
+    worker.WorkerIndex = snapshot.WorkerIndex;
+    worker.WorkerId = "linux-" + std::to_string(snapshot.WorkerIndex);
+    worker.ActiveRelays = snapshot.ActiveRelays;
+    worker.PendingBytes = snapshot.PendingBytes;
+    worker.TcpReadBytes = snapshot.TcpReadBytes;
+    worker.TcpWriteBytes = snapshot.TcpWriteBytes;
+    worker.Errors = snapshot.Errors;
+    return worker;
+}
+#endif
 
 void TqAppendActiveRelayJson(std::ostringstream& out, const TqRelayActiveSnapshot& relay) {
     out << '{';
@@ -141,16 +171,17 @@ void TqAppendActiveRelayJson(std::ostringstream& out, const TqRelayActiveSnapsho
     out << '}';
 }
 
-void TqAppendAggregateWorkerJson(std::ostringstream& out, const std::string& workerId) {
-    const auto metrics = TqSnapshotRelayMetrics();
+void TqAppendRelayWorkerJson(std::ostringstream& out, const TqRelayWorkerSnapshot& worker) {
     out << '{';
-    TqAppendJsonString(out, "worker_id", workerId);
+    TqAppendJsonString(out, "worker_id", worker.WorkerId);
     out << ',';
-    TqAppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    TqAppendJsonString(out, "backend", worker.Backend);
+    out << ",\"worker_index\":" << worker.WorkerIndex;
+    out << ",\"active_relays\":" << worker.ActiveRelays;
+    out << ",\"pending_bytes\":" << worker.PendingBytes;
+    out << ",\"tcp_read_bytes\":" << worker.TcpReadBytes;
+    out << ",\"tcp_write_bytes\":" << worker.TcpWriteBytes;
+    out << ",\"errors\":" << worker.Errors;
     out << '}';
 }
 
@@ -434,6 +465,18 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     return metrics;
 }
 
+std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers() {
+    std::vector<TqRelayWorkerSnapshot> workers;
+    workers.push_back(MakeAggregateRelayWorkerSnapshot());
+#if defined(__linux__)
+    const auto linuxWorkers = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
+    for (const auto& snapshot : linuxWorkers) {
+        workers.push_back(ConvertLinuxRelayWorkerSnapshot(snapshot));
+    }
+#endif
+    return workers;
+}
+
 std::string TqRelayActiveRelaysJson() {
     const auto relays = TqSnapshotActiveRelays();
     std::ostringstream out;
@@ -469,16 +512,39 @@ std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool
     return "{}";
 }
 
-std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
-    found = workerId == "aggregate";
-    supported = found;
-    if (!found) {
-        return "{}";
-    }
-
+std::string TqRelayWorkersJson() {
+    const auto workers = TqSnapshotRelayWorkers();
     std::ostringstream out;
-    TqAppendAggregateWorkerJson(out, workerId);
+    out << '{';
+    TqAppendRelayCapabilitiesJson(out);
+    out << ",\"workers\":[";
+    for (size_t i = 0; i < workers.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        TqAppendRelayWorkerJson(out, workers[i]);
+    }
+    out << "]}";
     return out.str();
+}
+
+std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
+    found = false;
+    supported = true;
+    const auto workers = TqSnapshotRelayWorkers();
+    for (const auto& worker : workers) {
+        if (worker.WorkerId != workerId) {
+            continue;
+        }
+        found = true;
+        std::ostringstream out;
+        TqAppendRelayWorkerJson(out, worker);
+        std::string body = out.str();
+        body.pop_back();
+        body += ",\"relays\":[]}";
+        return body;
+    }
+    return "{}";
 }
 
 void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {

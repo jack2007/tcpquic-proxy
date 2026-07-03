@@ -4,6 +4,7 @@
 #include "admin_memory.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
+#include "trace.h"
 
 #include <algorithm>
 #include <chrono>
@@ -336,19 +337,6 @@ std::string RelayMetricsJson() {
     return out.str();
 }
 
-std::string RelayWorkersJson() {
-    const auto metrics = TqSnapshotRelayMetrics();
-    std::ostringstream out;
-    out << "{\"workers\":[{\"worker_id\":\"aggregate\",";
-    AppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
-    out << "}]}";
-    return out.str();
-}
-
 int HexValue(char ch) {
     if (ch >= '0' && ch <= '9') return ch - '0';
     if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
@@ -396,15 +384,35 @@ public:
         patch = TqPeerPatch{};
         if (!Consume('{')) return Error("peer patch must be an object");
         if (Consume('}')) return FinishPatch();
+        bool hasLegacyPeerId = false;
+        bool hasRecommendedPeerId = false;
+        bool hasLegacyQuicPeer = false;
+        bool hasRecommendedQuicPeer = false;
+        bool hasLegacyQuicConnections = false;
+        bool hasRecommendedQuicConnections = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) return Error("malformed peer patch object");
             if (key == "peer_id") {
+                if (hasRecommendedPeerId) return Error("conflicting peer field aliases");
+                hasLegacyPeerId = true;
                 std::string ignored;
                 if (!ParseStringField(ignored, "invalid peer_id")) return false;
+            } else if (key == "id") {
+                if (hasLegacyPeerId) return Error("conflicting peer field aliases");
+                hasRecommendedPeerId = true;
+                std::string ignored;
+                if (!ParseStringField(ignored, "invalid id")) return false;
             } else if (key == "quic_peer") {
+                if (hasRecommendedQuicPeer) return Error("conflicting peer field aliases");
+                hasLegacyQuicPeer = true;
                 patch.HasQuicPeer = true;
                 if (!ParseStringField(patch.QuicPeer, "invalid quic_peer")) return false;
+            } else if (key == "proto_peer") {
+                if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
+                hasRecommendedQuicPeer = true;
+                patch.HasQuicPeer = true;
+                if (!ParseStringField(patch.QuicPeer, "invalid proto_peer")) return false;
             } else if (key == "socks_listen") {
                 patch.HasSocksListen = true;
                 if (!ParseStringField(patch.SocksListen, "invalid socks_listen")) return false;
@@ -418,9 +426,17 @@ public:
                 patch.HasQuicPaths = true;
                 if (!ParseQuicPaths(patch.QuicPaths)) return false;
             } else if (key == "quic_connections") {
+                if (hasRecommendedQuicConnections) return Error("conflicting peer field aliases");
+                hasLegacyQuicConnections = true;
                 patch.HasQuicConnections = true;
                 if (!ParseUint32(patch.QuicConnections)) return Error("invalid quic_connections");
                 if (patch.QuicConnections == 0) return Error("quic_connections out of range");
+            } else if (key == "proto_connections") {
+                if (hasLegacyQuicConnections) return Error("conflicting peer field aliases");
+                hasRecommendedQuicConnections = true;
+                patch.HasQuicConnections = true;
+                if (!ParseUint32(patch.QuicConnections)) return Error("invalid proto_connections");
+                if (patch.QuicConnections == 0) return Error("proto_connections out of range");
             } else if (key == "compress") {
                 patch.HasCompress = true;
                 if (!ParseStringField(patch.Compress, "invalid compress")) return false;
@@ -483,13 +499,31 @@ private:
         if (!Consume('{')) return Error("peer must be an object");
         if (Consume('}')) return true;
         bool quicConnectionsSpecified = false;
+        bool hasLegacyPeerId = false;
+        bool hasRecommendedPeerId = false;
+        bool hasLegacyQuicPeer = false;
+        bool hasRecommendedQuicPeer = false;
+        bool hasLegacyQuicConnections = false;
+        bool hasRecommendedQuicConnections = false;
         do {
             std::string key;
             if (!ParseString(key) || !Consume(':')) return Error("malformed peer object");
             if (key == "peer_id") {
+                if (hasRecommendedPeerId) return Error("conflicting peer field aliases");
+                hasLegacyPeerId = true;
                 if (!ParseStringField(peer.PeerId, "invalid peer_id")) return false;
+            } else if (key == "id") {
+                if (hasLegacyPeerId) return Error("conflicting peer field aliases");
+                hasRecommendedPeerId = true;
+                if (!ParseStringField(peer.PeerId, "invalid id")) return false;
             } else if (key == "quic_peer") {
+                if (hasRecommendedQuicPeer) return Error("conflicting peer field aliases");
+                hasLegacyQuicPeer = true;
                 if (!ParseStringField(peer.QuicPeer, "invalid quic_peer")) return false;
+            } else if (key == "proto_peer") {
+                if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
+                hasRecommendedQuicPeer = true;
+                if (!ParseStringField(peer.QuicPeer, "invalid proto_peer")) return false;
             } else if (key == "socks_listen") {
                 if (!ParseStringField(peer.SocksListen, "invalid socks_listen")) return false;
             } else if (key == "http_listen") {
@@ -499,8 +533,15 @@ private:
             } else if (key == "paths") {
                 if (!ParseQuicPaths(peer.QuicPaths)) return false;
             } else if (key == "quic_connections") {
+                if (hasRecommendedQuicConnections) return Error("conflicting peer field aliases");
+                hasLegacyQuicConnections = true;
                 quicConnectionsSpecified = true;
                 if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
+            } else if (key == "proto_connections") {
+                if (hasLegacyQuicConnections) return Error("conflicting peer field aliases");
+                hasRecommendedQuicConnections = true;
+                quicConnectionsSpecified = true;
+                if (!ParseUint32(peer.QuicConnections)) return Error("invalid proto_connections");
             } else if (key == "quic_reconnect_interval_ms") {
                 return Error("unknown peer key: quic_reconnect_interval_ms");
             } else if (key == "compress") {
@@ -1534,6 +1575,22 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
         }
         return TqJsonResponse(200, TqRuntimeConfigJson(runtimeConfig, false));
     }
+    if (req.Method == "PATCH" && req.Path == "/runtime/config") {
+        TqConfig runtimeConfig;
+        std::string err;
+        bool unsupported = false;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            runtimeConfig = RuntimeConfig;
+            if (!TqApplyRuntimeConfigPatch(req.Body, runtimeConfig, err, unsupported)) {
+                return TqJsonResponse(
+                    unsupported ? 503 : 400,
+                    unsupported ? TqStructuredErrorJson("not_supported", err) : ErrorJson(err));
+            }
+            RuntimeConfig = runtimeConfig;
+        }
+        return TqJsonResponse(200, TqRuntimeConfigJson(runtimeConfig, false));
+    }
     if (req.Method == "GET" && req.Path == "/client/config") {
         TqConfig runtimeConfig;
         {
@@ -1547,6 +1604,24 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
         {
             std::lock_guard<std::mutex> lock(Mutex);
             runtimeConfig = RuntimeConfig;
+        }
+        return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
+    }
+    if (req.Method == "PATCH" && req.Path == "/diagnostics") {
+        TqConfig runtimeConfig;
+        std::string err;
+        {
+            std::lock_guard<std::mutex> lock(Mutex);
+            runtimeConfig = RuntimeConfig;
+            if (!TqApplyDiagnosticsPatch(req.Body, runtimeConfig, err)) {
+                return TqJsonResponse(400, ErrorJson(err));
+            }
+            RuntimeConfig = runtimeConfig;
+        }
+        if (!TqApplyDiagnosticsRuntime(runtimeConfig)) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson("not_supported", "failed to apply diagnostics runtime state"));
         }
         return TqJsonResponse(200, TqDiagnosticsJson(runtimeConfig));
     }
@@ -1579,7 +1654,7 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
         return TqJsonResponse(200, body);
     }
     if (req.Method == "GET" && req.Path == "/relay/workers") {
-        return TqJsonResponse(200, RelayWorkersJson());
+        return TqJsonResponse(200, TqRelayWorkersJson());
     }
     if (req.Method == "GET" && req.Path.compare(0, 15, "/relay/workers/") == 0) {
         const std::string encodedWorkerId = req.Path.substr(15);
