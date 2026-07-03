@@ -183,19 +183,32 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
-          $artifactDir = "artifacts/${{ matrix.artifact-name }}"
+          $artifactDir = Join-Path "artifacts" "${{ matrix.artifact-name }}"
           New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
-          $source = "${{ matrix.build-dir }}\bin\Release\raypx2.exe"
-          if (!(Test-Path $source)) {
-            $source = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "raypx2.exe" -Recurse | Select-Object -First 1 -ExpandProperty FullName
+
+          $candidatePaths = @(
+            (Join-Path "${{ matrix.build-dir }}" "bin\Release\raypx2.exe"),
+            (Join-Path "${{ matrix.build-dir }}" "bin\raypx2.exe")
+          )
+          $source = $candidatePaths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $source) {
+            $source = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "raypx2.exe" -File -Recurse |
+              Select-Object -First 1 -ExpandProperty FullName
           }
-          if (!(Test-Path $source)) {
+          if (-not $source) {
+            Write-Host "Produced executables under ${{ matrix.build-dir }}:"
+            Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "*.exe" -File -Recurse |
+              Sort-Object FullName |
+              ForEach-Object { Write-Host ("  {0}" -f $_.FullName) }
             throw "raypx2.exe was not produced"
           }
-          Copy-Item $source "$artifactDir\${{ matrix.binary-name }}"
-          $openssl = "${{ matrix.build-dir }}\bin\Release\openssl.exe"
-          if (Test-Path $openssl) {
-            Copy-Item $openssl "$artifactDir\openssl-windows-x64.exe"
+
+          Copy-Item -LiteralPath $source -Destination (Join-Path $artifactDir "${{ matrix.binary-name }}") -Force
+
+          $openssl = Get-ChildItem -Path "${{ matrix.build-dir }}" -Filter "openssl.exe" -File -Recurse |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($openssl) {
+            Copy-Item -LiteralPath $openssl -Destination (Join-Path $artifactDir "openssl-windows-x64.exe") -Force
           }
 
       - name: Stage macOS artifact
