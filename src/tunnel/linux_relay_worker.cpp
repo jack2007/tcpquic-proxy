@@ -1123,6 +1123,11 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             UnregisterRelayLocal(event.RelayId);
             break;
         }
+        case TqLinuxRelayEventType::FakeFinReceiveShutdown: {
+            auto relay = FindRelayById(event.RelayId);
+            FailRelayFatal(relay.get(), "quic_receive_fake_fin", true);
+            break;
+        }
         case TqLinuxRelayEventType::TakeCapturedQuicBytesForTest: {
             auto* command = static_cast<TakeCapturedQuicBytesForTestCommand*>(event.Control);
             CompleteTakeCapturedQuicBytesForTestCommand(
@@ -3494,6 +3499,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.TcpWritePartialCount = TcpWritePartialCount.load();
     snapshot.TcpWriteBurstStops = TcpWriteBurstStops.load();
     snapshot.ReadDisabledCount = ReadDisabledCount.load();
+    snapshot.FakeFinReceiveCount = FakeFinReceiveCount.load();
     snapshot.StreamLookupScanCount = StreamLookupScanCount.load();
     snapshot.CompressedTcpBytes = CompressedTcpBytes.load();
     snapshot.DecompressedTcpBytes = DecompressedTcpBytes.load();
@@ -3808,8 +3814,20 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 event->RECEIVE.BufferCount,
                 static_cast<uint32_t>(event->RECEIVE.Flags),
                 true);
-            assert(false && "MsQuic delivered FIN-only receive without known final size");
-            std::abort();
+            FakeFinReceiveCount.fetch_add(1);
+            if (stream != nullptr && stream->Handle != nullptr) {
+                (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            }
+            TqLinuxRelayEvent shutdown{};
+            shutdown.Type = TqLinuxRelayEventType::FakeFinReceiveShutdown;
+            shutdown.RelayId = relayId;
+            if (!Enqueue(std::move(shutdown)) && binding != nullptr) {
+                if (auto* handle = binding->Handle.load(std::memory_order_acquire);
+                    handle != nullptr) {
+                    handle->Stop.store(true, std::memory_order_release);
+                }
+            }
+            return QUIC_STATUS_SUCCESS;
         }
         if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
@@ -4084,6 +4102,8 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpWriteEagainCount += snapshot.TcpWriteEagainCount;
         total.TcpWritePartialCount += snapshot.TcpWritePartialCount;
         total.TcpWriteBurstStops += snapshot.TcpWriteBurstStops;
+        total.FakeFinReceiveCount += snapshot.FakeFinReceiveCount;
+        total.StreamLookupScanCount += snapshot.StreamLookupScanCount;
         total.DeferredReceiveCompleteBytes += snapshot.DeferredReceiveCompleteBytes;
         total.DeferredReceiveCompletes += snapshot.DeferredReceiveCompletes;
         total.DeferredReceiveCompletionFlushes += snapshot.DeferredReceiveCompletionFlushes;

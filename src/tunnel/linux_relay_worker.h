@@ -185,6 +185,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t TcpWritePartialCount{0};
     uint64_t TcpWriteBurstStops{0};
     uint64_t ReadDisabledCount{0};
+    uint64_t FakeFinReceiveCount{0};
     uint64_t BufferAcquireCount{0};
     uint64_t StreamLookupScanCount{0};
     uint64_t CompressedTcpBytes{0};
@@ -587,6 +588,7 @@ private:
     std::atomic<uint64_t> TcpWritePartialCount{0};
     std::atomic<uint64_t> TcpWriteBurstStops{0};
     std::atomic<uint64_t> ReadDisabledCount{0};
+    std::atomic<uint64_t> FakeFinReceiveCount{0};
     std::atomic<uint64_t> StreamLookupScanCount{0};
     std::atomic<uint64_t> CompressedTcpBytes{0};
     std::atomic<uint64_t> DecompressedTcpBytes{0};

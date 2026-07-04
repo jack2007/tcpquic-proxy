@@ -42,6 +42,7 @@ enum class TqLinuxRelayEventType {
     Snapshot,
     Shutdown,
     CallbackReceiveQueueFailedShutdown,
+    FakeFinReceiveShutdown,
     TakeCapturedQuicBytesForTest,
     EnqueueQuicReceiveForTest,
     FlushTcpWritableForTest,
