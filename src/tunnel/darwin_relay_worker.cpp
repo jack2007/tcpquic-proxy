@@ -1889,12 +1889,12 @@ void TqDarwinRelayWorker::ReleaseCallbackReceiveBudget(
 }
 
 bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
-    const std::shared_ptr<RelayState>& relay,
+    const std::shared_ptr<StreamBinding>& binding,
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin) {
-    if (relay == nullptr || (bufferCount != 0 && buffers == nullptr)) {
+    if (binding == nullptr || stream == nullptr || buffers == nullptr || bufferCount == 0) {
         return false;
     }
 
@@ -1903,17 +1903,11 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         Errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    receive->RelayId = binding->RelayId;
     receive->Stream = stream;
+    receive->BindingOwner = binding;
     receive->Fin = fin;
     receive->Slices.reserve(bufferCount);
-
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            return false;
-        }
-        receive->RelayId = relay->Id;
-    }
 
     for (uint32_t i = 0; i < bufferCount; ++i) {
         if (buffers[i].Length == 0) {
@@ -1930,20 +1924,10 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         Errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-
-    std::shared_ptr<StreamBinding> binding;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            return false;
-        }
-        binding = relay->Binding;
-    }
     if (!ReserveCallbackReceiveBudget(binding.get(), receive->TotalLength)) {
         Errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    receive->BindingOwner = binding;
     QuicReceiveViewCount.fetch_add(1, std::memory_order_relaxed);
     QuicReceiveViewBytes.fetch_add(receive->TotalLength, std::memory_order_relaxed);
 
@@ -2731,16 +2715,16 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         if (worker == nullptr || !binding->Active.load(std::memory_order_acquire)) {
             return QUIC_STATUS_SUCCESS;
         }
-        auto relay = worker->FindRelay(binding->RelayId);
-        if (relay == nullptr) {
-            return QUIC_STATUS_SUCCESS;
-        }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
         if (TqIsMsQuicFakeFinReceive(
                 event->RECEIVE.AbsoluteOffset,
                 event->RECEIVE.TotalBufferLength,
                 event->RECEIVE.BufferCount,
                 event->RECEIVE.Flags)) {
+            auto relay = bindingOwner->Relay.lock();
+            if (relay == nullptr) {
+                return QUIC_STATUS_SUCCESS;
+            }
             TqTraceLinuxRelayStreamState state{};
             {
                 std::lock_guard<std::mutex> relayLock(relay->Mutex);
@@ -2775,14 +2759,12 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             std::abort();
         }
         if (!worker->QueueDeferredQuicReceive(
-                relay,
+                bindingOwner,
                 stream,
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
                 fin)) {
             worker->Errors.fetch_add(1, std::memory_order_relaxed);
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            relay->Closing = true;
             return QUIC_STATUS_SUCCESS;
         }
         return QUIC_STATUS_PENDING;

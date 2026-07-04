@@ -237,7 +237,7 @@ private:
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool SetTcpReadBackpressure(const std::shared_ptr<RelayState>& relay, bool paused);
     bool QueueDeferredQuicReceive(
-        const std::shared_ptr<RelayState>& relay,
+        const std::shared_ptr<StreamBinding>& binding,
         MsQuicStream* stream,
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,

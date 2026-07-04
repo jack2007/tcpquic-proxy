@@ -2590,7 +2590,7 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
-void CallbackReceiveCurrentlyUsesLockedRelayLookup() {
+void CallbackReceiveDoesNotUseLockedRelayLookup() {
     ResetFakeReceiveComplete();
     TqDarwinRelayWorkerConfig config{};
     config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
@@ -2621,7 +2621,7 @@ void CallbackReceiveCurrentlyUsesLockedRelayLookup() {
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
     CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_PENDING);
-    CHECK(worker.FindRelayLockedCountForTest() > before);
+    CHECK(worker.FindRelayLockedCountForTest() == before);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -2700,7 +2700,7 @@ int main() {
     CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes();
     QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics();
     CompressedQuicReceiveFailsClosedWithoutWritingCorruptData();
-    CallbackReceiveCurrentlyUsesLockedRelayLookup();
+    CallbackReceiveDoesNotUseLockedRelayLookup();
     RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement();
     return 0;
 }
