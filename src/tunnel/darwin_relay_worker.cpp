@@ -408,6 +408,18 @@ std::shared_ptr<void> TqDarwinRelayWorker::StreamCallbackContextOwnerForTest(uin
     return relay->Binding;
 }
 
+std::shared_ptr<void> TqDarwinRelayWorker::DetachRelayFromActiveMapForTest(uint64_t relayId) {
+    std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it == Relays.end()) {
+        return nullptr;
+    }
+    auto relay = it->second;
+    Relays.erase(it);
+    return relay;
+}
+
 uint64_t TqDarwinRelayWorker::KnownSendOperationCountForTest() {
     std::lock_guard<std::mutex> lock(KnownSendMutex);
     return KnownSendOperations.size();
@@ -424,6 +436,16 @@ uint64_t TqDarwinRelayWorker::PendingQuicSendCountForTest(uint64_t relayId) {
 
 uint64_t TqDarwinRelayWorker::InFlightQuicSendCountForTest(uint64_t relayId) {
     auto relay = FindRelay(relayId);
+    if (relay == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> relayLock(relay->Mutex);
+    return relay->InFlightQuicSends;
+}
+
+uint64_t TqDarwinRelayWorker::InFlightQuicSendCountFromRelayForTest(
+    const std::shared_ptr<void>& relayOwner) {
+    auto relay = std::static_pointer_cast<RelayState>(relayOwner);
     if (relay == nullptr) {
         return 0;
     }
@@ -1725,6 +1747,11 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
     auto relay = workerThread ? FindRelayLocal(info.RelayId) : FindRelay(info.RelayId);
     if (relay == nullptr) {
         relay = workerThread ? FindRetiredRelayLocal(info.RelayId) : FindRetiredRelay(info.RelayId);
+    }
+    if (relay == nullptr) {
+        if (auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner)) {
+            relay = binding->Relay.lock();
+        }
     }
     delete operation;
     if (relay != nullptr) {
