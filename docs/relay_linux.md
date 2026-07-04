@@ -168,6 +168,12 @@ QUIC receive 背压：
 - low watermark 当前等于 high watermark，即 pending bytes 只要低于上限就恢复 receive。
 - event queue 满时走 `CallbackPendingQuicReceives` 降级路径，并暂停 receive；worker 后续 `DrainCallbackPendingQuicReceives()` 转入正常 pending 队列。
 
+异常 receive 形态：
+
+- MsQuic fake FIN receive 不再让进程 `abort()`。callback 记录 `receive_fake_fin` trace 和 `linux_relay_fake_fin_receive_count` 后返回 `QUIC_STATUS_SUCCESS`，因为该分支不持有 MsQuic receive buffer。
+- callback 会尝试 abort 当前 MsQuic stream，并投递 `FakeFinReceiveShutdown` 给 owner worker；真正的 relay fatal reset 仍在 owner worker 线程内串行完成。
+- 如果 fake FIN fatal shutdown event 投递失败，则通过 binding handle 降级标记当前 relay stopped，避免 callback 线程直接修改 worker-owned relay 状态。
+
 ### 1.5 client/server 差异
 
 client ingress 路径：
@@ -408,6 +414,7 @@ admin API 行为：
 4. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
 5. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
 6. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
-7. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
+7. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、`linux_relay_fake_fin_receive_count`、last errno/status。
+8. fallback 扫描：`linux_relay_stream_lookup_scan_count` 非零或持续增长时，说明仍有按 stream 扫描 relay 的 fallback 路径被触发，需要结合调用来源判断是否增加 `RelaysByStream` / slot generation。
 
-Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛和控制面 wait metrics 已补齐。后续重点是根据生产指标决定是否需要 queue shard、per-relay callback pending top N 等低优先级观测增强；QUIC receive 背压 hysteresis 本轮不处理。
+Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛、控制面 wait metrics、fake FIN 单 relay 隔离和 stream lookup fallback 观测已补齐。后续重点是根据生产指标决定是否需要 queue shard、per-relay callback pending top N、stream/fd lookup map 等低优先级观测或结构增强；QUIC receive 背压 hysteresis 本轮不处理。
