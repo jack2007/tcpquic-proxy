@@ -272,18 +272,12 @@ QUIC receive 背压：
 - 非队首完成或 missing view 保留线性查找/诊断路径，并通过 `ReceiveViewFinishLinearSearchCount`、`ReceiveViewFinishNotFrontCount`、`ReceiveViewFinishLinearSearchNanos` 观测。
 - Windows QUIC -> TCP 仍保持每条 relay 单队首 drain，不支持乱序 TCP 写。
 
-### 3.4 receive callback 先复制数据，预算控制后置
+### 3.4 receive callback 复制前预算判断
 
-现象：
+历史问题：
 
-- `StreamCallback(RECEIVE)` 里先调用 `BuildDeferredQuicReceiveView()`，将 MsQuic buffers 复制到 `OwnedBuffer`。
-- pending bytes 上限在 worker 的 `EnqueueDeferredQuicReceiveView()` 中检查，复制已经发生。
-
-影响：
-
-- 大 receive 或 callback burst 会先消耗内存和 CPU，然后才暂停 QUIC receive。
-- `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 不能阻止单次超大 view 的复制。
-- callback 线程承担 memcpy 成本，会增加 `CallbackDispatchNanos`。
+- 旧实现里 `StreamCallback(RECEIVE)` 先调用 `BuildDeferredQuicReceiveView()` 复制 MsQuic buffers，pending bytes 上限仅在 worker 的 `EnqueueDeferredQuicReceiveView()` 中检查。
+- 大 receive 或 callback burst 会先消耗内存和 CPU，然后才暂停 QUIC receive；`WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 不能阻止单次超大 view 的复制。
 
 当前状态：
 
@@ -350,17 +344,12 @@ QUIC receive 背压：
 - 增加 worker thread ownership 断言，例如关键队列操作要求 `WorkerThreadToken_ == CurrentThreadToken()`。
 - 测试辅助如果需要跨线程窥探队列，应通过 IOCP command 或 snapshot 暴露，不直接读队列。
 
-### 3.8 观测指标还不能覆盖所有潜在热点
+### 3.8 Windows relay 热点观测指标
 
-现象：
+历史问题：
 
-- worker 级 `Lock_` 已有 acquire/wait 计数。
-- `PendingReceives` 深度、pending bytes、callback dispatch nanos 已有指标。
-- 但 maintenance 扫描耗时、每轮扫描 relay 数、receive view 线性查找成本、callback 复制字节/耗时等还没有直接指标。
-
-影响：
-
-- 高并发 Windows 性能问题发生时，可能只能看到 backlog 或延迟结果，难以判断根因是 callback copy、全表 maintenance、TCP 写慢还是 worker map 锁。
+- 早期仅有 worker 级 `Lock_` acquire/wait、`PendingReceives` 深度、pending bytes、callback dispatch nanos 等指标。
+- maintenance 扫描耗时、每轮扫描 relay 数、receive view 线性查找成本、callback 复制字节/耗时等缺少直接指标，高并发下难以定位 callback copy、全表 maintenance 或 TCP 写慢等根因。
 
 当前状态：
 

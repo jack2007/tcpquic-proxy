@@ -2148,6 +2148,40 @@ bool TqWindowsRelayWorker::TestArmRelayClosingForLateDiscard(uint64_t relayId) {
     return true;
 }
 
+bool TqWindowsRelayWorker::TestArmRelayClosingOnRelayOnlyForTest(uint64_t relayId) {
+    std::shared_ptr<RelayContext> relay;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        const auto it = Relays_.find(relayId);
+        if (it != Relays_.end()) {
+            relay = it->second;
+        }
+    }
+    if (!relay) {
+        return false;
+    }
+    relay->Closing.store(true, std::memory_order_release);
+    return true;
+}
+
+bool TqWindowsRelayWorker::TestBumpCallbackBindingGenerationForTest(
+    uint64_t relayId,
+    uint64_t delta) {
+    std::shared_ptr<RelayContext> relay;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        const auto it = Relays_.find(relayId);
+        if (it != Relays_.end()) {
+            relay = it->second;
+        }
+    }
+    if (!relay || !relay->Callback || delta == 0) {
+        return false;
+    }
+    relay->Callback->Generation += delta;
+    return true;
+}
+
 bool TqWindowsRelayWorker::TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId) {
     std::shared_ptr<RelayContext> relay;
     {

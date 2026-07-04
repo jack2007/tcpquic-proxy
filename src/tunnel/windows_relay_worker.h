@@ -240,6 +240,8 @@ public:
         uint32_t timeoutMs) const;
     void TestReleaseWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest& block) const;
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
+    bool TestArmRelayClosingOnRelayOnlyForTest(uint64_t relayId);
+    bool TestBumpCallbackBindingGenerationForTest(uint64_t relayId, uint64_t delta);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
     bool MaybePostTcpRecvForTest(uint64_t relayId);
     bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;

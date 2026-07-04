@@ -624,6 +624,107 @@ bool TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest() {
            after.CallbackReceiveCopyBytes >= before.CallbackReceiveCopyBytes + sizeof(payload);
 }
 
+bool TestWindowsRelayCallbackReceiveBudgetSkipsStaleGenerationForTest() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    g_StreamReceiveSetEnabledCalls = 0;
+
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        MsQuic = nullptr;
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay = 8;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+    if (!worker.TestBumpCallbackBindingGenerationForTest(handle.WindowsRelayId, 1)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const auto before = worker.Snapshot();
+    uint8_t payload[16]{};
+    QUIC_BUFFER buffer{sizeof(payload), payload};
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = sizeof(payload);
+    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const auto after = worker.Snapshot();
+    worker.Stop();
+    MsQuic = nullptr;
+    return status == QUIC_STATUS_PENDING &&
+           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount &&
+           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount &&
+           g_StreamReceiveSetEnabledCalls == 0;
+}
+
+bool TestWindowsRelayCallbackReceiveBudgetSkipsClosingRelayForTest() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    g_StreamReceiveSetEnabledCalls = 0;
+
+    TqWindowsRelayWorker worker;
+    if (!worker.TestCreateIocpForCallbackPostOnly()) {
+        MsQuic = nullptr;
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay = 8;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+    if (!worker.TestArmRelayClosingOnRelayOnlyForTest(handle.WindowsRelayId)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const auto before = worker.Snapshot();
+    const uint64_t setEnabledBefore = g_StreamReceiveSetEnabledCalls;
+    uint8_t payload[16]{};
+    QUIC_BUFFER buffer{sizeof(payload), payload};
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = sizeof(payload);
+    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const auto after = worker.Snapshot();
+    MsQuic = nullptr;
+    return (status == QUIC_STATUS_PENDING || status == QUIC_STATUS_SUCCESS) &&
+           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount &&
+           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount &&
+           g_StreamReceiveSetEnabledCalls == setEnabledBefore;
+}
+
 bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     TqWindowsRelayWorker worker;
     worker.SetMaintenanceBudgetForTest(1);
@@ -1814,6 +1915,14 @@ int main() {
 
     if (!TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest()) {
         return 129;
+    }
+
+    if (!TestWindowsRelayCallbackReceiveBudgetSkipsStaleGenerationForTest()) {
+        return 140;
+    }
+
+    if (!TestWindowsRelayCallbackReceiveBudgetSkipsClosingRelayForTest()) {
+        return 141;
     }
 
     if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
