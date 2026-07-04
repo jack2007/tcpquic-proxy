@@ -104,8 +104,13 @@ sequenceDiagram
     participant TCP as 本地 TCP socket
 
     QUIC-->>Callback: QUIC_STREAM_EVENT_RECEIVE
-    Callback->>Callback: 复制 QUIC buffers 到 OwnedBuffer
-    Callback->>Relay: PostQueuedCompletionStatus(RelayReceiveReady)
+    Callback->>Callback: ComputeReceiveEventBytes + 预算判断
+    alt 预算允许或 FIN
+        Callback->>Callback: 复制 QUIC buffers 到 OwnedBuffer
+        Callback->>Relay: PostQueuedCompletionStatus(RelayReceiveReady)
+    else 预算超限
+        Callback->>Callback: StreamReceiveSetEnabled(FALSE)，跳过复制
+    end
     Relay->>Relay: EnqueueDeferredQuicReceiveView
     Relay->>Relay: DrainRelayReceives
     Relay->>TCP: WSASend overlapped
@@ -116,8 +121,9 @@ sequenceDiagram
 
 实现要点：
 
-- Windows receive callback 会复制 MsQuic buffers 到 `TqWindowsPendingQuicReceive::OwnedBuffer`，再返回 `QUIC_STATUS_PENDING`。
-- callback 投递的是带 relay id/generation 的 `RelayReceiveReady` operation；真正入 `PendingReceives` 发生在 worker 线程。
+- `StreamCallback(RECEIVE)` 先调用 `ComputeReceiveEventBytes()` 和 `ShouldRejectReceiveInCallback()`：通过 `CallbackBinding::RelayHint` 读取 relay generation、pending bytes 和 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay`；明显超限且不含 FIN 的 receive 会暂停后续 QUIC receive 并跳过复制，返回 `QUIC_STATUS_SUCCESS`。
+- 预算允许或带 `QUIC_RECEIVE_FLAG_FIN` 的 receive 才会调用 `BuildDeferredQuicReceiveView()` 复制 MsQuic buffers 到 `TqWindowsPendingQuicReceive::OwnedBuffer`，成功投递 IOCP 后返回 `QUIC_STATUS_PENDING`。
+- callback 投递的是带 relay id/generation 的 `RelayReceiveReady` operation；真正入 `PendingReceives` 发生在 worker 线程的 `EnqueueDeferredQuicReceiveView()`，其中仍保留预算检查作为并发竞态兜底。
 - `DrainRelayReceives()` 只处理队首 view，保持 QUIC -> TCP 写入顺序。
 - 非压缩路径由 `PostTcpSendFromReceiveView()` 对当前 slice 投递 `WSASend()`。
 - zstd 路径由 `PostTcpSendFromCompressedReceiveView()` 解压到 relay buffer 后投递 `WSASend()`。
@@ -169,8 +175,8 @@ TCP read 背压：
 
 QUIC receive 背压：
 
-- `EnqueueDeferredQuicReceiveView()` 累加 `PendingQuicReceiveBytes` 和 `PendingQuicReceiveQueueDepth`。
-- 达到 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 后调用 `StreamReceiveSetEnabled(FALSE)`。
+- **callback 线程（复制前）**：`ShouldRejectReceiveInCallback()` 比较 `PendingQuicReceiveBytes + receiveBytes` 与 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay`；超限时调用 `StreamReceiveSetEnabled(FALSE)` 并跳过复制。FIN receive、零字节 receive、hint 为空、generation 不匹配、relay 已 closing 或 limit 为 0 时不做预算拒绝，交给 worker 侧 stale/drop 逻辑处理。
+- **worker 线程（入队时）**：`EnqueueDeferredQuicReceiveView()` 累加 `PendingQuicReceiveBytes` 和 `PendingQuicReceiveQueueDepth`；达到上限后调用 `StreamReceiveSetEnabled(FALSE)`。
 - pending bytes 低于一半时 `MaybeResumeQuicReceive()` 恢复 receive。
 
 关闭：
@@ -201,7 +207,7 @@ QUIC receive 背压：
 
 ### 热点结论
 
-当前最高优先级关注 `TqWindowsRelayWorker::Lock_`，但它的风险边界与旧实现不同：MsQuic receive callback 现在先复制 receive view 并用 id/generation 投递 IOCP，`SEND_COMPLETE` 也通过 `PostCallbackOperationById()` 投递，因此 callback 线程直接持 worker map 锁的机会下降。真正要观察的是 worker 内部查 map、snapshot、trace context 和 relay retire 与注册/观测之间的竞争。
+当前最高优先级关注 `TqWindowsRelayWorker::Lock_`，但它的风险边界与旧实现不同：MsQuic receive callback 在复制前做轻量预算判断，预算允许时才复制 receive view 并用 id/generation 投递 IOCP；`SEND_COMPLETE` 也通过 `PostCallbackOperationById()` 投递，因此 callback 线程直接持 worker map 锁的机会下降。真正要观察的是 worker 内部查 map、snapshot、trace context 和 relay retire 与注册/观测之间的竞争。
 
 建议线上或压力测试时重点看这些指标：
 
@@ -209,6 +215,10 @@ QUIC receive 背压：
 - `WindowsRelayWorkerLockWaitNanos`
 - `WindowsRelayFindRelayByIdCount`
 - `WindowsRelayCallbackDispatchNanos`
+- `WindowsRelayCallbackReceiveBudgetRejectedCount` / `WindowsRelayCallbackReceiveBudgetPausedCount`
+- `WindowsRelayCallbackReceiveCopyBytes` / `WindowsRelayCallbackReceiveCopyNanos`
+- `WindowsRelayMaintenanceDrainCount` / `WindowsRelayMaintenanceDrainNanos` / `WindowsRelayMaintenanceRelaysProcessed`
+- `WindowsRelayReceiveViewFinishLinearSearchCount` / `WindowsRelayReceiveViewFinishLinearSearchNanos` / `WindowsRelayReceiveViewFinishNotFrontCount`
 - `WindowsRelaySnapshotBuildNanos`
 - `WindowsRelaySnapshotActiveRelaysScanned`
 - `WindowsCallbackIocpPostCount`
@@ -281,10 +291,15 @@ QUIC receive 背压：
 
 当前状态：
 
-- callback 线程在复制前通过 `CallbackBinding::RelayHint` 读取 relay generation、pending bytes 和上限，先做轻量预算判断。
-- 对不含 FIN 且会超过 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 的 receive，callback 线程会暂停后续 QUIC receive 并跳过复制。
+- callback 线程在复制前通过 `CallbackBinding::RelayHint` 读取 relay generation、pending bytes 和上限，先做轻量预算判断（`ComputeReceiveEventBytes()` → `ShouldRejectReceiveInCallback()`）。
+- 对不含 FIN 且会超过 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 的 receive，callback 线程会调用 `PauseQuicReceiveFromCallback()` 暂停后续 QUIC receive 并跳过复制，返回 `QUIC_STATUS_SUCCESS`（不持有 MsQuic buffer ownership）。
+- FIN receive 始终绕过预算拒绝，保证 stream 关闭语义；hint 为空、generation 不匹配、relay 已 closing 或 limit 为 0 时也不做预算拒绝，由 worker 侧 IOCP/stale/drop 逻辑兜底。
 - worker 侧 `EnqueueDeferredQuicReceiveView()` 仍保留预算检查，作为并发竞态兜底。
-- copy 字节和耗时通过 `windows_relay_callback_receive_copy_bytes` / `windows_relay_callback_receive_copy_nanos` 观测，预算拒绝和暂停通过对应 callback receive budget 指标观测。
+- copy 字节和耗时通过 `windows_relay_callback_receive_copy_bytes` / `windows_relay_callback_receive_copy_nanos` 观测；预算拒绝和暂停通过 `windows_relay_callback_receive_budget_rejected_count` / `windows_relay_callback_receive_budget_paused_count` 观测；trace 摘要字段为 `win_cb_recv_*`。
+
+验证覆盖：
+
+- `tcpquic_windows_relay_worker_test` 覆盖初始指标状态、copy 计量、预算拒绝（复制前暂停且不复制）、FIN 绕过、stale generation / closing relay 跳过预算拒绝等路径。
 
 ### 3.5 `StreamCallback()` 遇到 fake FIN 会 `abort()` 是设计行为
 
@@ -353,7 +368,9 @@ QUIC receive 背压：
 
 当前状态：
 
-- maintenance 扫描耗时、每轮扫描 relay 数、receive view 线性查找成本、callback 复制字节/耗时均已有指标。
+- maintenance 扫描：`windows_relay_maintenance_drain_count` / `windows_relay_maintenance_drain_nanos` / `windows_relay_maintenance_relays_processed` / `windows_relay_maintenance_full_scan_*`。
+- receive view 线性查找：`windows_relay_receive_view_finish_linear_search_count` / `windows_relay_receive_view_finish_linear_search_nanos` / `windows_relay_receive_view_finish_not_front_count`。
+- callback 复制与预算：`windows_relay_callback_receive_copy_bytes` / `windows_relay_callback_receive_copy_nanos` / `windows_relay_callback_receive_budget_rejected_count` / `windows_relay_callback_receive_budget_paused_count`。
 - 后续如果继续优化 receive callback，可评估 MsQuic buffer ownership 或分片处理，但当前观测缺口已关闭。
 
 ## 建议优先级
