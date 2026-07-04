@@ -647,9 +647,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
-            if (auto relay = FindRelay(event.RelayId)) {
-                RetryPendingQuicSends(relay);
-            }
+            // Ideal send retries are worker-thread-only; stop purge is lifecycle cleanup.
             break;
         case TqDarwinRelayEventType::RegisterRelay:
             CompleteRegisterCommand(static_cast<RegisterRelayCommand*>(event.Control), {});
@@ -1674,27 +1672,19 @@ void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState
     if (relay == nullptr) {
         return;
     }
+    AssertWorkerThreadForRelayState();
     for (;;) {
         std::unique_ptr<TqDarwinRelaySendOperation> operation;
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            if (relay->Closing || relay->PendingQuicSends.empty()) {
-                break;
-            }
-            operation = std::move(relay->PendingQuicSends.front());
-            relay->PendingQuicSends.pop_front();
+        if (relay->Closing || relay->PendingQuicSends.empty()) {
+            break;
         }
+        operation = std::move(relay->PendingQuicSends.front());
+        relay->PendingQuicSends.pop_front();
         if (!TrySubmitQuicSendOperation(relay, std::move(operation))) {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
             relay->Closing = true;
             return;
         }
-        bool hasPending = false;
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            hasPending = !relay->PendingQuicSends.empty();
-        }
-        if (hasPending) {
+        if (!relay->PendingQuicSends.empty()) {
             return;
         }
     }
@@ -1747,7 +1737,7 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
             }
             closing = relay->Closing;
         }
-        if (!bindingRelayFallback && !closing && !info.Submitting) {
+        if (workerThread && !bindingRelayFallback && !closing && !info.Submitting) {
             RetryPendingQuicSends(relay);
             if (ShouldResumeTcpReadForQuicBacklog(relay)) {
                 (void)SetTcpReadBackpressure(relay, false);
@@ -1761,7 +1751,7 @@ bool TqDarwinRelayWorker::ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr
     if (relay == nullptr) {
         return false;
     }
-    std::lock_guard<std::mutex> relayLock(relay->Mutex);
+    AssertWorkerThreadForRelayState();
     if (Config.MaxInFlightQuicSends != 0 && relay->InFlightQuicSends >= Config.MaxInFlightQuicSends) {
         return true;
     }
@@ -1775,7 +1765,7 @@ bool TqDarwinRelayWorker::ShouldResumeTcpReadForQuicBacklog(const std::shared_pt
     if (relay == nullptr) {
         return false;
     }
-    std::lock_guard<std::mutex> relayLock(relay->Mutex);
+    AssertWorkerThreadForRelayState();
     if (relay->TcpReadClosed) {
         return false;
     }
@@ -1791,27 +1781,22 @@ bool TqDarwinRelayWorker::SetTcpReadBackpressure(const std::shared_ptr<RelayStat
     if (relay == nullptr) {
         return false;
     }
+    AssertWorkerThreadForRelayState();
     bool oldPaused = false;
     bool oldArmed = false;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->TcpReadPausedByQuicBacklog == paused) {
-            return true;
-        }
-        oldPaused = relay->TcpReadPausedByQuicBacklog;
-        oldArmed = relay->TcpReadArmed;
-        relay->TcpReadPausedByQuicBacklog = paused;
-        relay->TcpReadArmed = !paused && !relay->TcpReadClosed;
+    if (relay->TcpReadPausedByQuicBacklog == paused) {
+        return true;
     }
+    oldPaused = relay->TcpReadPausedByQuicBacklog;
+    oldArmed = relay->TcpReadArmed;
+    relay->TcpReadPausedByQuicBacklog = paused;
+    relay->TcpReadArmed = !paused && !relay->TcpReadClosed;
     if (UpdateTcpInterest(relay)) {
         return true;
     }
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        relay->TcpReadPausedByQuicBacklog = oldPaused;
-        relay->TcpReadArmed = oldArmed;
-        relay->Closing = true;
-    }
+    relay->TcpReadPausedByQuicBacklog = oldPaused;
+    relay->TcpReadArmed = oldArmed;
+    relay->Closing = true;
     Errors.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
