@@ -483,10 +483,6 @@ bool TestWindowsRelayFinishReceiveViewNotFrontIsCounted() {
 bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     TqWindowsRelayWorker worker;
     worker.SetMaintenanceBudgetForTest(1);
-    if (!StartRelayWorkerForTest(worker)) {
-        worker.Stop();
-        return false;
-    }
     alignas(MsQuicStream) unsigned char streamStorageA[sizeof(MsQuicStream)]{};
     alignas(MsQuicStream) unsigned char streamStorageB[sizeof(MsQuicStream)]{};
     auto* streamA = reinterpret_cast<MsQuicStream*>(streamStorageA);
@@ -499,7 +495,6 @@ bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     tuning.RelayIoSize = 4096;
     if (!worker.RegisterRelayForTest(streamA, &handleA, tuning, TqCompressAlgo::None) ||
         !worker.RegisterRelayForTest(streamB, &handleB, tuning, TqCompressAlgo::None)) {
-        worker.Stop();
         return false;
     }
     worker.TestScheduleMaintenanceForTest(handleA.WindowsRelayId);
@@ -509,7 +504,6 @@ bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     const auto afterOne = worker.Snapshot();
     worker.TestDrainMaintenanceForTest();
     const auto afterTwo = worker.Snapshot();
-    worker.Stop();
     return afterOne.MaintenanceRelaysProcessed == before.MaintenanceRelaysProcessed + 1 &&
            afterTwo.MaintenanceRelaysProcessed == before.MaintenanceRelaysProcessed + 2;
 }
