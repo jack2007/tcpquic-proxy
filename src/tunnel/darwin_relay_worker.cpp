@@ -89,6 +89,8 @@ struct TqDarwinRelayWorker::StreamBinding : public std::enable_shared_from_this<
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
     std::weak_ptr<RelayState> Relay;
+    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> CallbackPendingQuicReceives;
+    mutable std::mutex CallbackPendingQuicReceivesMutex;
 };
 
 struct TqDarwinRelayPendingTcpWrite {
@@ -704,6 +706,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
     if (processed > 0) {
         EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
     }
+    FlushAllCallbackPendingQuicReceivesLocal();
     return processed;
 }
 
@@ -967,6 +970,15 @@ void TqDarwinRelayWorker::RetireRelay(
         (void)DiscardDeferredQuicReceive(nullptr, receive);
     }
     if (binding != nullptr) {
+        std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> callbackPendingReceives;
+        {
+            std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+            callbackPendingReceives.swap(binding->CallbackPendingQuicReceives);
+        }
+        for (const auto& receive : callbackPendingReceives) {
+            ReleaseCallbackReceiveBudget(receive);
+            (void)DiscardDeferredQuicReceive(nullptr, receive);
+        }
         binding->Active.store(false, std::memory_order_release);
         static constexpr uint32_t kMaxCallbackRefYields = 100000;
         uint32_t callbackRefYields = 0;
@@ -1045,8 +1057,13 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
             completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0;
         const bool hasCallbackReceives =
             (*it)->CallbackPendingReceiveEvents.load(std::memory_order_acquire) != 0;
+        bool hasCallbackPendingQuicReceives = false;
+        {
+            std::lock_guard<std::mutex> guard((*it)->CallbackPendingQuicReceivesMutex);
+            hasCallbackPendingQuicReceives = !(*it)->CallbackPendingQuicReceives.empty();
+        }
         if ((*it)->CallbackRefs.load(std::memory_order_acquire) == 0 && !hasKnownOperations &&
-            !hasCallbackReceives) {
+            !hasCallbackReceives && !hasCallbackPendingQuicReceives) {
             ClearRetiredStreamCallbackIfSafe(it->get());
             (*it)->Worker.store(nullptr, std::memory_order_release);
             it = RetiredStreamBindings.erase(it);
@@ -2267,12 +2284,83 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
     event.Fin = fin;
     event.ReceiveView = receive;
     if (!EnqueueEvent(std::move(event))) {
-        ReleaseCallbackReceiveBudget(receive);
-        QuicReceiveViewCount.fetch_sub(1, std::memory_order_relaxed);
-        QuicReceiveViewBytes.fetch_sub(receive->TotalLength, std::memory_order_relaxed);
-        return recordFailure(TqDarwinQuicReceiveEnqueueResult::EventQueueFull);
+        QuicReceiveViewBackpressureQueued.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+            binding->CallbackPendingQuicReceives.push_back(receive);
+        }
+        if (auto relay = binding->Relay.lock()) {
+            relay->QuicReceivePaused = true;
+        }
+        PauseMsQuicReceiveFromCallback(stream);
+        (void)Wake();
+        return TqDarwinQuicReceiveEnqueueResult::EventQueueFull;
     }
     return TqDarwinQuicReceiveEnqueueResult::Ok;
+}
+
+void TqDarwinRelayWorker::FlushCallbackPendingQuicReceives(StreamBinding* binding) {
+    if (binding == nullptr) {
+        return;
+    }
+    AssertWorkerThreadForRelayState();
+
+    for (;;) {
+        std::shared_ptr<TqDarwinPendingQuicReceive> receive;
+        {
+            std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+            if (binding->CallbackPendingQuicReceives.empty()) {
+                break;
+            }
+            receive = binding->CallbackPendingQuicReceives.front();
+        }
+        if (receive == nullptr) {
+            std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+            if (!binding->CallbackPendingQuicReceives.empty()) {
+                binding->CallbackPendingQuicReceives.pop_front();
+            }
+            continue;
+        }
+
+        TqDarwinRelayEvent retryEvent{};
+        retryEvent.Type = TqDarwinRelayEventType::QuicReceiveView;
+        retryEvent.RelayId = receive->RelayId;
+        retryEvent.TotalLength = receive->TotalLength;
+        retryEvent.Fin = receive->Fin;
+        retryEvent.ReceiveView = receive;
+        if (!EnqueueEvent(std::move(retryEvent))) {
+            break;
+        }
+
+        {
+            std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+            if (!binding->CallbackPendingQuicReceives.empty() &&
+                binding->CallbackPendingQuicReceives.front() == receive) {
+                binding->CallbackPendingQuicReceives.pop_front();
+            }
+        }
+    }
+
+    bool empty = false;
+    {
+        std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
+        empty = binding->CallbackPendingQuicReceives.empty();
+    }
+    if (empty) {
+        if (auto relay = binding->Relay.lock()) {
+            MaybeResumeQuicReceive(relay);
+        }
+    }
+}
+
+void TqDarwinRelayWorker::FlushAllCallbackPendingQuicReceivesLocal() {
+    AssertWorkerThreadForRelayState();
+    for (const auto& entry : Relays) {
+        const auto& relay = entry.second;
+        if (relay != nullptr && relay->Binding != nullptr) {
+            FlushCallbackPendingQuicReceives(relay->Binding.get());
+        }
+    }
 }
 
 void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
@@ -3133,9 +3221,7 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::EventQueueFull:
-            worker->PauseMsQuicReceiveFromCallback(stream);
-            worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
-            return QUIC_STATUS_SUCCESS;
+            return QUIC_STATUS_PENDING;
         }
         return QUIC_STATUS_SUCCESS;
     }

@@ -2350,6 +2350,7 @@ void ReceiveEnqueueFailureCurrentlyReturnsSuccess() {
 
     CHECK(worker.EventQueueFullErrorsForTest() == 0);
     CHECK(worker.QuicReceiveEnqueueFailuresForTest() == 0);
+    CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 0);
 
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
@@ -2365,13 +2366,88 @@ void ReceiveEnqueueFailureCurrentlyReturnsSuccess() {
     receiveEvent.RECEIVE.BufferCount = 1;
     receiveEvent.RECEIVE.Buffers = &quicBuffer;
 
-    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_SUCCESS);
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
     CHECK(worker.EventQueueFullErrorsForTest() == 1);
-    CHECK(worker.QuicReceiveEnqueueFailuresForTest() == 1);
+    CHECK(worker.QuicReceiveEnqueueFailuresForTest() == 0);
+    CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
     CHECK(g_receiveSetEnabledCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+
+    worker.SetReceiveSetEnabledForTest(nullptr);
+    worker.SetReceiveCompleteForTest(nullptr);
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void ReceiveCallbackQueueFullBackpressureRetriesAfterDrain() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    ResetFakeReceiveComplete();
+    ResetFakeReceiveSetEnabled(QUIC_STATUS_SUCCESS);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 2;
+    config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
+
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    worker.SetReceiveSetEnabledForTest(FakeReceiveSetEnabled);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(worker.PendingEventsForTest() == 2);
+
+    const char payload[] = "backpressure-retry";
+    QUIC_BUFFER quicBuffer{};
+    quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
+    quicBuffer.Length = static_cast<uint32_t>(sizeof(payload) - 1);
+
+    QUIC_STREAM_EVENT receiveEvent{};
+    receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receiveEvent.RECEIVE.BufferCount = 1;
+    receiveEvent.RECEIVE.Buffers = &quicBuffer;
+
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+    CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.PendingEventsForTest() == 1);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.PendingEventsForTest() == 0);
+    CHECK(worker.FlushTcpWritableForTest(result.RelayId));
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
+
+    char output[sizeof(payload)]{};
+    const ssize_t received = read(fds[1], output, sizeof(payload) - 1);
+    CHECK(received == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(std::memcmp(output, payload, sizeof(payload) - 1) == 0);
+    CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 1);
 
     worker.SetReceiveSetEnabledForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -3636,6 +3712,7 @@ int main() {
     RegisterFilterFailureRollsBackRelayAndHandle();
     RegisterAfterStopFailsWithoutPublishingHandle();
     ReceiveEnqueueFailureCurrentlyReturnsSuccess();
+    ReceiveCallbackQueueFullBackpressureRetriesAfterDrain();
     ReceiveCallbackBudgetRejectPausesAndCompletes();
     QuicReceiveCallbackReturnsPending();
     QuicReceiveCallbackDefersPendingBytesUntilWorkerEvent();

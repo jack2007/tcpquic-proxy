@@ -391,6 +391,8 @@ private:
     void ReleaseCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes);
     void ReleaseCallbackReceiveBudget(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     void ProcessQuicReceiveViewEvent(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    void FlushCallbackPendingQuicReceives(StreamBinding* binding);
+    void FlushAllCallbackPendingQuicReceivesLocal();
     bool EnqueueQuicReceiveForTcp(
         const std::shared_ptr<RelayState>& relay,
         const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
