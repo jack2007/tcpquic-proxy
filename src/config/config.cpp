@@ -14,6 +14,7 @@
 #include <fstream>
 #include <limits>
 #include <set>
+#include <system_error>
 #include <utility>
 
 #if defined(_WIN32)
@@ -53,7 +54,7 @@ std::string BaseNameFromArgv0(const char* argv0) {
     return path.empty() ? "tcpquic-proxy" : path;
 }
 
-std::string DefaultClientConfigPath(const char* argv0) {
+std::filesystem::path DefaultRuntimeBaseDir(const char* argv0) {
     const std::string runtimeName = BaseNameFromArgv0(argv0);
     std::filesystem::path base;
 #if defined(_WIN32)
@@ -71,7 +72,13 @@ std::string DefaultClientConfigPath(const char* argv0) {
             (runtimeName + "-" + std::to_string(static_cast<unsigned long>(::getuid())));
     }
 #endif
-    return (base / ("client-config-" + std::to_string(CurrentPid()) + ".json")).string();
+    return base;
+}
+
+std::string DefaultRoleConfigPath(const char* argv0, TqMode mode) {
+    const char* role = mode == TqMode::Client ? "client" : "server";
+    return (DefaultRuntimeBaseDir(argv0) /
+        (std::string(role) + "-config-" + std::to_string(CurrentPid()) + ".json")).string();
 }
 
 bool IsWhitespaceOnly(const std::string& value) {
@@ -869,6 +876,139 @@ private:
     std::string& Err;
 };
 
+const char* QuicProfileName(TqQuicProfile profile) {
+    switch (profile) {
+    case TqQuicProfile::MaxThroughput: return "max-throughput";
+    case TqQuicProfile::LowLatency: return "low-latency";
+    }
+    return "max-throughput";
+}
+
+const char* TuningModeName(TqTuningMode mode) {
+    switch (mode) {
+    case TqTuningMode::Auto: return "auto";
+    case TqTuningMode::Lan: return "lan";
+    case TqTuningMode::Wan: return "wan";
+    }
+    return "wan";
+}
+
+const char* TraceLevelName(TqConfig::TraceLevel level) {
+    switch (level) {
+    case TqConfig::TraceLevel::Info: return "info";
+    case TqConfig::TraceLevel::Debug: return "debug";
+    }
+    return "info";
+}
+
+nlohmann::json StringArrayJson(const std::vector<std::string>& values) {
+    nlohmann::json out = nlohmann::json::array();
+    for (const auto& value : values) {
+        out.push_back(value);
+    }
+    return out;
+}
+
+std::string RuntimeConfigJson(const TqConfig& cfg) {
+    nlohmann::json root;
+    root["tls"] = nlohmann::json::object();
+    if (!cfg.QuicCert.empty()) root["tls"]["cert"] = cfg.QuicCert;
+    if (!cfg.QuicKey.empty()) root["tls"]["key"] = cfg.QuicKey;
+    if (!cfg.QuicCa.empty()) root["tls"]["ca"] = cfg.QuicCa;
+
+    if (!cfg.AdminListen.empty() || !cfg.AdminTokenFile.empty() || cfg.AdminThreads != 2) {
+        root["admin"] = nlohmann::json::object();
+        if (!cfg.AdminListen.empty()) root["admin"]["listen"] = cfg.AdminListen;
+        if (!cfg.AdminTokenFile.empty()) root["admin"]["token_file"] = cfg.AdminTokenFile;
+        root["admin"]["threads"] = cfg.AdminThreads;
+    }
+
+    root["proto"] = {
+        {"profile", QuicProfileName(cfg.QuicProfile)},
+        {"disable_1rtt_encryption", cfg.QuicDisable1RttEncryption},
+        {"connection_stream_count", cfg.QuicConnectionStreamCount},
+        {"keepalive_ms", cfg.QuicKeepAliveIntervalMs},
+    };
+    if (cfg.Mode == TqMode::Client) {
+        root["proto"]["connections"] = cfg.QuicConnections;
+    }
+    if (cfg.TuningOverrideQuicIw != 0) root["proto"]["iw"] = cfg.TuningOverrideQuicIw;
+    if (cfg.TuningOverrideQuicInitRttMs != 0) root["proto"]["initrtt_ms"] = cfg.TuningOverrideQuicInitRttMs;
+
+    root["compression"] = {
+        {"mode", cfg.Compress},
+        {"level", cfg.CompressLevel},
+    };
+    root["tuning"] = {{"mode", TuningModeName(cfg.TuningMode)}};
+
+    nlohmann::json relay = nlohmann::json::object();
+    if (cfg.TuningOverrideRelayIoSize != 0) relay["io_size"] = cfg.TuningOverrideRelayIoSize;
+    nlohmann::json linuxRelay = nlohmann::json::object();
+    if (cfg.TuningOverrideLinuxRelayReadChunkSize != 0) linuxRelay["read_chunk_size"] = cfg.TuningOverrideLinuxRelayReadChunkSize;
+    if (cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes != 0) linuxRelay["tcp_write_max_bytes"] = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
+    if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes != 0) linuxRelay["tcp_write_burst_bytes"] = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
+    if (cfg.TuningOverrideLinuxRelayEventQueueCapacity != 0) linuxRelay["event_queue_capacity"] = cfg.TuningOverrideLinuxRelayEventQueueCapacity;
+    if (cfg.TuningOverrideLinuxRelayWorkerCount != 0) linuxRelay["worker_count"] = cfg.TuningOverrideLinuxRelayWorkerCount;
+    if (!linuxRelay.empty()) relay["linux"] = std::move(linuxRelay);
+    nlohmann::json windowsRelay = nlohmann::json::object();
+    if (cfg.TuningOverrideWindowsRelayWorkerCount != 0) windowsRelay["worker_count"] = cfg.TuningOverrideWindowsRelayWorkerCount;
+    if (!windowsRelay.empty()) relay["windows"] = std::move(windowsRelay);
+    if (!relay.empty()) root["relay"] = std::move(relay);
+
+    root["trace"] = {
+        {"enabled", cfg.Trace},
+        {"interval_sec", cfg.TraceIntervalSec},
+        {"level", TraceLevelName(cfg.TraceLogLevel)},
+    };
+
+    if (cfg.Mode == TqMode::Server) {
+        root["server"] = {
+            {"proto_listen", cfg.QuicListen},
+            {"allow_targets", StringArrayJson(cfg.AllowTargets)},
+            {"deny_targets", StringArrayJson(cfg.DenyTargets)},
+        };
+    }
+
+    return root.dump(2) + "\n";
+}
+
+bool WriteTextFileAtomically(const std::string& path, const std::string& body, std::string& err) {
+    std::error_code ec;
+    const std::filesystem::path target(path);
+    const std::filesystem::path parent = target.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            err = "failed to create config directory: " + ec.message();
+            return false;
+        }
+    }
+
+    const std::filesystem::path tmp = target.string() + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            err = "failed to open config temp file: " + tmp.string();
+            return false;
+        }
+        out << body;
+        out.close();
+        if (!out) {
+            err = "failed to write config temp file: " + tmp.string();
+            std::filesystem::remove(tmp, ec);
+            return false;
+        }
+    }
+
+    std::filesystem::rename(tmp, target, ec);
+    if (ec) {
+        err = "failed to publish config file: " + ec.message();
+        std::filesystem::remove(tmp, ec);
+        return false;
+    }
+    return true;
+}
+
 bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& err) {
     std::ifstream file(path);
     if (!file) {
@@ -997,6 +1137,8 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         return false;
     }
 
+    bool configSpecified = false;
+    bool configFileMissing = false;
     for (int i = 2; i < argc; ++i) {
         const char* arg = argv[i];
         const char* value = nullptr;
@@ -1013,8 +1155,11 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             err = "--config specified more than once";
             return false;
         }
+        configSpecified = true;
         cfg.ConfigPath = value;
-        if (!LoadRuntimeConfigFile(cfg.ConfigPath, cfg, err)) {
+        if (!std::filesystem::exists(cfg.ConfigPath)) {
+            configFileMissing = true;
+        } else if (!LoadRuntimeConfigFile(cfg.ConfigPath, cfg, err)) {
             return false;
         }
     }
@@ -1525,7 +1670,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         }
     }
     if (cfg.Mode == TqMode::Client && !clientConfigSpecified && cfg.ClientConfigPath.empty()) {
-        cfg.ClientConfigPath = DefaultClientConfigPath(argc > 0 ? argv[0] : nullptr);
+        cfg.ClientConfigPath = DefaultRoleConfigPath(argc > 0 ? argv[0] : nullptr, TqMode::Client);
     }
     if (clientConfigSpecified) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {
@@ -1623,6 +1768,14 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         }
         if (!cfg.DenyTargets.empty() && !TqValidateCidrList(cfg.DenyTargets, err)) {
             return false;
+        }
+        if (cfg.ConfigPath.empty()) {
+            cfg.ConfigPath = DefaultRoleConfigPath(argc > 0 ? argv[0] : nullptr, TqMode::Server);
+        }
+        if (!configSpecified || configFileMissing) {
+            if (!WriteTextFileAtomically(cfg.ConfigPath, RuntimeConfigJson(cfg), err)) {
+                return false;
+            }
         }
     }
 

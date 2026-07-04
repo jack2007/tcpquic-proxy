@@ -3,6 +3,8 @@
 #include "relay_metrics.h"
 #include "server_metrics.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
@@ -22,6 +24,11 @@ static std::string WriteTempConfig(const std::string& body) {
     f.close();
     if (!f) abort();
     return path.string();
+}
+
+static std::string ReadTextFile(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
 static std::string TempConfigPath(const std::string& name) {
@@ -1029,6 +1036,107 @@ int main() {
         if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 88;
         if (cfg.Tuning.InitialRttMs != 1) return 90;
         if (!cfg.QuicCa.empty()) return 186;
+    }
+    {
+        const std::string file = TempConfigPath("tcpquic-missing-server-runtime-config");
+        std::filesystem::remove(file);
+        const char* args[] = {
+            "tcpquic-proxy",
+            "server",
+            "--config",
+            file.c_str(),
+            "--listen",
+            "0.0.0.0:4433",
+            "--cert",
+            "server.crt",
+            "--key",
+            "server.key",
+            "--allow-targets",
+            "127.0.0.1/32",
+            "--admin-listen",
+            "127.0.0.1:19092",
+            "--admin-threads",
+            "3",
+            "--compress",
+            "zstd",
+            "--compress-level",
+            "2",
+            "--trace-interval",
+            "7"
+        };
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "missing server --config should generate config: %s\n", err.c_str());
+            return 340;
+        }
+        if (cfg.ConfigPath != file) return 341;
+        if (!std::filesystem::exists(file)) return 342;
+
+        const std::string body = ReadTextFile(file);
+        nlohmann::json root = nlohmann::json::parse(body);
+        if (root["tls"]["cert"] != "server.crt") return 343;
+        if (root["tls"]["key"] != "server.key") return 344;
+        if (root["server"]["proto_listen"] != "0.0.0.0:4433") return 345;
+        if (root["server"]["allow_targets"] != nlohmann::json::array({"127.0.0.1/32"})) return 346;
+        if (root["admin"]["listen"] != "127.0.0.1:19092") return 347;
+        if (root["admin"]["threads"] != 3) return 348;
+        if (root["compression"]["mode"] != "zstd") return 349;
+        if (root["compression"]["level"] != 2) return 350;
+        if (root["trace"]["interval_sec"] != 7) return 351;
+        if (root.contains("peers")) return 352;
+        std::filesystem::remove(file);
+    }
+    {
+        const std::string file = TempConfigPath("tcpquic-missing-server-runtime-config-required");
+        std::filesystem::remove(file);
+        const char* args[] = {
+            "tcpquic-proxy",
+            "server",
+            "--config",
+            file.c_str(),
+            "--listen",
+            "0.0.0.0:4433"
+        };
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 353;
+        if (err.find("--cert") == std::string::npos) return 354;
+        if (std::filesystem::exists(file)) return 355;
+    }
+    {
+        const char* args[] = {
+            "/tmp/tcpquic-proxy-test-bin",
+            "server",
+            "--listen",
+            "0.0.0.0:4433",
+            "--cert",
+            "server.crt",
+            "--key",
+            "server.key"
+        };
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "default server config path parse failed: %s\n", err.c_str());
+            return 356;
+        }
+        if (cfg.ConfigPath.empty()) return 357;
+        if (cfg.ConfigPath.find("tcpquic-proxy-test-bin") == std::string::npos) return 358;
+        if (cfg.ConfigPath.find("server-config-") == std::string::npos) return 359;
+        if (!std::filesystem::exists(cfg.ConfigPath)) return 360;
+        std::filesystem::remove(cfg.ConfigPath);
+    }
+    {
+        const std::string file = WriteTempConfig(R"json({"tls":{"cert":"server.crt"}})json");
+        const std::string before = ReadTextFile(file);
+        const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 361;
+        if (err.find("--listen") == std::string::npos) return 362;
+        if (ReadTextFile(file) != before) return 363;
+        std::filesystem::remove(file);
     }
     {
         const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--allow-targets", "127.0.0.1/32", "--cert", "a.crt", "--key", "a.key"};

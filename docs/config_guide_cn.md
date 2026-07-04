@@ -9,6 +9,13 @@ tcpquic-proxy server --config server.json
 
 配置文件必须是严格 JSON。下面示例为了说明方便使用 JSONC 注释，实际使用前需要删除注释。
 
+配置文件生命周期规则：
+
+1. `--config <path>` 指定且文件存在时，程序直接读取该文件；JSON 格式或字段 schema 不符合当前模式要求时启动失败，不修复、不覆盖。
+2. `--config <path>` 指定但文件不存在时，server 会按当前 CLI 参数和默认值生成该配置文件，然后继续启动。生成前仍会校验必填项，例如 `server` 模式必须提供 `--listen`、`--cert`、`--key`。
+3. 未指定 `--config` 时，server 使用与 Admin token 默认路径一致的运行时目录规则生成 `server-config-<pid>.json`，并以该文件作为后续 Admin ACL 写回目标。
+4. client 当前仍保留 legacy router 配置持久化行为：未指定 `--client-config` 时会使用默认 `client-config-<pid>.json`；Admin/router 配置变更会写回该文件。
+
 client 统一使用 `peers` 配置所有对端。只有一个远端 server 时，也配置一个元素的 `peers` 数组。不再需要单独的 multi-peer `client_config` 文件。
 
 ## Client 示例
