@@ -121,6 +121,7 @@ private:
     TqPeerConfig BridgeActivePeer;
 
     bool ApplyConfigLocked(const TqRouterConfig& config, std::string& err);
+    bool PersistConfigLocked(const TqRouterConfig& config, std::string& err) const;
 };
 
 bool TqValidateSinglePeerStartupBridge(const TqRouterConfig& config, std::string& err);

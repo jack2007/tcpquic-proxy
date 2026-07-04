@@ -1,0 +1,74 @@
+[
+  {
+    "id": null,
+    "path": "path-a",
+    "local": "10.201.1.1",
+    "peer": "10.201.1.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-a",
+    "local": "10.201.1.1",
+    "peer": "10.201.1.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-a",
+    "local": "10.201.1.1",
+    "peer": "10.201.1.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-a",
+    "local": "10.201.1.1",
+    "peer": "10.201.1.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-b",
+    "local": "10.201.2.1",
+    "peer": "10.201.2.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-b",
+    "local": "10.201.2.1",
+    "peer": "10.201.2.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-b",
+    "local": "10.201.2.1",
+    "peer": "10.201.2.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  },
+  {
+    "id": null,
+    "path": "path-b",
+    "local": "10.201.2.1",
+    "peer": "10.201.2.2:4433",
+    "state": "connected",
+    "active_tunnels": 0,
+    "total_tunnels": null
+  }
+]

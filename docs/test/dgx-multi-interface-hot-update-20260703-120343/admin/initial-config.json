@@ -1,0 +1,1 @@
+{"version":1,"peers":[{"peer_id":"dgx-f10","quic_peer":"10.201.1.2:4433,10.201.2.2:4433","socks_listen":"127.0.0.1:19080","http_listen":"127.0.0.1:18080","port_forwards":[{"listen":"127.0.0.1:15445","target":"10.201.1.2:16001"}],"paths":[{"name":"path-a","local":"10.201.1.1","peer":"10.201.1.2:4433","connections":4}],"quic_connections":8,"compress":"off","enabled":true}]}

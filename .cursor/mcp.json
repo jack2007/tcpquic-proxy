@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "gortex": {
+      "args": [
+        "mcp",
+        "--proxy"
+      ],
+      "command": "/home/jack/.local/bin/gortex",
+      "env": {
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "PATH": "/home/jack/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "GORTEX_INDEX_WORKERS": "8"
+      }
+    }
+  }
+}

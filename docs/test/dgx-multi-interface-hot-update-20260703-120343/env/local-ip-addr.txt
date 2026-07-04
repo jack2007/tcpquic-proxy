@@ -1,0 +1,9 @@
+$ ip -br addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enP7s7           UP             172.16.10.80/24 fe80::33ee:c014:fb96:25b9/64 
+enp1s0f0np0      UP             169.254.250.230/16 10.201.1.1/30 fe80::4ebb:47ff:fe30:161a/64 
+enp1s0f1np1      DOWN           
+enP2p1s0f0np0    UP             169.254.212.101/16 10.201.2.1/30 fe80::4ebb:47ff:fe30:161e/64 
+enP2p1s0f1np1    DOWN           
+wlP9s9           DOWN           
+docker0          DOWN           172.17.0.1/16 

@@ -1,0 +1,9 @@
+$ ssh jack@172.16.10.81 ip\ -br\ addr
+lo               UNKNOWN        127.0.0.1/8 ::1/128 
+enP7s7           UP             172.16.10.81/24 fe80::f884:fc2b:960c:7c39/64 
+enp1s0f0np0      UP             169.254.59.196/16 10.201.1.2/30 fe80::4ebb:47ff:fe2f:1b70/64 
+enp1s0f1np1      DOWN           
+enP2p1s0f0np0    UP             169.254.75.45/16 10.201.2.2/30 fe80::4ebb:47ff:fe2f:1b74/64 
+enP2p1s0f1np1    DOWN           
+wlP9s9           DOWN           
+docker0          DOWN           172.17.0.1/16 

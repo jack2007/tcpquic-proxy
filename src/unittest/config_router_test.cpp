@@ -24,6 +24,13 @@ static std::string WriteTempConfig(const std::string& body) {
     return path.string();
 }
 
+static std::string TempConfigPath(const std::string& name) {
+    static unsigned counter = 0;
+    std::ostringstream pathName;
+    pathName << name << "-" << std::rand() << "-" << counter++ << ".json";
+    return (std::filesystem::temp_directory_path() / pathName.str()).string();
+}
+
 static bool Parse(int argc, char** argv, TqConfig& cfg, std::string& err) {
     err.clear();
     bool ok = TqParseArgs(argc, argv, cfg, err);
@@ -828,6 +835,63 @@ int main() {
         if (!cfg.QuicPeer.empty()) return 327;
         if (cfg.QuicCa != "ca.crt") return 328;
         if (cfg.AdminListen != "127.0.0.1:19091") return 329;
+    }
+    {
+        const std::string missing = TempConfigPath("tcpquic-missing-client-config");
+        std::filesystem::remove(missing);
+        TqRouterConfig router;
+        std::string err;
+        if (!TqLoadClientConfig(missing, router, err)) {
+            std::fprintf(stderr, "missing client config should be accepted: %s\n", err.c_str());
+            return 332;
+        }
+        if (!router.Peers.empty()) return 333;
+    }
+    {
+        const std::string empty = WriteTempConfig("");
+        TqRouterConfig router;
+        std::string err;
+        if (!TqLoadClientConfig(empty, router, err)) {
+            std::fprintf(stderr, "empty client config should be accepted: %s\n", err.c_str());
+            return 334;
+        }
+        if (!router.Peers.empty()) return 335;
+    }
+    {
+        const char* args[] = {
+            "/tmp/tcpquic-proxy-test-bin",
+            "client",
+            "--ca",
+            "ca.crt",
+            "--admin-listen",
+            "127.0.0.1:19091"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "default client config path parse failed: %s\n", err.c_str());
+            return 336;
+        }
+        if (cfg.ClientConfigPath.empty()) return 337;
+        if (cfg.ClientConfigPath.find("tcpquic-proxy-test-bin") == std::string::npos) return 338;
+        if (cfg.ClientConfigPath.find("client-config-") == std::string::npos) return 339;
+    }
+    {
+        const std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"persisted","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11080","enabled":false}]})json");
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--ca",
+            "ca.crt",
+            "--config",
+            file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "router-style --config should be accepted for client: %s\n", err.c_str());
+            return 340;
+        }
+        if (cfg.Router.Peers.size() != 1) return 341;
+        if (cfg.Router.Peers[0].PeerId != "persisted") return 342;
     }
     {
         const char* args[] = {

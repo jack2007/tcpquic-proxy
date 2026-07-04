@@ -1,0 +1,65 @@
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                                        
+udp   UNCONN 0      0         127.0.0.54:53         0.0.0.0:*                                                  
+udp   UNCONN 0      0      127.0.0.53%lo:53         0.0.0.0:*                                                  
+udp   UNCONN 0      0            0.0.0.0:5353       0.0.0.0:*                                                  
+udp   UNCONN 0      0            0.0.0.0:42253      0.0.0.0:*                                                  
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=92)) 
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=96)) 
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=100))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=104))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=108))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=112))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=116))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=120))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=124))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=128))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=132))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=136))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=140))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=144))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=148))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=152))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=156))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=160))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=164))
+udp   UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=168))
+udp   UNCONN 0      0               [::]:5353          [::]:*                                                  
+udp   UNCONN 0      0               [::]:53305         [::]:*                                                  
+tcp   LISTEN 0      5          127.0.0.1:18081      0.0.0.0:*    users:(("raypx2-f10-2026",pid=2761321,fd=169))
+tcp   LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*                                                  
+tcp   LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*                                                  
+tcp   LISTEN 0      4096       127.0.0.1:631        0.0.0.0:*                                                  
+tcp   LISTEN 0      128        127.0.0.1:6010       0.0.0.0:*                                                  
+tcp   LISTEN 0      4096      10.201.1.2:16001      0.0.0.0:*    users:(("iperf3",pid=2761155,fd=3))           
+tcp   LISTEN 0      4096       127.0.0.1:11000      0.0.0.0:*                                                  
+tcp   LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*                                                  
+tcp   LISTEN 0      4096            [::]:22            [::]:*                                                  
+tcp   LISTEN 0      128            [::1]:6010          [::]:*                                                  
+tcp   LISTEN 0      4096           [::1]:631           [::]:*                                                  
+State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                                        
+UNCONN 0      0         127.0.0.54:53         0.0.0.0:*                                                  
+UNCONN 0      0      127.0.0.53%lo:53         0.0.0.0:*                                                  
+UNCONN 0      0            0.0.0.0:5353       0.0.0.0:*                                                  
+UNCONN 0      0            0.0.0.0:42253      0.0.0.0:*                                                  
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=92)) 
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=96)) 
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=100))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=104))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=108))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=112))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=116))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=120))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=124))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=128))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=132))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=136))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=140))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=144))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=148))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=152))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=156))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=160))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=164))
+UNCONN 0      0                  *:4433             *:*    users:(("raypx2-f10-2026",pid=2761321,fd=168))
+UNCONN 0      0               [::]:5353          [::]:*                                                  
+UNCONN 0      0               [::]:53305         [::]:*                                                  

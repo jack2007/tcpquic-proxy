@@ -1,0 +1,15 @@
+[f10] result root: /home/jack/src/tcpquic-proxy/docs/test/dgx-multi-interface-hot-update-20260703-120343
+[f10] recording environment
+[f10] deploying remote test binary without overwriting default binary
+[f10] starting remote iperf3 server
+[f10] starting remote QUIC server on explicit dual listen
+[f10] starting local client with path-a only
+[f10] waiting for initial path-a connected=4
+[f10] initial connected count: 4
+[f10] PATCH paths from path-a to path-a+path-b
+{"peer_id":"dgx-f10","enabled":true,"quic_peer":"10.201.1.2:4433,10.201.2.2:4433","socks_listen":"127.0.0.1:19080","http_listen":"127.0.0.1:18080","port_forwards":[{"listen":"127.0.0.1:15445","target":"10.201.1.2:16001"}],"paths":[{"name":"path-a","local":"10.201.1.1","peer":"10.201.1.2:4433","connections":4},{"name":"path-b","local":"10.201.2.1","peer":"10.201.2.2:4433","connections":4}],"state":"healthy","connection_count":8,"connected_connections":7,"active_streams":0,"total_streams":0,"reconnects":0,"last_error":"","last_connected_at":""}
+[f10] after patch 10s connected count: 8
+[f10] running iperf3 probe through local port forward
+[f10] iperf rc: 0
+[f10] PATCH paths clear for rollback behavior
+[f10] F10 completed: /home/jack/src/tcpquic-proxy/docs/test/dgx-multi-interface-hot-update-20260703-120343

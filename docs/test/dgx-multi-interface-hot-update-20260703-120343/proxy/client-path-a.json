@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "tls": {"cert": "cert/client/client.crt", "key": "cert/client/client.key", "ca": "cert/ca.crt"},
+  "admin": {"listen": "127.0.0.1:18081"},
+  "proto": {"disable_1rtt_encryption": true, "keepalive_ms": 5000},
+  "compression": {"mode": "off"},
+  "tuning": {"mode": "wan"},
+  "peers": [
+    {
+      "peer_id": "dgx-f10",
+      "http_listen": "127.0.0.1:18080",
+      "socks_listen": "127.0.0.1:19080",
+      "quic_peer": "10.201.1.2:4433,10.201.2.2:4433",
+      "quic_connections": 8,
+      "port_forwards": [
+        {"listen": "127.0.0.1:15445", "target": "10.201.1.2:16001"}
+      ],
+      "compress": "off",
+      "enabled": true,
+      "paths": [
+        {"name": "path-a", "local": "10.201.1.1", "peer": "10.201.1.2:4433", "connections": 4}
+      ]
+    }
+  ]
+}

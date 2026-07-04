@@ -209,6 +209,10 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
 }
 
 int RunClient(const TqConfig& cfg) {
+    if (!cfg.ClientConfigPath.empty()) {
+        std::fprintf(stderr, "tcpquic-proxy: client config file %s\n", cfg.ClientConfigPath.c_str());
+    }
+
     if (cfg.Router.Peers.empty() && !cfg.QuicPeer.empty()) {
         return RunSinglePeerClient(cfg);
     }

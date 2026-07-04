@@ -1,0 +1,31 @@
+**规则**: 撰写文档时，默认使用中文。
+
+<!-- gortex:communities:start -->
+<!-- gortex:skills:start -->
+## Community Skills
+
+| Area | Description | Skill |
+|------|-------------|-------|
+| 52 Dirs | 5663 symbols | `/gortex-52-dirs` |
+| Tlsfuzzer Scripts 24 Dirs | 2228 symbols | `/gortex-tlsfuzzer-scripts-24-dirs` |
+| Src Clogutils 22 Dirs | 1643 symbols | `/gortex-src-clogutils-22-dirs` |
+| Hazmat Primitives 36 Dirs | 1320 symbols | `/gortex-hazmat-primitives-36-dirs` |
+| Rs Ffi 1 Dirs Set | 1189 symbols | `/gortex-rs-ffi-1-dirs-set` |
+| Rs Ffi Set Linux Bindings Win Bindings 1058 2 | 1058 symbols | `/gortex-rs-ffi-set-linux-bindings-win-bindings-1058-2` |
+| Rs Ffi Set Linux Bindings Win Bindings 1058 1 | 1058 symbols | `/gortex-rs-ffi-set-linux-bindings-win-bindings-1058-1` |
+| Googlemock Test 5 Dirs Perform | 1005 symbols | `/gortex-googlemock-test-5-dirs-perform` |
+| Src Ecdsa 3 Dirs Six B | 997 symbols | `/gortex-src-ecdsa-3-dirs-six-b` |
+| Doc Tools 45 Dirs | 966 symbols | `/gortex-doc-tools-45-dirs` |
+| Include Openssl Openssl Sk Find Asn1 Asn1t 926 1 | 926 symbols | `/gortex-include-openssl-openssl-sk-find-asn1-asn1t-926-1` |
+| Include Openssl Openssl Sk Find Asn1 Asn1t 926 2 | 926 symbols | `/gortex-include-openssl-openssl-sk-find-asn1-asn1t-926-2` |
+| 19 Dirs | 919 symbols | `/gortex-19-dirs` |
+| 6 Dirs Mock | 821 symbols | `/gortex-6-dirs-mock` |
+| Tlslite Ng Tlslite Senderror Basedb Bufferedsocket | 810 symbols | `/gortex-tlslite-ng-tlslite-senderror-basedb-bufferedsocket` |
+| Tlslite Ng Tlslite Senderror Basedb Constants | 807 symbols | `/gortex-tlslite-ng-tlslite-senderror-basedb-constants` |
+| Primitives Asymmetric 18 Dirs | 775 symbols | `/gortex-primitives-asymmetric-18-dirs` |
+| Googletest Test 5 Dirs Print | 773 symbols | `/gortex-googletest-test-5-dirs-print` |
+| 8 Dirs | 760 symbols | `/gortex-8-dirs` |
+| Backends Openssl 10 Dirs Openssl Assert | 725 symbols | `/gortex-backends-openssl-10-dirs-openssl-assert` |
+<!-- gortex:skills:end -->
+
+<!-- gortex:communities:end -->

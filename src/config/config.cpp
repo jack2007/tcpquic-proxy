@@ -9,10 +9,17 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <set>
 #include <utility>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -20,6 +27,55 @@ constexpr uint32_t TqMaxQuicConnectionStreamCount = 65535;
 constexpr uint32_t TqMinQuicKeepAliveIntervalMs = 1000;
 constexpr uint32_t TqMaxQuicKeepAliveIntervalMs = 15000;
 constexpr size_t kMaxPortForwardTargetHostLength = 255;
+
+uint64_t CurrentPid() {
+#if defined(_WIN32)
+    return static_cast<uint64_t>(_getpid());
+#else
+    return static_cast<uint64_t>(::getpid());
+#endif
+}
+
+std::string BaseNameFromArgv0(const char* argv0) {
+    if (argv0 == nullptr || argv0[0] == '\0') {
+        return "tcpquic-proxy";
+    }
+    std::string path(argv0);
+    const size_t pos = path.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        path = path.substr(pos + 1);
+    }
+    return path.empty() ? "tcpquic-proxy" : path;
+}
+
+std::string DefaultClientConfigPath(const char* argv0) {
+    const std::string runtimeName = BaseNameFromArgv0(argv0);
+    std::filesystem::path base;
+#if defined(_WIN32)
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    base = localAppData != nullptr && localAppData[0] != '\0'
+        ? std::filesystem::path(localAppData) / runtimeName
+        : std::filesystem::temp_directory_path() / runtimeName;
+#else
+    const char* runtimeDir = std::getenv("XDG_RUNTIME_DIR");
+    if (runtimeDir != nullptr && runtimeDir[0] != '\0') {
+        base = std::filesystem::path(runtimeDir) / runtimeName;
+    } else {
+        base = std::filesystem::temp_directory_path() /
+            (runtimeName + "-" + std::to_string(static_cast<unsigned long>(::getuid())));
+    }
+#endif
+    return (base / ("client-config-" + std::to_string(CurrentPid()) + ".json")).string();
+}
+
+bool IsWhitespaceOnly(const std::string& value) {
+    for (unsigned char ch : value) {
+        if (!std::isspace(ch)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 const char* NextArg(int& i, int argc, char** argv, const char* flag, std::string& err) {
     if (i + 1 >= argc) {
@@ -1128,7 +1184,23 @@ bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& 
     }
     std::string body((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     JsonParser parser(body, err);
-    return parser.ParseRuntimeConfig(cfg);
+    if (parser.ParseRuntimeConfig(cfg)) {
+        return true;
+    }
+    const std::string runtimeErr = err;
+    if (cfg.Mode == TqMode::Client && runtimeErr == "unknown config key: version") {
+        TqRouterConfig router;
+        std::string routerErr;
+        JsonParser routerParser(body, routerErr);
+        if (routerParser.ParseRouter(router)) {
+            cfg.Router = std::move(router);
+            cfg.ClientConfigPath = path;
+            err.clear();
+            return true;
+        }
+    }
+    err = runtimeErr;
+    return false;
 }
 
 } // namespace
@@ -1249,6 +1321,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
     }
 
     bool quicPeerSpecified = false;
+    bool clientConfigSpecified = false;
     bool socksListenSpecified = false;
     bool httpListenSpecified = false;
     bool speedTestSpecified = false;
@@ -1318,6 +1391,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.ClientConfigPath = value;
+            clientConfigSpecified = true;
         } else if (GetOptionValue(arg, "--admin-listen", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--admin-listen", err);
@@ -1682,7 +1756,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         }
     }
 
-    if (!cfg.ClientConfigPath.empty() && cfg.Mode != TqMode::Client) {
+    if (clientConfigSpecified && cfg.Mode != TqMode::Client) {
         err = "--client-config is valid only in client mode";
         return false;
     }
@@ -1690,7 +1764,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         err = "--forward is valid only in client mode";
         return false;
     }
-    if (!cfg.ClientConfigPath.empty() && (!cfg.QuicPeer.empty() || quicPeerSpecified)) {
+    if (clientConfigSpecified && (!cfg.QuicPeer.empty() || quicPeerSpecified)) {
         err = "--client-config and --peer are mutually exclusive";
         return false;
     }
@@ -1699,12 +1773,15 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             err = "speed-test options are valid only in client mode";
             return false;
         }
-        if (!cfg.ClientConfigPath.empty()) {
+        if (clientConfigSpecified) {
             err = "speed-test options cannot be used with --client-config";
             return false;
         }
     }
-    if (!cfg.ClientConfigPath.empty()) {
+    if (cfg.Mode == TqMode::Client && !clientConfigSpecified && cfg.ClientConfigPath.empty()) {
+        cfg.ClientConfigPath = DefaultClientConfigPath(argc > 0 ? argv[0] : nullptr);
+    }
+    if (clientConfigSpecified) {
         if (!TqLoadClientConfig(cfg.ClientConfigPath, cfg.Router, err)) {
             return false;
         }
@@ -1809,10 +1886,18 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
 bool TqLoadClientConfig(const std::string& path, TqRouterConfig& router, std::string& err) {
     std::ifstream file(path);
     if (!file) {
+        if (!std::filesystem::exists(path)) {
+            router = TqRouterConfig{};
+            return true;
+        }
         err = "failed to open client config: " + path;
         return false;
     }
     std::string body((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (body.empty() || IsWhitespaceOnly(body)) {
+        router = TqRouterConfig{};
+        return true;
+    }
     JsonParser parser(body, err);
     return parser.ParseRouter(router);
 }

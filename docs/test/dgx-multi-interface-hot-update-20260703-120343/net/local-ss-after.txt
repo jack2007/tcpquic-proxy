@@ -1,0 +1,37 @@
+$ ss -ltnup
+Netid State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess                               
+udp   UNCONN 0      0            0.0.0.0:46150      0.0.0.0:*                                         
+udp   UNCONN 0      0         127.0.0.54:53         0.0.0.0:*                                         
+udp   UNCONN 0      0      127.0.0.53%lo:53         0.0.0.0:*                                         
+udp   UNCONN 0      0            0.0.0.0:5353       0.0.0.0:*                                         
+udp   UNCONN 0      0               [::]:47944         [::]:*                                         
+udp   UNCONN 0      0               [::]:5353          [::]:*                                         
+tcp   LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*                                         
+tcp   LISTEN 0      4096       127.0.0.1:19080      0.0.0.0:*    users:(("raypx2",pid=3130161,fd=168))
+tcp   LISTEN 0      5          127.0.0.1:18081      0.0.0.0:*    users:(("raypx2",pid=3130161,fd=106))
+tcp   LISTEN 0      4096       127.0.0.1:18080      0.0.0.0:*    users:(("raypx2",pid=3130161,fd=171))
+tcp   LISTEN 0      4096       127.0.0.1:18128      0.0.0.0:*    users:(("gost",pid=76196,fd=6))      
+tcp   LISTEN 0      128        127.0.0.1:6011       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6010       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6015       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6014       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6013       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6012       0.0.0.0:*                                         
+tcp   LISTEN 0      128        127.0.0.1:6016       0.0.0.0:*                                         
+tcp   LISTEN 0      4096      127.0.0.54:53         0.0.0.0:*                                         
+tcp   LISTEN 0      4096       127.0.0.1:631        0.0.0.0:*                                         
+tcp   LISTEN 0      4096       127.0.0.1:15445      0.0.0.0:*    users:(("raypx2",pid=3130161,fd=172))
+tcp   LISTEN 0      4096       127.0.0.1:11000      0.0.0.0:*                                         
+tcp   LISTEN 0      511          0.0.0.0:80         0.0.0.0:*                                         
+tcp   LISTEN 0      4096         0.0.0.0:22         0.0.0.0:*                                         
+tcp   LISTEN 0      4096           [::1]:631           [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6012          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6013          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6014          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6015          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6010          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6011          [::]:*                                         
+tcp   LISTEN 0      128            [::1]:6016          [::]:*                                         
+tcp   LISTEN 0      4096               *:4747             *:*    users:(("gortex",pid=3025329,fd=3))  
+tcp   LISTEN 0      511             [::]:80            [::]:*                                         
+tcp   LISTEN 0      4096            [::]:22            [::]:*                                         

@@ -6,6 +6,9 @@
 #include "tunnel_registry.h"
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -90,6 +93,21 @@ std::atomic<unsigned> g_adminTunnelAbortCalls{0};
 
 void AdminTunnelAbort(void*) {
     g_adminTunnelAbortCalls.fetch_add(1);
+}
+
+static std::string TempClientConfigPath(const std::string& name) {
+    static unsigned counter = 0;
+    std::ostringstream pathName;
+    pathName << name << "-" << counter++ << ".json";
+    return (std::filesystem::temp_directory_path() / pathName.str()).string();
+}
+
+static std::string ReadTextFile(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) {
+        return {};
+    }
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
 void TqTraceLogLine(const char* line) {
@@ -867,6 +885,32 @@ int main() {
         TqHttpRequest leadingZeroConnections = Request("PUT", "/config", "{\"version\":1,\"peers\":[{\"peer_id\":\"agent-leading-zero\",\"quic_peer\":\"127.0.0.1:14448\",\"socks_listen\":\"127.0.0.1:11005\",\"quic_connections\":004}]}");
         std::string leadingZeroResp = adminRuntime.HandleAdmin(leadingZeroConnections);
         if (leadingZeroResp.find("HTTP/1.1 400") == std::string::npos) return 73;
+    }
+    {
+        const std::string path = TempClientConfigPath("tcpquic-admin-persist-config");
+        std::filesystem::remove(path);
+        TqConfig runtimeConfig;
+        runtimeConfig.Mode = TqMode::Client;
+        runtimeConfig.ClientConfigPath = path;
+        TqRouterRuntime adminRuntime(nullptr, runtimeConfig);
+        std::string err;
+        if (!adminRuntime.ApplyConfig(TqRouterConfig{}, err)) return 352;
+        const std::string initialSaved = ReadTextFile(path);
+        if (initialSaved.find("\"peers\":[]") == std::string::npos) return 353;
+
+        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"persisted-peer\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"enabled\":false}");
+        std::string createResp = adminRuntime.HandleAdmin(create);
+        if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 347;
+
+        const std::string saved = ReadTextFile(path);
+        if (saved.find("\"peer_id\":\"persisted-peer\"") == std::string::npos) return 348;
+        if (saved.find("\"enabled\":false") == std::string::npos) return 349;
+
+        TqHttpRequest enable = Request("POST", "/peers/persisted-peer:enable", "");
+        std::string enableResp = adminRuntime.HandleAdmin(enable);
+        if (enableResp.find("HTTP/1.1 200 OK") == std::string::npos) return 350;
+        const std::string enabledSaved = ReadTextFile(path);
+        if (enabledSaved.find("\"enabled\":true") == std::string::npos) return 351;
     }
     {
         FakeAdapter adapter;

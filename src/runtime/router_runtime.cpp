@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 #include <unordered_set>
 #include <utility>
@@ -230,6 +232,57 @@ std::string PeersJson(const std::vector<TqPeerMetrics>& peers) {
     }
     out << "]}";
     return out.str();
+}
+
+std::string RouterConfigJson(const TqRouterConfig& config) {
+    std::ostringstream out;
+    out << "{\"version\":" << config.Version << ",\"peers\":[";
+    for (size_t i = 0; i < config.Peers.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        AppendPeerConfigJson(out, config.Peers[i]);
+    }
+    out << "]}";
+    return out.str();
+}
+
+bool WriteTextFileAtomically(const std::string& path, const std::string& body, std::string& err) {
+    std::error_code ec;
+    const std::filesystem::path target(path);
+    const std::filesystem::path parent = target.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            err = "failed to create client config directory: " + ec.message();
+            return false;
+        }
+    }
+
+    const std::filesystem::path tmp = target.string() + ".tmp";
+    {
+        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            err = "failed to open client config temp file: " + tmp.string();
+            return false;
+        }
+        file << body;
+        file.close();
+        if (!file) {
+            err = "failed to write client config temp file: " + tmp.string();
+            return false;
+        }
+    }
+
+    std::filesystem::rename(tmp, target, ec);
+    if (ec) {
+        const std::string renameError = ec.message();
+        std::error_code removeEc;
+        std::filesystem::remove(tmp, removeEc);
+        err = "failed to publish client config file: " + renameError;
+        return false;
+    }
+    return true;
 }
 
 void AppendConnectionJson(std::ostringstream& out, const TqConnectionSnapshot& connection) {
@@ -1200,7 +1253,17 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
 
     Config = config;
     RuntimeConfig.Router = config;
+    if (!PersistConfigLocked(config, err)) {
+        return false;
+    }
     return true;
+}
+
+bool TqRouterRuntime::PersistConfigLocked(const TqRouterConfig& config, std::string& err) const {
+    if (RuntimeConfig.Mode != TqMode::Client || RuntimeConfig.ClientConfigPath.empty()) {
+        return true;
+    }
+    return WriteTextFileAtomically(RuntimeConfig.ClientConfigPath, RouterConfigJson(config), err);
 }
 
 TqRouterConfig TqRouterRuntime::SnapshotConfig() const {
@@ -1421,6 +1484,7 @@ bool TqRouterRuntime::AddConnection(const std::string& peerId, std::string& err)
         err = "not found";
         return false;
     }
+    RuntimeConfig.Router = Config;
     auto running = RunningPeers.find(peerId);
     if (running != RunningPeers.end()) {
         running->second.QuicConnections = desired;
@@ -1428,6 +1492,9 @@ bool TqRouterRuntime::AddConnection(const std::string& peerId, std::string& err)
     auto metrics = Metrics.find(peerId);
     if (metrics != Metrics.end()) {
         metrics->second.ConnectionCount = desired;
+    }
+    if (!PersistConfigLocked(Config, err)) {
+        return false;
     }
     return true;
 }
@@ -1468,6 +1535,7 @@ bool TqRouterRuntime::DeleteConnection(
         err = "not found";
         return false;
     }
+    RuntimeConfig.Router = Config;
     auto running = RunningPeers.find(peerId);
     if (running != RunningPeers.end()) {
         running->second.QuicConnections = desired;
@@ -1475,6 +1543,9 @@ bool TqRouterRuntime::DeleteConnection(
     auto metrics = Metrics.find(peerId);
     if (metrics != Metrics.end()) {
         metrics->second.ConnectionCount = desired;
+    }
+    if (!PersistConfigLocked(Config, err)) {
+        return false;
     }
     return true;
 }
@@ -1513,16 +1584,7 @@ bool TqRouterRuntime::AbortConnectionTunnels(
 
 std::string TqRouterRuntime::ConfigJson() const {
     const TqRouterConfig config = SnapshotConfig();
-    std::ostringstream out;
-    out << "{\"version\":" << config.Version << ",\"peers\":[";
-    for (size_t i = 0; i < config.Peers.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendPeerConfigJson(out, config.Peers[i]);
-    }
-    out << "]}";
-    return out.str();
+    return RouterConfigJson(config);
 }
 
 std::string TqRouterRuntime::MetricsJson() const {
