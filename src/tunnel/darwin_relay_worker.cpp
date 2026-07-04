@@ -2630,14 +2630,35 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
     const uint64_t bytes = receive->PendingCompleteBytes;
     receive->PendingCompleteBytes = 0;
     DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
+    CompleteMsQuicReceiveFromCallback(receive->Stream, bytes);
+}
+
+void TqDarwinRelayWorker::CompleteMsQuicReceiveFromCallback(
+    MsQuicStream* stream,
+    uint64_t totalLength) {
+    if (totalLength == 0) {
+        return;
+    }
 #if defined(TCPQUIC_TESTING)
     if (g_darwinRelayReceiveCompleteForTest != nullptr) {
-        g_darwinRelayReceiveCompleteForTest(receive->Stream, bytes);
+        g_darwinRelayReceiveCompleteForTest(stream, totalLength);
         return;
     }
 #endif
-    if (receive->Stream != nullptr && receive->Stream->Handle != nullptr) {
-        receive->Stream->ReceiveComplete(bytes);
+    if (stream != nullptr && stream->Handle != nullptr) {
+        stream->ReceiveComplete(totalLength);
+    }
+}
+
+void TqDarwinRelayWorker::PauseMsQuicReceiveFromCallback(MsQuicStream* stream) {
+#if defined(TCPQUIC_TESTING)
+    if (g_darwinRelayReceiveSetEnabledForTest != nullptr) {
+        (void)g_darwinRelayReceiveSetEnabledForTest(stream, false);
+        return;
+    }
+#endif
+    if (stream != nullptr && stream->Handle != nullptr) {
+        (void)stream->ReceiveSetEnabled(false);
     }
 }
 
@@ -3075,17 +3096,48 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             assert(false && "MsQuic delivered FIN-only receive without known final size");
             std::abort();
         }
+        uint64_t totalLength = event->RECEIVE.TotalBufferLength;
+        if (totalLength == 0 && event->RECEIVE.BufferCount > 0 && event->RECEIVE.Buffers != nullptr) {
+            for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
+                totalLength += event->RECEIVE.Buffers[i].Length;
+            }
+        }
         const TqDarwinQuicReceiveEnqueueResult enqueueResult = worker->QueueDeferredQuicReceive(
             bindingOwner,
             stream,
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
             fin);
-        if (enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok) {
-            worker->Errors.fetch_add(1, std::memory_order_relaxed);
+        switch (enqueueResult) {
+        case TqDarwinQuicReceiveEnqueueResult::Ok:
+            return QUIC_STATUS_PENDING;
+        case TqDarwinQuicReceiveEnqueueResult::InvalidArgs:
+        case TqDarwinQuicReceiveEnqueueResult::EmptyNonFin:
+        case TqDarwinQuicReceiveEnqueueResult::NullBuffer:
+            return QUIC_STATUS_SUCCESS;
+        case TqDarwinQuicReceiveEnqueueResult::AllocationFailed: {
+            std::shared_ptr<RelayState> relay = binding->Relay.lock();
+            if (relay != nullptr) {
+                relay->Closing = true;
+                (void)worker->EnqueueRelayCloseFromCallback(
+                    relay,
+                    TqDarwinRelayEventType::QuicShutdownComplete);
+            }
+            if (totalLength > 0 || fin) {
+                worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
+            }
             return QUIC_STATUS_SUCCESS;
         }
-        return QUIC_STATUS_PENDING;
+        case TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected:
+            worker->PauseMsQuicReceiveFromCallback(stream);
+            worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
+            return QUIC_STATUS_SUCCESS;
+        case TqDarwinQuicReceiveEnqueueResult::EventQueueFull:
+            worker->PauseMsQuicReceiveFromCallback(stream);
+            worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
+            return QUIC_STATUS_SUCCESS;
+        }
+        return QUIC_STATUS_SUCCESS;
     }
     return QUIC_STATUS_SUCCESS;
 }

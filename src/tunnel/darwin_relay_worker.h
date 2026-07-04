@@ -401,6 +401,8 @@ private:
     void CompleteDeferredQuicReceive(
         const std::shared_ptr<RelayState>& relay,
         const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    void CompleteMsQuicReceiveFromCallback(MsQuicStream* stream, uint64_t totalLength);
+    void PauseMsQuicReceiveFromCallback(MsQuicStream* stream);
     bool SetQuicReceiveEnabled(const std::shared_ptr<RelayState>& relay, bool enabled);
     void MaybePauseQuicReceive(const std::shared_ptr<RelayState>& relay);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayState>& relay);
