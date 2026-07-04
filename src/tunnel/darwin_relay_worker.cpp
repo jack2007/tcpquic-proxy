@@ -550,7 +550,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
-            if (auto relay = FindRelay(event.RelayId)) {
+            if (auto relay = FindRelayLocal(event.RelayId)) {
                 RetryPendingQuicSends(relay);
             }
             break;
@@ -614,7 +614,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
-            if (auto relay = FindRelay(event.RelayId)) {
+            if (auto relay = FindRelayLocal(event.RelayId)) {
                 RetryPendingQuicSends(relay);
             }
             break;
@@ -1269,7 +1269,8 @@ void TqDarwinRelayWorker::ProcessKqueueEvent(const struct kevent& event) {
 
 void TqDarwinRelayWorker::ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data) {
     (void)data;
-    std::shared_ptr<RelayState> relay = FindRelay(relayId);
+    AssertWorkerThreadForRelayState();
+    std::shared_ptr<RelayState> relay = FindRelayLocal(relayId);
     if (relay == nullptr) {
         return;
     }
@@ -1706,9 +1707,9 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
     if (operation->Magic != TqDarwinRelaySendOperation::MagicValue) {
         Errors.fetch_add(1, std::memory_order_relaxed);
     }
-    auto relay = FindRelay(info.RelayId);
+    auto relay = workerThread ? FindRelayLocal(info.RelayId) : FindRelay(info.RelayId);
     if (relay == nullptr) {
-        relay = FindRetiredRelay(info.RelayId);
+        relay = workerThread ? FindRetiredRelayLocal(info.RelayId) : FindRetiredRelay(info.RelayId);
     }
     delete operation;
     if (relay != nullptr) {

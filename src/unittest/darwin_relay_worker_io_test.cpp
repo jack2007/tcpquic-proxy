@@ -537,7 +537,7 @@ void WorkerObservesTcpReadBytes() {
 
     TqDarwinRelayWorker worker(config);
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -548,21 +548,18 @@ void WorkerObservesTcpReadBytes() {
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
     CHECK(result.Ok);
 
+    const uint64_t lockedBefore = worker.FindRelayLockedCountForTest();
+    const uint64_t localBefore = worker.FindRelayLocalCountForTest();
     const char payload[] = "darwin-readiness";
     CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    TqDarwinRelayWorkerSnapshot snapshot{};
-    do {
-        snapshot = worker.Snapshot();
-        if (snapshot.TcpReadBytes >= sizeof(payload) - 1) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    } while (std::chrono::steady_clock::now() < deadline);
+    TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
 
     CHECK(snapshot.TcpReadBytes >= sizeof(payload) - 1);
     CHECK(snapshot.Errors == 0);
+    CHECK(worker.FindRelayLockedCountForTest() == lockedBefore);
+    CHECK(worker.FindRelayLocalCountForTest() > localBefore);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
