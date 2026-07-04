@@ -84,6 +84,7 @@ struct TqDarwinRelayWorker::StreamBinding : public std::enable_shared_from_this<
     std::atomic<MsQuicStream*> RetiredStream{nullptr};
     std::atomic<bool> Active{true};
     std::atomic<uint32_t> CallbackRefs{0};
+    std::atomic<bool> CallbackQuicReceivePaused{false};
     std::atomic<uint64_t> CallbackPendingReceiveBytes{0};
     std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
     std::shared_ptr<CompletionState> Completions;
@@ -2289,9 +2290,7 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
             std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
             binding->CallbackPendingQuicReceives.push_back(receive);
         }
-        if (auto relay = binding->Relay.lock()) {
-            relay->QuicReceivePaused = true;
-        }
+        binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
         PauseMsQuicReceiveFromCallback(stream);
         (void)Wake();
         return TqDarwinQuicReceiveEnqueueResult::EventQueueFull;
@@ -2304,6 +2303,11 @@ void TqDarwinRelayWorker::FlushCallbackPendingQuicReceives(StreamBinding* bindin
         return;
     }
     AssertWorkerThreadForRelayState();
+
+    std::shared_ptr<RelayState> relay = binding->Relay.lock();
+    if (relay != nullptr && binding->CallbackQuicReceivePaused.exchange(false, std::memory_order_acq_rel)) {
+        relay->QuicReceivePaused = true;
+    }
 
     for (;;) {
         std::shared_ptr<TqDarwinPendingQuicReceive> receive;
@@ -2379,6 +2383,11 @@ void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
         ReleaseCallbackReceiveBudget(receive);
         (void)DiscardDeferredQuicReceive(relay, receive);
         return;
+    }
+    if (auto binding = std::static_pointer_cast<StreamBinding>(receive->BindingOwner)) {
+        if (binding->CallbackQuicReceivePaused.exchange(false, std::memory_order_acq_rel)) {
+            relay->QuicReceivePaused = true;
+        }
     }
     relay->PendingQuicReceiveBytes += receive->TotalLength;
     relay->PendingQuicReceives.push_back(receive);
@@ -3204,9 +3213,7 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         case TqDarwinQuicReceiveEnqueueResult::NullBuffer:
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::AllocationFailed: {
-            std::shared_ptr<RelayState> relay = binding->Relay.lock();
-            if (relay != nullptr) {
-                relay->Closing = true;
+            if (std::shared_ptr<RelayState> relay = binding->Relay.lock()) {
                 (void)worker->EnqueueRelayCloseFromCallback(
                     relay,
                     TqDarwinRelayEventType::QuicShutdownComplete);
@@ -3217,9 +3224,7 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             return QUIC_STATUS_SUCCESS;
         }
         case TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected:
-            if (std::shared_ptr<RelayState> relay = binding->Relay.lock()) {
-                relay->QuicReceivePaused = true;
-            }
+            binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
             worker->PauseMsQuicReceiveFromCallback(stream);
             worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
             return QUIC_STATUS_SUCCESS;
