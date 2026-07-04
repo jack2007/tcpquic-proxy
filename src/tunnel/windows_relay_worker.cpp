@@ -3074,6 +3074,8 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
         return nullptr;
     }
 
+    const uint64_t copyStartNanos = NowSteadyNanos();
+
     auto view = std::make_shared<TqWindowsPendingQuicReceive>();
     view->Stream = stream;
     view->RelayId = binding.RelayId;
@@ -3103,6 +3105,10 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
             view->OwnedBuffer.data() + slice.Offset,
             slice.Length});
     }
+    CallbackReceiveCopyBytes_.fetch_add(view->TotalLength, std::memory_order_relaxed);
+    CallbackReceiveCopyNanos_.fetch_add(
+        NowSteadyNanos() - copyStartNanos,
+        std::memory_order_relaxed);
     return view;
 }
 

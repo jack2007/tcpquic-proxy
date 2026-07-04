@@ -484,6 +484,50 @@ bool TestWindowsRelayFinishReceiveViewNotFrontIsCounted() {
            after.ReceiveViewFinishNotFrontCount == before.ReceiveViewFinishNotFrontCount + 1;
 }
 
+bool TestWindowsRelayCallbackReceiveCopyMetricsForTest() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        MsQuic = nullptr;
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay = 4096;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const auto before = worker.Snapshot();
+    uint8_t payload[7]{1, 2, 3, 4, 5, 6, 7};
+    QUIC_BUFFER buffer{sizeof(payload), payload};
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = sizeof(payload);
+    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const auto after = worker.Snapshot();
+    worker.Stop();
+    MsQuic = nullptr;
+    return status == QUIC_STATUS_PENDING &&
+           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes + sizeof(payload) &&
+           after.CallbackReceiveCopyNanos >= before.CallbackReceiveCopyNanos;
+}
+
 bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     TqWindowsRelayWorker worker;
     worker.SetMaintenanceBudgetForTest(1);
@@ -1664,8 +1708,12 @@ int main() {
         return 125;
     }
 
-    if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
+    if (!TestWindowsRelayCallbackReceiveCopyMetricsForTest()) {
         return 126;
+    }
+
+    if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
+        return 127;
     }
 
     if (!TestWindowsRelaySnapshotConcurrentWithRegisterAndStop()) {
