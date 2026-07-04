@@ -309,37 +309,35 @@ admin API 行为：
 
 ### 3.4 runtime snapshot 持锁范围偏大
 
-现象：`TqLinuxRelayRuntime::Snapshot()` 和 `SnapshotWorkers()` 持有 `Runtime::Lock` 时逐个调用 `worker->Snapshot()`。worker snapshot 会投递同步 event 并等待 worker 完成。
+当前状态：已调整为在 `Runtime::Lock` 内只复制 worker 指针/引用，随后释放 runtime lock，再逐个调用 `worker->Snapshot()`。worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。
 
 影响：
 
-- admin snapshot 慢或 worker 忙时，`PickWorker()` 会被 runtime lock 阻塞，短连接建链可能被 metrics 请求影响。
+- admin snapshot 慢或 worker 忙时，`PickWorker()` 不再被 runtime lock 覆盖整个 worker snapshot 过程；剩余风险主要体现在单个 worker command wait 超时或部分 worker snapshot 结果缺失。
 - 如果未来 snapshot 更重，控制面抖动会更明显。
 
-建议：
+后续观察：
 
-- runtime lock 内只复制 worker 指针/引用，随后释放 lock，再调用各 worker snapshot。
-- worker lifetime 可通过 `shared_ptr` 或停止阶段 join 前 drain snapshot 请求保证。
-- 聚合 snapshot 可以允许返回部分 worker 超时结果，并暴露超时计数。
+- 关注 `linux_relay_runtime_lock_wait_nanos`、`linux_relay_runtime_lock_acquire_count` 和 `linux_relay_runtime_snapshot_inflight_max`，确认 admin snapshot 不再放大建链路径 runtime lock 等待。
+- 结合 `linux_relay_snapshot_command_wait_nanos`、`linux_relay_snapshot_command_wait_count` 和 `linux_relay_snapshot_command_timeouts` 判断是否存在 worker 忙导致的 snapshot 降级。
 
-推进状态：已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`，与 3.5、3.8 合并为同一轮控制面 wait/snapshot 持锁收敛工作。
+推进状态：本轮已落地 runtime snapshot 持锁范围收敛、snapshot in-flight guard 和对应 metrics；后续只保留现场观测与细节优化。
 
 ### 3.5 `ControlLock` 持锁等待 worker command
 
-现象：`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()` 在持有 `ControlLock` 后 enqueue command，并等待 command `Cv`。event queue 满时部分路径会释放锁重试，但 register 和 snapshot 的首次 enqueue 失败直接返回。
+当前状态：`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()` 已将 `ControlLock` 收敛到 running/thread id 等控制状态检查，不再持有 `ControlLock` 等待 worker command `Cv`。同步 command 使用明确 lifetime 管理、bounded enqueue retry 和 timeout metrics。
 
 影响：
 
-- worker 忙或 event queue 满时，控制面调用可能长时间占用 `ControlLock`，阻塞同 worker 的 stop/snapshot/register。
-- register enqueue 失败直接返回失败，短时 queue full 可能造成建链失败，而 unregister/test helper 有 retry。
+- worker 忙或 event queue 满时，单个控制命令仍可能等待 worker 完成或超时，但等待不再阻塞同 worker 的其他控制面入口获取 `ControlLock`。
+- register/snapshot 短时 queue full 会通过 bounded retry 缓冲；持续失败会计入 enqueue failure 或 timeout，便于现场定位。
 
-建议：
+后续观察：
 
-- 缩小 `ControlLock` 到 running/thread id 检查，不要持锁等待 command 完成。
-- register/snapshot enqueue 失败可采用 bounded retry + 明确错误日志，而不是静默返回空结果。
-- command wait 增加超时，超时后标记 relay/backend 状态，避免调用方无限阻塞。
+- 关注 `linux_relay_control_lock_wait_nanos`、`linux_relay_control_lock_acquire_count`，确认锁等待主要来自短临界区。
+- 关注 `linux_relay_control_command_wait_nanos`、`linux_relay_control_command_wait_count`、`linux_relay_control_command_timeouts` 和 `linux_relay_control_command_enqueue_failures`，区分 worker 忙、queue full 与真实控制面退化。
 
-推进状态：已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`，与 3.4、3.8 合并处理 command lifetime、timeout、bounded retry 和 wait metrics。
+推进状态：本轮已落地 `ControlLock` 长等待收敛、command timeout、bounded enqueue retry 和 wait metrics；后续重点是根据生产指标判断是否需要 queue shard 或更细粒度降级。
 
 ### 3.6 收到 MsQuic fake FIN 时直接 abort 进程
 
@@ -371,22 +369,21 @@ admin API 行为：
 - worker 线程独占更新、snapshot 也在 worker event 中读取的字段可改普通整数。
 - 高频指标可以按 worker 本地聚合，admin snapshot 时再汇总。
 
-### 3.8 运行时仍缺锁等待时间指标，queue 观测已补齐
+### 3.8 queue 和控制面等待指标已补齐
 
-现象：Windows relay metrics 暴露了 `windows_relay_worker_lock_wait_nanos`、`find_relay_by_id_count`、callback dispatch nanos 等；Linux queue 侧已经补齐 capacity、push/pop CAS retry 和多 producer 观测，但仍没有 ControlLock wait、Runtime lock wait、command wait 等锁/等待时间指标。
+当前状态：Linux queue 侧已经补齐 capacity、push/pop CAS retry 和多 producer 观测；控制面也已补齐 `ControlLock` wait、runtime lock wait、command wait、snapshot command wait、command timeout/enqueue failure 和 runtime snapshot in-flight max 等指标。
 
 影响：
 
-- queue 容量、CAS 竞争和多 producer 线索已经可直接观察，但控制面锁等待仍只能通过 snapshot 慢、建链慢或 queue/full/pending 等结果指标间接推断。
-- “锁热点排序”目前主要依赖代码结构和路径频率，缺少生产现场的直接等待时间证据。
+- queue 容量、CAS 竞争、多 producer、控制面锁等待和 command wait 已经可以直接观察，生产现场可把建链/拆链/snapshot 慢拆成 queue 压力、worker 忙、锁竞争或 timeout/enqueue failure。
+- 剩余观测缺口主要是更低优先级的细节增强，例如 per-relay callback pending depth/top N。
 
-建议：
+后续观察：
 
-- 继续补齐 `control_lock_wait_nanos`、`runtime_lock_wait_nanos`、`snapshot_command_wait_nanos` 等控制面等待时间。
-- 使用 `linux_relay_event_queue_push_cas_retries`、`linux_relay_event_queue_pop_cas_retries` 和 `linux_relay_multiple_event_producer_threads_observed` 辅助判断是否需要 queue shard。
-- 对 queue full 降级路径增加每 relay callback pending depth/top N。
+- 使用 `linux_relay_event_queue_push_cas_retries`、`linux_relay_event_queue_pop_cas_retries`、`linux_relay_multiple_event_producer_threads_observed` 和控制面 wait metrics 联合判断是否需要 queue shard。
+- 对 queue full 降级路径增加每 relay callback pending depth/top N，作为后续低优先级观测增强。
 
-推进状态：控制面锁等待、runtime lock 等待和 command wait 指标已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`；per-relay callback pending top N 保持为后续低优先级观测增强。
+推进状态：本轮已完成 queue metrics 与控制面 wait metrics 的主要闭环；per-relay callback pending top N 等细节保持为后续低优先级观测增强。
 
 ### 3.9 relay id lookup 已优化，但 fd/stream fallback 仍有线性扫描
 
@@ -413,4 +410,4 @@ admin API 行为：
 5. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
 6. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
 
-Linux active relay 明细和 event queue capacity/queue 竞争观测已补齐。当前推进重点是 runtime snapshot 持锁范围收敛、`ControlLock` 持锁等待 worker command 收敛，以及控制面锁/command wait 时间指标补齐；QUIC receive 背压 hysteresis 本轮不处理。
+Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛和控制面 wait metrics 已补齐。后续重点是根据生产指标决定是否需要 queue shard、per-relay callback pending top N 等低优先级观测增强；QUIC receive 背压 hysteresis 本轮不处理。

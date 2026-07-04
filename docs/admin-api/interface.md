@@ -240,6 +240,18 @@ Linux relay 额外包含：
 - `linux_relay_event_queue_pop_cas_retries`：worker pop 侧 CAS 重试次数。
 - `linux_relay_event_producer_threads_observed`：已观测到的 event producer 线程数量下界。
 - `linux_relay_multiple_event_producer_threads_observed`：是否观测到多个 event producer 线程。
+- `linux_relay_control_lock_wait_nanos`：Linux worker `ControlLock` 累计等待时间。
+- `linux_relay_control_lock_acquire_count`：Linux worker `ControlLock` 获取次数。
+- `linux_relay_control_command_wait_nanos`：register/unregister/snapshot 等控制命令累计等待 worker 完成的时间。
+- `linux_relay_control_command_wait_count`：控制命令等待次数。
+- `linux_relay_control_command_timeouts`：控制命令等待超时次数。
+- `linux_relay_control_command_enqueue_failures`：控制命令投递到 worker event queue 失败次数。
+- `linux_relay_snapshot_command_wait_nanos`：snapshot 命令累计等待 worker 完成的时间。
+- `linux_relay_snapshot_command_wait_count`：snapshot 命令等待次数。
+- `linux_relay_snapshot_command_timeouts`：snapshot 命令等待超时次数。
+- `linux_relay_runtime_lock_wait_nanos`：Linux relay runtime lock 累计等待时间。
+- `linux_relay_runtime_lock_acquire_count`：Linux relay runtime lock 获取次数。
+- `linux_relay_runtime_snapshot_inflight_max`：runtime snapshot 并发 in-flight guard 观测到的最大值。
 
 `GET /api/v1/relay/active-relays` 在不支持逐 relay 明细的平台返回类似：
 
