@@ -920,6 +920,7 @@ void TqDarwinRelayWorker::RetireRelay(
     }
     std::shared_ptr<StreamBinding> binding;
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> receivesToDiscard;
+    // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     {
         std::unique_lock<std::mutex> relayLock(relay->Mutex);
         relay->Closing = true;
@@ -1021,6 +1022,7 @@ void TqDarwinRelayWorker::CloseRelay(
         return;
     }
 
+    // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     {
         std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
@@ -1039,6 +1041,7 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
 #if defined(TCPQUIC_TESTING)
     RetiredRelayPurgeCount.fetch_add(1, std::memory_order_relaxed);
 #endif
+    // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     std::lock_guard<std::mutex> lock(RelayMutex);
     for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
