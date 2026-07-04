@@ -545,7 +545,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
         case TqDarwinRelayEventType::QuicShutdownComplete:
-            if (auto relay = FindRelay(event.RelayId)) {
+            if (auto relay = FindRelayLocal(event.RelayId)) {
                 CloseRelay(relay);
             }
             break;
@@ -2691,12 +2691,9 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
         if (worker != nullptr) {
-            auto relay = worker->FindRelay(binding->RelayId);
-            if (relay != nullptr) {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->Closing = true;
-                relay->TcpReadArmed = false;
-                relay->TcpWriteArmed = false;
+            std::shared_ptr<RelayState> relay;
+            if (!worker->Running.load(std::memory_order_acquire)) {
+                relay = binding->Relay.lock();
             }
             TqDarwinRelayEvent queuedEvent{};
             queuedEvent.RelayId = binding->RelayId;
