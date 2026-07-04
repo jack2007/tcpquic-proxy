@@ -348,11 +348,10 @@ admin API 行为：
 - 即使这是“不应发生”的 MsQuic 事件形态，生产进程直接退出会扩大单 stream 异常的影响面。
 - 该路径在 relay callback 中，崩溃时可能影响所有 active tunnels。
 
-建议：
+推进方案：
 
-- 改为记录 fatal relay error，调用 `AbortRelayFromCallback()` 或投递 fatal event 给 worker，关闭当前 relay/stream。
-- 保留 debug build assert，但 release build 不应 `std::abort()`。
-- 增加单测覆盖 fake FIN receive，验证只重置当前 relay。
+- 已形成 callback hardening 设计和开发计划，见 `docs/superpowers/specs/2026-07-04-linux-relay-callback-hardening-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-callback-hardening.md`。
+- 目标行为是记录 `receive_fake_fin` trace 和 `linux_relay_fake_fin_receive_count`，随后通过单 relay fatal reset 关闭当前 relay/stream；callback 返回 `QUIC_STATUS_SUCCESS`，因为该分支不持有 MsQuic receive buffer。
 
 ### 3.7 metrics 原子内存序偏保守
 
@@ -395,9 +394,9 @@ admin API 行为：
 
 建议：
 
-- 继续以 relay id map 为主路径。
-- 如需生产使用 fd/stream 查找，增加 `RelaysByFd` / `RelaysByStream` map 或 slot/generation id。
-- 在 metrics 中暴露 `StreamLookupScanCount`，若非零则排查调用来源。
+- 继续以 relay id map 和 callback binding 为主路径。
+- 本轮不新增 `RelaysByFd` / `RelaysByStream` map；先按 `docs/superpowers/plans/2026-07-04-linux-relay-callback-hardening.md` 把已有 `StreamLookupScanCount` 贯通到 admin metrics，输出 `linux_relay_stream_lookup_scan_count`。
+- 如果生产中该指标持续增长，再根据调用来源决定是否增加 stream/fd map 或 slot/generation id。
 
 ## 4. 排障优先级
 
