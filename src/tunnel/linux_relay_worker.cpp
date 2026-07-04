@@ -1018,11 +1018,37 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::RegisterRelay: {
             auto* command = static_cast<RegisterRelayCommand*>(event.Control);
             if (command != nullptr) {
+                bool cancelled = false;
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    cancelled = command->Cancelled;
+                    command->Done = cancelled;
+                }
+                if (cancelled) {
+                    command->Cv.notify_one();
+                    break;
+                }
+
+                const TqLinuxRelayRegistrationResult result =
+                    RegisterRelayWithIdLocal(command->Registration);
+
+                bool rollback = false;
+                bool completed = false;
                 {
                     std::lock_guard<std::mutex> guard(command->Mutex);
                     if (!command->Cancelled) {
-                        command->Result = RegisterRelayWithIdLocal(command->Registration);
+                        command->Result = result;
+                        command->Done = true;
+                        completed = true;
+                    } else {
+                        rollback = result.Ok;
                     }
+                }
+                if (rollback) {
+                    UnregisterRelayLocal(result.RelayId);
+                }
+                if (!completed) {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
                     command->Done = true;
                 }
                 command->Cv.notify_one();
@@ -1034,11 +1060,23 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::UnregisterRelay: {
             auto* command = static_cast<UnregisterRelayCommand*>(event.Control);
             if (command != nullptr) {
+                uint64_t relayId = 0;
+                bool cancelled = false;
                 {
                     std::lock_guard<std::mutex> guard(command->Mutex);
-                    if (!command->Cancelled) {
-                        UnregisterRelayLocal(command->RelayId);
-                    }
+                    cancelled = command->Cancelled;
+                    relayId = command->RelayId;
+                    command->Done = cancelled;
+                }
+                if (cancelled) {
+                    command->Cv.notify_one();
+                    break;
+                }
+
+                UnregisterRelayLocal(relayId);
+
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
                     command->Done = true;
                 }
                 command->Cv.notify_one();
@@ -1050,10 +1088,23 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         case TqLinuxRelayEventType::Snapshot: {
             auto* command = static_cast<SnapshotCommand*>(event.Control);
             if (command != nullptr) {
+                bool cancelled = false;
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    cancelled = command->Cancelled;
+                    command->Done = cancelled;
+                }
+                if (cancelled) {
+                    command->Cv.notify_one();
+                    break;
+                }
+
+                TqLinuxRelayWorkerSnapshot snapshot = SnapshotLocal();
+
                 {
                     std::lock_guard<std::mutex> guard(command->Mutex);
                     if (!command->Cancelled) {
-                        command->Result = SnapshotLocal();
+                        command->Result = std::move(snapshot);
                     }
                     command->Done = true;
                 }

@@ -307,9 +307,11 @@ public:
         _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
+#if defined(TQ_UNIT_TESTING)
     friend bool TqLinuxRelayWorkerEnqueueCancelledRegisterForTest(
         TqLinuxRelayWorker& worker,
         const TqLinuxRelayRegistration& registration);
+#endif
 
     enum class RelayErrorKind {
         EventQueueFull,

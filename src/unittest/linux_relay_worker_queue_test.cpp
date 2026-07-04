@@ -1,3 +1,4 @@
+#define TQ_UNIT_TESTING 1
 #include "linux_relay_worker.h"
 
 #include <cassert>
