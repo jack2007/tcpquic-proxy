@@ -217,6 +217,39 @@ fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 - detach stream binding。
 - 清空 pending queue，并对未完成 receive 调 `ReceiveComplete()` 归还 MsQuic buffer。
 
+### 1.7 Active relay snapshot 和 admin API
+
+Linux active relay 明细已由 worker 本地 snapshot 直接产出，不再只依赖 worker 聚合指标排障。
+
+实现路径：
+
+```text
+TqSnapshotActiveRelays()
+  -> TqLinuxRelayRuntime::Snapshot()
+  -> TqLinuxRelayWorker::Snapshot()
+  -> SnapshotLocal()
+  -> ActiveRelayStates 聚合到 runtime relay snapshot
+  -> admin active relay API 输出
+```
+
+`SnapshotLocal()` 在 owner worker 线程内遍历 active relay，因此读取的是 worker 私有状态，不需要在数据面增加 per-relay 大锁。runtime snapshot 会汇总所有 worker 的 `ActiveRelayStates`，并复用 `TqRelayActiveSnapshot` 输出给 admin API。
+
+当前 Linux active relay 明细包含：
+
+- 基础标识：`relay_id`、`worker_index`、本地/对端地址、lifecycle flags。
+- QUIC -> TCP pending：`pending_quic_receive_bytes`、`pending_quic_receive_queue_depth`、`callback_pending_quic_receive_depth`。
+- TCP -> QUIC pending：`outstanding_quic_send_bytes`、`pending_quic_send_retries`、`ideal_send_bytes`。
+- TCP 侧状态：`tcp_read_closed`、`tcp_write_closed`、`tcp_read_armed`、`tcp_write_armed`、`pending_tcp_write_queue_depth`、`pending_tcp_write_bytes`。
+- 背压和错误线索：`tcp_write_eagain_count`、`epoll_out_events`、`relay_buffer_bytes_in_use`。
+
+admin API 行为：
+
+- `/api/v1/relay/active-relays` 在 Linux 下返回 active relay 列表。
+- `/api/v1/relay/active-relays/{id}` 在 Linux 下按 relay id 返回单条明细；不存在时返回 404。
+- 不支持 active relay 明细的平台仍返回 `503 not_supported`。
+
+注意：`per_worker_active_relays` 当前仍为 `false`。`/api/v1/relay/workers/{id}` 保留 worker 聚合视图，`relays` 数组仍为空；逐 relay 诊断应使用 active relay API。snapshot 成本与 active relay 数量线性相关，适合作为排障接口，不建议作为高频数据面采样。
+
 ## 2. Linux 线程锁和同步热点排序
 
 下面按对转发热路径影响从高到低排序。这里把原子 CAS、eventfd wake、mutex 都列入“线程同步热点”，因为 Linux relay 的主要成本已经从传统大锁转为跨线程事件和原子同步。
@@ -239,13 +272,13 @@ fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 
 ## 3. 当前问题和解决方案建议
 
-### 3.1 Linux active relay 明细此前缺失
+### 3.1 Linux active relay 明细已补齐
 
 历史现象：`TqSnapshotActiveRelays()` 曾只在 Windows 分支填充逐 relay 明细，Linux 下 `/api/v1/relay/active-relays` 只能返回空列表，`/api/v1/relay/active-relays/{id}` 返回 `503 not_supported`。
 
 影响：排查单连接卡顿时只能看 `linux_relay_hot_relay_*` 和 worker 聚合计数，无法枚举所有 active relay 的 pending、backpressure、TCP/QUIC 方向状态和地址信息。
 
-当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
+当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。实现行为见 [1.7 Active relay snapshot 和 admin API](#17-active-relay-snapshot-和-admin-api)，详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
 
 ### 3.2 Event queue capacity 未暴露配置
 
@@ -376,4 +409,4 @@ fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 4. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
 5. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
 
-当前最值得优先补齐的是 Linux active relay 明细和 event queue capacity 配置；前者提升定位能力，后者让 queue full 降级路径有可操作的调优手段。
+Linux active relay 明细已补齐。当前最值得优先补齐的是 event queue capacity 配置，让 queue full 降级路径有可操作的调优手段；其次是 QUIC receive 背压 hysteresis 和 runtime snapshot 持锁范围收敛。
