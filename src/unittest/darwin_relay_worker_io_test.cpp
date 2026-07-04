@@ -2590,6 +2590,44 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void CallbackReceiveCurrentlyUsesLockedRelayLookup() {
+    ResetFakeReceiveComplete();
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    MsQuicStream stream{};
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = &stream;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const uint64_t before = worker.FindRelayLockedCountForTest();
+    uint8_t payload[] = {'h', 'i'};
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = payload;
+    buffer.Length = sizeof(payload);
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = sizeof(payload);
+    CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_PENDING);
+    CHECK(worker.FindRelayLockedCountForTest() > before);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 } // namespace
 
 int main() {
@@ -2638,6 +2676,7 @@ int main() {
     CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes();
     QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics();
     CompressedQuicReceiveFailsClosedWithoutWritingCorruptData();
+    CallbackReceiveCurrentlyUsesLockedRelayLookup();
     return 0;
 }
 

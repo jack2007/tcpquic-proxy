@@ -130,6 +130,8 @@ public:
     bool FlushTcpWritableForTest(uint64_t relayId);
     bool InvokeTcpEventForTest(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool InvokeQuicReceiveViewForTest(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    uint64_t FindRelayLockedCountForTest() const;
+    uint64_t FindRelayLocalCountForTest() const;
     void* StreamCallbackContextForTest(uint64_t relayId);
     std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
     uint64_t KnownSendOperationCountForTest();
@@ -214,6 +216,10 @@ private:
     // Raw lookup: caller must either be the sole worker-map owner or already hold RelayMutex.
     std::shared_ptr<RelayState> FindRelayLocal(uint64_t relayId) const;
     std::shared_ptr<RelayState> FindRetiredRelayLocal(uint64_t relayId) const;
+    void AssertWorkerThreadForRelayState() const;
+    bool IsRelayClosingLocal(const RelayState& relay) const;
+    void MarkRelayClosingLocal(RelayState& relay) const;
+    MsQuicStream* RelayStreamLocal(const RelayState& relay) const;
     void ProcessKqueueEvent(const struct kevent& event);
     void ProcessTcpEvents(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool DrainTcpReadable(const std::shared_ptr<RelayState>& relay);
@@ -309,6 +315,8 @@ private:
 #if defined(TCPQUIC_TESTING)
     bool FailRegisterTcpFiltersForTest{false};
     mutable std::atomic<uint32_t> WakeFailuresForTest{0};
+    mutable std::atomic<uint64_t> FindRelayLockedCount{0};
+    mutable std::atomic<uint64_t> FindRelayLocalCount{0};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};

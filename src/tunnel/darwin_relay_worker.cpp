@@ -333,6 +333,14 @@ bool TqDarwinRelayWorker::RunningForTest() const {
     return Running.load(std::memory_order_acquire);
 }
 
+uint64_t TqDarwinRelayWorker::FindRelayLockedCountForTest() const {
+    return FindRelayLockedCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::FindRelayLocalCountForTest() const {
+    return FindRelayLocalCount.load(std::memory_order_relaxed);
+}
+
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
     std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
     FailRegisterTcpFiltersForTest = fail;
@@ -1185,11 +1193,17 @@ bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDar
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelay(uint64_t relayId) {
+#if defined(TCPQUIC_TESTING)
+    FindRelayLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     std::lock_guard<std::mutex> lock(RelayMutex);
     return FindRelayLocal(relayId);
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelayLocal(uint64_t relayId) const {
+#if defined(TCPQUIC_TESTING)
+    FindRelayLocalCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     const auto it = Relays.find(relayId);
     if (it != Relays.end()) {
         return it->second;
@@ -1209,6 +1223,27 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetire
         }
     }
     return nullptr;
+}
+
+void TqDarwinRelayWorker::AssertWorkerThreadForRelayState() const {
+#if defined(TCPQUIC_TESTING) || !defined(NDEBUG)
+    assert(IsWorkerThread() && "RelayState data-plane fields are worker-thread-only");
+#endif
+}
+
+bool TqDarwinRelayWorker::IsRelayClosingLocal(const RelayState& relay) const {
+    AssertWorkerThreadForRelayState();
+    return relay.Closing;
+}
+
+void TqDarwinRelayWorker::MarkRelayClosingLocal(RelayState& relay) const {
+    AssertWorkerThreadForRelayState();
+    relay.Closing = true;
+}
+
+MsQuicStream* TqDarwinRelayWorker::RelayStreamLocal(const RelayState& relay) const {
+    AssertWorkerThreadForRelayState();
+    return relay.Stream;
 }
 
 void TqDarwinRelayWorker::ProcessKqueueEvent(const struct kevent& event) {
