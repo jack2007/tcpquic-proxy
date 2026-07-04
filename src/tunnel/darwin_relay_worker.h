@@ -240,6 +240,9 @@ private:
         std::unique_ptr<TqDarwinRelaySendOperation> operation);
     void RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay);
     bool EnqueueQuicSendCompleteFromCallback(uint64_t relayId, TqDarwinRelaySendOperation* operation);
+    bool EnqueueRelayCloseFromCallback(
+        const std::shared_ptr<RelayState>& relay,
+        TqDarwinRelayEventType type);
     void CompleteQuicSend(TqDarwinRelaySendOperation* operation);
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;

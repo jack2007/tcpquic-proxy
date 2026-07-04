@@ -1397,6 +1397,9 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
     if (relay->Closing || relay->TcpReadClosed) {
         return true;
     }
+    if (relay->Binding != nullptr && !relay->Binding->Active.load(std::memory_order_acquire)) {
+        return true;
+    }
     if (ShouldPauseTcpReadForQuicBacklog(relay)) {
         return SetTcpReadBackpressure(relay, true);
     }
@@ -1730,6 +1733,41 @@ bool TqDarwinRelayWorker::EnqueueQuicSendCompleteFromCallback(
         }
     }
     return false;
+}
+
+bool TqDarwinRelayWorker::EnqueueRelayCloseFromCallback(
+    const std::shared_ptr<RelayState>& relay,
+    TqDarwinRelayEventType type) {
+    if (relay == nullptr) {
+        return false;
+    }
+
+    uint32_t attempts = 0;
+    const bool workerThread = IsWorkerThread();
+    while (Running.load(std::memory_order_acquire) || (!workerThread && !WorkerThreadExited())) {
+        TqDarwinRelayEvent event{};
+        event.Type = type;
+        event.RelayId = relay->Id;
+        event.RelayOwner = relay;
+        if (EventQueue.TryPush(std::move(event))) {
+            (void)Wake();
+            return true;
+        }
+        if (workerThread) {
+            CloseRelay(relay, 1);
+            return true;
+        }
+        if ((attempts++ & 0x3F) == 0) {
+            (void)Wake();
+            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
+        } else {
+            std::this_thread::yield();
+        }
+    }
+
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    CloseRelay(relay, 1);
+    return true;
 }
 
 void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay) {
@@ -2277,66 +2315,64 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
             uint64_t remaining = static_cast<uint64_t>(sent);
             burstBytes += remaining;
             std::vector<std::shared_ptr<TqDarwinPendingQuicReceive>> completedReceives;
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                if (relay->Closing) {
-                    return false;
+            AssertWorkerThreadForRelayState();
+            if (relay->Closing) {
+                return false;
+            }
+            relay->TcpWriteBytes += static_cast<uint64_t>(sent);
+            TcpWriteBatches.fetch_add(1, std::memory_order_relaxed);
+            TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
+            while (remaining > 0 && !relay->PendingTcpWrites.empty()) {
+                auto front = relay->PendingTcpWrites.front();
+                if (front == nullptr) {
+                    relay->PendingTcpWrites.pop_front();
+                    continue;
                 }
-                relay->TcpWriteBytes += static_cast<uint64_t>(sent);
-                TcpWriteBatches.fetch_add(1, std::memory_order_relaxed);
-                TcpWriteBytes.fetch_add(static_cast<uint64_t>(sent), std::memory_order_relaxed);
-                while (remaining > 0 && !relay->PendingTcpWrites.empty()) {
-                    auto front = relay->PendingTcpWrites.front();
-                    if (front == nullptr) {
-                        relay->PendingTcpWrites.pop_front();
-                        continue;
-                    }
-                    auto receive = front->Receive;
-                    const uint64_t consumed = std::min<uint64_t>(remaining, front->View.Len);
-                    if (front->ReceiveBytesRemaining >= consumed) {
-                        front->ReceiveBytesRemaining -= consumed;
-                    } else {
-                        front->ReceiveBytesRemaining = 0;
-                    }
-                    if (remaining >= front->View.Len) {
-                        remaining -= front->View.Len;
-                        relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= front->View.Len
-                            ? relay->PendingTcpWriteBytes - front->View.Len
-                            : 0;
-                        relay->PendingTcpWrites.pop_front();
-                    } else {
-                        front->View.Data += remaining;
-                        front->View.Len -= remaining;
-                        relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= remaining
-                            ? relay->PendingTcpWriteBytes - remaining
-                            : 0;
-                        remaining = 0;
-                    }
-                    bool receiveHasPendingWrites = false;
-                    if (receive != nullptr) {
-                        for (const auto& pendingWrite : relay->PendingTcpWrites) {
-                            if (pendingWrite != nullptr && pendingWrite->Receive == receive &&
-                                pendingWrite->ReceiveBytesRemaining != 0) {
-                                receiveHasPendingWrites = true;
-                                break;
-                            }
+                auto receive = front->Receive;
+                const uint64_t consumed = std::min<uint64_t>(remaining, front->View.Len);
+                if (front->ReceiveBytesRemaining >= consumed) {
+                    front->ReceiveBytesRemaining -= consumed;
+                } else {
+                    front->ReceiveBytesRemaining = 0;
+                }
+                if (remaining >= front->View.Len) {
+                    remaining -= front->View.Len;
+                    relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= front->View.Len
+                        ? relay->PendingTcpWriteBytes - front->View.Len
+                        : 0;
+                    relay->PendingTcpWrites.pop_front();
+                } else {
+                    front->View.Data += remaining;
+                    front->View.Len -= remaining;
+                    relay->PendingTcpWriteBytes = relay->PendingTcpWriteBytes >= remaining
+                        ? relay->PendingTcpWriteBytes - remaining
+                        : 0;
+                    remaining = 0;
+                }
+                bool receiveHasPendingWrites = false;
+                if (receive != nullptr) {
+                    for (const auto& pendingWrite : relay->PendingTcpWrites) {
+                        if (pendingWrite != nullptr && pendingWrite->Receive == receive &&
+                            pendingWrite->ReceiveBytesRemaining != 0) {
+                            receiveHasPendingWrites = true;
+                            break;
                         }
                     }
-                    if (receive != nullptr && !receiveHasPendingWrites &&
-                        receive->PendingCompleteBytes == 0 && receive->CompletedLength < receive->TotalLength) {
-                        receive->PendingCompleteBytes = receive->TotalLength;
-                        receive->CompletedLength = receive->TotalLength;
-                        relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
-                            ? relay->PendingQuicReceiveBytes - receive->TotalLength
-                            : 0;
-                        for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
-                            if (*it == receive) {
-                                relay->PendingQuicReceives.erase(it);
-                                break;
-                            }
+                }
+                if (receive != nullptr && !receiveHasPendingWrites &&
+                    receive->PendingCompleteBytes == 0 && receive->CompletedLength < receive->TotalLength) {
+                    receive->PendingCompleteBytes = receive->TotalLength;
+                    receive->CompletedLength = receive->TotalLength;
+                    relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
+                        ? relay->PendingQuicReceiveBytes - receive->TotalLength
+                        : 0;
+                    for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
+                        if (*it == receive) {
+                            relay->PendingQuicReceives.erase(it);
+                            break;
                         }
-                        completedReceives.push_back(receive);
                     }
+                    completedReceives.push_back(receive);
                 }
             }
             for (const auto& receive : completedReceives) {
@@ -2349,23 +2385,19 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
             continue;
         }
         if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->TcpWriteArmed = true;
-            }
-            (void)UpdateTcpInterest(relay);
+            AssertWorkerThreadForRelayState();
+            relay->TcpWriteArmed = true;
+            (void)UpdateTcpInterestLocal(relay);
             return true;
         }
         Errors.fetch_add(1, std::memory_order_relaxed);
         std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> receivesToDiscard;
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            relay->Closing = true;
-            receivesToDiscard.swap(relay->PendingQuicReceives);
-            relay->PendingQuicReceiveBytes = 0;
-            relay->PendingTcpWriteBytes = 0;
-            relay->PendingTcpWrites.clear();
-        }
+        AssertWorkerThreadForRelayState();
+        relay->Closing = true;
+        receivesToDiscard.swap(relay->PendingQuicReceives);
+        relay->PendingQuicReceiveBytes = 0;
+        relay->PendingTcpWriteBytes = 0;
+        relay->PendingTcpWrites.clear();
         for (const auto& pending : receivesToDiscard) {
             (void)DiscardDeferredQuicReceive(nullptr, pending);
         }
@@ -2578,11 +2610,56 @@ void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
         return;
     }
 
-    // Unregister must complete even when the worker thread is blocked mid-flush
-    // (for example during a partial TCP write). Eventizing this path would
-    // deadlock because the worker cannot drain control events until the flush
-    // returns.
-    UnregisterRelayLocal(relayId);
+    // Active RelayState data-plane fields are worker-thread-owned. Non-worker
+    // lifecycle cleanup must queue while a worker can still be touching them.
+    UnregisterRelayCommand command{};
+    command.RelayId = relayId;
+    uint32_t attempts = 0;
+    for (;;) {
+        bool fallbackLocal = false;
+        bool queued = false;
+        {
+            std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+            if (KqueueFd < 0 || WorkerThreadExited()) {
+                fallbackLocal = true;
+            } else {
+                TqDarwinRelayEvent event{};
+                event.Type = TqDarwinRelayEventType::UnregisterRelay;
+                event.Control = &command;
+                if (EventQueue.TryPush(std::move(event))) {
+                    (void)Wake();
+                    queued = true;
+                }
+            }
+        }
+
+        if (fallbackLocal) {
+            UnregisterRelayLocal(relayId);
+            return;
+        }
+        if (queued) {
+            break;
+        }
+        if ((attempts++ & 0x3F) == 0) {
+            (void)Wake();
+            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
+        } else {
+            std::this_thread::yield();
+        }
+    }
+
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    while (!command.Done) {
+        if (command.Cv.wait_for(
+                lock,
+                kControlCommandWakeRetryInterval,
+                [&command] { return command.Done; })) {
+            break;
+        }
+        lock.unlock();
+        (void)Wake();
+        lock.lock();
+    }
 }
 
 TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
@@ -2726,22 +2803,14 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             if (relay == nullptr) {
                 return QUIC_STATUS_SUCCESS;
             }
-            TqDarwinRelayEvent queuedEvent{};
-            queuedEvent.RelayId = binding->RelayId;
-            queuedEvent.RelayOwner = relay;
+            binding->Active.store(false, std::memory_order_release);
+            TqDarwinRelayEventType closeEventType = TqDarwinRelayEventType::QuicShutdownComplete;
             if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
-                queuedEvent.Type = TqDarwinRelayEventType::QuicPeerSendAborted;
+                closeEventType = TqDarwinRelayEventType::QuicPeerSendAborted;
             } else if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
-                queuedEvent.Type = TqDarwinRelayEventType::QuicPeerReceiveAborted;
-            } else {
-                queuedEvent.Type = TqDarwinRelayEventType::QuicShutdownComplete;
+                closeEventType = TqDarwinRelayEventType::QuicPeerReceiveAborted;
             }
-            if (!worker->Running.load(std::memory_order_acquire) ||
-                !worker->EnqueueEvent(std::move(queuedEvent))) {
-                if (relay != nullptr) {
-                    worker->CloseRelay(relay, 1);
-                }
-            }
+            (void)worker->EnqueueRelayCloseFromCallback(relay, closeEventType);
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -2750,16 +2819,6 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         if (worker == nullptr || !binding->Active.load(std::memory_order_acquire)) {
             return QUIC_STATUS_SUCCESS;
         }
-        auto relay = bindingOwner->Relay.lock();
-        if (relay == nullptr) {
-            return QUIC_STATUS_SUCCESS;
-        }
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            if (relay->Closing) {
-                return QUIC_STATUS_SUCCESS;
-            }
-        }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
         if (TqIsMsQuicFakeFinReceive(
                 event->RECEIVE.AbsoluteOffset,
@@ -2767,26 +2826,12 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
                 event->RECEIVE.BufferCount,
                 event->RECEIVE.Flags)) {
             TqTraceLinuxRelayStreamState state{};
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                state.WorkerIndex = worker->Config.WorkerIndex;
-                state.RelayId = relay->Id;
-                state.OutstandingQuicSends = relay->PendingQuicSends.size();
-                state.OutstandingQuicSendBytes = relay->InFlightQuicSendBytes;
-                state.PendingTcpWriteQueue = relay->PendingTcpWrites.size();
-                state.PendingTcpWriteBytes = relay->PendingTcpWriteBytes;
-                state.PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
-                state.TcpReadBytes = relay->TcpReadBytes;
-                state.TcpWriteBytes = relay->TcpWriteBytes;
-                state.TcpReadClosed = relay->TcpReadClosed;
-                state.TcpWriteClosed = relay->TcpWriteClosed;
-                state.QuicSendFinSubmitted = relay->QuicSendFinSubmitted;
-                state.QuicSendFinCompleted = relay->QuicSendFinCompleted;
-            }
+            state.WorkerIndex = worker->Config.WorkerIndex;
+            state.RelayId = binding->RelayId;
             TqTraceRelayStreamEvent(
                 "darwin",
                 worker->Config.WorkerIndex,
-                relay->Id,
+                binding->RelayId,
                 "receive_fake_fin",
                 0,
                 0,
