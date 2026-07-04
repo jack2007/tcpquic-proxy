@@ -88,6 +88,7 @@ struct TqDarwinRelayWorker::StreamBinding : public std::enable_shared_from_this<
     std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
+    std::weak_ptr<RelayState> Relay;
 };
 
 struct TqDarwinRelayPendingTcpWrite {
@@ -821,6 +822,7 @@ void TqDarwinRelayWorker::RetireRelay(
     }
     if (binding != nullptr) {
         binding->Active.store(false, std::memory_order_release);
+        binding->Relay.reset();
         static constexpr uint32_t kMaxCallbackRefYields = 100000;
         uint32_t callbackRefYields = 0;
         while (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs &&
@@ -2465,6 +2467,7 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         std::lock_guard<std::mutex> lock(RelayMutex);
         relay->Id = NextRelayId++;
         binding->RelayId = relay->Id;
+        binding->Relay = relay;
         Relays.emplace(relay->Id, relay);
     }
 
