@@ -545,7 +545,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
         case TqDarwinRelayEventType::QuicShutdownComplete:
-            if (auto relay = FindRelayLocal(event.RelayId)) {
+            if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
                 CloseRelay(relay);
             }
             break;
@@ -2691,12 +2691,13 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
         if (worker != nullptr) {
-            std::shared_ptr<RelayState> relay;
-            if (!worker->Running.load(std::memory_order_acquire)) {
-                relay = binding->Relay.lock();
+            std::shared_ptr<RelayState> relay = binding->Relay.lock();
+            if (relay == nullptr) {
+                return QUIC_STATUS_SUCCESS;
             }
             TqDarwinRelayEvent queuedEvent{};
             queuedEvent.RelayId = binding->RelayId;
+            queuedEvent.RelayOwner = relay;
             if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
                 queuedEvent.Type = TqDarwinRelayEventType::QuicPeerSendAborted;
             } else if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {

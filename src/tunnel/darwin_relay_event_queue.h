@@ -51,6 +51,7 @@ struct TqDarwinRelayEvent {
     uint64_t Value{0};
     uint64_t RelayId{0};
     void* Relay{nullptr};
+    std::shared_ptr<void> RelayOwner;
     void* Control{nullptr};
     TqBufferRef Buffer;
     std::vector<TqBufferRef> Buffers;
