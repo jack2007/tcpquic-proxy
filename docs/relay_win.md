@@ -248,12 +248,11 @@ QUIC receive 背压：
 - 高频小包或高连接数场景下，维护扫描可能压过真正 I/O 处理。
 - snapshot 也要扫描 active relays，会和这条维护路径叠加。
 
-建议：
+当前状态：
 
-- 把维护改成事件驱动：只有进入 backpressure、receive drain、close-after-drained、retry queue 非空的 relay 进入 maintenance queue。
-- 为 maintenance 增加预算，例如每轮最多处理 M 个 relay，避免单次事件后扫全表。
-- 将 `PendingQuicSendRetries` 为空且未暂停 TCP read 的 relay 排除出常规扫描。
-- 保留低频兜底 timer 扫描，避免遗漏异常状态。
+- 常规维护已改为 worker-owned maintenance queue，只有状态变化后需要 retry、resume、close 或 retire 的 relay 会入队。
+- 每轮 maintenance drain 有预算，避免单个 IOCP event 后处理完整 worker relay map。
+- 仍保留低频 full-scan fallback，只把需要维护的 relay 入队，用于兜底异常状态。
 
 ### 3.3 `PendingReceives` 删除是线性查找
 
@@ -267,11 +266,11 @@ QUIC receive 背压：
 - 慢 TCP 写或大 receive backlog 下，队列较深时完成 view 会产生 O(N) 查找。
 - 如果未来加入并行 drain 或乱序完成，这里既不高效，也不显式表达顺序约束。
 
-建议：
+当前状态：
 
-- 正常路径改成校验 `PendingReceives.front() == view` 后 `pop_front()`。
-- 异常路径再保留线性查找并计数，例如 `finish_receive_view_not_front`。
-- 文档和断言明确 Windows quic -> tcp 每条 relay 单队首 drain，不支持乱序 TCP 写。
+- 正常完成路径要求 `PendingReceives.front() == view`，然后 O(1) `pop_front()`。
+- 非队首完成或 missing view 保留线性查找/诊断路径，并通过 `ReceiveViewFinishLinearSearchCount`、`ReceiveViewFinishNotFrontCount`、`ReceiveViewFinishLinearSearchNanos` 观测。
+- Windows QUIC -> TCP 仍保持每条 relay 单队首 drain，不支持乱序 TCP 写。
 
 ### 3.4 receive callback 先复制数据，预算控制后置
 
@@ -364,12 +363,10 @@ QUIC receive 背压：
 
 - 高并发 Windows 性能问题发生时，可能只能看到 backlog 或延迟结果，难以判断根因是 callback copy、全表 maintenance、TCP 写慢还是 worker map 锁。
 
-建议：
+当前剩余缺口：
 
-- 增加 `MaintenanceScanCount`、`MaintenanceScanNanos`、`MaintenanceRelaysScanned`。
-- 增加 `ReceiveViewFinishLinearSearchCount/Nanos`，并统计非队首完成次数。
-- 增加 `CallbackReceiveCopyBytes`、`CallbackReceiveCopyNanos`。
-- 将这些指标接入 `relay_metrics.cpp`、trace active relay 输出和 admin JSON。
+- callback 复制字节/耗时还没有直接指标。
+- receive callback 复制前预算控制仍未实现，相关观测可在后续 3.4 方案中补齐。
 
 ## 建议优先级
 
@@ -378,8 +375,8 @@ QUIC receive 背压：
 | 已完成 | `SetRelayTraceContext()` 通过 IOCP 串行更新 trace context | 原跨线程写 `TraceTarget` 的 C++ 数据竞争风险已消除。 |
 | 高 | 移除生产路径 `abort()`，把 fake FIN 降级为单 relay 错误 | 避免单连接异常杀进程。 |
 | 中 | 为 Windows 增加独立 worker count 配置名 | 配置语义和后续调优需要。 |
-| 中 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 高连接数下可能是主要扩展瓶颈。 |
-| 中 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 降低深队列下的 O(N) 成本。 |
+| 已完成 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 常规路径已改为事件驱动 maintenance queue，并保留低频兜底扫描。 |
+| 已完成 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 正常路径 O(1)，异常路径有计数和 trace。 |
 | 中 | receive callback 复制前加入预算判断和指标 | 降低 callback 线程 CPU/内存尖峰。 |
 | 低 | 清理或注释 per-relay 残留 mutex | 降低维护误解。 |
-| 低 | 补齐 maintenance/copy/linear-search 指标 | 方便下一轮性能定位。 |
+| 部分完成 | 补齐 maintenance/copy/linear-search 指标 | maintenance 和 linear-search 指标已补齐，callback copy 指标留待 receive callback 预算方案处理。 |
