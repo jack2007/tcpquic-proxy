@@ -962,7 +962,7 @@ void ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
-void ActiveWorkerSendCompleteCurrentlyUsesKnownSendLocks() {
+void ActiveWorkerSendCompleteDoesNotUseKnownSendLocks() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
@@ -1002,8 +1002,8 @@ void ActiveWorkerSendCompleteCurrentlyUsesKnownSendLocks() {
     CHECK(worker.KnownSendOperationCountForTest() == 0);
     CHECK(worker.ActiveSendLocalRegisterCountForTest() > localRegisterBefore);
     CHECK(worker.ActiveSendLocalCompleteCountForTest() > localCompleteBefore);
-    CHECK(worker.KnownSendLockedCountForTest() > knownBefore);
-    CHECK(worker.CompletionStateLockedCountForTest() > completionBefore);
+    CHECK(worker.KnownSendLockedCountForTest() == knownBefore);
+    CHECK(worker.CompletionStateLockedCountForTest() == completionBefore);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -3367,7 +3367,7 @@ int main() {
     SendCompleteAfterUnregisterReleasesOperation();
     SendCompleteCallbackQueuesUntilWorkerDrain();
     ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays();
-    ActiveWorkerSendCompleteCurrentlyUsesKnownSendLocks();
+    ActiveWorkerSendCompleteDoesNotUseKnownSendLocks();
     SendCompleteEnqueueFailureWaitsForWorkerAccounting();
     SendCompleteAfterRunningFalseWaitsForWorkerExit();
     SendCompleteFallsBackToBindingRelayWhenMapLookupMisses();

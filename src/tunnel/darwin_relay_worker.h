@@ -148,6 +148,13 @@ struct TqDarwinRelaySendOperation {
         return static_cast<TqDarwinSendOperationState>(State.load(std::memory_order_acquire)) ==
             TqDarwinSendOperationState::CompletionClaimed;
     }
+
+    bool IsSubmitted() const {
+        const auto state = static_cast<TqDarwinSendOperationState>(State.load(std::memory_order_acquire));
+        return state == TqDarwinSendOperationState::Submitted ||
+            state == TqDarwinSendOperationState::CompletionClaimed ||
+            state == TqDarwinSendOperationState::Completed;
+    }
 };
 
 #if defined(TCPQUIC_TESTING)
@@ -426,9 +433,11 @@ private:
     // Serializes worker-local map reads with lifecycle map/deque mutation without taking RelayMutex.
     mutable std::shared_mutex RelayMapAccessMutex;
     mutable std::mutex KnownSendMutex;
+    mutable std::mutex ActiveSendMutex;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;
     std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> KnownSendOperations;
+    std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> ActiveSendOperations;
     std::vector<std::shared_ptr<StreamBinding>> RetiredStreamBindings;
     uint64_t NextRelayId{1};
 #if defined(TCPQUIC_TESTING)
@@ -441,6 +450,7 @@ private:
     mutable std::atomic<uint64_t> CompletionStateLockedCount{0};
     mutable std::atomic<uint64_t> ActiveSendLocalRegisterCount{0};
     mutable std::atomic<uint64_t> ActiveSendLocalCompleteCount{0};
+    mutable std::atomic<uint64_t> ActiveSendOperationsSize{0};
     mutable std::atomic<uint64_t> FallbackSendCompletionCount{0};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
