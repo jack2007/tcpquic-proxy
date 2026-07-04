@@ -329,6 +329,8 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpWritePartialCount = snapshot.TcpWritePartialCount;
     metrics.TcpWriteBurstStops = snapshot.TcpWriteBurstStops;
     metrics.ReadDisabledCount = snapshot.ReadDisabledCount;
+    metrics.LinuxRelayFakeFinReceiveCount = snapshot.FakeFinReceiveCount;
+    metrics.LinuxRelayStreamLookupScanCount = snapshot.StreamLookupScanCount;
     metrics.CompressedTcpBytes = snapshot.CompressedTcpBytes;
     metrics.DecompressedTcpBytes = snapshot.DecompressedTcpBytes;
     metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;
@@ -709,6 +711,10 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
     out << ",\"linux_relay_tcp_write_partial_count\":" << metrics.TcpWritePartialCount;
     out << ",\"linux_relay_tcp_write_burst_stops\":" << metrics.TcpWriteBurstStops;
     out << ",\"linux_relay_read_disabled_count\":" << metrics.ReadDisabledCount;
+    out << ",\"linux_relay_fake_fin_receive_count\":"
+        << metrics.LinuxRelayFakeFinReceiveCount;
+    out << ",\"linux_relay_stream_lookup_scan_count\":"
+        << metrics.LinuxRelayStreamLookupScanCount;
     out << ',';
     TqAppendJsonString(out, "linux_relay_backend", metrics.Backend);
     out << ",\"linux_relay_compressed_tcp_bytes\":" << metrics.CompressedTcpBytes;

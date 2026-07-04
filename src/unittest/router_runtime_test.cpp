@@ -1502,6 +1502,8 @@ int main() {
         if (bodyText.find("\"linux_relay_tcp_read_bytes\"") == std::string::npos) return 99;
         if (bodyText.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (bodyText.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
+        if (bodyText.find("\"linux_relay_fake_fin_receive_count\":") == std::string::npos) return 372;
+        if (bodyText.find("\"linux_relay_stream_lookup_scan_count\":") == std::string::npos) return 373;
 #if defined(__linux__)
         if (bodyText.find("\"linux_relay_backend\":\"epoll\"") == std::string::npos) return 235;
 #elif defined(__APPLE__)
