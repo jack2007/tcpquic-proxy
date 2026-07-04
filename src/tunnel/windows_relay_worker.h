@@ -39,6 +39,7 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicSendComplete,
     QuicSendRetry,
     CloseRelay,
+    SetTraceContext,
     StopWorker,
     RegisterRelay,
     Snapshot,
@@ -258,6 +259,10 @@ private:
         uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
     void HandleQuicIdealSendBuffer(const std::shared_ptr<RelayContext>& relay, uint64_t byteCount);
+    void ApplyRelayTraceContext(
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t tunnelId,
+        const std::string& target);
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     void QueueQuicSendCompleteByIdFromCallback(
         const CallbackBinding& binding,
