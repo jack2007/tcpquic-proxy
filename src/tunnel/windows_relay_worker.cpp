@@ -1367,6 +1367,41 @@ bool TqWindowsRelayWorker::TestGetRelayTraceStateForTest(
     return true;
 }
 
+bool TqWindowsRelayWorker::TestPostTraceContextForTest(
+    uint64_t relayId,
+    uint64_t generation,
+    uint64_t tunnelId,
+    const char* target) {
+    if (relayId == 0 || tunnelId == 0) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
+    if (Iocp_ == nullptr || !Thread_.joinable() || Stopping_.load(std::memory_order_acquire)) {
+        return false;
+    }
+    if (!FindRelayById(relayId)) {
+        return false;
+    }
+
+    auto op = std::make_unique<IoOperation>();
+    op->Event = TqWindowsIocpOperationType::SetTraceContext;
+    op->RelayId = relayId;
+    op->Generation = generation;
+    op->Value = tunnelId;
+    if (target != nullptr) {
+        op->Text = target;
+    }
+
+    IoOperation* raw = op.release();
+    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+        delete raw;
+        Errors_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+
 bool TqWindowsRelayWorker::TestPostWorkerQueueBlockForTest(
     TqWindowsRelayWorkerQueueBlockForTest* block) {
     if (Iocp_ == nullptr || block == nullptr) {

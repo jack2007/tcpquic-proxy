@@ -211,6 +211,11 @@ public:
         uint64_t relayId,
         TqTraceLinuxRelayStreamState* out,
         std::string* targetStorage) const;
+    bool TestPostTraceContextForTest(
+        uint64_t relayId,
+        uint64_t generation,
+        uint64_t tunnelId,
+        const char* target);
     bool TestPostWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest* block);
     bool TestWaitWorkerQueueBlockEnteredForTest(
         TqWindowsRelayWorkerQueueBlockForTest& block,

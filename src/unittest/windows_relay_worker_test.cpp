@@ -1150,6 +1150,127 @@ bool TestWindowsRelayTraceContextUsesWorkerQueue() {
     return sawTrace;
 }
 
+bool TestWindowsRelayTraceContextDropsStaleGeneration() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorker worker;
+    if (!worker.Start()) {
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+        if (handle.WindowsRelayId == 0) {
+            TqCloseSocket(pair[0]);
+        }
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const uint64_t staleGeneration = 999999;
+    if (!worker.TestPostTraceContextForTest(
+            handle.WindowsRelayId,
+            staleGeneration,
+            777,
+            "stale.example:443")) {
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    (void)worker.Snapshot();
+
+    TqTraceLinuxRelayStreamState state{};
+    std::string targetStorage;
+    const bool ok = worker.TestGetRelayTraceStateForTest(
+        handle.WindowsRelayId,
+        &state,
+        &targetStorage);
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    MsQuic = nullptr;
+    return ok && state.TunnelId == 0 && state.Target == nullptr;
+}
+
+bool TestWindowsRelayTraceContextAllowsNullTarget() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorker worker;
+    if (!worker.Start()) {
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+        if (handle.WindowsRelayId == 0) {
+            TqCloseSocket(pair[0]);
+        }
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    worker.SetRelayTraceContext(handle.WindowsRelayId, 888, nullptr);
+
+    (void)worker.Snapshot();
+
+    TqTraceLinuxRelayStreamState state{};
+    std::string targetStorage;
+    const bool ok = worker.TestGetRelayTraceStateForTest(
+        handle.WindowsRelayId,
+        &state,
+        &targetStorage);
+
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    MsQuic = nullptr;
+    return ok && state.TunnelId == 888 && state.Target == nullptr;
+}
+
 }  // namespace
 #endif
 
@@ -1204,6 +1325,14 @@ int main() {
 
     if (!TestWindowsRelayTraceContextUsesWorkerQueue()) {
         return 123;
+    }
+
+    if (!TestWindowsRelayTraceContextDropsStaleGeneration()) {
+        return 124;
+    }
+
+    if (!TestWindowsRelayTraceContextAllowsNullTarget()) {
+        return 125;
     }
 
     {
