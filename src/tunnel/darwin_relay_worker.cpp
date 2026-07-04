@@ -1815,11 +1815,11 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     if (!completionAlreadyRan) {
         (void)raw->TryMarkSubmitted();
     }
+    submittedInfo.CompletionEventClaimed = raw->IsCompletionClaimed();
     if (relay->SubmittingQuicSends > 0) {
         --relay->SubmittingQuicSends;
     }
-    const bool completionClaimedDuringSend = raw->IsCompletionClaimed();
-    if (workerThread && (submittedInfo.CompletionEventClaimed || completionClaimedDuringSend)) {
+    if (workerThread && submittedInfo.CompletionEventClaimed) {
         (void)DrainEvents(1);
     }
     if (completionAlreadyRan) {
@@ -1828,7 +1828,7 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     }
 
     if (QUIC_FAILED(status)) {
-        if (submittedInfo.CompletionEventClaimed || completionClaimedDuringSend) {
+        if (submittedInfo.CompletionEventClaimed) {
             (void)operation.release();
             return true;
         }

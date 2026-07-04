@@ -187,6 +187,23 @@ QUIC_STATUS FakeStreamSend(
     return g_sendStatus.load(std::memory_order_acquire);
 }
 
+QUIC_STATUS FakeStreamSendCompletesSynchronously(
+    MsQuicStream*,
+    const QUIC_BUFFER*,
+    uint32_t,
+    QUIC_SEND_FLAGS,
+    void* context) {
+    g_sendCalls.fetch_add(1, std::memory_order_relaxed);
+    g_lastSendContext.store(context, std::memory_order_release);
+    void* callbackContext = g_syncCallbackContext.load(std::memory_order_acquire);
+    CHECK(callbackContext != nullptr);
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    event.SEND_COMPLETE.ClientContext = context;
+    CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
+    return g_sendStatus.load(std::memory_order_acquire);
+}
+
 void FakeReceiveComplete(MsQuicStream*, uint64_t byteCount) {
     g_receiveCompleteCalls.fetch_add(1, std::memory_order_relaxed);
     g_receiveCompleteBytes.fetch_add(byteCount, std::memory_order_relaxed);
@@ -1420,6 +1437,48 @@ void SynchronousSendCompleteBeforeSuccessDoesNotLeak() {
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void SynchronousSendCompleteDoesNotDoubleComplete() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 16;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSendCompletesSynchronously);
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    void* callbackContext = worker.StreamCallbackContextForTest(result.RelayId);
+    CHECK(callbackContext != nullptr);
+    g_syncCallbackContext.store(callbackContext, std::memory_order_release);
+    g_completeBeforeSendReturns.store(true, std::memory_order_release);
+    const char payload[] = "synchronous-send-complete";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
+    CHECK(worker.PendingEventsForTest() == 0);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    g_completeBeforeSendReturns.store(false, std::memory_order_release);
+    g_syncCallbackContext.store(nullptr, std::memory_order_release);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
@@ -3421,6 +3480,7 @@ int main() {
     SendCompleteFallsBackToBindingRelayWhenMapLookupMisses();
     SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease();
     SynchronousSendCompleteBeforeSuccessDoesNotLeak();
+    SynchronousSendCompleteDoesNotDoubleComplete();
     MagicMismatchKnownOperationCleansAccounting();
     StopThenLateCompletionDoesNotUseDanglingWorker();
     StopThenLateTcpEventIgnoresRetiredRelay();
