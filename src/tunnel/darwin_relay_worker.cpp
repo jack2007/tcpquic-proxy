@@ -1199,7 +1199,6 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmittedLocal(
 }
 
 bool TqDarwinRelayWorker::TryClaimKnownSendCompletionEvent(
-    StreamBinding* binding,
     TqDarwinRelaySendOperation* operation,
     KnownSendOperationInfo* info) {
     if (operation == nullptr) {
@@ -1207,34 +1206,13 @@ bool TqDarwinRelayWorker::TryClaimKnownSendCompletionEvent(
     }
     bool tracked = false;
     {
-        std::lock_guard<std::mutex> lock(KnownSendMutex);
-        tracked = KnownSendOperations.find(operation) != KnownSendOperations.end();
-    }
-    if (!tracked) {
         std::lock_guard<std::mutex> lock(ActiveSendMutex);
         tracked = ActiveSendOperations.find(operation) != ActiveSendOperations.end();
     }
     if (!tracked) {
-        if (binding == nullptr || binding->Completions == nullptr) {
-            return false;
-        }
-#if defined(TCPQUIC_TESTING)
-        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
-#endif
-        std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
-        const auto it = binding->Completions->KnownSendOperations.find(operation);
-        if (it == binding->Completions->KnownSendOperations.end()) {
-            return false;
-        }
-        if (info != nullptr) {
-            *info = it->second;
-        }
-        it->second.CompletionEventClaimed = true;
-        return true;
+        return false;
     }
-    const auto state = static_cast<TqDarwinSendOperationState>(
-        operation->State.load(std::memory_order_acquire));
-    if (state == TqDarwinSendOperationState::CompletionClaimed) {
+    if (operation->IsCompletionClaimed()) {
         if (info != nullptr) {
             info->RelayId = operation->CompletionRelayId;
             info->TotalBytes = operation->CompletionTotalBytes;
@@ -1244,10 +1222,6 @@ bool TqDarwinRelayWorker::TryClaimKnownSendCompletionEvent(
             info->BindingOwner = operation->CompletionBindingOwner;
         }
         return true;
-    }
-    if (state == TqDarwinSendOperationState::Completed ||
-        state == TqDarwinSendOperationState::Detached) {
-        return false;
     }
     if (!operation->TryClaimCompletion()) {
         return false;
@@ -2972,7 +2946,7 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             reinterpret_cast<TqDarwinRelaySendOperation*>(event->SEND_COMPLETE.ClientContext);
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
         KnownSendOperationInfo info{};
-        if (worker != nullptr && worker->TryClaimKnownSendCompletionEvent(binding, operation, &info)) {
+        if (worker != nullptr && worker->TryClaimKnownSendCompletionEvent(operation, &info)) {
             if (info.CompletionEventClaimed) {
                 return QUIC_STATUS_SUCCESS;
             }

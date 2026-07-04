@@ -404,7 +404,6 @@ private:
         KnownSendOperationInfo* info = nullptr);
     // Claims a SEND_COMPLETE callback before enqueue; info reports the prior claim state.
     bool TryClaimKnownSendCompletionEvent(
-        StreamBinding* binding,
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info);
     bool UnregisterKnownSendOperation(
