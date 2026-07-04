@@ -81,9 +81,7 @@ int main() {
     metrics.DeferredReceiveCompletes = 111;
     metrics.QuicSendBackpressureEvents = 222;
 
-    std::ostringstream out;
-    TqAppendRelayMetricsJson(out, metrics);
-    const std::string json = out.str();
+    const std::string json = TqRelayMetricsFieldsJson(metrics);
     CheckContains(json, "\"linux_relay_backend\":\"kqueue\"");
     CheckContains(json, "\"linux_relay_outstanding_quic_send_bytes\":11");
     CheckContains(json, "\"linux_relay_tcp_read_batches\":22");

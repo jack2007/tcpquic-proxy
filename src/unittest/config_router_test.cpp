@@ -54,12 +54,8 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     return {};
 }
 
-void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
-    out << '"' << name << "\":\"" << value << '"';
-}
-
-void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot&) {
-    out << ",\"linux_relay_backend\":\"test\"";
+std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
+    return "{\"linux_relay_backend\":\"test\"}";
 }
 
 static std::string CaptureUsage() {

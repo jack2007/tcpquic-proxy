@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -200,9 +199,8 @@ struct TqRelayWorkerSnapshot {
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays();
 std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers();
+std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot& metrics);
 std::string TqRelayActiveRelaysJson();
 std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool& supported);
 std::string TqRelayWorkersJson();
 std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported);
-void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics);
-void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value);

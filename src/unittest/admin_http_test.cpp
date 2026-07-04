@@ -3,6 +3,8 @@
 #include "admin_console.h"
 #include "platform_socket.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -389,8 +391,9 @@ int main() {
         std::ifstream in(tokenFile);
         std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();
-        if (body.find("\"token\":\"" + auth.Token() + "\"") == std::string::npos) return 88;
-        if (body.find("\"listen\":\"127.0.0.1:19091\"") == std::string::npos) return 89;
+        const auto tokenJson = nlohmann::json::parse(body);
+        if (tokenJson["token"] != auth.Token()) return 88;
+        if (tokenJson["listen"] != "127.0.0.1:19091") return 89;
 #if !defined(_WIN32)
         const auto perms = std::filesystem::status(tokenFile).permissions();
         if ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) return 90;
@@ -463,7 +466,8 @@ int main() {
         const std::string token = server.AuthTokenForTesting();
         if (token.size() != 64) return 448;
         const std::string body = TqReadTextFile(tokenFile);
-        if (body.find("\"token\":\"" + token + "\"") == std::string::npos) return 449;
+        const auto tokenJson = nlohmann::json::parse(body);
+        if (tokenJson["token"] != token) return 449;
         server.Stop();
         if (!std::filesystem::exists(tokenFile)) return 450;
     }
@@ -486,7 +490,8 @@ int main() {
         const std::string newToken = server.AuthTokenForTesting();
         if (newToken == oldToken) return 452;
         const std::string body = TqReadTextFile(tokenFile);
-        if (body.find("\"token\":\"" + newToken + "\"") == std::string::npos) return 453;
+        const auto tokenJson = nlohmann::json::parse(body);
+        if (tokenJson["token"] != newToken) return 453;
         server.Stop();
         if (std::filesystem::exists(tokenFile)) return 454;
     }

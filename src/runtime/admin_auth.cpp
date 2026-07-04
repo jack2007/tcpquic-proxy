@@ -1,5 +1,7 @@
 #include "admin_auth.h"
 
+#include <nlohmann/json.hpp>
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -9,7 +11,6 @@
 #include <fstream>
 #include <mutex>
 #include <random>
-#include <sstream>
 #include <vector>
 
 #if defined(_WIN32)
@@ -125,50 +126,15 @@ uint64_t TqUnixNow() {
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
-std::string TqJsonEscape(const std::string& value) {
-    std::ostringstream out;
-    for (unsigned char ch : value) {
-        switch (ch) {
-        case '\\':
-            out << "\\\\";
-            break;
-        case '"':
-            out << "\\\"";
-            break;
-        case '\n':
-            out << "\\n";
-            break;
-        case '\r':
-            out << "\\r";
-            break;
-        case '\t':
-            out << "\\t";
-            break;
-        default:
-            if (ch < 0x20) {
-                out << "\\u";
-                static constexpr char kHex[] = "0123456789abcdef";
-                out << "00" << kHex[ch >> 4] << kHex[ch & 0x0f];
-            } else {
-                out << static_cast<char>(ch);
-            }
-            break;
-        }
-    }
-    return out.str();
-}
-
 std::string TqTokenJson(const std::string& token, const std::string& listen) {
-    std::ostringstream out;
-    out << "{\n"
-        << "  \"version\":1,\n"
-        << "  \"token_type\":\"Bearer\",\n"
-        << "  \"token\":\"" << TqJsonEscape(token) << "\",\n"
-        << "  \"listen\":\"" << TqJsonEscape(listen) << "\",\n"
-        << "  \"pid\":" << TqCurrentPid() << ",\n"
-        << "  \"created_at_unix\":" << TqUnixNow() << "\n"
-        << "}\n";
-    return out.str();
+    return nlohmann::json{
+        {"version", 1},
+        {"token_type", "Bearer"},
+        {"token", token},
+        {"listen", listen},
+        {"pid", TqCurrentPid()},
+        {"created_at_unix", TqUnixNow()},
+    }.dump(2) + "\n";
 }
 
 bool TqConstantTimeEquals(const std::string& a, const std::string& b) {
@@ -203,10 +169,15 @@ bool TqFileContainsTokenOrPid(const std::string& path, const std::string& token)
         return false;
     }
     std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (!token.empty() && body.find("\"token\":\"" + token + "\"") != std::string::npos) {
-        return true;
+    try {
+        const auto json = nlohmann::json::parse(body);
+        if (!token.empty() && json.value("token", std::string{}) == token) {
+            return true;
+        }
+        return json.value("pid", uint64_t{0}) == TqCurrentPid();
+    } catch (const nlohmann::json::exception&) {
+        return false;
     }
-    return body.find("\"pid\":" + std::to_string(TqCurrentPid())) != std::string::npos;
 }
 
 class TqTokenJsonParser {

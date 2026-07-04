@@ -14,6 +14,8 @@
 
 #include "admin_httplib.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -354,6 +356,14 @@ void TqSetRedirect(httplib::Response& res, const char* location) {
     res.set_content("", "text/plain");
 }
 
+std::string TqSimpleErrorJson(const std::string& message) {
+    return nlohmann::json{{"error", message}}.dump();
+}
+
+std::string TqStructuredErrorJson(const std::string& code, const std::string& message) {
+    return nlohmann::json{{"error", {{"code", code}, {"message", message}}}}.dump();
+}
+
 bool TqHandleConsoleStatic(const httplib::Request& req, httplib::Response& res) {
     if (req.method != "GET") {
         return false;
@@ -380,7 +390,7 @@ bool TqHandleConsoleStatic(const httplib::Request& req, httplib::Response& res) 
 void TqSetLegacyResponse(httplib::Response& res, const std::string& raw) {
     const size_t lineEnd = raw.find("\r\n");
     if (lineEnd == std::string::npos || raw.compare(0, 9, "HTTP/1.1 ") != 0) {
-        TqSetJson(res, 500, "{\"error\":\"bad handler response\"}");
+        TqSetJson(res, 500, TqSimpleErrorJson("bad handler response"));
         return;
     }
     int status = 500;
@@ -395,48 +405,7 @@ void TqSetLegacyResponse(httplib::Response& res, const std::string& raw) {
 }
 
 std::string TqUnauthorizedJson() {
-    return "{\"error\":{\"code\":\"unauthorized\",\"message\":\"unauthorized\"}}";
-}
-
-std::string TqAdminStatusEscape(const std::string& text) {
-    std::string escaped;
-    escaped.reserve(text.size());
-    const char* hex = "0123456789abcdef";
-    for (unsigned char ch : text) {
-        switch (ch) {
-        case '"':
-            escaped += "\\\"";
-            break;
-        case '\\':
-            escaped += "\\\\";
-            break;
-        case '\b':
-            escaped += "\\b";
-            break;
-        case '\f':
-            escaped += "\\f";
-            break;
-        case '\n':
-            escaped += "\\n";
-            break;
-        case '\r':
-            escaped += "\\r";
-            break;
-        case '\t':
-            escaped += "\\t";
-            break;
-        default:
-            if (ch < 0x20) {
-                escaped += "\\u00";
-                escaped += hex[(ch >> 4) & 0x0f];
-                escaped += hex[ch & 0x0f];
-            } else {
-                escaped.push_back(static_cast<char>(ch));
-            }
-            break;
-        }
-    }
-    return escaped;
+    return TqStructuredErrorJson("unauthorized", "unauthorized");
 }
 
 std::string TqAdminStatusBody(
@@ -447,27 +416,25 @@ std::string TqAdminStatusBody(
     const bool authEnabled = auth != nullptr;
     const bool tokenPresent = auth && !auth->Token().empty();
     const bool loopbackOnly = TqAdminBindHostIsLoopback(TqAdminListenHost(listen));
-    std::ostringstream out;
-    out << "{"
-        << "\"role\":\"" << TqAdminStatusEscape(options.Role) << "\","
-        << "\"listen\":\"" << TqAdminStatusEscape(listen) << "\","
-        << "\"auth\":{"
-        << "\"enabled\":" << (authEnabled ? "true" : "false") << ","
-        << "\"type\":\"bearer\","
-        << "\"token_file\":\"" << TqAdminStatusEscape(tokenFile) << "\","
-        << "\"token_present\":" << (tokenPresent ? "true" : "false")
-        << "},"
-        << "\"http\":{"
-        << "\"threads\":" << options.AdminThreads << ","
-        << "\"max_body_bytes\":" << options.MaxBodyBytes << ","
-        << "\"keep_alive\":false"
-        << "},"
-        << "\"security\":{"
-        << "\"loopback_only\":" << (loopbackOnly ? "true" : "false") << ","
-        << "\"tls\":false"
-        << "}"
-        << "}";
-    return out.str();
+    return nlohmann::json{
+        {"role", options.Role},
+        {"listen", listen},
+        {"auth", {
+            {"enabled", authEnabled},
+            {"type", "bearer"},
+            {"token_file", tokenFile},
+            {"token_present", tokenPresent},
+        }},
+        {"http", {
+            {"threads", options.AdminThreads},
+            {"max_body_bytes", options.MaxBodyBytes},
+            {"keep_alive", false},
+        }},
+        {"security", {
+            {"loopback_only", loopbackOnly},
+            {"tls", false},
+        }},
+    }.dump();
 }
 
 } // namespace
@@ -631,11 +598,11 @@ bool TqAdminHttpServer::Start(std::string& err) {
     Server->set_payload_max_length(Options.MaxBodyBytes);
     Server->set_error_handler([](const httplib::Request&, httplib::Response& res) {
         if (res.status == 413) {
-            TqSetJson(res, 413, "{\"error\":{\"code\":\"payload_too_large\",\"message\":\"payload too large\"}}");
+            TqSetJson(res, 413, TqStructuredErrorJson("payload_too_large", "payload too large"));
         } else if (res.status == 400) {
-            TqSetJson(res, 400, "{\"error\":{\"code\":\"bad_request\",\"message\":\"bad request\"}}");
+            TqSetJson(res, 400, TqStructuredErrorJson("bad_request", "bad request"));
         } else {
-            TqSetJson(res, res.status == 0 ? 404 : res.status, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+            TqSetJson(res, res.status == 0 ? 404 : res.status, TqStructuredErrorJson("not_found", "not found"));
         }
     });
     ConfigureRoutes();
@@ -728,7 +695,7 @@ void TqAdminHttpServer::ConfigureRoutes() {
             return;
         }
         if (!TqIsV1Prefix(req.path)) {
-            TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+            TqSetJson(res, 404, TqStructuredErrorJson("not_found", "not found"));
             return;
         }
         TqHttpRequest adminReq = TqMakeAdminRequest(req);
@@ -741,10 +708,10 @@ void TqAdminHttpServer::ConfigureRoutes() {
             return;
         }
         if (!TqIsV1AdminPath(req.path)) {
-            TqSetJson(res, 404, "{\"error\":{\"code\":\"not_found\",\"message\":\"not found\"}}");
+            TqSetJson(res, 404, TqStructuredErrorJson("not_found", "not found"));
             return;
         }
-        TqSetLegacyResponse(res, Handler ? Handler(adminReq) : TqJsonResponse(500, "{\"error\":\"no handler\"}"));
+        TqSetLegacyResponse(res, Handler ? Handler(adminReq) : TqJsonResponse(500, TqSimpleErrorJson("no handler")));
     };
 
     Server->Get(R"(.*)", dispatch);

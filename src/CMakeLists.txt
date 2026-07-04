@@ -205,7 +205,7 @@ endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
 tcpquic_link_quic_address_deps(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib)
+target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib nlohmann_json::nlohmann_json)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()
@@ -294,7 +294,7 @@ add_executable(tcpquic_tuning_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_tuning_test)
-target_link_libraries(tcpquic_tuning_test PRIVATE spdlog::spdlog)
+target_link_libraries(tcpquic_tuning_test PRIVATE spdlog::spdlog nlohmann_json::nlohmann_json)
 set_property(TARGET tcpquic_tuning_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_tuning_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -355,6 +355,7 @@ add_executable(tcpquic_memory_stats_test
     tunnel/relay_alloc.cpp
 )
 tcpquic_target_include_dirs(tcpquic_memory_stats_test)
+target_link_libraries(tcpquic_memory_stats_test PRIVATE nlohmann_json::nlohmann_json)
 tcpquic_link_mimalloc(tcpquic_memory_stats_test)
 set_property(TARGET tcpquic_memory_stats_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_memory_stats_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
@@ -723,7 +724,7 @@ add_executable(tcpquic_config_router_test
 )
 tcpquic_target_include_dirs(tcpquic_config_router_test)
 tcpquic_link_quic_address_deps(tcpquic_config_router_test)
-target_link_libraries(tcpquic_config_router_test PRIVATE spdlog::spdlog)
+target_link_libraries(tcpquic_config_router_test PRIVATE spdlog::spdlog nlohmann_json::nlohmann_json)
 set_property(TARGET tcpquic_config_router_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_config_router_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -922,7 +923,7 @@ if(NOT WIN32)
         runtime/tcp_sink_bench.cpp
     )
     tcpquic_target_include_dirs(tcpquic_tcp_sink_bench_test)
-    target_link_libraries(tcpquic_tcp_sink_bench_test PRIVATE Threads::Threads)
+    target_link_libraries(tcpquic_tcp_sink_bench_test PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
     set_property(TARGET tcpquic_tcp_sink_bench_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_tcp_sink_bench_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -931,7 +932,7 @@ if(NOT WIN32)
         runtime/tcp_sink_bench.cpp
     )
     tcpquic_target_include_dirs(tcpquic_tcp_sink_bench)
-    target_link_libraries(tcpquic_tcp_sink_bench PRIVATE Threads::Threads)
+    target_link_libraries(tcpquic_tcp_sink_bench PRIVATE Threads::Threads nlohmann_json::nlohmann_json)
     set_property(TARGET tcpquic_tcp_sink_bench PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_tcp_sink_bench APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
@@ -995,7 +996,7 @@ add_executable(tcpquic_admin_http_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_admin_http_test)
-target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads inc cpp_httplib)
+target_link_libraries(tcpquic_admin_http_test PRIVATE Threads::Threads inc cpp_httplib nlohmann_json::nlohmann_json)
 if(WIN32)
     target_compile_definitions(tcpquic_admin_http_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(tcpquic_admin_http_test PRIVATE ws2_32)
@@ -1046,7 +1047,7 @@ if(WIN32)
 endif()
 add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES})
 tcpquic_target_include_dirs(tcpquic_router_runtime_test)
-target_link_libraries(tcpquic_router_runtime_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog cpp_httplib)
+target_link_libraries(tcpquic_router_runtime_test PRIVATE Threads::Threads inc warnings msquic logging base_link spdlog::spdlog cpp_httplib nlohmann_json::nlohmann_json)
 if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_router_runtime_test PRIVATE msquic_platform)
 endif()
@@ -1078,7 +1079,7 @@ add_executable(tcpquic_server_admin_test
     tunnel/relay_alloc.cpp
 )
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
-target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic)
+target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic nlohmann_json::nlohmann_json)
 tcpquic_link_mimalloc(tcpquic_server_admin_test)
 set_property(TARGET tcpquic_server_admin_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_server_admin_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")

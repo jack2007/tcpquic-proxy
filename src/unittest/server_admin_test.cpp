@@ -99,12 +99,6 @@ TqHttpRequest Request(const std::string& method, const std::string& path, const 
 
 } // namespace
 
-void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value);
-
-void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
-    out << '"' << name << "\":\"" << value << '"';
-}
-
 std::string TqJsonResponse(int status, const std::string& json) {
     const char* reason = status == 200 ? "OK" :
         (status == 202 ? "Accepted" :
@@ -151,8 +145,8 @@ std::string TqRelayWorkersJson() {
     return "{\"capabilities\":{\"active_relay_detail\":false,\"worker_detail\":true,\"per_worker_active_relays\":false},\"workers\":[{\"worker_id\":\"aggregate\",\"backend\":\"test\",\"worker_index\":0,\"active_relays\":7,\"pending_bytes\":1234,\"tcp_read_bytes\":11,\"tcp_write_bytes\":22,\"errors\":3}]}";
 }
 
-void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot&) {
-    out << ",\"linux_relay_backend\":\"test\"";
+std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
+    return "{\"linux_relay_backend\":\"test\"}";
 }
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {

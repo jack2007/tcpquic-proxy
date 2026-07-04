@@ -2,6 +2,8 @@
 
 #include "relay_alloc.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #include <sstream>
 
@@ -24,10 +26,6 @@ uint64_t TqNonNegativeSumInt64(int64_t a, int64_t b) {
     return TqNonNegativeInt64(a) + TqNonNegativeInt64(b);
 }
 #endif
-
-const char* TqBoolJson(bool value) {
-    return value ? "true" : "false";
-}
 
 } // namespace
 
@@ -115,26 +113,26 @@ std::string TqFormatMemoryAllocatorStatsLine(const TqMemoryAllocatorStats& stats
 }
 
 std::string TqMemoryAllocatorStatsJson(const TqMemoryAllocatorStats& stats) {
-    std::ostringstream out;
-    out << "{\"status\":\"dumped\""
-        << ",\"allocator\":\"mimalloc\""
-        << ",\"enabled\":" << TqBoolJson(stats.MimallocEnabled)
-        << ",\"available\":" << TqBoolJson(stats.Available)
-        << ",\"requested_current_bytes\":" << stats.RequestedCurrentBytes
-        << ",\"requested_total_bytes\":" << stats.RequestedTotalBytes
-        << ",\"requested_freed_bytes\":" << stats.RequestedFreedBytes
-        << ",\"requested_peak_bytes\":" << stats.RequestedPeakBytes
-        << ",\"reserved_current_bytes\":" << stats.ReservedCurrentBytes
-        << ",\"committed_current_bytes\":" << stats.CommittedCurrentBytes
-        << ",\"page_committed_current_bytes\":" << stats.PageCommittedCurrentBytes
-        << ",\"normal_alloc_count\":" << stats.NormalAllocCount
-        << ",\"huge_alloc_count\":" << stats.HugeAllocCount
-        << ",\"mmap_calls\":" << stats.MmapCalls
-        << ",\"commit_calls\":" << stats.CommitCalls
-        << ",\"purge_calls\":" << stats.PurgeCalls
-        << ",\"threads_current\":" << stats.ThreadsCurrent
-        << '}';
-    return out.str();
+    nlohmann::json body{
+        {"status", "dumped"},
+        {"allocator", "mimalloc"},
+        {"enabled", stats.MimallocEnabled},
+        {"available", stats.Available},
+        {"requested_current_bytes", stats.RequestedCurrentBytes},
+        {"requested_total_bytes", stats.RequestedTotalBytes},
+        {"requested_freed_bytes", stats.RequestedFreedBytes},
+        {"requested_peak_bytes", stats.RequestedPeakBytes},
+        {"reserved_current_bytes", stats.ReservedCurrentBytes},
+        {"committed_current_bytes", stats.CommittedCurrentBytes},
+        {"page_committed_current_bytes", stats.PageCommittedCurrentBytes},
+        {"normal_alloc_count", stats.NormalAllocCount},
+        {"huge_alloc_count", stats.HugeAllocCount},
+        {"mmap_calls", stats.MmapCalls},
+        {"commit_calls", stats.CommitCalls},
+        {"purge_calls", stats.PurgeCalls},
+        {"threads_current", stats.ThreadsCurrent},
+    };
+    return body.dump();
 }
 
 void TqDumpMemoryAllocatorStatsToLog(const TqMemoryAllocatorStats& stats) {

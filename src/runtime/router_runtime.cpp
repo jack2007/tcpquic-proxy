@@ -6,6 +6,8 @@
 #include "tunnel_registry.h"
 #include "trace.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -64,38 +66,6 @@ struct TqPeerActionBody {
     uint32_t GraceSeconds{kDefaultPeerDrainGraceSeconds};
 };
 
-std::string JsonEscape(const std::string& value) {
-    std::string out;
-    out.reserve(value.size() + 2);
-    for (char ch : value) {
-        switch (ch) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(ch) < 0x20) {
-                static const char Hex[] = "0123456789abcdef";
-                const unsigned char v = static_cast<unsigned char>(ch);
-                out += "\\u00";
-                out.push_back(Hex[v >> 4]);
-                out.push_back(Hex[v & 0x0f]);
-            } else {
-                out.push_back(ch);
-            }
-            break;
-        }
-    }
-    return out;
-}
-
-void AppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
-    out << '"' << name << "\":\"" << JsonEscape(value) << '"';
-}
-
 bool IsHostPort(const std::string& value) {
     size_t portStart = std::string::npos;
     if (!value.empty() && value[0] == '[') {
@@ -137,114 +107,85 @@ std::string PortForwardTargetText(const TqPortForwardConfig& forward) {
     return out.str();
 }
 
-void AppendPortForwardsJson(std::ostringstream& out, const std::vector<TqPortForwardConfig>& forwards) {
-    out << ",\"port_forwards\":[";
-    for (size_t i = 0; i < forwards.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        out << '{';
-        AppendJsonString(out, "listen", forwards[i].Listen);
-        out << ',';
-        AppendJsonString(out, "target", PortForwardTargetText(forwards[i]));
-        out << '}';
+nlohmann::json PortForwardsJsonValue(const std::vector<TqPortForwardConfig>& forwards) {
+    nlohmann::json values = nlohmann::json::array();
+    for (const auto& forward : forwards) {
+        values.push_back({
+            {"listen", forward.Listen},
+            {"target", PortForwardTargetText(forward)},
+        });
     }
-    out << ']';
+    return values;
 }
 
-void AppendQuicPathsJson(std::ostringstream& out, const std::vector<TqQuicPathConfig>& paths) {
-    out << ",\"paths\":[";
-    for (size_t i = 0; i < paths.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        out << '{';
-        AppendJsonString(out, "name", paths[i].Name);
-        out << ',';
-        AppendJsonString(out, "local", paths[i].LocalAddress);
-        out << ',';
-        AppendJsonString(out, "peer", paths[i].Peer);
-        out << ",\"connections\":" << paths[i].Connections;
-        out << '}';
+nlohmann::json QuicPathsJsonValue(const std::vector<TqQuicPathConfig>& paths) {
+    nlohmann::json values = nlohmann::json::array();
+    for (const auto& path : paths) {
+        values.push_back({
+            {"name", path.Name},
+            {"local", path.LocalAddress},
+            {"peer", path.Peer},
+            {"connections", path.Connections},
+        });
     }
-    out << ']';
+    return values;
 }
 
-void AppendPeerConfigJson(std::ostringstream& out, const TqPeerConfig& peer) {
-    out << '{';
-    AppendJsonString(out, "peer_id", peer.PeerId);
-    out << ',';
-    AppendJsonString(out, "quic_peer", peer.QuicPeer);
-    out << ',';
-    AppendJsonString(out, "socks_listen", peer.SocksListen);
-    out << ',';
-    AppendJsonString(out, "http_listen", peer.HttpListen);
-    AppendPortForwardsJson(out, peer.PortForwards);
-    AppendQuicPathsJson(out, peer.QuicPaths);
+nlohmann::json PeerConfigJsonValue(const TqPeerConfig& peer) {
+    nlohmann::json body{
+        {"peer_id", peer.PeerId},
+        {"quic_peer", peer.QuicPeer},
+        {"socks_listen", peer.SocksListen},
+        {"http_listen", peer.HttpListen},
+        {"port_forwards", PortForwardsJsonValue(peer.PortForwards)},
+        {"paths", QuicPathsJsonValue(peer.QuicPaths)},
+        {"compress", peer.Compress},
+        {"enabled", peer.Enabled},
+    };
     if (peer.QuicConnections != 0) {
-        out << ",\"quic_connections\":" << peer.QuicConnections;
+        body["quic_connections"] = peer.QuicConnections;
     }
-    out << ',';
-    AppendJsonString(out, "compress", peer.Compress);
-    out << ",\"enabled\":" << (peer.Enabled ? "true" : "false");
-    out << '}';
+    return body;
 }
 
-void AppendPeerMetricsJson(std::ostringstream& out, const TqPeerMetrics& peer) {
-    out << '{';
-    AppendJsonString(out, "peer_id", peer.PeerId);
-    out << ",\"enabled\":" << (peer.Enabled ? "true" : "false") << ',';
-    AppendJsonString(out, "quic_peer", peer.QuicPeer);
-    out << ',';
-    AppendJsonString(out, "socks_listen", peer.SocksListen);
-    out << ',';
-    AppendJsonString(out, "http_listen", peer.HttpListen);
-    AppendPortForwardsJson(out, peer.PortForwards);
-    AppendQuicPathsJson(out, peer.QuicPaths);
-    out << ',';
-    AppendJsonString(out, "state", peer.State);
-    out << ",\"connection_count\":" << peer.ConnectionCount;
-    out << ",\"connected_connections\":" << peer.ConnectedConnections;
-    out << ",\"active_streams\":" << peer.ActiveStreams;
-    out << ",\"total_streams\":" << peer.TotalStreams;
-    out << ",\"reconnects\":" << peer.Reconnects;
-    out << ',';
-    AppendJsonString(out, "last_error", peer.LastError);
-    out << ',';
-    AppendJsonString(out, "last_connected_at", peer.LastConnectedAt);
-    out << '}';
+nlohmann::json PeerMetricsJsonValue(const TqPeerMetrics& peer) {
+    return {
+        {"peer_id", peer.PeerId},
+        {"enabled", peer.Enabled},
+        {"quic_peer", peer.QuicPeer},
+        {"socks_listen", peer.SocksListen},
+        {"http_listen", peer.HttpListen},
+        {"port_forwards", PortForwardsJsonValue(peer.PortForwards)},
+        {"paths", QuicPathsJsonValue(peer.QuicPaths)},
+        {"state", peer.State},
+        {"connection_count", peer.ConnectionCount},
+        {"connected_connections", peer.ConnectedConnections},
+        {"active_streams", peer.ActiveStreams},
+        {"total_streams", peer.TotalStreams},
+        {"reconnects", peer.Reconnects},
+        {"last_error", peer.LastError},
+        {"last_connected_at", peer.LastConnectedAt},
+    };
 }
 
 std::string PeerMetricsJson(const TqPeerMetrics& peer) {
-    std::ostringstream out;
-    AppendPeerMetricsJson(out, peer);
-    return out.str();
+    return PeerMetricsJsonValue(peer).dump();
 }
 
 std::string PeersJson(const std::vector<TqPeerMetrics>& peers) {
-    std::ostringstream out;
-    out << "{\"peers\":[";
-    for (size_t i = 0; i < peers.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendPeerMetricsJson(out, peers[i]);
+    nlohmann::json body{{"peers", nlohmann::json::array()}};
+    for (const auto& peer : peers) {
+        body["peers"].push_back(PeerMetricsJsonValue(peer));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string RouterConfigJson(const TqRouterConfig& config) {
-    std::ostringstream out;
-    out << "{\"version\":" << config.Version << ",\"peers\":[";
-    for (size_t i = 0; i < config.Peers.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendPeerConfigJson(out, config.Peers[i]);
+    nlohmann::json body{{"version", config.Version}, {"peers", nlohmann::json::array()}};
+    for (const auto& peer : config.Peers) {
+        body["peers"].push_back(PeerConfigJsonValue(peer));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 bool WriteTextFileAtomically(const std::string& path, const std::string& body, std::string& err) {
@@ -285,109 +226,97 @@ bool WriteTextFileAtomically(const std::string& path, const std::string& body, s
     return true;
 }
 
-void AppendConnectionJson(std::ostringstream& out, const TqConnectionSnapshot& connection) {
-    out << '{';
-    AppendJsonString(out, "connection_id", connection.ConnectionId);
-    out << ",\"slot_index\":" << connection.SlotIndex;
-    out << ",\"generation\":" << connection.Generation;
-    out << ",\"connected\":" << (connection.Connected ? "true" : "false");
-    out << ",\"retry_scheduled\":" << (connection.RetryScheduled ? "true" : "false");
-    out << ',';
-    AppendJsonString(out, "state", connection.State);
-    out << ',';
-    AppendJsonString(out, "path", connection.PathName);
-    out << ',';
-    AppendJsonString(out, "local", connection.LocalAddress);
-    out << ',';
-    AppendJsonString(out, "peer", connection.PeerAddress);
-    out << ",\"active_tunnels\":" << connection.ActiveTunnels;
-    out << ',';
-    AppendJsonString(out, "last_error", connection.LastError);
-    out << '}';
+nlohmann::json ConnectionJsonValue(const TqConnectionSnapshot& connection) {
+    return {
+        {"connection_id", connection.ConnectionId},
+        {"slot_index", connection.SlotIndex},
+        {"generation", connection.Generation},
+        {"connected", connection.Connected},
+        {"retry_scheduled", connection.RetryScheduled},
+        {"state", connection.State},
+        {"path", connection.PathName},
+        {"local", connection.LocalAddress},
+        {"peer", connection.PeerAddress},
+        {"active_tunnels", connection.ActiveTunnels},
+        {"last_error", connection.LastError},
+    };
 }
 
 std::string ConnectionJson(const TqConnectionSnapshot& connection) {
-    std::ostringstream out;
-    AppendConnectionJson(out, connection);
-    return out.str();
+    return ConnectionJsonValue(connection).dump();
 }
 
 std::string ConnectionsJson(const std::vector<TqConnectionSnapshot>& connections) {
-    std::ostringstream out;
-    out << "{\"connections\":[";
-    for (size_t i = 0; i < connections.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendConnectionJson(out, connections[i]);
+    nlohmann::json body{{"connections", nlohmann::json::array()}};
+    for (const auto& connection : connections) {
+        body["connections"].push_back(ConnectionJsonValue(connection));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
-void AppendTunnelJson(std::ostringstream& out, const TqTunnelSnapshot& tunnel) {
-    out << '{';
-    AppendJsonString(out, "tunnel_id", tunnel.TunnelId);
-    out << ',';
-    AppendJsonString(out, "peer_id", tunnel.PeerId);
-    out << ',';
-    AppendJsonString(out, "connection_id", tunnel.ConnectionId);
-    out << ',';
-    AppendJsonString(out, "state", tunnel.State);
-    out << ',';
-    AppendJsonString(out, "target", tunnel.Target);
-    out << ',';
-    AppendJsonString(out, "role", tunnel.Role);
-    out << ',';
-    AppendJsonString(out, "ingress", tunnel.Ingress);
-    out << ',';
-    AppendJsonString(out, "compress", tunnel.Compress);
-    out << ',';
-    AppendJsonString(out, "created_at", tunnel.CreatedAt);
-    out << ",\"duration_ms\":" << tunnel.DurationMs;
-    out << ",\"tcp_read_bytes\":" << tunnel.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << tunnel.TcpWriteBytes;
-    out << ",\"pending_bytes\":" << tunnel.PendingBytes;
-    out << ',';
-    AppendJsonString(out, "relay_backend", tunnel.RelayBackend);
-    out << ",\"worker_index\":" << tunnel.WorkerIndex;
-    out << ',';
-    AppendJsonString(out, "last_error", tunnel.LastError);
-    out << '}';
+nlohmann::json TunnelJsonValue(const TqTunnelSnapshot& tunnel) {
+    return {
+        {"tunnel_id", tunnel.TunnelId},
+        {"peer_id", tunnel.PeerId},
+        {"connection_id", tunnel.ConnectionId},
+        {"state", tunnel.State},
+        {"target", tunnel.Target},
+        {"role", tunnel.Role},
+        {"ingress", tunnel.Ingress},
+        {"compress", tunnel.Compress},
+        {"created_at", tunnel.CreatedAt},
+        {"duration_ms", tunnel.DurationMs},
+        {"tcp_read_bytes", tunnel.TcpReadBytes},
+        {"tcp_write_bytes", tunnel.TcpWriteBytes},
+        {"pending_bytes", tunnel.PendingBytes},
+        {"relay_backend", tunnel.RelayBackend},
+        {"worker_index", tunnel.WorkerIndex},
+        {"last_error", tunnel.LastError},
+    };
 }
 
 std::string TunnelJson(const TqTunnelSnapshot& tunnel) {
-    std::ostringstream out;
-    AppendTunnelJson(out, tunnel);
-    return out.str();
+    return TunnelJsonValue(tunnel).dump();
 }
 
 std::string TunnelsJson(const std::vector<TqTunnelSnapshot>& tunnels) {
-    std::ostringstream out;
-    out << "{\"tunnels\":[";
-    for (size_t i = 0; i < tunnels.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendTunnelJson(out, tunnels[i]);
+    nlohmann::json body{{"tunnels", nlohmann::json::array()}};
+    for (const auto& tunnel : tunnels) {
+        body["tunnels"].push_back(TunnelJsonValue(tunnel));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
+}
+
+nlohmann::json RelayMetricsJsonValue(const TqRelayMetricsSnapshot& metrics) {
+    return nlohmann::json::parse(TqRelayMetricsFieldsJson(metrics));
+}
+
+void MergeObject(nlohmann::json& target, const nlohmann::json& source) {
+    for (const auto& item : source.items()) {
+        target[item.key()] = item.value();
+    }
 }
 
 std::string RelayMetricsJson() {
-    std::ostringstream out;
-    out << '{';
     const auto metrics = TqSnapshotRelayMetrics();
-    AppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
-    out << ",\"errors\":" << metrics.Errors;
-    TqAppendRelayMetricsJson(out, metrics);
-    out << '}';
-    return out.str();
+    nlohmann::json body{
+        {"backend", metrics.Backend},
+        {"active_relays", metrics.ActiveRelays},
+        {"pending_bytes", metrics.PendingBytes},
+        {"tcp_read_bytes", metrics.TcpReadBytes},
+        {"tcp_write_bytes", metrics.TcpWriteBytes},
+        {"errors", metrics.Errors},
+    };
+    MergeObject(body, RelayMetricsJsonValue(metrics));
+    return body.dump();
+}
+
+std::string ErrorJson(const std::string& err) {
+    return nlohmann::json{{"error", err}}.dump();
+}
+
+std::string StatusJson(const char* status) {
+    return nlohmann::json{{"status", status}}.dump();
 }
 
 int HexValue(char ch) {
@@ -397,160 +326,199 @@ int HexValue(char ch) {
     return -1;
 }
 
-void AppendUtf8(uint32_t value, std::string& out) {
-    if (value <= 0x7F) {
-        out.push_back(static_cast<char>(value));
-    } else if (value <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (value >> 6)));
-        out.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xE0 | (value >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-    }
-}
-
 class RouterJsonParser {
 public:
     RouterJsonParser(const std::string& text, std::string& err) : Text(text), Err(err) {}
 
     bool Parse(TqRouterConfig& router) {
         router = TqRouterConfig{};
-        if (!Consume('{')) return Error("config must be a JSON object");
-        if (Consume('}')) return Finish(router);
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed config object");
+        nlohmann::json root;
+        if (!Load(root, "malformed config object")) return false;
+        if (!root.is_object()) return Error("config must be a JSON object");
+        for (const auto& item : root.items()) {
+            const std::string& key = item.key();
             if (key == "version") {
-                if (!ParseUint32(router.Version)) return Error("invalid version");
+                if (!ReadUint32(item.value(), router.Version)) return Error("invalid version");
             } else if (key == "peers") {
-                if (!ParsePeers(router.Peers)) return false;
-            } else if (!SkipValue()) {
-                return false;
+                if (!ParsePeers(item.value(), router.Peers)) return false;
             }
-        } while (Consume(','));
-        if (!Consume('}')) return Error("malformed config object");
-        return Finish(router);
+        }
+        return TqValidateRouterConfig(router, Err);
     }
 
     bool ParsePatch(TqPeerPatch& patch) {
         patch = TqPeerPatch{};
-        if (!Consume('{')) return Error("peer patch must be an object");
-        if (Consume('}')) return FinishPatch();
+        nlohmann::json root;
+        if (!Load(root, "malformed peer patch object")) return false;
+        if (!root.is_object()) return Error("peer patch must be an object");
         bool hasLegacyPeerId = false;
         bool hasRecommendedPeerId = false;
         bool hasLegacyQuicPeer = false;
         bool hasRecommendedQuicPeer = false;
         bool hasLegacyQuicConnections = false;
         bool hasRecommendedQuicConnections = false;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed peer patch object");
+        for (const auto& item : root.items()) {
+            const std::string& key = item.key();
             if (key == "peer_id") {
                 if (hasRecommendedPeerId) return Error("conflicting peer field aliases");
                 hasLegacyPeerId = true;
                 std::string ignored;
-                if (!ParseStringField(ignored, "invalid peer_id")) return false;
+                if (!ReadStringField(item.value(), ignored, "invalid peer_id")) return false;
             } else if (key == "id") {
                 if (hasLegacyPeerId) return Error("conflicting peer field aliases");
                 hasRecommendedPeerId = true;
                 std::string ignored;
-                if (!ParseStringField(ignored, "invalid id")) return false;
+                if (!ReadStringField(item.value(), ignored, "invalid id")) return false;
             } else if (key == "quic_peer") {
                 if (hasRecommendedQuicPeer) return Error("conflicting peer field aliases");
                 hasLegacyQuicPeer = true;
                 patch.HasQuicPeer = true;
-                if (!ParseStringField(patch.QuicPeer, "invalid quic_peer")) return false;
+                if (!ReadStringField(item.value(), patch.QuicPeer, "invalid quic_peer")) return false;
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
                 patch.HasQuicPeer = true;
-                if (!ParseStringField(patch.QuicPeer, "invalid proto_peer")) return false;
+                if (!ReadStringField(item.value(), patch.QuicPeer, "invalid proto_peer")) return false;
             } else if (key == "socks_listen") {
                 patch.HasSocksListen = true;
-                if (!ParseStringField(patch.SocksListen, "invalid socks_listen")) return false;
+                if (!ReadStringField(item.value(), patch.SocksListen, "invalid socks_listen")) return false;
             } else if (key == "http_listen") {
                 patch.HasHttpListen = true;
-                if (!ParseStringField(patch.HttpListen, "invalid http_listen")) return false;
+                if (!ReadStringField(item.value(), patch.HttpListen, "invalid http_listen")) return false;
             } else if (key == "port_forwards") {
                 patch.HasPortForwards = true;
-                if (!ParsePortForwards(patch.PortForwards)) return false;
+                if (!ParsePortForwards(item.value(), patch.PortForwards)) return false;
             } else if (key == "paths") {
                 patch.HasQuicPaths = true;
-                if (!ParseQuicPaths(patch.QuicPaths)) return false;
+                if (!ParseQuicPaths(item.value(), patch.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 if (hasRecommendedQuicConnections) return Error("conflicting peer field aliases");
                 hasLegacyQuicConnections = true;
                 patch.HasQuicConnections = true;
-                if (!ParseUint32(patch.QuicConnections)) return Error("invalid quic_connections");
+                if (!ReadUint32(item.value(), patch.QuicConnections)) return Error("invalid quic_connections");
                 if (patch.QuicConnections == 0) return Error("quic_connections out of range");
             } else if (key == "proto_connections") {
                 if (hasLegacyQuicConnections) return Error("conflicting peer field aliases");
                 hasRecommendedQuicConnections = true;
                 patch.HasQuicConnections = true;
-                if (!ParseUint32(patch.QuicConnections)) return Error("invalid proto_connections");
+                if (!ReadUint32(item.value(), patch.QuicConnections)) return Error("invalid proto_connections");
                 if (patch.QuicConnections == 0) return Error("proto_connections out of range");
             } else if (key == "compress") {
                 patch.HasCompress = true;
-                if (!ParseStringField(patch.Compress, "invalid compress")) return false;
+                if (!ReadStringField(item.value(), patch.Compress, "invalid compress")) return false;
             } else if (key == "enabled") {
                 patch.HasEnabled = true;
-                if (!ParseBool(patch.Enabled)) return Error("invalid enabled");
-            } else if (!SkipValue()) {
-                return false;
+                if (!ReadBool(item.value(), patch.Enabled)) return Error("invalid enabled");
             }
-        } while (Consume(','));
-        if (!Consume('}')) return Error("malformed peer patch object");
-        return FinishPatch();
+        }
+        return true;
     }
 
     bool ParsePeerActionBody(TqPeerActionBody& body) {
         body = TqPeerActionBody{};
-        if (!Consume('{')) return Error("peer action body must be an object");
-        if (Consume('}')) return FinishPatch();
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed peer action body");
+        nlohmann::json root;
+        if (!Load(root, "malformed peer action body")) return false;
+        if (!root.is_object()) return Error("peer action body must be an object");
+        for (const auto& item : root.items()) {
+            const std::string& key = item.key();
             if (key == "mode") {
-                if (!ParseStringField(body.Mode, "invalid mode")) return false;
+                if (!ReadStringField(item.value(), body.Mode, "invalid mode")) return false;
             } else if (key == "grace_seconds") {
-                if (!ParseUint32(body.GraceSeconds)) return Error("invalid grace_seconds");
-            } else if (!SkipValue()) {
-                return false;
+                if (!ReadUint32(item.value(), body.GraceSeconds)) return Error("invalid grace_seconds");
             }
-        } while (Consume(','));
-        if (!Consume('}')) return Error("malformed peer action body");
-        return FinishPatch();
-    }
-
-private:
-    bool Finish(TqRouterConfig& router) {
-        SkipWs();
-        if (Pos != Text.size()) return Error("unexpected trailing content in config");
-        return TqValidateRouterConfig(router, Err);
-    }
-
-    bool FinishPatch() {
-        SkipWs();
-        if (Pos != Text.size()) return Error("unexpected trailing content in peer patch");
+        }
         return true;
     }
 
-    bool ParsePeers(std::vector<TqPeerConfig>& peers) {
-        peers.clear();
-        if (!Consume('[')) return Error("peers must be an array");
-        if (Consume(']')) return true;
-        do {
-            TqPeerConfig peer;
-            if (!ParsePeer(peer)) return false;
-            peers.push_back(peer);
-        } while (Consume(','));
-        return Consume(']') || Error("malformed peers array");
+private:
+    bool Load(nlohmann::json& out, const char* err) {
+        if (ContainsUnicodeSurrogateEscape()) {
+            return Error("unicode surrogate escapes are not supported");
+        }
+        try {
+            out = nlohmann::json::parse(Text);
+            return true;
+        } catch (const nlohmann::json::exception&) {
+            return Error(err);
+        }
     }
 
-    bool ParsePeer(TqPeerConfig& peer) {
-        if (!Consume('{')) return Error("peer must be an object");
-        if (Consume('}')) return true;
+    bool ContainsUnicodeSurrogateEscape() const {
+        for (size_t i = 0; i + 5 < Text.size(); ++i) {
+            if (Text[i] != '\\' || Text[i + 1] != 'u') {
+                continue;
+            }
+            uint32_t value = 0;
+            bool valid = true;
+            for (int j = 0; j < 4; ++j) {
+                const int hex = HexValue(Text[i + 2 + static_cast<size_t>(j)]);
+                if (hex < 0) {
+                    valid = false;
+                    break;
+                }
+                value = (value << 4) | static_cast<uint32_t>(hex);
+            }
+            if (valid && value >= 0xD800 && value <= 0xDFFF) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool ReadString(const nlohmann::json& value, std::string& out) {
+        if (!value.is_string()) return false;
+        out = value.get<std::string>();
+        return true;
+    }
+
+    bool ReadStringField(const nlohmann::json& value, std::string& out, const std::string& err) {
+        if (ReadString(value, out)) return true;
+        return Error(err);
+    }
+
+    bool ReadBool(const nlohmann::json& value, bool& out) {
+        if (!value.is_boolean()) return false;
+        out = value.get<bool>();
+        return true;
+    }
+
+    bool ReadUint32(const nlohmann::json& value, uint32_t& out) {
+        uint64_t raw = 0;
+        if (value.is_number_unsigned()) {
+            raw = value.get<uint64_t>();
+        } else if (value.is_number_integer()) {
+            const int64_t signedValue = value.get<int64_t>();
+            if (signedValue < 0) return false;
+            raw = static_cast<uint64_t>(signedValue);
+        } else {
+            return false;
+        }
+        if (raw > UINT32_MAX) return false;
+        out = static_cast<uint32_t>(raw);
+        return true;
+    }
+
+    bool RequireObject(const nlohmann::json& value, const char* err) {
+        return value.is_object() || Error(err);
+    }
+
+    bool RequireArray(const nlohmann::json& value, const char* err) {
+        return value.is_array() || Error(err);
+    }
+
+    bool ParsePeers(const nlohmann::json& array, std::vector<TqPeerConfig>& peers) {
+        peers.clear();
+        if (!RequireArray(array, "peers must be an array")) return false;
+        for (const auto& value : array) {
+            TqPeerConfig peer;
+            if (!ParsePeer(value, peer)) return false;
+            peers.push_back(std::move(peer));
+        }
+        return true;
+    }
+
+    bool ParsePeer(const nlohmann::json& object, TqPeerConfig& peer) {
+        if (!RequireObject(object, "peer must be an object")) return false;
         bool quicConnectionsSpecified = false;
         bool hasLegacyPeerId = false;
         bool hasRecommendedPeerId = false;
@@ -558,120 +526,101 @@ private:
         bool hasRecommendedQuicPeer = false;
         bool hasLegacyQuicConnections = false;
         bool hasRecommendedQuicConnections = false;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed peer object");
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "peer_id") {
                 if (hasRecommendedPeerId) return Error("conflicting peer field aliases");
                 hasLegacyPeerId = true;
-                if (!ParseStringField(peer.PeerId, "invalid peer_id")) return false;
+                if (!ReadStringField(item.value(), peer.PeerId, "invalid peer_id")) return false;
             } else if (key == "id") {
                 if (hasLegacyPeerId) return Error("conflicting peer field aliases");
                 hasRecommendedPeerId = true;
-                if (!ParseStringField(peer.PeerId, "invalid id")) return false;
+                if (!ReadStringField(item.value(), peer.PeerId, "invalid id")) return false;
             } else if (key == "quic_peer") {
                 if (hasRecommendedQuicPeer) return Error("conflicting peer field aliases");
                 hasLegacyQuicPeer = true;
-                if (!ParseStringField(peer.QuicPeer, "invalid quic_peer")) return false;
+                if (!ReadStringField(item.value(), peer.QuicPeer, "invalid quic_peer")) return false;
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
-                if (!ParseStringField(peer.QuicPeer, "invalid proto_peer")) return false;
+                if (!ReadStringField(item.value(), peer.QuicPeer, "invalid proto_peer")) return false;
             } else if (key == "socks_listen") {
-                if (!ParseStringField(peer.SocksListen, "invalid socks_listen")) return false;
+                if (!ReadStringField(item.value(), peer.SocksListen, "invalid socks_listen")) return false;
             } else if (key == "http_listen") {
-                if (!ParseStringField(peer.HttpListen, "invalid http_listen")) return false;
+                if (!ReadStringField(item.value(), peer.HttpListen, "invalid http_listen")) return false;
             } else if (key == "port_forwards") {
-                if (!ParsePortForwards(peer.PortForwards)) return false;
+                if (!ParsePortForwards(item.value(), peer.PortForwards)) return false;
             } else if (key == "paths") {
-                if (!ParseQuicPaths(peer.QuicPaths)) return false;
+                if (!ParseQuicPaths(item.value(), peer.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 if (hasRecommendedQuicConnections) return Error("conflicting peer field aliases");
                 hasLegacyQuicConnections = true;
                 quicConnectionsSpecified = true;
-                if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
+                if (!ReadUint32(item.value(), peer.QuicConnections)) return Error("invalid quic_connections");
             } else if (key == "proto_connections") {
                 if (hasLegacyQuicConnections) return Error("conflicting peer field aliases");
                 hasRecommendedQuicConnections = true;
                 quicConnectionsSpecified = true;
-                if (!ParseUint32(peer.QuicConnections)) return Error("invalid proto_connections");
+                if (!ReadUint32(item.value(), peer.QuicConnections)) return Error("invalid proto_connections");
             } else if (key == "quic_reconnect_interval_ms") {
                 return Error("unknown peer key: quic_reconnect_interval_ms");
             } else if (key == "compress") {
-                if (!ParseStringField(peer.Compress, "invalid compress")) return false;
+                if (!ReadStringField(item.value(), peer.Compress, "invalid compress")) return false;
             } else if (key == "enabled") {
-                if (!ParseBool(peer.Enabled)) return Error("invalid enabled");
-            } else if (!SkipValue()) {
-                return false;
+                if (!ReadBool(item.value(), peer.Enabled)) return Error("invalid enabled");
             }
-        } while (Consume(','));
+        }
         if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
-        return Consume('}') || Error("malformed peer object");
+        return true;
     }
 
-    bool ParseQuicPaths(std::vector<TqQuicPathConfig>& paths) {
+    bool ParseQuicPaths(const nlohmann::json& array, std::vector<TqQuicPathConfig>& paths) {
         paths.clear();
-        if (!Consume('[')) return Error("paths must be an array");
-        if (Consume(']')) return true;
-        do {
+        if (!RequireArray(array, "paths must be an array")) return false;
+        for (const auto& value : array) {
             TqQuicPathConfig path;
-            if (!ParseQuicPathObject(path)) return false;
+            if (!ParseQuicPathObject(value, path)) return false;
             paths.push_back(std::move(path));
-        } while (Consume(','));
-        return Consume(']') || Error("malformed paths array");
-    }
-
-    bool ParseQuicPathObject(TqQuicPathConfig& path) {
-        if (!Consume('{')) return Error("path must be an object");
-        bool hasName = false;
-        bool hasLocal = false;
-        bool hasPeer = false;
-        bool hasConnections = false;
-        if (Consume('}')) return Error("path fields are required");
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed path object");
-            if (key == "name") {
-                hasName = true;
-                if (!ParseString(path.Name)) return Error("invalid path.name");
-            } else if (key == "local") {
-                hasLocal = true;
-                if (!ParseString(path.LocalAddress)) return Error("invalid path.local");
-            } else if (key == "peer") {
-                hasPeer = true;
-                if (!ParseString(path.Peer)) return Error("invalid path.peer");
-            } else if (key == "connections") {
-                hasConnections = true;
-                if (!ParseUint32(path.Connections)) return Error("invalid path.connections");
-            } else {
-                return Error("unknown path key: " + key);
-            }
-        } while (Consume(','));
-        if (!Consume('}')) return Error("malformed path object");
-        if (!hasName || !hasLocal || !hasPeer || !hasConnections) {
-            return Error("path name, local, peer and connections are required");
         }
         return true;
     }
 
-    bool ParsePortForwardPort(const std::string& value, size_t portStart, uint16_t& port) {
-        if (portStart >= value.size()) {
-            return false;
+    bool ParseQuicPathObject(const nlohmann::json& object, TqQuicPathConfig& path) {
+        if (!RequireObject(object, "path must be an object")) return false;
+        if (object.empty()) return Error("path fields are required");
+        bool hasName = false, hasLocal = false, hasPeer = false, hasConnections = false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
+            if (key == "name") {
+                hasName = true;
+                if (!ReadString(item.value(), path.Name)) return Error("invalid path.name");
+            } else if (key == "local") {
+                hasLocal = true;
+                if (!ReadString(item.value(), path.LocalAddress)) return Error("invalid path.local");
+            } else if (key == "peer") {
+                hasPeer = true;
+                if (!ReadString(item.value(), path.Peer)) return Error("invalid path.peer");
+            } else if (key == "connections") {
+                hasConnections = true;
+                if (!ReadUint32(item.value(), path.Connections)) return Error("invalid path.connections");
+            } else {
+                return Error("unknown path key: " + key);
+            }
         }
+        if (!hasName || !hasLocal || !hasPeer || !hasConnections) return Error("path name, local, peer and connections are required");
+        return true;
+    }
+
+    bool ParsePortForwardPort(const std::string& value, size_t portStart, uint16_t& port) {
+        if (portStart >= value.size()) return false;
         uint32_t parsedPort = 0;
         for (size_t i = portStart; i < value.size(); ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(value[i]))) {
-                return false;
-            }
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) return false;
             const uint32_t digit = static_cast<uint32_t>(value[i] - '0');
-            if (parsedPort > 6553 || (parsedPort == 6553 && digit > 5)) {
-                return false;
-            }
+            if (parsedPort > 6553 || (parsedPort == 6553 && digit > 5)) return false;
             parsedPort = parsedPort * 10 + digit;
         }
-        if (parsedPort == 0) {
-            return false;
-        }
+        if (parsedPort == 0) return false;
         port = static_cast<uint16_t>(parsedPort);
         return true;
     }
@@ -679,27 +628,19 @@ private:
     bool ParsePortForwardTargetText(const std::string& target, std::string& host, uint16_t& port) {
         host.clear();
         port = 0;
-
         size_t portStart = std::string::npos;
         if (!target.empty() && target[0] == '[') {
             const size_t close = target.find(']');
-            if (close == std::string::npos || close == 1 || close + 2 > target.size() || target[close + 1] != ':') {
-                return false;
-            }
+            if (close == std::string::npos || close == 1 || close + 2 > target.size() || target[close + 1] != ':') return false;
             host = target.substr(1, close - 1);
             portStart = close + 2;
         } else {
             const size_t colon = target.find(':');
-            if (colon == std::string::npos || colon == 0 || colon + 1 >= target.size() ||
-                target.find(':', colon + 1) != std::string::npos) {
-                return false;
-            }
+            if (colon == std::string::npos || colon == 0 || colon + 1 >= target.size() || target.find(':', colon + 1) != std::string::npos) return false;
             host = target.substr(0, colon);
             portStart = colon + 1;
         }
-
-        if (host.empty() || host.size() > kMaxPortForwardTargetHostLength ||
-            !ParsePortForwardPort(target, portStart, port)) {
+        if (host.empty() || host.size() > kMaxPortForwardTargetHostLength || !ParsePortForwardPort(target, portStart, port)) {
             host.clear();
             port = 0;
             return false;
@@ -707,155 +648,36 @@ private:
         return true;
     }
 
-    bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
+    bool ParsePortForwards(const nlohmann::json& array, std::vector<TqPortForwardConfig>& forwards) {
         forwards.clear();
-        if (!Consume('[')) return Error("port_forwards must be an array");
-        if (Consume(']')) return true;
-        do {
+        if (!RequireArray(array, "port_forwards must be an array")) return false;
+        for (const auto& value : array) {
             TqPortForwardConfig forward;
-            if (!ParsePortForwardObject(forward)) return false;
-            forwards.push_back(forward);
-        } while (Consume(','));
-        return Consume(']') || Error("malformed port_forwards array");
+            if (!ParsePortForwardObject(value, forward)) return false;
+            forwards.push_back(std::move(forward));
+        }
+        return true;
     }
 
-    bool ParsePortForwardObject(TqPortForwardConfig& forward) {
-        if (!Consume('{')) return Error("port_forward must be an object");
-        bool hasListen = false;
-        bool hasTarget = false;
-        if (Consume('}')) return Error("port_forward listen and target are required");
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed port_forward object");
+    bool ParsePortForwardObject(const nlohmann::json& object, TqPortForwardConfig& forward) {
+        if (!RequireObject(object, "port_forward must be an object")) return false;
+        if (object.empty()) return Error("port_forward listen and target are required");
+        bool hasListen = false, hasTarget = false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "listen") {
                 hasListen = true;
-                if (!ParseString(forward.Listen)) return Error("invalid port_forward.listen");
-                if (!IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
+                if (!ReadString(item.value(), forward.Listen) || !IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
             } else if (key == "target") {
                 hasTarget = true;
                 std::string target;
-                if (!ParseString(target)) return Error("invalid port_forward.target");
-                if (!ParsePortForwardTargetText(target, forward.TargetHost, forward.TargetPort)) {
-                    return Error("invalid port_forward.target");
-                }
+                if (!ReadString(item.value(), target) || !ParsePortForwardTargetText(target, forward.TargetHost, forward.TargetPort)) return Error("invalid port_forward.target");
             } else {
                 return Error("unknown port_forward key: " + key);
             }
-        } while (Consume(','));
-        if (!Consume('}')) return Error("malformed port_forward object");
+        }
         if (!hasListen || !hasTarget) return Error("port_forward listen and target are required");
         return true;
-    }
-
-    bool ParseStringField(std::string& out, const std::string& err) {
-        if (ParseString(out)) return true;
-        return !Err.empty() ? false : Error(err);
-    }
-
-    bool ParseString(std::string& out) {
-        SkipWs();
-        if (Pos >= Text.size() || Text[Pos] != '"') return false;
-        ++Pos;
-        out.clear();
-        while (Pos < Text.size()) {
-            char ch = Text[Pos++];
-            if (ch == '"') return true;
-            if (ch == '\\') {
-                if (Pos >= Text.size()) return false;
-                char escaped = Text[Pos++];
-                switch (escaped) {
-                case '"': case '\\': case '/': out.push_back(escaped); break;
-                case 'b': out.push_back('\b'); break;
-                case 'f': out.push_back('\f'); break;
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case 'u': {
-                    if (Pos + 4 > Text.size()) return false;
-                    uint32_t value = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        int hex = HexValue(Text[Pos++]);
-                        if (hex < 0) return false;
-                        value = (value << 4) | static_cast<uint32_t>(hex);
-                    }
-                    if (value >= 0xD800 && value <= 0xDFFF) return Error("unicode surrogate escapes are not supported");
-                    AppendUtf8(value, out);
-                    break;
-                }
-                default: return false;
-                }
-            } else {
-                if (static_cast<unsigned char>(ch) < 0x20) return false;
-                out.push_back(ch);
-            }
-        }
-        return false;
-    }
-
-    bool ParseUint32(uint32_t& out) {
-        SkipWs();
-        if (Pos >= Text.size() || !std::isdigit(static_cast<unsigned char>(Text[Pos]))) return false;
-        if (Text[Pos] == '0' && Pos + 1 < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos + 1]))) return false;
-        uint64_t value = 0;
-        while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            value = (value * 10) + static_cast<uint32_t>(Text[Pos] - '0');
-            if (value > UINT32_MAX) return false;
-            ++Pos;
-        }
-        out = static_cast<uint32_t>(value);
-        return true;
-    }
-
-    bool ParseBool(bool& out) {
-        SkipWs();
-        if (Text.compare(Pos, 4, "true") == 0) { Pos += 4; out = true; return true; }
-        if (Text.compare(Pos, 5, "false") == 0) { Pos += 5; out = false; return true; }
-        return false;
-    }
-
-    bool SkipValue() {
-        SkipWs();
-        if (Pos >= Text.size()) return Error("unexpected end of config");
-        if (Text[Pos] == '"') {
-            std::string ignored;
-            return ParseString(ignored) || Error("invalid string value");
-        }
-        if (Text[Pos] == '{') {
-            ++Pos;
-            if (Consume('}')) return true;
-            do {
-                std::string ignored;
-                if (!ParseString(ignored) || !Consume(':') || !SkipValue()) return Error("malformed object value");
-            } while (Consume(','));
-            return Consume('}') || Error("malformed object value");
-        }
-        if (Text[Pos] == '[') {
-            ++Pos;
-            if (Consume(']')) return true;
-            do {
-                if (!SkipValue()) return false;
-            } while (Consume(','));
-            return Consume(']') || Error("malformed array value");
-        }
-        if (std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            uint32_t ignored = 0;
-            return ParseUint32(ignored) || Error("invalid number value");
-        }
-        if (Text.compare(Pos, 4, "true") == 0) { Pos += 4; return true; }
-        if (Text.compare(Pos, 5, "false") == 0) { Pos += 5; return true; }
-        if (Text.compare(Pos, 4, "null") == 0) { Pos += 4; return true; }
-        return Error("invalid value");
-    }
-
-    bool Consume(char expected) {
-        SkipWs();
-        if (Pos >= Text.size() || Text[Pos] != expected) return false;
-        ++Pos;
-        return true;
-    }
-
-    void SkipWs() {
-        while (Pos < Text.size() && std::isspace(static_cast<unsigned char>(Text[Pos]))) ++Pos;
     }
 
     bool Error(const std::string& err) {
@@ -865,14 +687,7 @@ private:
 
     const std::string& Text;
     std::string& Err;
-    size_t Pos{0};
 };
-
-std::string ErrorJson(const std::string& err) {
-    std::ostringstream out;
-    out << "{\"error\":\"" << JsonEscape(err) << "\"}";
-    return out.str();
-}
 
 bool DecodePathSegment(const std::string& encoded, std::string& decoded) {
     decoded.clear();
@@ -1589,32 +1404,25 @@ std::string TqRouterRuntime::ConfigJson() const {
 
 std::string TqRouterRuntime::MetricsJson() const {
     const TqRouterMetrics metrics = SnapshotMetrics();
-    std::ostringstream out;
-    out << '{';
-    AppendJsonString(out, "role", metrics.Role);
-    out << ',';
-    AppendJsonString(out, "status", metrics.Status);
-    out << ",\"uptime_seconds\":" << metrics.UptimeSeconds << ",\"peers\":[";
-    for (size_t i = 0; i < metrics.Peers.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendPeerMetricsJson(out, metrics.Peers[i]);
+    nlohmann::json body{
+        {"role", metrics.Role},
+        {"status", metrics.Status},
+        {"uptime_seconds", metrics.UptimeSeconds},
+        {"peers", nlohmann::json::array()},
+    };
+    for (const auto& peer : metrics.Peers) {
+        body["peers"].push_back(PeerMetricsJsonValue(peer));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string TqRouterRuntime::HealthJson() const {
     const TqRouterMetrics metrics = SnapshotMetrics();
-    std::ostringstream out;
-    out << '{';
-    AppendJsonString(out, "role", metrics.Role);
-    out << ',';
-    AppendJsonString(out, "status", metrics.Status);
-    out << ",\"uptime_seconds\":" << metrics.UptimeSeconds;
-    out << '}';
-    return out.str();
+    return nlohmann::json{
+        {"role", metrics.Role},
+        {"status", metrics.Status},
+        {"uptime_seconds", metrics.UptimeSeconds},
+    }.dump();
 }
 
 std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
@@ -1767,7 +1575,7 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
                 if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
                     return TqJsonResponse(404, ErrorJson("not found"));
                 }
-                return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+                return TqJsonResponse(202, StatusJson("aborting"));
             }
             return TqJsonResponse(404, ErrorJson("not found"));
         }
@@ -1778,13 +1586,13 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
             if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
-            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            return TqJsonResponse(202, StatusJson("aborting"));
         }
         if (tunnelPath.Action == "drain") {
             if (!TqDrainTunnelById(tunnelPath.TunnelId)) {
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
-            return TqJsonResponse(202, "{\"status\":\"draining\"}");
+            return TqJsonResponse(202, StatusJson("draining"));
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }
@@ -1841,13 +1649,13 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
             if (!ReconnectConnection(connectionPath.PeerId, connectionPath.ConnectionId, err)) {
                 return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
             }
-            return TqJsonResponse(202, "{\"status\":\"reconnecting\"}");
+            return TqJsonResponse(202, StatusJson("reconnecting"));
         }
         if (connectionPath.Action == "abort-tunnels") {
             if (!AbortConnectionTunnels(connectionPath.PeerId, connectionPath.ConnectionId, err)) {
                 return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
             }
-            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            return TqJsonResponse(202, StatusJson("aborting"));
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }
@@ -1963,13 +1771,13 @@ std::string TqRouterRuntime::HandleAdmin(const TqHttpRequest& req) {
             if (!DrainPeer(peerPath.PeerId, body.GraceSeconds, err)) {
                 return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
             }
-            return TqJsonResponse(202, "{\"status\":\"draining\"}");
+            return TqJsonResponse(202, StatusJson("draining"));
         }
         if (peerPath.Action == "abort-tunnels") {
             if (!AbortPeerTunnels(peerPath.PeerId, err)) {
                 return TqJsonResponse(err == "not found" ? 404 : 400, ErrorJson(err));
             }
-            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            return TqJsonResponse(202, StatusJson("aborting"));
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }

@@ -7,6 +7,8 @@
 #include "tunnel_registry.h"
 #include "trace.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <mutex>
 #include <sstream>
@@ -20,111 +22,92 @@ struct TqServerTunnelAdminPath {
 };
 
 std::string ErrorJson(const std::string& err) {
-    std::ostringstream out;
-    out << "{\"error\":\"" << err << "\"}";
-    return out.str();
+    return nlohmann::json{{"error", err}}.dump();
 }
 
 std::string StructuredErrorJson(const std::string& code, const std::string& message) {
-    std::ostringstream out;
-    out << "{\"error\":{";
-    TqAppendJsonString(out, "code", code);
-    out << ',';
-    TqAppendJsonString(out, "message", message);
-    out << "}}";
-    return out.str();
+    return nlohmann::json{{"error", {{"code", code}, {"message", message}}}}.dump();
+}
+
+nlohmann::json RelayMetricsJsonValue(const TqRelayMetricsSnapshot& metrics) {
+    return nlohmann::json::parse(TqRelayMetricsFieldsJson(metrics));
+}
+
+void MergeObject(nlohmann::json& target, const nlohmann::json& source) {
+    for (const auto& item : source.items()) {
+        target[item.key()] = item.value();
+    }
 }
 
 std::string RelayMetricsJson() {
-    std::ostringstream out;
-    out << '{';
     const auto metrics = TqSnapshotRelayMetrics();
-    TqAppendJsonString(out, "backend", metrics.Backend);
-    out << ",\"active_relays\":" << metrics.ActiveRelays;
-    out << ",\"pending_bytes\":" << metrics.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << metrics.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << metrics.TcpWriteBytes;
-    out << ",\"errors\":" << metrics.Errors;
-    TqAppendRelayMetricsJson(out, metrics);
-    out << '}';
-    return out.str();
+    nlohmann::json body{
+        {"backend", metrics.Backend},
+        {"active_relays", metrics.ActiveRelays},
+        {"pending_bytes", metrics.PendingBytes},
+        {"tcp_read_bytes", metrics.TcpReadBytes},
+        {"tcp_write_bytes", metrics.TcpWriteBytes},
+        {"errors", metrics.Errors},
+    };
+    MergeObject(body, RelayMetricsJsonValue(metrics));
+    return body.dump();
 }
 
-void AppendServerConnectionJson(std::ostringstream& out, const TqServerConnectionSnapshot& connection) {
-    out << '{';
-    TqAppendJsonString(out, "connection_id", connection.ConnectionId);
-    out << ',';
-    TqAppendJsonString(out, "remote_address", connection.RemoteAddress);
-    out << ',';
-    TqAppendJsonString(out, "state", connection.State);
-    out << ",\"active_streams\":" << connection.ActiveStreams;
-    out << ",\"total_streams\":" << connection.TotalStreams;
-    out << ",\"active_tunnels\":" << connection.ActiveTunnels;
-    out << ',';
-    TqAppendJsonString(out, "last_error", connection.LastError);
-    out << '}';
+nlohmann::json ServerConnectionJsonValue(const TqServerConnectionSnapshot& connection) {
+    return {
+        {"connection_id", connection.ConnectionId},
+        {"remote_address", connection.RemoteAddress},
+        {"state", connection.State},
+        {"active_streams", connection.ActiveStreams},
+        {"total_streams", connection.TotalStreams},
+        {"active_tunnels", connection.ActiveTunnels},
+        {"last_error", connection.LastError},
+    };
 }
 
 std::string ServerConnectionsJson(const std::vector<TqServerConnectionSnapshot>& connections) {
-    std::ostringstream out;
-    out << "{\"connections\":[";
-    for (size_t i = 0; i < connections.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        AppendServerConnectionJson(out, connections[i]);
+    nlohmann::json body{{"connections", nlohmann::json::array()}};
+    for (const auto& connection : connections) {
+        body["connections"].push_back(ServerConnectionJsonValue(connection));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string ServerConnectionJson(const TqServerConnectionSnapshot& connection) {
-    std::ostringstream out;
-    AppendServerConnectionJson(out, connection);
-    return out.str();
+    return ServerConnectionJsonValue(connection).dump();
 }
 
-void AppendTunnelJson(std::ostringstream& out, const TqTunnelSnapshot& tunnel) {
-    out << '{';
-    TqAppendJsonString(out, "tunnel_id", tunnel.TunnelId);
-    out << ',';
-    TqAppendJsonString(out, "peer_id", tunnel.PeerId);
-    out << ',';
-    TqAppendJsonString(out, "connection_id", tunnel.ConnectionId);
-    out << ',';
-    TqAppendJsonString(out, "state", tunnel.State);
-    out << ',';
-    TqAppendJsonString(out, "target", tunnel.Target);
-    out << ',';
-    TqAppendJsonString(out, "role", tunnel.Role);
-    out << ",\"duration_ms\":" << tunnel.DurationMs;
-    out << ",\"active\":true";
-    out << '}';
+nlohmann::json TunnelJsonValue(const TqTunnelSnapshot& tunnel) {
+    return {
+        {"tunnel_id", tunnel.TunnelId},
+        {"peer_id", tunnel.PeerId},
+        {"connection_id", tunnel.ConnectionId},
+        {"state", tunnel.State},
+        {"target", tunnel.Target},
+        {"role", tunnel.Role},
+        {"duration_ms", tunnel.DurationMs},
+        {"active", true},
+    };
 }
 
 std::string ServerTunnelsJson() {
     const auto all = TqSnapshotTunnels();
-    std::ostringstream out;
-    out << "{\"tunnels\":[";
-    bool first = true;
+    nlohmann::json body{{"tunnels", nlohmann::json::array()}};
     for (const auto& tunnel : all) {
         if (tunnel.Role != "server") {
             continue;
         }
-        if (!first) {
-            out << ',';
-        }
-        first = false;
-        AppendTunnelJson(out, tunnel);
+        body["tunnels"].push_back(TunnelJsonValue(tunnel));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string ServerTunnelJson(const TqTunnelSnapshot& tunnel) {
-    std::ostringstream out;
-    AppendTunnelJson(out, tunnel);
-    return out.str();
+    return TunnelJsonValue(tunnel).dump();
+}
+
+std::string StatusJson(const char* status) {
+    return nlohmann::json{{"status", status}}.dump();
 }
 
 bool DecodePathSegment(const std::string& encoded, std::string& decoded) {
@@ -318,7 +301,7 @@ std::string TqHandleServerAdmin(
             if (!TqAbortServerConnectionTunnels(connectionId)) {
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
-            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            return TqJsonResponse(202, StatusJson("aborting"));
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }
@@ -339,7 +322,7 @@ std::string TqHandleServerAdmin(
                 if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
                     return TqJsonResponse(404, ErrorJson("not found"));
                 }
-                return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+                return TqJsonResponse(202, StatusJson("aborting"));
             }
             return TqJsonResponse(404, ErrorJson("not found"));
         }
@@ -350,13 +333,13 @@ std::string TqHandleServerAdmin(
             if (!TqAbortTunnelById(tunnelPath.TunnelId)) {
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
-            return TqJsonResponse(202, "{\"status\":\"aborting\"}");
+            return TqJsonResponse(202, StatusJson("aborting"));
         }
         if (tunnelPath.Action == "drain") {
             if (!TqDrainTunnelById(tunnelPath.TunnelId)) {
                 return TqJsonResponse(404, ErrorJson("not found"));
             }
-            return TqJsonResponse(202, "{\"status\":\"draining\"}");
+            return TqJsonResponse(202, StatusJson("draining"));
         }
         return TqJsonResponse(404, ErrorJson("not found"));
     }

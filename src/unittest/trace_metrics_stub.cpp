@@ -10,8 +10,6 @@ std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
     return {};
 }
 
-void TqAppendRelayMetricsJson(std::ostringstream&, const TqRelayMetricsSnapshot&) {
-}
-
-void TqAppendJsonString(std::ostringstream&, const char*, const std::string&) {
+std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
+    return "{}";
 }

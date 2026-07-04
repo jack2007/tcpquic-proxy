@@ -4,6 +4,7 @@
 #include "proxy_auth.h"
 #include "tuning.h"
 
+#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 
 #include <cctype>
@@ -309,861 +310,515 @@ bool IsValidCompress(const std::string& value) {
     return value.empty() || value == "auto" || value == "zstd" || value == "off";
 }
 
-int HexValue(char ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
-void AppendUtf8(uint32_t value, std::string& out) {
-    if (value <= 0x7F) {
-        out.push_back(static_cast<char>(value));
-    } else if (value <= 0x7FF) {
-        out.push_back(static_cast<char>(0xC0 | (value >> 6)));
-        out.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-    } else {
-        out.push_back(static_cast<char>(0xE0 | (value >> 12)));
-        out.push_back(static_cast<char>(0x80 | ((value >> 6) & 0x3F)));
-        out.push_back(static_cast<char>(0x80 | (value & 0x3F)));
-    }
-}
-
 class JsonParser {
 public:
     JsonParser(const std::string& text, std::string& err) : Text(text), Err(err) {}
 
     bool ParseRouter(TqRouterConfig& router) {
         router = TqRouterConfig{};
-        if (!Consume('{')) {
+        nlohmann::json root;
+        if (!Load(root, "malformed client config object")) {
+            return false;
+        }
+        if (!root.is_object()) {
             return Error("client config must be a JSON object");
         }
-        if (Consume('}')) {
-            return Finish(router);
-        }
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed client config object");
-            }
+        for (const auto& item : root.items()) {
+            const std::string& key = item.key();
+            const auto& value = item.value();
             if (key == "version") {
-                if (!ParseUint32(router.Version)) {
-                    return Error("invalid version");
-                }
+                if (!ReadUint32(value, router.Version)) return Error("invalid version");
             } else if (key == "peers") {
-                if (!ParsePeers(router.Peers)) {
-                    return false;
-                }
+                if (!ParsePeers(value, router.Peers, false)) return false;
             } else if (key == "proxy_auth") {
-                if (!ParseProxyAuth(router.ProxyAuth)) {
-                    return false;
-                }
-            } else if (!SkipValue()) {
-                return false;
+                if (!ParseProxyAuth(value, router.ProxyAuth)) return false;
             }
-        } while (Consume(','));
-
-        if (!Consume('}')) {
-            return Error("malformed client config object");
-        }
-        return Finish(router);
-    }
-
-    bool ParseRuntimeConfig(TqConfig& cfg) {
-        if (!Consume('{')) {
-            return Error("config must be a JSON object");
-        }
-        if (Consume('}')) {
-            return FinishRuntimeConfig();
-        }
-        bool speedTestSpecified = cfg.SpeedTestMode != TqSpeedTestMode::None;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed config object");
-            }
-            if (!ParseRuntimeConfigField(key, cfg, speedTestSpecified)) {
-                return false;
-            }
-        } while (Consume(','));
-
-        if (!Consume('}')) {
-            return Error("malformed config object");
-        }
-        return FinishRuntimeConfig();
-    }
-
-private:
-    bool Finish(TqRouterConfig& router) {
-        SkipWs();
-        if (Pos != Text.size()) {
-            return Error("unexpected trailing content in client config");
         }
         return TqValidateRouterConfig(router, Err);
     }
 
-    bool FinishRuntimeConfig() {
-        SkipWs();
-        if (Pos != Text.size()) {
-            return Error("unexpected trailing content in config");
+    bool ParseRuntimeConfig(TqConfig& cfg) {
+        nlohmann::json root;
+        if (!Load(root, "malformed config object")) {
+            return false;
+        }
+        if (!root.is_object()) {
+            return Error("config must be a JSON object");
+        }
+        if (root.contains("version")) {
+            return Error("unknown config key: version");
+        }
+        bool speedTestSpecified = cfg.SpeedTestMode != TqSpeedTestMode::None;
+        for (const auto& item : root.items()) {
+            if (!ParseRuntimeConfigField(item.key(), item.value(), cfg, speedTestSpecified)) {
+                return false;
+            }
         }
         return true;
     }
 
-    bool ParseRuntimeConfigField(const std::string& key, TqConfig& cfg, bool& speedTestSpecified) {
-        if (key == "tls") return ParseTlsConfig(cfg);
-        if (key == "admin") return ParseAdminConfig(cfg);
-        if (key == "proto") return ParseProtoConfig(cfg);
-        if (key == "server") return ParseServerConfig(cfg);
-        if (key == "relay") return ParseRelayConfig(cfg);
-        if (key == "tuning") return ParseTuningConfig(cfg);
-        if (key == "compression") return ParseCompressionConfig(cfg);
-        if (key == "trace") return ParseTraceConfig(cfg);
-        if (key == "client") return ParseClientConfig(cfg, speedTestSpecified);
-        if (key == "peers") return ParseRuntimePeers(cfg.Router.Peers);
-        return Error(("unknown config key: " + key).c_str());
+private:
+    bool Load(nlohmann::json& out, const char* err) {
+        try {
+            out = nlohmann::json::parse(Text);
+            return true;
+        } catch (const nlohmann::json::exception&) {
+            return Error(err);
+        }
     }
 
-    bool ParseTlsConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("tls must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed tls object");
+    bool ReadString(const nlohmann::json& value, std::string& out) {
+        if (!value.is_string()) return false;
+        out = value.get<std::string>();
+        return true;
+    }
+
+    bool ReadBool(const nlohmann::json& value, bool& out) {
+        if (!value.is_boolean()) return false;
+        out = value.get<bool>();
+        return true;
+    }
+
+    bool ReadUint32(const nlohmann::json& value, uint32_t& out) {
+        uint64_t raw = 0;
+        if (value.is_number_unsigned()) {
+            raw = value.get<uint64_t>();
+        } else if (value.is_number_integer()) {
+            const int64_t signedValue = value.get<int64_t>();
+            if (signedValue < 0) return false;
+            raw = static_cast<uint64_t>(signedValue);
+        } else {
+            return false;
+        }
+        if (raw > std::numeric_limits<uint32_t>::max()) return false;
+        out = static_cast<uint32_t>(raw);
+        return true;
+    }
+
+    bool ReadUint32InRange(const nlohmann::json& value, uint32_t minValue, uint32_t maxValue, uint32_t& out) {
+        if (!ReadUint32(value, out)) return false;
+        return out >= minValue && out <= maxValue;
+    }
+
+    bool ReadInt(const nlohmann::json& value, int& out) {
+        if (!value.is_number_integer()) return false;
+        const int64_t raw = value.get<int64_t>();
+        if (raw < std::numeric_limits<int>::min() || raw > std::numeric_limits<int>::max()) return false;
+        out = static_cast<int>(raw);
+        return true;
+    }
+
+    bool RequireObject(const nlohmann::json& value, const char* err) {
+        return value.is_object() || Error(err);
+    }
+
+    bool RequireArray(const nlohmann::json& value, const char* err) {
+        return value.is_array() || Error(err);
+    }
+
+    bool ParseRuntimeConfigField(const std::string& key, const nlohmann::json& value, TqConfig& cfg, bool& speedTestSpecified) {
+        if (key == "tls") return ParseTlsConfig(value, cfg);
+        if (key == "admin") return ParseAdminConfig(value, cfg);
+        if (key == "proto") return ParseProtoConfig(value, cfg);
+        if (key == "server") return ParseServerConfig(value, cfg);
+        if (key == "relay") return ParseRelayConfig(value, cfg);
+        if (key == "tuning") return ParseTuningConfig(value, cfg);
+        if (key == "compression") return ParseCompressionConfig(value, cfg);
+        if (key == "trace") return ParseTraceConfig(value, cfg);
+        if (key == "client") return ParseClientConfig(value, cfg, speedTestSpecified);
+        if (key == "peers") return ParsePeers(value, cfg.Router.Peers, true);
+        return Error("unknown config key: " + key);
+    }
+
+    bool ParseTlsConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "tls must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "cert") {
-                if (!ParseString(cfg.QuicCert)) return Error("invalid tls.cert");
+                if (!ReadString(item.value(), cfg.QuicCert)) return Error("invalid tls.cert");
             } else if (key == "key") {
-                if (!ParseString(cfg.QuicKey)) return Error("invalid tls.key");
+                if (!ReadString(item.value(), cfg.QuicKey)) return Error("invalid tls.key");
             } else if (key == "ca") {
-                if (!ParseString(cfg.QuicCa)) return Error("invalid tls.ca");
+                if (!ReadString(item.value(), cfg.QuicCa)) return Error("invalid tls.ca");
             } else {
-                return Error(("unknown tls key: " + key).c_str());
+                return Error("unknown tls key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed tls object");
+        }
+        return true;
     }
 
-    bool ParseAdminConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("admin must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed admin object");
+    bool ParseAdminConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "admin must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "listen") {
-                if (!ParseString(cfg.AdminListen)) return Error("invalid admin.listen");
+                if (!ReadString(item.value(), cfg.AdminListen)) return Error("invalid admin.listen");
             } else if (key == "token_file") {
-                if (!ParseString(cfg.AdminTokenFile)) return Error("invalid admin.token_file");
+                if (!ReadString(item.value(), cfg.AdminTokenFile)) return Error("invalid admin.token_file");
             } else if (key == "threads") {
-                if (!ParseUint32InRange(1, 32, cfg.AdminThreads)) return Error("invalid admin.threads");
+                if (!ReadUint32InRange(item.value(), 1, 32, cfg.AdminThreads)) return Error("invalid admin.threads");
             } else {
-                return Error(("unknown admin key: " + key).c_str());
+                return Error("unknown admin key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed admin object");
+        }
+        return true;
     }
 
-    bool ParseProtoConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("proto must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed proto object");
+    bool ParseProtoConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "proto must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "profile") {
-                std::string value;
-                if (!ParseString(value)) return Error("invalid proto.profile");
-                if (value == "max-throughput") cfg.QuicProfile = TqQuicProfile::MaxThroughput;
-                else if (value == "low-latency") cfg.QuicProfile = TqQuicProfile::LowLatency;
+                std::string profile;
+                if (!ReadString(item.value(), profile)) return Error("invalid proto.profile");
+                if (profile == "max-throughput") cfg.QuicProfile = TqQuicProfile::MaxThroughput;
+                else if (profile == "low-latency") cfg.QuicProfile = TqQuicProfile::LowLatency;
                 else return Error("invalid proto.profile");
             } else if (key == "disable_1rtt_encryption") {
-                if (!ParseBool(cfg.QuicDisable1RttEncryption)) return Error("invalid proto.disable_1rtt_encryption");
+                if (!ReadBool(item.value(), cfg.QuicDisable1RttEncryption)) return Error("invalid proto.disable_1rtt_encryption");
             } else if (key == "connections") {
-                if (!ParseUint32(cfg.QuicConnections) || cfg.QuicConnections > 128) return Error("invalid proto.connections");
+                if (!ReadUint32(item.value(), cfg.QuicConnections) || cfg.QuicConnections > 128) return Error("invalid proto.connections");
                 if (cfg.QuicConnections == 0) cfg.QuicConnections = 1;
             } else if (key == "connection_stream_count") {
-                if (!ParseUint32(cfg.QuicConnectionStreamCount) ||
-                    cfg.QuicConnectionStreamCount == 0 ||
-                    cfg.QuicConnectionStreamCount > TqMaxQuicConnectionStreamCount) {
+                if (!ReadUint32(item.value(), cfg.QuicConnectionStreamCount) || cfg.QuicConnectionStreamCount == 0 || cfg.QuicConnectionStreamCount > TqMaxQuicConnectionStreamCount) {
                     return Error("invalid proto.connection_stream_count");
                 }
             } else if (key == "keepalive_ms") {
-                if (!ParseUint32InRange(
-                        TqMinQuicKeepAliveIntervalMs,
-                        TqMaxQuicKeepAliveIntervalMs,
-                        cfg.QuicKeepAliveIntervalMs)) {
-                    return Error("invalid proto.keepalive_ms");
-                }
+                if (!ReadUint32InRange(item.value(), TqMinQuicKeepAliveIntervalMs, TqMaxQuicKeepAliveIntervalMs, cfg.QuicKeepAliveIntervalMs)) return Error("invalid proto.keepalive_ms");
             } else if (key == "iw") {
-                if (!ParseUint32(cfg.TuningOverrideQuicIw)) return Error("invalid proto.iw");
+                if (!ReadUint32(item.value(), cfg.TuningOverrideQuicIw)) return Error("invalid proto.iw");
             } else if (key == "initrtt_ms") {
-                if (!ParseUint32(cfg.TuningOverrideQuicInitRttMs)) return Error("invalid proto.initrtt_ms");
+                if (!ReadUint32(item.value(), cfg.TuningOverrideQuicInitRttMs)) return Error("invalid proto.initrtt_ms");
             } else {
-                return Error(("unknown proto key: " + key).c_str());
+                return Error("unknown proto key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed proto object");
+        }
+        return true;
     }
 
-    bool ParseServerConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("server must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed server object");
+    bool ParseServerConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "server must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "proto_listen") {
-                if (!ParseString(cfg.QuicListen)) return Error("invalid server.proto_listen");
+                if (!ReadString(item.value(), cfg.QuicListen)) return Error("invalid server.proto_listen");
             } else if (key == "allow_targets") {
-                if (!ParseStringList(cfg.AllowTargets)) return Error("invalid server.allow_targets");
+                if (!ParseStringList(item.value(), cfg.AllowTargets)) return Error("invalid server.allow_targets");
             } else if (key == "deny_targets") {
-                if (!ParseStringList(cfg.DenyTargets)) return Error("invalid server.deny_targets");
+                if (!ParseStringList(item.value(), cfg.DenyTargets)) return Error("invalid server.deny_targets");
             } else {
-                return Error(("unknown server key: " + key).c_str());
+                return Error("unknown server key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed server object");
+        }
+        return true;
     }
 
-    bool ParseRelayConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("relay must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed relay object");
+    bool ParseRelayConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "relay must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "io_size") {
-                if (!ParseUint32(cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
+                if (!ReadUint32(item.value(), cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
             } else if (key == "linux") {
-                if (!ParseLinuxRelayConfig(cfg)) return false;
+                if (!ParseLinuxRelayConfig(item.value(), cfg)) return false;
             } else {
-                return Error(("unknown relay key: " + key).c_str());
+                return Error("unknown relay key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed relay object");
+        }
+        return true;
     }
 
-    bool ParseLinuxRelayConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("relay.linux must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed relay.linux object");
+    bool ParseLinuxRelayConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "relay.linux must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "read_chunk_size") {
-                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayReadChunkSize, "relay.linux.read_chunk_size")) return false;
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayReadChunkSize)) return Error("invalid relay.linux.read_chunk_size");
             } else if (key == "worker_slots") {
                 uint32_t ignored = 0;
-                if (!ParseNonZeroUint32(ignored, "relay.linux.worker_slots")) return false;
+                if (!ReadNonZeroUint32(item.value(), ignored)) return Error("invalid relay.linux.worker_slots");
                 spdlog::warn("relay.linux.worker_slots is deprecated and ignored");
             } else if (key == "tcp_write_max_bytes") {
-                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes, "relay.linux.tcp_write_max_bytes")) return false;
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes)) return Error("invalid relay.linux.tcp_write_max_bytes");
             } else if (key == "tcp_write_burst_bytes") {
-                if (!ParseNonZeroUint32(cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes, "relay.linux.tcp_write_burst_bytes")) return false;
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes)) return Error("invalid relay.linux.tcp_write_burst_bytes");
             } else {
-                return Error(("unknown relay.linux key: " + key).c_str());
+                return Error("unknown relay.linux key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed relay.linux object");
+        }
+        return true;
     }
 
-    bool ParseTuningConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("tuning must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed tuning object");
+    bool ParseTuningConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "tuning must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "mode") {
                 std::string value;
-                if (!ParseString(value)) return Error("invalid tuning.mode");
+                if (!ReadString(item.value(), value)) return Error("invalid tuning.mode");
                 cfg.TuningMode = TqParseTuningMode(value.c_str());
                 if (value != "auto" && value != "lan" && value != "wan") return Error("invalid tuning.mode");
             } else {
-                return Error(("unknown tuning key: " + key).c_str());
+                return Error("unknown tuning key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed tuning object");
+        }
+        return true;
     }
 
-    bool ParseCompressionConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("compression must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed compression object");
+    bool ParseCompressionConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "compression must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "mode") {
-                if (!ParseString(cfg.Compress)) return Error("invalid compression.mode");
-                if (!IsValidCompress(cfg.Compress)) return Error("invalid compression.mode");
+                if (!ReadString(item.value(), cfg.Compress) || !IsValidCompress(cfg.Compress)) return Error("invalid compression.mode");
             } else if (key == "level") {
-                if (!ParseInt(cfg.CompressLevel)) return Error("invalid compression.level");
+                if (!ReadInt(item.value(), cfg.CompressLevel)) return Error("invalid compression.level");
             } else {
-                return Error(("unknown compression key: " + key).c_str());
+                return Error("unknown compression key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed compression object");
+        }
+        return true;
     }
 
-    bool ParseTraceConfig(TqConfig& cfg) {
-        if (!Consume('{')) return Error("trace must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed trace object");
+    bool ParseTraceConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "trace must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "enabled") {
-                if (!ParseBool(cfg.Trace)) return Error("invalid trace.enabled");
+                if (!ReadBool(item.value(), cfg.Trace)) return Error("invalid trace.enabled");
             } else if (key == "interval_sec") {
-                if (!ParseUint32(cfg.TraceIntervalSec)) return Error("invalid trace.interval_sec");
+                if (!ReadUint32(item.value(), cfg.TraceIntervalSec)) return Error("invalid trace.interval_sec");
                 cfg.Trace = true;
             } else if (key == "level") {
                 std::string level;
-                if (!ParseString(level)) return Error("invalid trace.level");
-                if (level == "info") {
-                    cfg.TraceLogLevel = TqConfig::TraceLevel::Info;
-                } else if (level == "debug") {
-                    cfg.TraceLogLevel = TqConfig::TraceLevel::Debug;
-                } else {
-                    return Error("invalid trace.level (expected info or debug)");
-                }
+                if (!ReadString(item.value(), level)) return Error("invalid trace.level");
+                if (level == "info") cfg.TraceLogLevel = TqConfig::TraceLevel::Info;
+                else if (level == "debug") cfg.TraceLogLevel = TqConfig::TraceLevel::Debug;
+                else return Error("invalid trace.level (expected info or debug)");
             } else {
-                return Error(("unknown trace key: " + key).c_str());
+                return Error("unknown trace key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed trace object");
+        }
+        return true;
     }
 
-    bool ParseClientConfig(TqConfig& cfg, bool& speedTestSpecified) {
-        if (!Consume('{')) return Error("client must be an object");
-        if (Consume('}')) return true;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) return Error("malformed client object");
+    bool ParseClientConfig(const nlohmann::json& object, TqConfig& cfg, bool& speedTestSpecified) {
+        if (!RequireObject(object, "client must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "download_test") {
-                if (!ParseSpeedTest(TqSpeedTestMode::Download, cfg, speedTestSpecified, "client.download_test")) return false;
+                if (!ParseSpeedTest(item.value(), TqSpeedTestMode::Download, cfg, speedTestSpecified, "client.download_test")) return false;
             } else if (key == "download_sink_test") {
-                if (!ParseSpeedTest(TqSpeedTestMode::DownloadSink, cfg, speedTestSpecified, "client.download_sink_test")) return false;
+                if (!ParseSpeedTest(item.value(), TqSpeedTestMode::DownloadSink, cfg, speedTestSpecified, "client.download_sink_test")) return false;
             } else if (key == "upload_test") {
-                if (!ParseSpeedTest(TqSpeedTestMode::Upload, cfg, speedTestSpecified, "client.upload_test")) return false;
+                if (!ParseSpeedTest(item.value(), TqSpeedTestMode::Upload, cfg, speedTestSpecified, "client.upload_test")) return false;
             } else if (key == "handshake_threads") {
-                if (!ParseUint32(cfg.HandshakeThreads)) return Error("invalid client.handshake_threads");
+                if (!ReadUint32(item.value(), cfg.HandshakeThreads)) return Error("invalid client.handshake_threads");
             } else {
-                return Error(("unknown client key: " + key).c_str());
+                return Error("unknown client key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed client object");
+        }
+        return true;
     }
 
-    bool ParseSpeedTest(TqSpeedTestMode mode, TqConfig& cfg, bool& speedTestSpecified, const char* key) {
-        if (speedTestSpecified) {
-            return Error("speed-test options are mutually exclusive");
-        }
-        if (!ParseUint32InRange(1, 86400, cfg.SpeedTestDurationSec)) {
-            return Error((std::string("invalid ") + key).c_str());
-        }
+    bool ParseSpeedTest(const nlohmann::json& value, TqSpeedTestMode mode, TqConfig& cfg, bool& speedTestSpecified, const char* key) {
+        if (speedTestSpecified) return Error("speed-test options are mutually exclusive");
+        if (!ReadUint32InRange(value, 1, 86400, cfg.SpeedTestDurationSec)) return Error(std::string("invalid ") + key);
         cfg.SpeedTestMode = mode;
         speedTestSpecified = true;
         return true;
     }
 
-    bool ParseNonZeroUint32(uint32_t& out, const char* key) {
-        if (!ParseUint32(out) || out == 0) {
-            return Error((std::string("invalid ") + key).c_str());
+    bool ReadNonZeroUint32(const nlohmann::json& value, uint32_t& out) {
+        return ReadUint32(value, out) && out != 0;
+    }
+
+    bool ParsePeers(const nlohmann::json& array, std::vector<TqPeerConfig>& peers, bool runtimeShape) {
+        peers.clear();
+        if (!RequireArray(array, "peers must be an array")) return false;
+        for (const auto& value : array) {
+            TqPeerConfig peer;
+            if (runtimeShape) {
+                if (!ParseRuntimePeer(value, peer)) return false;
+            } else if (!ParsePeer(value, peer)) {
+                return false;
+            }
+            peers.push_back(std::move(peer));
         }
         return true;
     }
 
-    bool ParseRuntimePeers(std::vector<TqPeerConfig>& peers) {
-        peers.clear();
-        if (!Consume('[')) {
-            return Error("peers must be an array");
-        }
-        if (Consume(']')) {
-            return true;
-        }
-        do {
-            TqPeerConfig peer;
-            if (!ParseRuntimePeer(peer)) {
-                return false;
-            }
-            peers.push_back(peer);
-        } while (Consume(','));
-        return Consume(']') || Error("malformed peers array");
-    }
-
-    bool ParseRuntimePeer(TqPeerConfig& peer) {
-        if (!Consume('{')) {
-            return Error("peer must be an object");
-        }
-        if (Consume('}')) {
-            return true;
-        }
+    bool ParseRuntimePeer(const nlohmann::json& object, TqPeerConfig& peer) {
+        if (!RequireObject(object, "peer must be an object")) return false;
         bool protoConnectionsSpecified = false;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed peer object");
-            }
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "id") {
-                if (!ParseString(peer.PeerId)) return Error("invalid peer.id");
+                if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer.id");
             } else if (key == "proto_peer") {
-                if (!ParseString(peer.QuicPeer)) return Error("invalid peer.proto_peer");
+                if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid peer.proto_peer");
             } else if (key == "socks_listen") {
-                if (!ParseString(peer.SocksListen)) return Error("invalid peer.socks_listen");
+                if (!ReadString(item.value(), peer.SocksListen)) return Error("invalid peer.socks_listen");
             } else if (key == "http_listen") {
-                if (!ParseString(peer.HttpListen)) return Error("invalid peer.http_listen");
+                if (!ReadString(item.value(), peer.HttpListen)) return Error("invalid peer.http_listen");
             } else if (key == "port_forwards") {
-                if (!ParsePortForwards(peer.PortForwards)) return false;
+                if (!ParsePortForwards(item.value(), peer.PortForwards)) return false;
             } else if (key == "paths") {
-                if (!ParseQuicPaths(peer.QuicPaths)) return false;
+                if (!ParseQuicPaths(item.value(), peer.QuicPaths)) return false;
             } else if (key == "proto_connections") {
                 protoConnectionsSpecified = true;
-                if (!ParseUint32(peer.QuicConnections)) return Error("invalid peer.proto_connections");
+                if (!ReadUint32(item.value(), peer.QuicConnections)) return Error("invalid peer.proto_connections");
             } else if (key == "compress") {
-                if (!ParseString(peer.Compress)) return Error("invalid peer.compress");
+                if (!ReadString(item.value(), peer.Compress)) return Error("invalid peer.compress");
             } else if (key == "enabled") {
-                if (!ParseBool(peer.Enabled)) return Error("invalid peer.enabled");
+                if (!ReadBool(item.value(), peer.Enabled)) return Error("invalid peer.enabled");
             } else {
-                return Error(("unknown peer key: " + key).c_str());
+                return Error("unknown peer key: " + key);
             }
-        } while (Consume(','));
-        if (protoConnectionsSpecified && peer.QuicConnections == 0) {
-            return Error("peer.proto_connections out of range");
         }
-        return Consume('}') || Error("malformed peer object");
+        if (protoConnectionsSpecified && peer.QuicConnections == 0) return Error("peer.proto_connections out of range");
+        return true;
     }
 
-    bool ParsePeers(std::vector<TqPeerConfig>& peers) {
-        peers.clear();
-        if (!Consume('[')) {
-            return Error("peers must be an array");
-        }
-        if (Consume(']')) {
-            return true;
-        }
-        do {
-            TqPeerConfig peer;
-            if (!ParsePeer(peer)) {
-                return false;
-            }
-            peers.push_back(peer);
-        } while (Consume(','));
-        return Consume(']') || Error("malformed peers array");
-    }
-
-    bool ParsePeer(TqPeerConfig& peer) {
-        if (!Consume('{')) {
-            return Error("peer must be an object");
-        }
-        if (Consume('}')) {
-            return true;
-        }
+    bool ParsePeer(const nlohmann::json& object, TqPeerConfig& peer) {
+        if (!RequireObject(object, "peer must be an object")) return false;
         bool quicConnectionsSpecified = false;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed peer object");
-            }
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "peer_id") {
-                if (!ParseString(peer.PeerId)) return Error("invalid peer_id");
+                if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer_id");
             } else if (key == "quic_peer") {
-                if (!ParseString(peer.QuicPeer)) return Error("invalid quic_peer");
+                if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid quic_peer");
             } else if (key == "socks_listen") {
-                if (!ParseString(peer.SocksListen)) return Error("invalid socks_listen");
+                if (!ReadString(item.value(), peer.SocksListen)) return Error("invalid socks_listen");
             } else if (key == "http_listen") {
-                if (!ParseString(peer.HttpListen)) return Error("invalid http_listen");
+                if (!ReadString(item.value(), peer.HttpListen)) return Error("invalid http_listen");
             } else if (key == "port_forwards") {
-                if (!ParsePortForwards(peer.PortForwards)) return false;
+                if (!ParsePortForwards(item.value(), peer.PortForwards)) return false;
             } else if (key == "paths") {
-                if (!ParseQuicPaths(peer.QuicPaths)) return false;
+                if (!ParseQuicPaths(item.value(), peer.QuicPaths)) return false;
             } else if (key == "quic_connections") {
                 quicConnectionsSpecified = true;
-                if (!ParseUint32(peer.QuicConnections)) return Error("invalid quic_connections");
+                if (!ReadUint32(item.value(), peer.QuicConnections)) return Error("invalid quic_connections");
             } else if (key == "quic_reconnect_interval_ms") {
                 return Error("unknown peer key: quic_reconnect_interval_ms");
             } else if (key == "compress") {
-                if (!ParseString(peer.Compress)) return Error("invalid compress");
+                if (!ReadString(item.value(), peer.Compress)) return Error("invalid compress");
             } else if (key == "enabled") {
-                if (!ParseBool(peer.Enabled)) return Error("invalid enabled");
-            } else if (!SkipValue()) {
-                return false;
+                if (!ReadBool(item.value(), peer.Enabled)) return Error("invalid enabled");
             }
-        } while (Consume(','));
-        if (quicConnectionsSpecified && peer.QuicConnections == 0) {
-            return Error("quic_connections out of range");
         }
-        return Consume('}') || Error("malformed peer object");
+        if (quicConnectionsSpecified && peer.QuicConnections == 0) return Error("quic_connections out of range");
+        return true;
     }
 
-    bool ParseQuicPaths(std::vector<TqQuicPathConfig>& paths) {
+    bool ParseQuicPaths(const nlohmann::json& array, std::vector<TqQuicPathConfig>& paths) {
         paths.clear();
-        if (!Consume('[')) {
-            return Error("paths must be an array");
-        }
-        if (Consume(']')) {
-            return true;
-        }
-        do {
+        if (!RequireArray(array, "paths must be an array")) return false;
+        for (const auto& value : array) {
             TqQuicPathConfig path;
-            if (!ParseQuicPathObject(path)) {
-                return false;
-            }
+            if (!ParseQuicPathObject(value, path)) return false;
             paths.push_back(std::move(path));
-        } while (Consume(','));
-        return Consume(']') || Error("malformed paths array");
-    }
-
-    bool ParseQuicPathObject(TqQuicPathConfig& path) {
-        if (!Consume('{')) {
-            return Error("path must be an object");
-        }
-        if (Consume('}')) {
-            return Error("path fields are required");
-        }
-        bool hasName = false;
-        bool hasLocal = false;
-        bool hasPeer = false;
-        bool hasConnections = false;
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed path object");
-            }
-            if (key == "name") {
-                hasName = true;
-                if (!ParseString(path.Name)) return Error("invalid path.name");
-            } else if (key == "local") {
-                hasLocal = true;
-                if (!ParseString(path.LocalAddress)) return Error("invalid path.local");
-            } else if (key == "peer") {
-                hasPeer = true;
-                if (!ParseString(path.Peer)) return Error("invalid path.peer");
-            } else if (key == "connections") {
-                hasConnections = true;
-                if (!ParseUint32(path.Connections)) return Error("invalid path.connections");
-            } else {
-                return Error(("unknown path key: " + key).c_str());
-            }
-        } while (Consume(','));
-        if (!Consume('}')) {
-            return Error("malformed path object");
-        }
-        if (!hasName || !hasLocal || !hasPeer || !hasConnections) {
-            return Error("path name, local, peer and connections are required");
         }
         return true;
     }
 
-    bool ParsePortForwards(std::vector<TqPortForwardConfig>& forwards) {
-        forwards.clear();
-        if (!Consume('[')) {
-            return Error("port_forwards must be an array");
-        }
-        if (Consume(']')) {
-            return true;
-        }
-        do {
-            TqPortForwardConfig forward;
-            if (!ParsePortForwardObject(forward)) {
-                return false;
+    bool ParseQuicPathObject(const nlohmann::json& object, TqQuicPathConfig& path) {
+        if (!RequireObject(object, "path must be an object")) return false;
+        if (object.empty()) return Error("path fields are required");
+        bool hasName = false, hasLocal = false, hasPeer = false, hasConnections = false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
+            if (key == "name") {
+                hasName = true;
+                if (!ReadString(item.value(), path.Name)) return Error("invalid path.name");
+            } else if (key == "local") {
+                hasLocal = true;
+                if (!ReadString(item.value(), path.LocalAddress)) return Error("invalid path.local");
+            } else if (key == "peer") {
+                hasPeer = true;
+                if (!ReadString(item.value(), path.Peer)) return Error("invalid path.peer");
+            } else if (key == "connections") {
+                hasConnections = true;
+                if (!ReadUint32(item.value(), path.Connections)) return Error("invalid path.connections");
+            } else {
+                return Error("unknown path key: " + key);
             }
-            forwards.push_back(std::move(forward));
-        } while (Consume(','));
-        return Consume(']') || Error("malformed port_forwards array");
+        }
+        if (!hasName || !hasLocal || !hasPeer || !hasConnections) return Error("path name, local, peer and connections are required");
+        return true;
     }
 
-    bool ParsePortForwardObject(TqPortForwardConfig& forward) {
-        if (!Consume('{')) {
-            return Error("port_forward must be an object");
+    bool ParsePortForwards(const nlohmann::json& array, std::vector<TqPortForwardConfig>& forwards) {
+        forwards.clear();
+        if (!RequireArray(array, "port_forwards must be an array")) return false;
+        for (const auto& value : array) {
+            TqPortForwardConfig forward;
+            if (!ParsePortForwardObject(value, forward)) return false;
+            forwards.push_back(std::move(forward));
         }
-        bool hasListen = false;
-        bool hasTarget = false;
-        if (Consume('}')) {
-            return Error("port_forward listen and target are required");
-        }
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed port_forward object");
-            }
+        return true;
+    }
+
+    bool ParsePortForwardObject(const nlohmann::json& object, TqPortForwardConfig& forward) {
+        if (!RequireObject(object, "port_forward must be an object")) return false;
+        if (object.empty()) return Error("port_forward listen and target are required");
+        bool hasListen = false, hasTarget = false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "listen") {
                 hasListen = true;
-                if (!ParseString(forward.Listen)) return Error("invalid port_forward.listen");
-                if (!IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
+                if (!ReadString(item.value(), forward.Listen) || !IsHostPort(forward.Listen)) return Error("invalid port_forward.listen");
             } else if (key == "target") {
                 hasTarget = true;
                 std::string target;
-                if (!ParseString(target)) return Error("invalid port_forward.target");
-                if (!SplitHostPortValue(target, forward.TargetHost, forward.TargetPort)) {
-                    return Error("invalid port_forward.target");
-                }
+                if (!ReadString(item.value(), target) || !SplitHostPortValue(target, forward.TargetHost, forward.TargetPort)) return Error("invalid port_forward.target");
             } else {
-                return Error(("unknown port_forward key: " + key).c_str());
+                return Error("unknown port_forward key: " + key);
             }
-        } while (Consume(','));
-        if (!Consume('}')) {
-            return Error("malformed port_forward object");
         }
-        if (!hasListen || !hasTarget) {
-            return Error("port_forward listen and target are required");
-        }
+        if (!hasListen || !hasTarget) return Error("port_forward listen and target are required");
         return true;
     }
 
-    bool ParseProxyAuth(std::vector<TqProxyAuthUser>& users) {
+    bool ParseProxyAuth(const nlohmann::json& array, std::vector<TqProxyAuthUser>& users) {
         users.clear();
-        if (!Consume('[')) {
-            return Error("proxy_auth must be an array");
-        }
-        if (Consume(']')) {
-            return true;
-        }
-        do {
+        if (!RequireArray(array, "proxy_auth must be an array")) return false;
+        for (const auto& value : array) {
             TqProxyAuthUser user;
-            if (!ParseProxyAuthUser(user)) {
-                return false;
-            }
+            if (!ParseProxyAuthUser(value, user)) return false;
             users.push_back(std::move(user));
-        } while (Consume(','));
-        return Consume(']') || Error("malformed proxy_auth array");
+        }
+        return true;
     }
 
-    bool ParseProxyAuthUser(TqProxyAuthUser& user) {
-        if (!Consume('{')) {
-            return Error("proxy_auth entry must be an object");
-        }
-        if (Consume('}')) {
-            return true;
-        }
-        do {
-            std::string key;
-            if (!ParseString(key) || !Consume(':')) {
-                return Error("malformed proxy_auth object");
-            }
+    bool ParseProxyAuthUser(const nlohmann::json& object, TqProxyAuthUser& user) {
+        if (!RequireObject(object, "proxy_auth entry must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
             if (key == "username") {
-                if (!ParseString(user.Username)) return Error("invalid proxy_auth.username");
+                if (!ReadString(item.value(), user.Username)) return Error("invalid proxy_auth.username");
             } else if (key == "password") {
-                if (!ParseString(user.Password)) return Error("invalid proxy_auth.password");
+                if (!ReadString(item.value(), user.Password)) return Error("invalid proxy_auth.password");
             } else {
-                return Error(("unknown proxy_auth key: " + key).c_str());
+                return Error("unknown proxy_auth key: " + key);
             }
-        } while (Consume(','));
-        return Consume('}') || Error("malformed proxy_auth object");
-    }
-
-    bool ParseString(std::string& out) {
-        SkipWs();
-        if (Pos >= Text.size() || Text[Pos] != '"') {
-            return false;
-        }
-        ++Pos;
-        out.clear();
-        while (Pos < Text.size()) {
-            char ch = Text[Pos++];
-            if (ch == '"') {
-                return true;
-            }
-            if (ch == '\\') {
-                if (Pos >= Text.size()) {
-                    return false;
-                }
-                char escaped = Text[Pos++];
-                switch (escaped) {
-                case '"':
-                case '\\':
-                case '/':
-                    out.push_back(escaped);
-                    break;
-                case 'b':
-                    out.push_back('\b');
-                    break;
-                case 'f':
-                    out.push_back('\f');
-                    break;
-                case 'n':
-                    out.push_back('\n');
-                    break;
-                case 'r':
-                    out.push_back('\r');
-                    break;
-                case 't':
-                    out.push_back('\t');
-                    break;
-                case 'u': {
-                    if (Pos + 4 > Text.size()) {
-                        return false;
-                    }
-                    uint32_t value = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        int hex = HexValue(Text[Pos++]);
-                        if (hex < 0) {
-                            return false;
-                        }
-                        value = (value << 4) | static_cast<uint32_t>(hex);
-                    }
-                    AppendUtf8(value, out);
-                    break;
-                }
-                default:
-                    return false;
-                }
-            } else {
-                if (static_cast<unsigned char>(ch) < 0x20) {
-                    return false;
-                }
-                out.push_back(ch);
-            }
-        }
-        return false;
-    }
-
-    bool ParseUint32(uint32_t& out) {
-        SkipWs();
-        if (Pos >= Text.size() || !std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            return false;
-        }
-        if (Text[Pos] == '0' && Pos + 1 < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos + 1]))) {
-            return false;
-        }
-        uint64_t value = 0;
-        while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            value = value * 10 + static_cast<uint32_t>(Text[Pos] - '0');
-            if (value > std::numeric_limits<uint32_t>::max()) {
-                return false;
-            }
-            ++Pos;
-        }
-        out = static_cast<uint32_t>(value);
-        return true;
-    }
-
-    bool ParseUint32InRange(uint32_t minValue, uint32_t maxValue, uint32_t& out) {
-        if (!ParseUint32(out)) {
-            return false;
-        }
-        return out >= minValue && out <= maxValue;
-    }
-
-    bool ParseInt(int& out) {
-        SkipWs();
-        if (Pos >= Text.size()) {
-            return false;
-        }
-        bool negative = false;
-        if (Text[Pos] == '-') {
-            negative = true;
-            ++Pos;
-        }
-        if (Pos >= Text.size() || !std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            return false;
-        }
-        if (Text[Pos] == '0' && Pos + 1 < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos + 1]))) {
-            return false;
-        }
-        uint64_t value = 0;
-        while (Pos < Text.size() && std::isdigit(static_cast<unsigned char>(Text[Pos]))) {
-            value = value * 10 + static_cast<uint32_t>(Text[Pos] - '0');
-            const uint64_t limit = negative
-                ? static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ull
-                : static_cast<uint64_t>(std::numeric_limits<int>::max());
-            if (value > limit) {
-                return false;
-            }
-            ++Pos;
-        }
-        if (negative && value == static_cast<uint64_t>(std::numeric_limits<int>::max()) + 1ull) {
-            out = std::numeric_limits<int>::min();
-        } else {
-            out = negative ? -static_cast<int>(value) : static_cast<int>(value);
         }
         return true;
     }
 
-    bool ParseBool(bool& out) {
-        SkipWs();
-        if (Text.compare(Pos, 4, "true") == 0) {
-            Pos += 4;
-            out = true;
-            return true;
-        }
-        if (Text.compare(Pos, 5, "false") == 0) {
-            Pos += 5;
-            out = false;
-            return true;
-        }
-        return false;
-    }
-
-    bool ParseStringList(std::vector<std::string>& out) {
-        SkipWs();
-        if (Pos < Text.size() && Text[Pos] == '"') {
-            std::string value;
-            if (!ParseString(value)) {
-                return false;
-            }
-            SplitCommaList(value, out);
-            return true;
-        }
-        if (!Consume('[')) {
-            return false;
-        }
+    bool ParseStringList(const nlohmann::json& value, std::vector<std::string>& out) {
         out.clear();
-        if (Consume(']')) {
+        if (value.is_string()) {
+            SplitCommaList(value.get<std::string>(), out);
             return true;
         }
-        do {
-            std::string item;
-            if (!ParseString(item)) {
-                return false;
-            }
-            out.push_back(item);
-        } while (Consume(','));
-        return Consume(']');
-    }
-
-    bool SkipValue() {
-        SkipWs();
-        if (Pos >= Text.size()) {
-            return Error("unexpected end of client config");
+        if (!value.is_array()) return false;
+        for (const auto& item : value) {
+            if (!item.is_string()) return false;
+            out.push_back(item.get<std::string>());
         }
-        if (Text[Pos] == '"') {
-            std::string ignored;
-            return ParseString(ignored) || Error("invalid string value");
-        }
-        if (Text[Pos] == '{') {
-            ++Pos;
-            if (Consume('}')) return true;
-            do {
-                std::string ignored;
-                if (!ParseString(ignored) || !Consume(':') || !SkipValue()) return Error("malformed object value");
-            } while (Consume(','));
-            return Consume('}') || Error("malformed object value");
-        }
-        if (Text[Pos] == '[') {
-            ++Pos;
-            if (Consume(']')) return true;
-            do {
-                if (!SkipValue()) return false;
-            } while (Consume(','));
-            return Consume(']') || Error("malformed array value");
-        }
-        bool ignoredBool = false;
-        if (ParseBool(ignoredBool)) {
-            return true;
-        }
-        uint32_t ignoredUint = 0;
-        if (ParseUint32(ignoredUint)) {
-            return true;
-        }
-        return Error("unsupported value in client config");
-    }
-
-    bool Consume(char expected) {
-        SkipWs();
-        if (Pos < Text.size() && Text[Pos] == expected) {
-            ++Pos;
-            return true;
-        }
-        return false;
-    }
-
-    void SkipWs() {
-        while (Pos < Text.size() && std::isspace(static_cast<unsigned char>(Text[Pos]))) {
-            ++Pos;
-        }
+        return true;
     }
 
     bool Error(const char* message) {
@@ -1171,9 +826,13 @@ private:
         return false;
     }
 
+    bool Error(const std::string& message) {
+        Err = message;
+        return false;
+    }
+
     const std::string& Text;
     std::string& Err;
-    size_t Pos{0};
 };
 
 bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& err) {
@@ -1212,7 +871,7 @@ void TqPrintUsage(FILE* out) {
         "Client and Server:\n"
         "  -h, --help, --usage         Show this help and exit\n"
         "  --config <path>              Runtime JSON config file\n"
-        "                              (preferred; see docs/config_guide.md)\n"
+        "                              (preferred; see docs/config_guide_cn.md)\n"
         "  --cert <path>                TLS certificate PEM path\n"
         "  --key <path>                 TLS private key PEM path\n"
         "  --ca <path>                  CA certificate PEM path\n"

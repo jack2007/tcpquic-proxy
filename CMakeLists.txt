@@ -176,6 +176,9 @@ set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPDLOG_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${TCPQUIC_SPDLOG_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/spdlog")
 
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/json" "${CMAKE_BINARY_DIR}/json")
+
 # Align tool/test binaries with msquic convention: build/bin/Release/
 set(TCPQUIC_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/$<IF:$<CONFIG:Debug>,Debug,Release>")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${TCPQUIC_OUTPUT_DIR}")

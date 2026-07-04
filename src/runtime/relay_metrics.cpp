@@ -10,6 +10,8 @@
 #include "windows_relay_worker.h"
 #endif
 
+#include <nlohmann/json.hpp>
+
 #include <sstream>
 
 namespace {
@@ -86,20 +88,11 @@ std::string TqJsonEscape(const std::string& value) {
 
 } // namespace
 
-void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
+static void TqAppendJsonString(std::ostringstream& out, const char* name, const std::string& value) {
     out << '"' << name << "\":\"" << TqJsonEscape(value) << '"';
 }
 
 namespace {
-
-void TqAppendRelayCapabilitiesJson(std::ostringstream& out) {
-    out << "\"capabilities\":{";
-    out << "\"active_relay_detail\":"
-        << (kRelayActiveRelayDetailSupported ? "true" : "false");
-    out << ",\"worker_detail\":true";
-    out << ",\"per_worker_active_relays\":false";
-    out << '}';
-}
 
 TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot() {
     const auto metrics = TqSnapshotRelayMetrics();
@@ -130,59 +123,61 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
 }
 #endif
 
-void TqAppendActiveRelayJson(std::ostringstream& out, const TqRelayActiveSnapshot& relay) {
-    out << '{';
-    TqAppendJsonString(out, "relay_id", std::to_string(relay.RelayId));
-    out << ",\"relay_id_numeric\":" << relay.RelayId;
-    out << ",\"worker_index\":" << relay.WorkerIndex;
-    out << ',';
-    TqAppendJsonString(out, "backend", relay.Backend);
-    out << ",\"active_handlers\":" << relay.ActiveHandlers;
-    out << ",\"queued_worker_ops\":" << relay.QueuedWorkerOps;
-    out << ",\"in_flight_tcp_recvs\":" << relay.InFlightTcpRecvs;
-    out << ",\"in_flight_tcp_sends\":" << relay.InFlightTcpSends;
-    out << ",\"in_flight_quic_sends\":" << relay.InFlightQuicSends;
-    out << ",\"pending_quic_receive_bytes\":" << relay.PendingQuicReceiveBytes;
-    out << ",\"pending_quic_receive_queue_depth\":" << relay.PendingQuicReceiveQueueDepth;
-    out << ",\"callback_pending_quic_receive_depth\":"
-        << relay.CallbackPendingQuicReceiveDepth;
-    out << ",\"outstanding_quic_send_bytes\":" << relay.OutstandingQuicSendBytes;
-    out << ",\"max_outstanding_quic_send_bytes\":" << relay.MaxOutstandingQuicSendBytes;
-    out << ",\"event_queue_depth\":" << relay.EventQueueDepth;
-    out << ",\"tcp_read_bytes\":" << relay.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << relay.TcpWriteBytes;
-    out << ",\"last_tcp_write_errno\":" << relay.LastTcpWriteErrno;
-    out << ",\"last_tcp_recv_errno\":" << relay.LastTcpRecvErrno;
-    out << ",\"last_tcp_send_errno\":" << relay.LastTcpSendErrno;
-    out << ",\"last_iocp_completion_errno\":" << relay.LastIocpCompletionErrno;
-    out << ",\"last_iocp_operation\":" << relay.LastIocpOperation;
-    out << ",\"closing\":" << (relay.Closing ? "true" : "false");
-    out << ",\"tcp_read_closed\":" << (relay.TcpReadClosed ? "true" : "false");
-    out << ",\"tcp_read_paused_by_quic_backlog\":"
-        << (relay.TcpReadPausedByQuicBacklog ? "true" : "false");
-    out << ",\"tcp_write_closed\":" << (relay.TcpWriteClosed ? "true" : "false");
-    out << ",\"close_after_drained\":" << (relay.CloseAfterDrained ? "true" : "false");
-    out << ",\"quic_send_fin_submitted\":"
-        << (relay.QuicSendFinSubmitted ? "true" : "false");
-    out << ",\"quic_send_fin_completed\":"
-        << (relay.QuicSendFinCompleted ? "true" : "false");
-    out << ",\"stop_published\":" << (relay.StopPublished ? "true" : "false");
-    out << ",\"stream_detached\":" << (relay.StreamDetached ? "true" : "false");
-    out << '}';
+nlohmann::json TqRelayCapabilitiesJsonValue() {
+    return {
+        {"active_relay_detail", kRelayActiveRelayDetailSupported},
+        {"worker_detail", true},
+        {"per_worker_active_relays", false},
+    };
 }
 
-void TqAppendRelayWorkerJson(std::ostringstream& out, const TqRelayWorkerSnapshot& worker) {
-    out << '{';
-    TqAppendJsonString(out, "worker_id", worker.WorkerId);
-    out << ',';
-    TqAppendJsonString(out, "backend", worker.Backend);
-    out << ",\"worker_index\":" << worker.WorkerIndex;
-    out << ",\"active_relays\":" << worker.ActiveRelays;
-    out << ",\"pending_bytes\":" << worker.PendingBytes;
-    out << ",\"tcp_read_bytes\":" << worker.TcpReadBytes;
-    out << ",\"tcp_write_bytes\":" << worker.TcpWriteBytes;
-    out << ",\"errors\":" << worker.Errors;
-    out << '}';
+nlohmann::json TqActiveRelayJsonValue(const TqRelayActiveSnapshot& relay) {
+    return {
+        {"relay_id", std::to_string(relay.RelayId)},
+        {"relay_id_numeric", relay.RelayId},
+        {"worker_index", relay.WorkerIndex},
+        {"backend", relay.Backend},
+        {"active_handlers", relay.ActiveHandlers},
+        {"queued_worker_ops", relay.QueuedWorkerOps},
+        {"in_flight_tcp_recvs", relay.InFlightTcpRecvs},
+        {"in_flight_tcp_sends", relay.InFlightTcpSends},
+        {"in_flight_quic_sends", relay.InFlightQuicSends},
+        {"pending_quic_receive_bytes", relay.PendingQuicReceiveBytes},
+        {"pending_quic_receive_queue_depth", relay.PendingQuicReceiveQueueDepth},
+        {"callback_pending_quic_receive_depth", relay.CallbackPendingQuicReceiveDepth},
+        {"outstanding_quic_send_bytes", relay.OutstandingQuicSendBytes},
+        {"max_outstanding_quic_send_bytes", relay.MaxOutstandingQuicSendBytes},
+        {"event_queue_depth", relay.EventQueueDepth},
+        {"tcp_read_bytes", relay.TcpReadBytes},
+        {"tcp_write_bytes", relay.TcpWriteBytes},
+        {"last_tcp_write_errno", relay.LastTcpWriteErrno},
+        {"last_tcp_recv_errno", relay.LastTcpRecvErrno},
+        {"last_tcp_send_errno", relay.LastTcpSendErrno},
+        {"last_iocp_completion_errno", relay.LastIocpCompletionErrno},
+        {"last_iocp_operation", relay.LastIocpOperation},
+        {"closing", relay.Closing},
+        {"tcp_read_closed", relay.TcpReadClosed},
+        {"tcp_read_paused_by_quic_backlog", relay.TcpReadPausedByQuicBacklog},
+        {"tcp_write_closed", relay.TcpWriteClosed},
+        {"close_after_drained", relay.CloseAfterDrained},
+        {"quic_send_fin_submitted", relay.QuicSendFinSubmitted},
+        {"quic_send_fin_completed", relay.QuicSendFinCompleted},
+        {"stop_published", relay.StopPublished},
+        {"stream_detached", relay.StreamDetached},
+    };
+}
+
+nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
+    return {
+        {"worker_id", worker.WorkerId},
+        {"backend", worker.Backend},
+        {"worker_index", worker.WorkerIndex},
+        {"active_relays", worker.ActiveRelays},
+        {"pending_bytes", worker.PendingBytes},
+        {"tcp_read_bytes", worker.TcpReadBytes},
+        {"tcp_write_bytes", worker.TcpWriteBytes},
+        {"errors", worker.Errors},
+    };
 }
 
 } // namespace
@@ -479,18 +474,14 @@ std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers() {
 
 std::string TqRelayActiveRelaysJson() {
     const auto relays = TqSnapshotActiveRelays();
-    std::ostringstream out;
-    out << '{';
-    TqAppendRelayCapabilitiesJson(out);
-    out << ",\"relays\":[";
-    for (size_t i = 0; i < relays.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        TqAppendActiveRelayJson(out, relays[i]);
+    nlohmann::json body{
+        {"capabilities", TqRelayCapabilitiesJsonValue()},
+        {"relays", nlohmann::json::array()},
+    };
+    for (const auto& relay : relays) {
+        body["relays"].push_back(TqActiveRelayJsonValue(relay));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool& supported) {
@@ -504,9 +495,7 @@ std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool
     for (const auto& relay : relays) {
         if (std::to_string(relay.RelayId) == relayId) {
             found = true;
-            std::ostringstream out;
-            TqAppendActiveRelayJson(out, relay);
-            return out.str();
+            return TqActiveRelayJsonValue(relay).dump();
         }
     }
     return "{}";
@@ -514,18 +503,14 @@ std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool
 
 std::string TqRelayWorkersJson() {
     const auto workers = TqSnapshotRelayWorkers();
-    std::ostringstream out;
-    out << '{';
-    TqAppendRelayCapabilitiesJson(out);
-    out << ",\"workers\":[";
-    for (size_t i = 0; i < workers.size(); ++i) {
-        if (i != 0) {
-            out << ',';
-        }
-        TqAppendRelayWorkerJson(out, workers[i]);
+    nlohmann::json body{
+        {"capabilities", TqRelayCapabilitiesJsonValue()},
+        {"workers", nlohmann::json::array()},
+    };
+    for (const auto& worker : workers) {
+        body["workers"].push_back(TqRelayWorkerJsonValue(worker));
     }
-    out << "]}";
-    return out.str();
+    return body.dump();
 }
 
 std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
@@ -537,17 +522,14 @@ std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bo
             continue;
         }
         found = true;
-        std::ostringstream out;
-        TqAppendRelayWorkerJson(out, worker);
-        std::string body = out.str();
-        body.pop_back();
-        body += ",\"relays\":[]}";
-        return body;
+        nlohmann::json body = TqRelayWorkerJsonValue(worker);
+        body["relays"] = nlohmann::json::array();
+        return body.dump();
     }
     return "{}";
 }
 
-void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
+static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
     out << ",\"linux_relay_wakeups\":" << metrics.Wakeups;
     out << ",\"linux_relay_events_processed\":" << metrics.EventsProcessed;
     out << ",\"linux_relay_pending_events\":" << metrics.PendingEvents;
@@ -754,4 +736,14 @@ void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnaps
     out << ",\"windows_relay_snapshot_active_relays_scanned\":"
         << metrics.WindowsRelaySnapshotActiveRelaysScanned;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
+}
+
+std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot& metrics) {
+    std::ostringstream out;
+    out << "{\"_\":0";
+    TqAppendRelayMetricsJson(out, metrics);
+    out << '}';
+    auto value = nlohmann::json::parse(out.str());
+    value.erase("_");
+    return value.dump();
 }

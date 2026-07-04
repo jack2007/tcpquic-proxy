@@ -1,9 +1,10 @@
 #include "tcp_sink_bench.h"
 
+#include <nlohmann/json.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cerrno>
-#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -202,19 +203,18 @@ void PrintJson(
     const double gbps = durationSec == 0
         ? 0.0
         : static_cast<double>(bytes) * 8.0 / static_cast<double>(durationSec) / 1e9;
-    std::printf(
-        "{\"mode\":\"%s\",\"streams\":%u,\"duration_sec\":%u,"
-        "\"bytes\":%" PRIu64 ",\"gbps\":%.6f,\"ops\":%" PRIu64 ","
-        "\"connections\":%" PRIu64 ",\"errors\":%" PRIu64 ",\"exit\":%d}\n",
-        mode,
-        streams,
-        durationSec,
-        bytes,
-        gbps,
-        counters.Ops.load(),
-        counters.Connections.load(),
-        counters.Errors.load(),
-        exitCode);
+    const std::string body = nlohmann::json{
+        {"mode", mode},
+        {"streams", streams},
+        {"duration_sec", durationSec},
+        {"bytes", bytes},
+        {"gbps", gbps},
+        {"ops", counters.Ops.load()},
+        {"connections", counters.Connections.load()},
+        {"errors", counters.Errors.load()},
+        {"exit", exitCode},
+    }.dump();
+    std::printf("%s\n", body.c_str());
 }
 
 int RunServer(const BenchConfig& cfg) {
