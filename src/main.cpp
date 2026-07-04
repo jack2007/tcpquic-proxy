@@ -7,8 +7,10 @@
 #include "acl.h"
 #include "server_dial_reactor.h"
 #include "router_runtime.h"
+#include "runtime_config_file_store.h"
 #include "server_admin.h"
 #include "server_metrics.h"
+#include "server_runtime_config.h"
 #include "speed_test.h"
 #include "tuning.h"
 #include "tunnel_reaper.h"
@@ -260,6 +262,11 @@ int RunServer(const TqConfig& cfg) {
     TqAcl acl;
     acl.AllowCidrs = cfg.AllowTargets;
     acl.DenyCidrs = cfg.DenyTargets;
+    TqServerRuntimeConfigState runtimeConfigState(cfg);
+    std::unique_ptr<TqRuntimeConfigFileStore> runtimeConfigStore;
+    if (!cfg.ConfigPath.empty()) {
+        runtimeConfigStore.reset(new TqRuntimeConfigFileStore(cfg.ConfigPath));
+    }
 
     auto metrics = std::make_shared<TqServerMetrics>();
     auto speed = std::make_shared<TqServerSpeedTestController>();
@@ -325,7 +332,9 @@ int RunServer(const TqConfig& cfg) {
             return 1;
         }
         const TqAdminHttpServerOptions adminOptions = TqMakeAdminOptions(cfg);
-        admin.reset(new TqAdminHttpServer(cfg.AdminListen, [metrics, started, &serverDial, &cfg](const TqHttpRequest& req) {
+        admin.reset(new TqAdminHttpServer(
+            cfg.AdminListen,
+            [metrics, started, &serverDial, &runtimeConfigState, &runtimeConfigStore](const TqHttpRequest& req) {
             const uint64_t uptimeSeconds = static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count());
             metrics->TcpDialing.store(serverDial.PendingCount());
@@ -335,8 +344,18 @@ int RunServer(const TqConfig& cfg) {
             if (req.Method == "GET" && req.Path == "/metrics") {
                 return TqJsonResponse(200, TqServerMetricsJson(*metrics, uptimeSeconds));
             }
-            return TqHandleServerAdmin(req, *metrics, uptimeSeconds, cfg);
-        }, adminOptions));
+            return TqHandleServerAdmin(
+                req,
+                *metrics,
+                uptimeSeconds,
+                runtimeConfigState,
+                runtimeConfigStore.get(),
+                [&serverDial](const TqAcl& nextAcl) {
+                    serverDial.UpdateAcl(nextAcl);
+                    return true;
+                });
+        },
+            adminOptions));
         if (!admin->Start(err)) {
             std::fprintf(stderr, "tcpquic-proxy: failed to start admin server: %s\n", err.c_str());
             return 1;

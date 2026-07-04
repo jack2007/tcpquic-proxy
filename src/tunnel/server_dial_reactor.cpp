@@ -113,6 +113,7 @@ struct TqServerDialReactor::Impl {
     };
 
     TqAcl Acl;
+    mutable std::mutex AclLock;
     std::unique_ptr<ITqSocketReactor> Reactor;
     TqAresDnsResolver DnsResolver;
 #ifdef TQ_UNIT_TESTING
@@ -279,6 +280,11 @@ struct TqServerDialReactor::Impl {
         return Pending.size();
     }
 
+    void UpdateAcl(TqAcl acl) {
+        std::lock_guard<std::mutex> guard(AclLock);
+        Acl = std::move(acl);
+    }
+
     bool RunOnce(int timeoutMs) {
         bool didWork = false;
         {
@@ -397,9 +403,16 @@ struct TqServerDialReactor::Impl {
             for (auto& addr : filtered) {
                 SetSockaddrPort(addr, it->second->Request.Port);
             }
-        } else if (!TqAclFilterResolvedAddresses(Acl, addresses, it->second->Request.Port, filtered)) {
-            Complete(token, TqOpenError::AclDenied);
-            return;
+        } else {
+            TqAcl acl;
+            {
+                std::lock_guard<std::mutex> guard(AclLock);
+                acl = Acl;
+            }
+            if (!TqAclFilterResolvedAddresses(acl, addresses, it->second->Request.Port, filtered)) {
+                Complete(token, TqOpenError::AclDenied);
+                return;
+            }
         }
         if (filtered.empty()) {
             Complete(token, literal ? TqOpenError::AclDenied : TqOpenError::TcpTimeout);
@@ -813,4 +826,10 @@ bool TqServerDialReactor::RunOnce(int timeoutMs) {
 
 size_t TqServerDialReactor::PendingCount() const {
     return State != nullptr ? State->PendingCount() : 0;
+}
+
+void TqServerDialReactor::UpdateAcl(TqAcl acl) {
+    if (State != nullptr) {
+        State->UpdateAcl(std::move(acl));
+    }
 }

@@ -136,9 +136,11 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/admin_config.cpp
     runtime/client_peer_runtime.cpp
     runtime/memory_stats.cpp
+    runtime/runtime_config_file_store.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_admin.cpp
+    runtime/server_runtime_config.cpp
     runtime/server_metrics.cpp
     runtime/speed_test.cpp
     runtime/shutdown.cpp
@@ -359,6 +361,15 @@ target_link_libraries(tcpquic_memory_stats_test PRIVATE nlohmann_json::nlohmann_
 tcpquic_link_mimalloc(tcpquic_memory_stats_test)
 set_property(TARGET tcpquic_memory_stats_test PROPERTY FOLDER "tools")
 set_property(TARGET tcpquic_memory_stats_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
+add_executable(tcpquic_runtime_config_file_store_test
+    unittest/runtime_config_file_store_test.cpp
+    runtime/runtime_config_file_store.cpp
+)
+tcpquic_target_include_dirs(tcpquic_runtime_config_file_store_test)
+target_link_libraries(tcpquic_runtime_config_file_store_test PRIVATE nlohmann_json::nlohmann_json)
+set_property(TARGET tcpquic_runtime_config_file_store_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_runtime_config_file_store_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 set(TCPQUIC_ARES_DNS_RESOLVER_TEST_SOURCES
     unittest/ares_dns_resolver_test.cpp
@@ -1075,8 +1086,12 @@ add_executable(tcpquic_server_admin_test
     runtime/admin_memory.cpp
     runtime/admin_config.cpp
     runtime/memory_stats.cpp
+    runtime/runtime_config_file_store.cpp
     runtime/server_admin.cpp
+    runtime/server_runtime_config.cpp
+    acl/acl.cpp
     tunnel/relay_alloc.cpp
+    ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
 target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic nlohmann_json::nlohmann_json)
@@ -1241,6 +1256,7 @@ set(TCPQUIC_TEST_TARGETS
     tcpquic_relay_buffer_test
     tcpquic_relay_alloc_test
     tcpquic_memory_stats_test
+    tcpquic_runtime_config_file_store_test
     tcpquic_tuning_test
     tcpquic_quic_settings_test
     tcpquic_thread_pool_test

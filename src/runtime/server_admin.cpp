@@ -4,12 +4,15 @@
 #include "admin_memory.h"
 #include "quic_session.h"
 #include "relay_metrics.h"
+#include "runtime_config_file_store.h"
+#include "server_runtime_config.h"
 #include "tunnel_registry.h"
 #include "trace.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -168,32 +171,90 @@ bool ParseServerTunnelAdminPath(const std::string& path, TqServerTunnelAdminPath
     return out.TunnelId.find('/') == std::string::npos;
 }
 
-} // namespace
-
-std::string TqHandleServerAdmin(
-    const TqHttpRequest& req,
-    TqServerMetrics& metrics,
-    uint64_t uptimeSeconds) {
-    return TqHandleServerAdmin(req, metrics, uptimeSeconds, TqConfig{});
-}
-
-std::string TqHandleServerAdmin(
+std::string HandleServerAdmin(
     const TqHttpRequest& req,
     TqServerMetrics& metrics,
     uint64_t uptimeSeconds,
-    const TqConfig& runtimeConfig) {
+    const TqConfig& runtimeConfig,
+    TqServerRuntimeConfigState* runtimeConfigState,
+    TqRuntimeConfigFileStore* runtimeConfigStore,
+    const TqServerAdminUpdateAcl& updateAcl) {
     std::string response;
     if (TqHandleMemoryAdmin(req, response)) {
         return response;
     }
 
     if (req.Method == "GET" && req.Path == "/server/config") {
+        const TqConfig snapshot = runtimeConfigState != nullptr ?
+            runtimeConfigState->SnapshotConfig() :
+            runtimeConfig;
         std::vector<std::string> resolved;
         {
             std::lock_guard<std::mutex> guard(metrics.Lock);
             resolved = metrics.ResolvedListens;
         }
-        return TqJsonResponse(200, TqServerRuntimeConfigJson(runtimeConfig, resolved, false));
+        return TqJsonResponse(200, TqServerRuntimeConfigJson(snapshot, resolved, false));
+    }
+    if (req.Method == "PATCH" && req.Path == "/server/config") {
+        if (runtimeConfigState == nullptr) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson(
+                    "not_supported",
+                    "server runtime config state is not available"));
+        }
+
+        TqServerConfigPatch patch;
+        std::string err;
+        bool unsupported = false;
+        if (!TqParseServerConfigPatch(req.Body, patch, err, unsupported)) {
+            return TqJsonResponse(
+                unsupported ? 503 : 400,
+                unsupported ? TqStructuredErrorJson("not_supported", err) : ErrorJson(err));
+        }
+
+        TqConfig nextConfig;
+        TqAcl nextAcl;
+        if (!runtimeConfigState->BuildAclPatch(patch, nextConfig, nextAcl, err)) {
+            return TqJsonResponse(400, ErrorJson(err));
+        }
+
+        if (nextConfig.ConfigPath.empty()) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson(
+                    "not_supported",
+                    "server runtime config path is not available"));
+        }
+        if (runtimeConfigStore == nullptr) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson(
+                    "not_supported",
+                    "server runtime config store is not available"));
+        }
+
+        if (!runtimeConfigStore->PatchServerAcl(
+                nextConfig.AllowTargets,
+                nextConfig.DenyTargets,
+                err)) {
+            return TqJsonResponse(503, ErrorJson(err));
+        }
+        if (!updateAcl || !updateAcl(nextAcl)) {
+            return TqJsonResponse(
+                503,
+                TqStructuredErrorJson(
+                    "not_supported",
+                    "failed to apply server ACL runtime state"));
+        }
+
+        runtimeConfigState->Commit(nextConfig, nextAcl);
+        std::vector<std::string> resolved;
+        {
+            std::lock_guard<std::mutex> guard(metrics.Lock);
+            resolved = metrics.ResolvedListens;
+        }
+        return TqJsonResponse(200, TqServerRuntimeConfigJson(nextConfig, resolved, false));
     }
     if (req.Method == "PATCH" && req.Path == "/runtime/config") {
         TqConfig patchedConfig = runtimeConfig;
@@ -347,4 +408,45 @@ std::string TqHandleServerAdmin(
         return TqJsonResponse(200, ServerTunnelsJson());
     }
     return TqJsonResponse(404, ErrorJson("not found"));
+}
+
+} // namespace
+
+std::string TqHandleServerAdmin(
+    const TqHttpRequest& req,
+    TqServerMetrics& metrics,
+    uint64_t uptimeSeconds,
+    TqServerRuntimeConfigState& runtimeConfigState,
+    TqRuntimeConfigFileStore* runtimeConfigStore,
+    TqServerAdminUpdateAcl updateAcl) {
+    return HandleServerAdmin(
+        req,
+        metrics,
+        uptimeSeconds,
+        runtimeConfigState.SnapshotConfig(),
+        &runtimeConfigState,
+        runtimeConfigStore,
+        updateAcl);
+}
+
+std::string TqHandleServerAdmin(
+    const TqHttpRequest& req,
+    TqServerMetrics& metrics,
+    uint64_t uptimeSeconds) {
+    return TqHandleServerAdmin(req, metrics, uptimeSeconds, TqConfig{});
+}
+
+std::string TqHandleServerAdmin(
+    const TqHttpRequest& req,
+    TqServerMetrics& metrics,
+    uint64_t uptimeSeconds,
+    const TqConfig& runtimeConfig) {
+    return HandleServerAdmin(
+        req,
+        metrics,
+        uptimeSeconds,
+        runtimeConfig,
+        nullptr,
+        nullptr,
+        TqServerAdminUpdateAcl{});
 }

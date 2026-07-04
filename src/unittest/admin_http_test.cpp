@@ -280,6 +280,9 @@ int main() {
         if (html.find("server-connections") == std::string_view::npos) return 351;
         if (html.find("server-tunnels") == std::string_view::npos) return 352;
         if (html.find("server-acl") == std::string_view::npos) return 353;
+        if (html.find("server-acl-allow") == std::string_view::npos) return 437;
+        if (html.find("server-acl-deny") == std::string_view::npos) return 438;
+        if (html.find("server-acl-save") == std::string_view::npos) return 439;
         if (html.find("<th>total_streams_opened</th>") == std::string_view::npos) return 429;
         if (html.find("remote source") == std::string_view::npos) return 354;
         if (html.find("remote_identity") != std::string_view::npos) return 355;
@@ -299,6 +302,9 @@ int main() {
         if (js.find("item.total_streams_opened += Number(connection.total_streams || 0);") == std::string_view::npos) return 430;
         if (js.find("total_streams_opened: row.total_streams") == std::string_view::npos) return 431;
         if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;
+        if (js.find("api('/server/config', { method: 'PATCH'") == std::string_view::npos) return 440;
+        if (js.find("parseAclTargets") == std::string_view::npos) return 441;
+        if (js.find("saveServerAcl") == std::string_view::npos) return 442;
         if (js.find("renderRelay") == std::string_view::npos) return 368;
         if (js.find("function platformRelayBackend(data)") == std::string_view::npos) return 432;
         if (js.find("data.linux_relay_backend") == std::string_view::npos) return 433;
@@ -1047,6 +1053,9 @@ int main() {
             if (req.Method == "GET" && req.Path == "/server/config") {
                 return TqJsonResponse(200, "{\"server_config\":true}");
             }
+            if (req.Method == "PATCH" && req.Path == "/server/config") {
+                return TqJsonResponse(200, "{\"server_config_patched\":true}");
+            }
             if (req.Method == "GET" && req.Path == "/peers/agent-d/config") {
                 return TqJsonResponse(200, "{\"peer_config\":true}");
             }
@@ -1287,6 +1296,11 @@ int main() {
         if (const int code = sendAuthorized("GET", "/api/v1/server/config", serverConfigResponse)) return code;
         if (!TqHttpStatusIs(serverConfigResponse, 200)) return 189;
         if (serverConfigResponse.find("\"server_config\":true") == std::string::npos) return 190;
+
+        std::string serverConfigPatchResponse;
+        if (const int code = sendAuthorized("PATCH", "/api/v1/server/config", serverConfigPatchResponse)) return code;
+        if (!TqHttpStatusIs(serverConfigPatchResponse, 200)) return 229;
+        if (serverConfigPatchResponse.find("\"server_config_patched\":true") == std::string::npos) return 230;
 
         std::string peerConfigResponse;
         if (const int code = sendAuthorized("GET", "/api/v1/peers/agent-d/config", peerConfigResponse)) return code;

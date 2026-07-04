@@ -191,6 +191,7 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
 | `GET` | `/api/v1/server` | `200` | 返回 server 指标 JSON。 |
 | `GET` | `/api/v1/server/metrics` | `200` | 返回 server 指标 JSON。 |
 | `GET` | `/api/v1/server/config` | `200` | 查询 server 配置快照，包括 listen、resolved listens、ACL、proto、tuning、relay、compression 等字段。 |
+| `PATCH` | `/api/v1/server/config` | `200`/`400`/`503` | 热更新 server ACL，并写回 server JSON 配置文件。首版只支持 `allow_targets` 和 `deny_targets`。 |
 | `GET` | `/api/v1/server/connections` | `200` | 列出 server 侧 QUIC connection。 |
 | `GET` | `/api/v1/server/connections/{connection_id}` | `200`/`404` | 查询 server 侧单个 connection。 |
 | `POST` | `/api/v1/server/connections/{connection_id}:abort-tunnels` | `202`/`404` | 中止该 server connection 下的 tunnels。 |
@@ -228,6 +229,22 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
 `ServerTunnel` 字段：`tunnel_id`、`peer_id`、`connection_id`、`state`、`target`、`role`、`duration_ms`、`active`。
 
 `GET /api/v1/server/config` 返回 server 运行时配置快照，字段使用推荐配置 schema 命名，例如 `listen`、`resolved_listens`、`allow_targets`、`deny_targets`、`proto`、`tls`、`tuning`、`relay`、`compression`、`admin`。证书密钥等敏感字段会脱敏或不返回。
+
+`PATCH /api/v1/server/config`：
+
+```json
+{
+  "allow_targets": ["127.0.0.1/32", "10.0.0.0/8"],
+  "deny_targets": ["169.254.0.0/16"]
+}
+```
+
+- `allow_targets` 和 `deny_targets` 支持 JSON array，也兼容逗号分隔字符串；未出现字段保持当前运行态值。
+- 成功后会用 `nlohmann::json` 更新 `--config` 指向的 server JSON 文件中的 `server.allow_targets` / `server.deny_targets`，再更新运行态 ACL，随后提交 runtime config state。
+- 进程没有可写回的 `config_path`，或当前 handler 没有配置文件 store 时，返回 `503 not_supported`。
+- 非法 CIDR、非法 JSON、未知字段返回 `400`，旧运行态 ACL 保持不变。
+- `listen`、`resolved_listens`、`tls`、`quic`、`proto`、`relay`、`admin` 等启动级字段返回 `503 not_supported`。
+- PATCH 空 `allow_targets: []` 表示拒绝所有普通新建 tunnel；启动配置省略 `allow_targets` 时仍按启动默认值补 `0.0.0.0/0`。
 
 ## Relay 和内存诊断响应
 

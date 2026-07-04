@@ -353,6 +353,119 @@ int TestAclDenyReturnsAclDenied() {
     return 0;
 }
 
+int TestUpdateAclAffectsNewLiteralRequests() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) {
+        return 180;
+    }
+
+    ScopedSocket listener;
+    uint16_t port = 0;
+    if (!MakeLoopbackListener(listener, port)) {
+        return 181;
+    }
+
+    TqServerDialReactor reactor(AllowAllAcl());
+    if (!reactor.Start()) {
+        return 182;
+    }
+
+    bool firstCompleted = false;
+    TqServerDialResult firstObserved{};
+    TqServerDialRequest firstRequest;
+    firstRequest.Host = "127.0.0.1";
+    firstRequest.Port = port;
+    firstRequest.Complete = [&](const TqServerDialResult& result) {
+        firstCompleted = true;
+        firstObserved = result;
+    };
+
+    if (reactor.Submit(std::move(firstRequest)) == 0) {
+        reactor.Stop();
+        return 183;
+    }
+    if (!RunUntil(firstCompleted, reactor, 3000)) {
+        reactor.Stop();
+        return 184;
+    }
+    ScopedSocket firstConnected(firstObserved.Fd);
+    if (!firstObserved.Done || firstObserved.Error != TqOpenError::Ok) {
+        reactor.Stop();
+        return 185;
+    }
+    if (!TqSocketValid(firstConnected.Get()) || !AcceptOne(listener.Get(), 1000)) {
+        reactor.Stop();
+        return 186;
+    }
+
+    TqAcl denyLoopback;
+    denyLoopback.AllowCidrs = {"10.0.0.0/8"};
+    denyLoopback.DenyCidrs = {"127.0.0.0/8"};
+    reactor.UpdateAcl(denyLoopback);
+
+    bool deniedCompleted = false;
+    TqServerDialResult deniedObserved{};
+    TqServerDialRequest deniedRequest;
+    deniedRequest.Host = "127.0.0.1";
+    deniedRequest.Port = port;
+    deniedRequest.Complete = [&](const TqServerDialResult& result) {
+        deniedCompleted = true;
+        deniedObserved = result;
+    };
+
+    if (reactor.Submit(std::move(deniedRequest)) == 0) {
+        reactor.Stop();
+        return 187;
+    }
+    if (!RunUntil(deniedCompleted, reactor, 3000)) {
+        reactor.Stop();
+        return 188;
+    }
+    if (!deniedObserved.Done || deniedObserved.Error != TqOpenError::AclDenied) {
+        reactor.Stop();
+        return 189;
+    }
+    if (TqSocketValid(deniedObserved.Fd)) {
+        TqCloseSocket(deniedObserved.Fd);
+        reactor.Stop();
+        return 190;
+    }
+
+    reactor.UpdateAcl(AllowAllAcl());
+
+    bool secondCompleted = false;
+    TqServerDialResult secondObserved{};
+    TqServerDialRequest secondRequest;
+    secondRequest.Host = "127.0.0.1";
+    secondRequest.Port = port;
+    secondRequest.Complete = [&](const TqServerDialResult& result) {
+        secondCompleted = true;
+        secondObserved = result;
+    };
+
+    if (reactor.Submit(std::move(secondRequest)) == 0) {
+        reactor.Stop();
+        return 191;
+    }
+    if (!RunUntil(secondCompleted, reactor, 3000)) {
+        reactor.Stop();
+        return 192;
+    }
+    reactor.Stop();
+
+    ScopedSocket secondConnected(secondObserved.Fd);
+    if (!secondObserved.Done || secondObserved.Error != TqOpenError::Ok) {
+        return 193;
+    }
+    if (!TqSocketValid(secondConnected.Get())) {
+        return 194;
+    }
+    if (!AcceptOne(listener.Get(), 1000)) {
+        return 195;
+    }
+    return 0;
+}
+
 int TestDnsFailureReturnsDnsFailed() {
     TqSocketStartup startup;
     if (!startup.Ok()) {
@@ -1167,6 +1280,10 @@ int main() {
         return result;
     }
     result = TestAclDenyReturnsAclDenied();
+    if (result != 0) {
+        return result;
+    }
+    result = TestUpdateAclAffectsNewLiteralRequests();
     if (result != 0) {
         return result;
     }

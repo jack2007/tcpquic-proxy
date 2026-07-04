@@ -60,6 +60,7 @@ public:
     void Cancel(uint64_t token);
     bool RunOnce(int timeoutMs);
     size_t PendingCount() const;
+    void UpdateAcl(TqAcl acl);
 
 private:
     struct Impl;

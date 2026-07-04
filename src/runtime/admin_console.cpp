@@ -102,6 +102,8 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     .allocator-result-panel{background:var(--tq-panel);border:1px solid var(--tq-line);border-radius:8px;padding:12px;display:grid;gap:6px;font-size:12px;color:var(--tq-muted);align-content:start}
     .allocator-result-panel strong{color:var(--tq-text);font-size:13px}
     .allocator-metric-row{display:grid;grid-template-columns:1fr auto;gap:8px;border-top:1px solid var(--tq-line);padding-top:8px}
+    .acl-editor{min-height:180px}
+    .acl-status{margin-top:12px}
     .steps{display:grid;gap:8px;margin:0;padding:0;list-style:none}.steps li{display:grid;grid-template-columns:28px 1fr;gap:8px;align-items:start;font-size:13px;color:var(--tq-ink);line-height:1.4}
     .num{display:inline-flex;width:22px;height:22px;align-items:center;justify-content:center;border-radius:50%;background:#e8eef4;font-size:12px;font-weight:700}
     .callout{border:1px solid #f1cc8f;background:#fff8eb;color:#7c3d00;padding:10px 12px;border-radius:8px;font-size:13px;line-height:1.45}
@@ -212,11 +214,13 @@ static constexpr char kConsoleHtmlStorage[] =
         </section>
 
         <section id="server-acl" class="page">
-          <div class="title-row"><div><h2>ACL - server</h2><p class="subtitle">server 独有页面。只读展示 server config 中的 allow_targets/deny_targets 和 metrics 中的 acl_denied。</p></div></div>
+          <div class="title-row"><div><h2>ACL - server</h2><p class="subtitle">server 独有页面。编辑 allow_targets/deny_targets 后保存，后续新建 tunnel 立即使用新 ACL。</p></div><div class="actions"><button class="btn primary" id="server-acl-save">Save ACL</button></div></div>
           <div class="grid">
-            <div class="card span-7 table-scroll"><h3>规则摘要</h3><table><thead><tr><th>type</th><th>targets</th></tr></thead><tbody id="server-acl-rules"></tbody></table></div>
-            <div class="card span-5"><h3>统计</h3><div class="metric"><span class="label">acl_denied</span><span class="value" id="server-acl-denied">0</span><span class="note">from /api/v1/metrics</span></div></div>
-            <div class="card span-12"><div class="callout">当前 API 不提供逐条命中历史或最近拒绝列表，因此首版不展示 matches、last_match、time、reason 等字段。</div></div>
+            <div class="card span-6"><h3>allow_targets</h3><textarea id="server-acl-allow" class="acl-editor" spellcheck="false"></textarea></div>
+            <div class="card span-6"><h3>deny_targets</h3><textarea id="server-acl-deny" class="acl-editor" spellcheck="false"></textarea></div>
+            <div class="card span-7 table-scroll"><h3>当前规则摘要</h3><table><thead><tr><th>type</th><th>targets</th></tr></thead><tbody id="server-acl-rules"></tbody></table></div>
+            <div class="card span-5"><h3>状态</h3><div class="metric"><span class="label">acl_denied</span><span class="value" id="server-acl-denied">0</span><span class="note">from /api/v1/metrics</span></div><div class="callout acl-status" id="server-acl-status">等待刷新</div></div>
+            <div class="card span-12"><div class="callout">每行一个 CIDR；也可以粘贴逗号分隔内容。空 allow_targets 会拒绝所有普通目标。</div></div>
           </div>
         </section>
 
@@ -610,15 +614,48 @@ static constexpr char kConsoleJsStorage[] =
       renderRows(document.getElementById('server-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','state','target','role','duration_ms','active']);
     }
 
-    async function renderServerAcl() {
-      const [config, metrics] = await Promise.all([api('/server/config'), api('/metrics')]);
+    function parseAclTargets(value) {
+      return String(value || '')
+        .split(/[\n,]/)
+        .map(item => item.trim())
+        .filter(Boolean);
+    }
+
+    function formatAclTargets(values) {
+      return (Array.isArray(values) ? values : []).join('\n');
+    }
+
+    function setServerAclForm(config) {
       const allowTargets = Array.isArray(config.allow_targets) ? config.allow_targets : [];
       const denyTargets = Array.isArray(config.deny_targets) ? config.deny_targets : [];
+      const allowEditor = document.getElementById('server-acl-allow');
+      const denyEditor = document.getElementById('server-acl-deny');
+      if (allowEditor) allowEditor.value = formatAclTargets(allowTargets);
+      if (denyEditor) denyEditor.value = formatAclTargets(denyTargets);
       renderRows(document.getElementById('server-acl-rules'), [
         { type: 'allow_targets', targets: allowTargets.join(', ') },
         { type: 'deny_targets', targets: denyTargets.join(', ') }
       ], ['type','targets']);
+    }
+
+    async function renderServerAcl() {
+      const [config, metrics] = await Promise.all([api('/server/config'), api('/metrics')]);
+      setServerAclForm(config);
       document.getElementById('server-acl-denied').textContent = text(metrics.acl_denied);
+      const status = document.getElementById('server-acl-status');
+      if (status) status.textContent = `loaded from ${text(config.config_path || 'runtime state')}`;
+    }
+
+    async function saveServerAcl() {
+      const payload = {
+        allow_targets: parseAclTargets(document.getElementById('server-acl-allow').value),
+        deny_targets: parseAclTargets(document.getElementById('server-acl-deny').value)
+      };
+      const status = document.getElementById('server-acl-status');
+      if (status) status.textContent = 'saving';
+      const config = await api('/server/config', { method: 'PATCH', body: payload });
+      setServerAclForm(config);
+      if (status) status.textContent = 'saved';
     }
 
     function renderPanelError(elementId, err) {
@@ -896,6 +933,8 @@ static constexpr char kConsoleJsStorage[] =
       if (runtimeConfigSave) runtimeConfigSave.onclick = () => runClientAction(saveRuntimeConfig);
       const diagnosticsSave = document.getElementById('diagnostics-save');
       if (diagnosticsSave) diagnosticsSave.onclick = () => runClientAction(saveDiagnostics);
+      const serverAclSave = document.getElementById('server-acl-save');
+      if (serverAclSave) serverAclSave.onclick = () => runClientAction(saveServerAcl);
       const allocatorDump = document.getElementById('allocator-dump');
       if (allocatorDump) allocatorDump.onclick = () => runClientAction(runAllocatorDump);
       document.getElementById('peer-delete').onclick = () => {
