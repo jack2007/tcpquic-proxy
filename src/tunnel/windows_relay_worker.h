@@ -19,9 +19,11 @@
 #endif
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +48,9 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
     QuicShutdownComplete,
+#if defined(TQ_UNIT_TESTING)
+    TestBlockWorkerQueue,
+#endif
 };
 
 struct TqWindowsRelayActiveSnapshot {
@@ -137,6 +142,15 @@ struct TqWindowsRelayWorkerSnapshot {
     std::vector<TqWindowsRelayActiveSnapshot> ActiveRelayStates;
 };
 
+#if defined(TQ_UNIT_TESTING)
+struct TqWindowsRelayWorkerQueueBlockForTest {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    bool Entered{false};
+    bool Release{false};
+};
+#endif
+
 class TqWindowsRelayWorker {
 public:
     explicit TqWindowsRelayWorker(uint32_t workerIndex = 0);
@@ -192,6 +206,15 @@ public:
         uint64_t relayId,
         bool* closeAfterDrained,
         bool* tcpRecvClosed) const;
+    bool TestGetRelayTraceStateForTest(
+        uint64_t relayId,
+        TqTraceLinuxRelayStreamState* out,
+        std::string* targetStorage) const;
+    bool TestPostWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest* block);
+    bool TestWaitWorkerQueueBlockEnteredForTest(
+        TqWindowsRelayWorkerQueueBlockForTest& block,
+        uint32_t timeoutMs) const;
+    void TestReleaseWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest& block) const;
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
     bool MaybePostTcpRecvForTest(uint64_t relayId);

@@ -965,6 +965,18 @@ void TqWindowsRelayWorker::Run() {
             }
             continue;
         }
+#if defined(TQ_UNIT_TESTING)
+        if (op->Event == TqWindowsIocpOperationType::TestBlockWorkerQueue) {
+            auto* block = static_cast<TqWindowsRelayWorkerQueueBlockForTest*>(op->Control);
+            if (block != nullptr) {
+                std::unique_lock<std::mutex> guard(block->Mutex);
+                block->Entered = true;
+                block->Cv.notify_all();
+                block->Cv.wait(guard, [block] { return block->Release; });
+            }
+            continue;
+        }
+#endif
         const bool carriesRelayRef = static_cast<bool>(op->Relay);
         const bool callbackSourced = IsCallbackSourcedOperation(op->Event);
         auto relay = op->Relay;
@@ -1290,6 +1302,64 @@ bool TqWindowsRelayWorker::RegisterRelayForTest(
     handle->WindowsRelayId = relay->Id;
     handle->WindowsWorkerIndex = WorkerIndex_;
     return true;
+}
+
+bool TqWindowsRelayWorker::TestGetRelayTraceStateForTest(
+    uint64_t relayId,
+    TqTraceLinuxRelayStreamState* out,
+    std::string* targetStorage) const {
+    if (out == nullptr || targetStorage == nullptr) {
+        return false;
+    }
+    targetStorage->clear();
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        const auto it = Relays_.find(relayId);
+        if (it == Relays_.end()) {
+            return false;
+        }
+        *out = BuildRelayTraceState(it->second);
+        if (out->Target != nullptr) {
+            *targetStorage = out->Target;
+            out->Target = targetStorage->c_str();
+        }
+    }
+    return true;
+}
+
+bool TqWindowsRelayWorker::TestPostWorkerQueueBlockForTest(
+    TqWindowsRelayWorkerQueueBlockForTest* block) {
+    if (Iocp_ == nullptr || block == nullptr) {
+        return false;
+    }
+    auto op = std::make_unique<IoOperation>();
+    op->Event = TqWindowsIocpOperationType::TestBlockWorkerQueue;
+    op->Control = block;
+    IoOperation* raw = op.release();
+    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+        delete raw;
+        return false;
+    }
+    return true;
+}
+
+bool TqWindowsRelayWorker::TestWaitWorkerQueueBlockEnteredForTest(
+    TqWindowsRelayWorkerQueueBlockForTest& block,
+    uint32_t timeoutMs) const {
+    std::unique_lock<std::mutex> guard(block.Mutex);
+    return block.Cv.wait_for(
+        guard,
+        std::chrono::milliseconds(timeoutMs),
+        [&block] { return block.Entered; });
+}
+
+void TqWindowsRelayWorker::TestReleaseWorkerQueueBlockForTest(
+    TqWindowsRelayWorkerQueueBlockForTest& block) const {
+    {
+        std::lock_guard<std::mutex> guard(block.Mutex);
+        block.Release = true;
+    }
+    block.Cv.notify_all();
 }
 
 bool TqWindowsRelayWorker::TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength) {

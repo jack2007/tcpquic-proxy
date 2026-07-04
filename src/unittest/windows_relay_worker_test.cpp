@@ -9,6 +9,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -1043,6 +1044,112 @@ bool TestWindowsRelayReceiveCallbackDoesNotFindRelayForTest() {
         g_StreamReceiveCompleteBytes == sizeof(data) && g_StreamReceiveCompleteCalls == 1;
 }
 
+bool TestWindowsRelayTraceContextUsesWorkerQueue() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        MsQuic = nullptr;
+        return false;
+    }
+    if (!TqSetNonBlocking(pair[1])) {
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorker worker;
+    if (!worker.Start()) {
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelay(pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+        if (handle.WindowsRelayId == 0) {
+            TqCloseSocket(pair[0]);
+        }
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqTraceLinuxRelayStreamState before{};
+    std::string beforeTarget;
+    if (!worker.TestGetRelayTraceStateForTest(handle.WindowsRelayId, &before, &beforeTarget)) {
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+    if (before.TunnelId != 0 || before.Target != nullptr) {
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    worker.SetRelayTraceContext(handle.WindowsRelayId, 12345, "queued.example:443");
+
+    TqTraceLinuxRelayStreamState immediate{};
+    std::string immediateTarget;
+    if (!worker.TestGetRelayTraceStateForTest(handle.WindowsRelayId, &immediate, &immediateTarget)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+    if (immediate.TunnelId != 0 || immediate.Target != nullptr) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+        return false;
+    }
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+
+    (void)worker.Snapshot();
+    TqTraceLinuxRelayStreamState after{};
+    std::string afterTarget;
+    const bool sawTrace =
+        worker.TestGetRelayTraceStateForTest(handle.WindowsRelayId, &after, &afterTarget) &&
+        after.TunnelId == 12345 &&
+        after.Target != nullptr &&
+        std::strcmp(after.Target, "queued.example:443") == 0;
+
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    MsQuic = nullptr;
+    return sawTrace;
+}
+
 }  // namespace
 #endif
 
@@ -1093,6 +1200,10 @@ int main() {
 
     if (!TestWindowsRelayReceiveCallbackDoesNotFindRelayForTest()) {
         return 76;
+    }
+
+    if (!TestWindowsRelayTraceContextUsesWorkerQueue()) {
+        return 123;
     }
 
     {
