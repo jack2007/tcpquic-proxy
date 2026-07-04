@@ -920,6 +920,85 @@ void SendCompleteEnqueueFailureWaitsForWorkerAccounting() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void SendCompleteAfterRunningFalseWaitsForWorkerExit() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 2;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "running-false-complete";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+
+    void* callbackContext = worker.StreamCallbackContextForTest(result.RelayId);
+    void* sendContext = g_lastSendContext.load(std::memory_order_acquire);
+    CHECK(callbackContext != nullptr);
+    CHECK(sendContext != nullptr);
+
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(worker.Snapshot().PendingEvents == 2);
+
+    worker.SetRunningForTest(false);
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    event.SEND_COMPLETE.ClientContext = sendContext;
+    std::atomic<bool> callbackEntered{false};
+    std::atomic<bool> callbackReturned{false};
+    std::thread callbackThread([&] {
+        callbackEntered.store(true, std::memory_order_release);
+        CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
+        callbackReturned.store(true, std::memory_order_release);
+    });
+
+    const auto enteredDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!callbackEntered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < enteredDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(callbackEntered.load(std::memory_order_acquire));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!callbackReturned.load(std::memory_order_acquire));
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+    CHECK(worker.KnownSendOperationCountForTest() == 1);
+
+    worker.MarkWorkerThreadExitedForTest();
+    const auto returnedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!callbackReturned.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < returnedDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(callbackReturned.load(std::memory_order_acquire));
+    callbackThread.join();
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void SendCompleteFallsBackToBindingRelayWhenMapLookupMisses() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -2982,6 +3061,7 @@ int main() {
     SendCompleteAfterUnregisterReleasesOperation();
     SendCompleteCallbackQueuesUntilWorkerDrain();
     SendCompleteEnqueueFailureWaitsForWorkerAccounting();
+    SendCompleteAfterRunningFalseWaitsForWorkerExit();
     SendCompleteFallsBackToBindingRelayWhenMapLookupMisses();
     SynchronousSendCompleteBeforeFailureDoesNotDoubleRelease();
     SynchronousSendCompleteBeforeSuccessDoesNotLeak();

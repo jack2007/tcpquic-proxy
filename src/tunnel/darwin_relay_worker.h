@@ -145,6 +145,8 @@ public:
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
     uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
     uint64_t PendingTcpWriteBytesForTest(uint64_t relayId);
+    void SetRunningForTest(bool running);
+    void MarkWorkerThreadExitedForTest();
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
@@ -194,6 +196,7 @@ private:
 
     void Run();
     bool IsWorkerThread() const;
+    bool WorkerThreadExited() const;
     bool Wake() const;
     bool EnqueueEvent(TqDarwinRelayEvent&& event);
     ControlEnqueueResult EnqueueControlEvent(TqDarwinRelayEvent&& event) const;

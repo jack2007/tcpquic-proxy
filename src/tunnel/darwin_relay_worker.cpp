@@ -294,6 +294,11 @@ bool TqDarwinRelayWorker::IsWorkerThread() const {
     return WorkerThreadId == std::this_thread::get_id();
 }
 
+bool TqDarwinRelayWorker::WorkerThreadExited() const {
+    std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+    return WorkerThreadId == std::thread::id{};
+}
+
 #if defined(TCPQUIC_TESTING)
 bool TqDarwinRelayWorker::StartForTest() {
     if (KqueueFd < 0) {
@@ -333,6 +338,15 @@ uint32_t TqDarwinRelayWorker::DrainWakeForTest() {
 
 bool TqDarwinRelayWorker::RunningForTest() const {
     return Running.load(std::memory_order_acquire);
+}
+
+void TqDarwinRelayWorker::SetRunningForTest(bool running) {
+    Running.store(running, std::memory_order_release);
+}
+
+void TqDarwinRelayWorker::MarkWorkerThreadExitedForTest() {
+    std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+    WorkerThreadId = std::thread::id{};
 }
 
 uint64_t TqDarwinRelayWorker::FindRelayLockedCountForTest() const {
@@ -700,6 +714,10 @@ void TqDarwinRelayWorker::Run() {
         for (int i = 0; i < count; ++i) {
             ProcessKqueueEvent(events[i]);
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
+        WorkerThreadId = std::thread::id{};
     }
 }
 
@@ -1689,7 +1707,7 @@ bool TqDarwinRelayWorker::EnqueueQuicSendCompleteFromCallback(
     TqDarwinRelaySendOperation* operation) {
     uint32_t attempts = 0;
     const bool workerThread = IsWorkerThread();
-    while (Running.load(std::memory_order_acquire)) {
+    while (Running.load(std::memory_order_acquire) || (!workerThread && !WorkerThreadExited())) {
         TqDarwinRelayEvent event{};
         event.Type = TqDarwinRelayEventType::QuicSendComplete;
         event.RelayId = relayId;
