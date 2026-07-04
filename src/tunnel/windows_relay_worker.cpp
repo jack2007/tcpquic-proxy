@@ -214,7 +214,7 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
     ITqDecompressor* Decompressor{nullptr};
     TqRelayHandle* PublicHandle{nullptr};
     TqTuningConfig Tuning;
-    std::mutex TcpRecvOpsLock;
+    // Worker-thread-owned (IOCP serializes access); not protected by per-relay mutex.
     std::vector<std::unique_ptr<IoOperation>> TcpRecvOpsFree;
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
     std::atomic<bool> Closing{false};
@@ -240,11 +240,9 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
     std::atomic<uint64_t> LastIocpCompletionErrno{0};
     std::atomic<uint32_t> LastIocpOperation{0};
     std::atomic<const char*> CloseReason{kWindowsRelayCloseReasonUnknown};
-    std::mutex PendingReceiveLock;
+    // Worker-thread-owned (IOCP serializes access); not protected by per-relay mutex.
     std::list<std::shared_ptr<TqWindowsPendingQuicReceive>> PendingReceives;
-    std::mutex CallbackPendingQuicReceiveLock;
-    std::deque<std::shared_ptr<TqWindowsPendingQuicReceive>> CallbackPendingQuicReceives;
-    std::mutex PendingQuicSendLock;
+    // Worker-thread-owned (IOCP serializes access); not protected by per-relay mutex.
     std::deque<std::unique_ptr<TqWindowsQuicSendOperation>> PendingQuicSendRetries;
     std::atomic<bool> TcpRecvPosted{false};
     std::atomic<bool> TcpReadPausedByQuicBacklog{false};
@@ -469,11 +467,7 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
             relay->OutstandingQuicSendBytes.load(std::memory_order_relaxed);
         active.MaxOutstandingQuicSendBytes =
             relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> pendingGuard(relay->CallbackPendingQuicReceiveLock);
-            active.CallbackPendingQuicReceiveDepth =
-                relay->CallbackPendingQuicReceives.size();
-        }
+        active.CallbackPendingQuicReceiveDepth = 0;
         snapshot.ActiveRelayStates.push_back(active);
     }
 
@@ -1571,14 +1565,10 @@ bool TqWindowsRelayWorker::TestCompleteReceiveViewForCleanup(uint64_t relayId, u
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    std::shared_ptr<TqWindowsPendingQuicReceive> view;
-    {
-        std::lock_guard<std::mutex> guard(relay->PendingReceiveLock);
-        if (relay->PendingReceives.empty()) {
-            return false;
-        }
-        view = relay->PendingReceives.front();
+    if (relay->PendingReceives.empty()) {
+        return false;
     }
+    auto view = relay->PendingReceives.front();
     if (!view || completedLength > view->TotalLength) {
         return false;
     }
@@ -1889,10 +1879,6 @@ bool TqWindowsRelayWorker::TestNoWorkerEventQueueReceiveViewForTest() const {
         if (!relay) {
             continue;
         }
-        std::lock_guard<std::mutex> pendingGuard(relay->CallbackPendingQuicReceiveLock);
-        if (!relay->CallbackPendingQuicReceives.empty()) {
-            return false;
-        }
     }
     return true;
 }
@@ -1914,14 +1900,10 @@ bool TqWindowsRelayWorker::TestAdvanceReceiveViewForCompletion(uint64_t relayId,
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    std::shared_ptr<TqWindowsPendingQuicReceive> view;
-    {
-        std::lock_guard<std::mutex> guard(relay->PendingReceiveLock);
-        if (relay->PendingReceives.empty()) {
-            return false;
-        }
-        view = relay->PendingReceives.front();
+    if (relay->PendingReceives.empty()) {
+        return false;
     }
+    auto view = relay->PendingReceives.front();
     if (!view || completedLength == 0 || view->CompletedLength > view->TotalLength ||
         completedLength > view->TotalLength - view->CompletedLength) {
         return false;
@@ -2508,19 +2490,11 @@ bool TqWindowsRelayWorker::HasPendingRelayDrainWork(
     if (!relay) {
         return false;
     }
-    bool hasCallbackPending = false;
-    bool hasPendingReceives = false;
-    size_t pendingQuicSendRetries = 0;
-    {
-        std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
-        hasCallbackPending = !relay->CallbackPendingQuicReceives.empty();
-    }
-    hasPendingReceives = !relay->PendingReceives.empty();
-    pendingQuicSendRetries = relay->PendingQuicSendRetries.size();
+    const bool hasPendingReceives = !relay->PendingReceives.empty();
+    const size_t pendingQuicSendRetries = relay->PendingQuicSendRetries.size();
     return relay->InFlightTcpSends.load(std::memory_order_acquire) != 0 ||
            relay->PendingQuicReceiveQueueDepth.load(std::memory_order_acquire) != 0 ||
            relay->PendingQuicReceiveBytes.load(std::memory_order_acquire) != 0 ||
-           hasCallbackPending ||
            hasPendingReceives ||
            relay->InFlightQuicSends.load(std::memory_order_acquire) != 0 ||
            pendingQuicSendRetries != 0 ||
@@ -2562,22 +2536,14 @@ bool TqWindowsRelayWorker::HasPendingAfterStreamShutdown(
     if (!relay) {
         return false;
     }
-    bool hasCallbackPending = false;
-    bool hasPendingReceives = false;
-    size_t pendingQuicSendRetries = 0;
-    {
-        std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
-        hasCallbackPending = !relay->CallbackPendingQuicReceives.empty();
-    }
-    hasPendingReceives = !relay->PendingReceives.empty();
-    pendingQuicSendRetries = relay->PendingQuicSendRetries.size();
+    const bool hasPendingReceives = !relay->PendingReceives.empty();
+    const size_t pendingQuicSendRetries = relay->PendingQuicSendRetries.size();
     return relay->InFlightQuicSends.load(std::memory_order_acquire) != 0 ||
            relay->OutstandingQuicSendBytes.load(std::memory_order_acquire) != 0 ||
            pendingQuicSendRetries != 0 ||
            relay->InFlightTcpSends.load(std::memory_order_acquire) != 0 ||
            relay->InFlightTcpRecvs.load(std::memory_order_acquire) != 0 ||
            relay->PendingQuicReceiveQueueDepth.load(std::memory_order_acquire) != 0 ||
-           hasCallbackPending ||
            hasPendingReceives ||
            relay->PendingQuicReceiveBytes.load(std::memory_order_acquire) != 0 ||
            (relay->QuicSendFinSubmitted.load(std::memory_order_acquire) &&

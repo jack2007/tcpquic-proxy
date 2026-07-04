@@ -226,3 +226,9 @@ bool TqFormatSocketPeerAddr(TqSocketHandle fd, std::string& out);
 
 void TqTraceIncOpenTx(uint32_t connId);
 void TqTraceIncOpenRx(uint32_t connId);
+
+#if defined(TQ_UNIT_TESTING)
+void TqResetRelayTraceCallCountsForTest();
+uint64_t TqRelayTraceStopConditionCountForTest();
+uint64_t TqRelayTraceUnregisterCountForTest();
+#endif

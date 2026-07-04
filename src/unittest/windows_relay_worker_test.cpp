@@ -1,5 +1,6 @@
 #include "compress.h"
 #include "platform_socket.h"
+#include "trace.h"
 #include "windows_relay_worker.h"
 
 #include <atomic>
@@ -2502,6 +2503,7 @@ int main() {
         if (!sendCompleteWorker.TestMarkTcpRecvInFlightForRetirement(handle.WindowsRelayId)) {
             return 405;
         }
+        TqResetRelayTraceCallCountsForTest();
         auto* operation =
             sendCompleteWorker.TestCreateQuicSendOperationForTest(handle.WindowsRelayId, 7);
         if (operation == nullptr) {
@@ -2521,6 +2523,10 @@ int main() {
             snapshot.ActiveRelayStates.front().InFlightQuicSends != 0 ||
             snapshot.ActiveRelayStates.front().OutstandingQuicSendBytes != 0) {
             return 408;
+        }
+        if (TqRelayTraceStopConditionCountForTest() != 0 ||
+            TqRelayTraceUnregisterCountForTest() != 0) {
+            return 409;
         }
     }
     {

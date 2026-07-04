@@ -999,11 +999,32 @@ void TqTraceRelayStreamEvent(
         fin ? 1 : 0);
 }
 
+#if defined(TQ_UNIT_TESTING)
+static std::atomic<uint64_t> g_RelayTraceStopConditionCount{0};
+static std::atomic<uint64_t> g_RelayTraceUnregisterCount{0};
+
+void TqResetRelayTraceCallCountsForTest() {
+    g_RelayTraceStopConditionCount.store(0, std::memory_order_relaxed);
+    g_RelayTraceUnregisterCount.store(0, std::memory_order_relaxed);
+}
+
+uint64_t TqRelayTraceStopConditionCountForTest() {
+    return g_RelayTraceStopConditionCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqRelayTraceUnregisterCountForTest() {
+    return g_RelayTraceUnregisterCount.load(std::memory_order_relaxed);
+}
+#endif
+
 void TqTraceRelayStopCondition(
     const char* backend,
     uint32_t workerIndex,
     const char* trigger,
     const TqTraceLinuxRelayStreamState& state) {
+#if defined(TQ_UNIT_TESTING)
+    g_RelayTraceStopConditionCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     if (!TqTraceEnabled()) {
         return;
     }
@@ -1091,6 +1112,9 @@ void TqTraceRelayStreamShutdown(
 void TqTraceRelayUnregister(
     const char* backend,
     const TqTraceLinuxRelayStreamState& state) {
+#if defined(TQ_UNIT_TESTING)
+    g_RelayTraceUnregisterCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     if (!TqTraceEnabled()) {
         return;
     }

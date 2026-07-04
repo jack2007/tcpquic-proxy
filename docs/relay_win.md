@@ -203,7 +203,8 @@ QUIC receive 背压：
 | P4 | `TqClientTunnelOpenHandle::Lock`、ingress `Mutex`/`LifecycleMutex` | `client_ingress_reactor.cpp`、`tcp_tunnel.cpp` | client OPEN handle、ingress lifecycle | client 代理握手、OPEN 完成/取消 | 控制面锁，不在 relay 包级转发路径。 |
 | P4 | `TqTunnelReaper::Mutex`、`TqThreadPool::Mutex` | `tunnel_reaper.cpp`、`thread_pool.cpp` | 回收队列、通用任务队列 | tunnel 回收、异步任务 | 辅助线程锁，不是 Windows relay 数据面瓶颈。 |
 | 测试/残留 | `LastPostedCallbackLock_` | `windows_relay_worker.cpp` | 单测中的最近 callback post 记录 | `TQ_UNIT_TESTING` | 只在单测编译路径存在。 |
-| 残留/非生产热锁 | `RelayContext::PendingReceiveLock`、`CallbackPendingQuicReceiveLock`、`PendingQuicSendLock`、`TcpRecvOpsLock` | `windows_relay_worker.cpp` | per-relay 队列或 freelist | 当前生产主路径基本未用这些锁保护对应队列 | 当前代码实际依赖 worker 线程串行访问 `PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFree`。这些锁的存在容易误导读者，以为 per-relay 队列是跨线程加锁模型。 |
+
+Per-relay 队列（`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFree`）由 worker IOCP 线程串行访问，不再声明误导性的 per-relay mutex。Windows 不使用 Linux 的 `CallbackPendingQuicReceives` 降级队列；`CallbackPendingQuicReceiveDepth` 指标恒为 0。
 
 ### 热点结论
 
@@ -338,26 +339,21 @@ QUIC receive 背压：
 验证覆盖：
 
 - `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation / closing relay 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target，以及零 id、relay 不存在、worker 已停止和投递失败等 fire-and-forget 负路径。
-- send-complete post failure 用例覆盖 callback 投递失败时的 accounting 和 fatal reset；当前代码路径已避免该分支读取 `TraceTarget`，后续可补充 trace hook 断言，直接验证不会发出 stop-condition/unregister trace。
+- send-complete post failure 用例覆盖 callback 投递失败时的 accounting 和 fatal reset；`FailRelayFatalFromCallback()` 使用 `CloseRelay(..., traceState=false)`，单测通过 trace hook 计数断言不会触发 stop-condition/unregister trace。
 
-### 3.7 per-relay mutex 声明和实际模型不一致
+### 3.7 per-relay mutex 声明和实际模型不一致已修复
 
-现象：
+历史现象：
 
-- `RelayContext` 声明了 `TcpRecvOpsLock`、`PendingReceiveLock`、`PendingQuicSendLock` 等 mutex。
-- 当前生产路径实际直接访问 `TcpRecvOpsFree`、`PendingReceives`、`PendingQuicSendRetries`，依赖 worker IOCP 串行化。
-- 部分锁只在测试辅助或统计路径出现。
+- `RelayContext` 曾声明 `TcpRecvOpsLock`、`PendingReceiveLock`、`PendingQuicSendLock`、`CallbackPendingQuicReceiveLock` 等 mutex。
+- 生产路径实际直接访问 `TcpRecvOpsFree`、`PendingReceives`、`PendingQuicSendRetries`，依赖 worker IOCP 串行化。
+- `CallbackPendingQuicReceives` 为 Linux 降级路径；Windows 从未写入该 deque，相关锁与队列已移除。
 
-影响：
+当前状态：
 
-- 代码阅读者容易误判并发模型，以为这些队列跨线程加锁安全。
-- 后续维护者可能在 callback 或外部线程直接访问这些队列，误以为已有锁保护。
-
-建议：
-
-- 删除未使用的 per-relay mutex，或把字段注释明确为“worker-thread-owned”。
-- 增加 worker thread ownership 断言，例如关键队列操作要求 `WorkerThreadToken_ == CurrentThreadToken()`。
-- 测试辅助如果需要跨线程窥探队列，应通过 IOCP command 或 snapshot 暴露，不直接读队列。
+- per-relay 队列字段已标注为 worker-thread-owned（IOCP 串行访问，无 per-relay mutex）。
+- snapshot 中 `CallbackPendingQuicReceiveDepth` 恒为 0，与 Linux 语义区分。
+- 单测如需窥探队列状态应通过 snapshot 或 IOCP command，不在生产路径保留误导性锁。
 
 ### 3.8 Windows relay 热点观测指标
 
@@ -383,5 +379,5 @@ QUIC receive 背压：
 | 已完成 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 常规路径已改为事件驱动 maintenance queue，并保留低频兜底扫描。 |
 | 已完成 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 正常路径 O(1)，异常路径有计数和 trace。 |
 | 已完成 | receive callback 复制前加入预算判断和指标 | 超限 receive 会在复制前被拒绝并暂停后续 receive，copy 成本已有指标。 |
-| 低 | 清理或注释 per-relay 残留 mutex | 降低维护误解。 |
+| 已完成 | 清理或注释 per-relay 残留 mutex | 已删除未用锁并标注 worker-thread-owned 队列。 |
 | 已完成 | 补齐 maintenance/copy/linear-search 指标 | maintenance、linear-search 和 callback copy 指标均已补齐。 |

@@ -187,6 +187,19 @@ void TqTraceRelayFatalError(
     uint64_t) {
 }
 
+#if defined(TQ_UNIT_TESTING)
+void TqResetRelayTraceCallCountsForTest() {
+}
+
+uint64_t TqRelayTraceStopConditionCountForTest() {
+    return 0;
+}
+
+uint64_t TqRelayTraceUnregisterCountForTest() {
+    return 0;
+}
+#endif
+
 const MsQuicApi* MsQuic = nullptr;
 
 uint32_t TqCountConnectionTunnels(MsQuicConnection*) { return 0; }
