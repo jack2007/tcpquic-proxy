@@ -398,6 +398,13 @@ private:
         bool Done{false};
     };
 
+    struct ControlState {
+        bool Running{false};
+        bool IsWorkerThread{false};
+    };
+
+    ControlState GetControlState() const;
+    std::unique_lock<std::mutex> AcquireControlLockForMetrics() const;
     bool IsWorkerThread() const;
     TqLinuxRelayRegistrationResult RegisterRelayWithIdLocal(
         const TqLinuxRelayRegistration& registration);

@@ -217,6 +217,64 @@ int main() {
 
     {
         TqLinuxRelayWorkerConfig config{};
+        config.EventQueueCapacity = 1024;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 3401;
+        }
+
+        std::atomic<bool> snapshotStarted{false};
+        std::atomic<bool> registerReturned{false};
+        std::thread snapshotThread([&]() {
+            snapshotStarted.store(true, std::memory_order_release);
+            (void)worker.Snapshot();
+        });
+
+        while (!snapshotStarted.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            snapshotThread.join();
+            worker.Stop();
+            return 3403;
+        }
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.SinkQuicReceives = false;
+        registration.EnableQuicSends = false;
+        registration.Stream = nullptr;
+        registration.Handle = nullptr;
+        TqLinuxRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+        registerReturned.store(true, std::memory_order_release);
+
+        snapshotThread.join();
+        if (!registerReturned.load(std::memory_order_acquire)) {
+            worker.Stop();
+            ::close(fds[0]);
+            ::close(fds[1]);
+            return 3402;
+        }
+        if (result.Ok) {
+            worker.UnregisterRelay(result.RelayId);
+        } else {
+            ::close(fds[0]);
+        }
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.ControlLockAcquireCount == 0) {
+            std::fprintf(stderr, "expected ControlLock acquisitions to be recorded\n");
+            worker.Stop();
+            ::close(fds[1]);
+            return 3404;
+        }
+        worker.Stop();
+        ::close(fds[1]);
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 4096;
