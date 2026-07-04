@@ -416,7 +416,7 @@ void UnregisterWakesAfterFullQueueWakeFailures() {
     worker.SetWakeFailuresForTest(2);
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
-    CHECK(worker.Snapshot().PendingEvents == 2);
+    CHECK(worker.PendingEventsForTest() == 2);
 
     std::mutex mutex;
     std::condition_variable cv;
@@ -998,7 +998,7 @@ void SendCompleteEnqueueFailureWaitsForWorkerAccounting() {
 
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
-    CHECK(worker.Snapshot().PendingEvents == 2);
+    CHECK(worker.PendingEventsForTest() == 2);
 
     g_sendStatus.store(QUIC_STATUS_SUCCESS, std::memory_order_release);
     QUIC_STREAM_EVENT event{};
@@ -1095,7 +1095,7 @@ void SendCompleteAfterRunningFalseWaitsForWorkerExit() {
 
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
-    CHECK(worker.Snapshot().PendingEvents == 2);
+    CHECK(worker.PendingEventsForTest() == 2);
 
     worker.SetRunningForTest(false);
     QUIC_STREAM_EVENT event{};
@@ -3145,7 +3145,7 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
 
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
-    CHECK(worker.Snapshot().PendingEvents == 2);
+    CHECK(worker.PendingEventsForTest() == 2);
 
     const uint64_t before = worker.FindRelayLockedCountForTest();
     QUIC_STREAM_EVENT event{};

@@ -336,6 +336,10 @@ uint32_t TqDarwinRelayWorker::DrainWakeForTest() {
     return DrainWakeEvents();
 }
 
+uint32_t TqDarwinRelayWorker::PendingEventsForTest() const {
+    return EventQueue.SizeApprox();
+}
+
 bool TqDarwinRelayWorker::RunningForTest() const {
     return Running.load(std::memory_order_acquire);
 }

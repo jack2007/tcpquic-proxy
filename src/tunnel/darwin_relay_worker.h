@@ -121,6 +121,7 @@ public:
     bool EnqueueForTest(TqDarwinRelayEvent event);
     bool DrainOneEventForTest();
     uint32_t DrainWakeForTest();
+    uint32_t PendingEventsForTest() const;
     bool RunningForTest() const;
     void SetRegisterTcpFiltersFailureForTest(bool fail);
     void SetWakeFailuresForTest(uint32_t failures);
