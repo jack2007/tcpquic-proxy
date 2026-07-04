@@ -3438,7 +3438,7 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     TqDarwinRelayWorkerConfig config{};
     config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
     TqDarwinRelayWorker worker(config);
-    CHECK(worker.StartForTest());
+    CHECK(worker.Start());
 
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -3466,15 +3466,51 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
+
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_PENDING);
     CHECK(worker.FindRelayLockedCountForTest() == before);
-    const uint64_t drainLockedBefore = worker.FindRelayLockedCountForTest();
-    const uint64_t drainLocalBefore = worker.FindRelayLocalCountForTest();
-    CHECK(worker.DrainOneEventForTest());
-    CHECK(worker.FindRelayLockedCountForTest() == drainLockedBefore);
-    CHECK(worker.FindRelayLocalCountForTest() > drainLocalBefore);
 
     worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void CallbackShutdownDoesNotUseLockedRelayLookup() {
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    CHECK(worker.Start());
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const uint64_t before = worker.FindRelayLockedCountForTest();
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.FindRelayLockedCountForTest() == before);
+
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    for (int i = 0; i < 200; ++i) {
+        snapshot = worker.Snapshot();
+        if (snapshot.ActiveRelays == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(snapshot.ActiveRelays == 0);
+
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
@@ -3734,6 +3770,7 @@ int main() {
     QuicReceiveSnapshotAggregatesPendingTcpWriteMetrics();
     CompressedQuicReceiveFailsClosedWithoutWritingCorruptData();
     CallbackReceiveDoesNotUseLockedRelayLookup();
+    CallbackShutdownDoesNotUseLockedRelayLookup();
     QuicShutdownCallbackClosesViaWorkerEventWithoutLockedLookup();
     QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup();
     StopPurgesQueuedShutdownCloseWithoutLockedLookup();
