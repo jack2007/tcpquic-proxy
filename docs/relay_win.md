@@ -309,25 +309,26 @@ QUIC receive 背压：
 - 单测保留断言可通过 `TQ_UNIT_TESTING` 分支实现，生产路径不能直接终止进程。
 - 在 trace 中保留 absolute offset、total buffer length、flags，方便定位 MsQuic 行为。
 
-### 3.6 trace context 从外部线程直接写入 relay 字段
+### 3.6 trace context 外部线程直写问题已修复
 
-现象：
+修复前问题：
 
 - `TqWindowsRelayWorker::SetRelayTraceContext()` 通过 `FindRelayById()` 拿到 relay 后，直接写 `TraceTunnelId` 和 `TraceTarget`。
 - worker 线程中的 `BuildRelayTraceState()` 会读取同一组字段并生成 trace state。
 
-影响：
+修复前影响：
 
 - `TraceTarget` 是 `std::string`，外部写与 worker 读之间没有同一把锁或 IOCP 串行化，存在数据竞争风险。
 - 这个问题通常只在 relay 启动后短窗口出现，但 C++ 数据竞争本身属于未定义行为。
 
-修复方向：
+当前状态：
 
 - `TqWindowsRelayWorker::SetRelayTraceContext()` 不直接写 `RelayContext`，而是复制 `target` 并投递 `SetTraceContext` IOCP operation。
 - worker 线程解析 relay id/generation 后更新 `TraceTunnelId` 和 `TraceTarget`，与 `BuildRelayTraceState()` 的读取保持同一 worker 串行模型。
 - 迟到 operation 在 relay 不存在或 generation 不匹配时丢弃，不复活 relay；shutdown 后投递失败也不写 relay 字段。
+- trace context 的写入和读取现在都由 worker IOCP 串行化，上述外部线程直写风险已消除。
 
-验证：
+验证覆盖：
 
 - `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target。
 
@@ -373,7 +374,7 @@ QUIC receive 背压：
 
 | 优先级 | 建议 | 理由 |
 |---|---|---|
-| 高 | 修复 `SetRelayTraceContext()` 跨线程写 `TraceTarget` | 涉及 C++ 数据竞争，风险明确。 |
+| 已完成 | `SetRelayTraceContext()` 通过 IOCP 串行更新 trace context | 原跨线程写 `TraceTarget` 的 C++ 数据竞争风险已消除。 |
 | 高 | 移除生产路径 `abort()`，把 fake FIN 降级为单 relay 错误 | 避免单连接异常杀进程。 |
 | 中 | 为 Windows 增加独立 worker count 配置名 | 配置语义和后续调优需要。 |
 | 中 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 高连接数下可能是主要扩展瓶颈。 |
