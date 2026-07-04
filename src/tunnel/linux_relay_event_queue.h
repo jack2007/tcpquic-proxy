@@ -63,6 +63,11 @@ struct TqLinuxRelayEvent {
     std::shared_ptr<TqPendingQuicReceive> ReceiveView;
 };
 
+struct TqLinuxRelayEventQueueStats {
+    uint64_t PushCasRetries{0};
+    uint64_t PopCasRetries{0};
+};
+
 class TqLinuxRelayEventQueue final {
 public:
     explicit TqLinuxRelayEventQueue(size_t capacity)
@@ -92,6 +97,7 @@ public:
                         std::memory_order_relaxed)) {
                     break;
                 }
+                PushCasRetries.fetch_add(1, std::memory_order_relaxed);
             } else if (diff < 0) {
                 return false;
             } else {
@@ -119,6 +125,7 @@ public:
                         std::memory_order_relaxed)) {
                     break;
                 }
+                PopCasRetries.fetch_add(1, std::memory_order_relaxed);
             } else if (diff < 0) {
                 return false;
             } else {
@@ -141,6 +148,13 @@ public:
         return CapacityValue;
     }
 
+    TqLinuxRelayEventQueueStats Stats() const {
+        TqLinuxRelayEventQueueStats stats{};
+        stats.PushCasRetries = PushCasRetries.load(std::memory_order_relaxed);
+        stats.PopCasRetries = PopCasRetries.load(std::memory_order_relaxed);
+        return stats;
+    }
+
 private:
     struct Cell {
         std::atomic<size_t> Sequence{0};
@@ -160,4 +174,6 @@ private:
     std::unique_ptr<Cell[]> Slots;
     alignas(64) std::atomic<size_t> EnqueuePos{0};
     alignas(64) std::atomic<size_t> DequeuePos{0};
+    alignas(64) std::atomic<uint64_t> PushCasRetries{0};
+    alignas(64) std::atomic<uint64_t> PopCasRetries{0};
 };

@@ -113,6 +113,9 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
     uint64_t WakeupWrites{0};
     uint64_t PendingEvents{0};
+    uint64_t EventQueueCapacity{0};
+    uint64_t EventQueuePushCasRetries{0};
+    uint64_t EventQueuePopCasRetries{0};
     uint64_t PendingBytes{0};
     uint64_t RelayBufferBytesInUse{0};
     uint64_t ActiveRelays{0};

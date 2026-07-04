@@ -68,14 +68,14 @@ int main() {
         config.EventQueueCapacity = 1024;
         config.TrackEventProducers = true;
         TqLinuxRelayWorker worker(config);
-        assert(worker.StartForTest());
+        if (!worker.StartForTest()) return 111;
 
         std::thread producerA([&worker]() {
             for (uint64_t i = 0; i < 128; ++i) {
                 TqLinuxRelayEvent event{};
                 event.Type = TqLinuxRelayEventType::TestMarker;
                 event.Value = i;
-                assert(worker.EnqueueForTest(std::move(event)));
+                if (!worker.EnqueueForTest(std::move(event))) return;
             }
         });
         std::thread producerB([&worker]() {
@@ -83,22 +83,37 @@ int main() {
                 TqLinuxRelayEvent event{};
                 event.Type = TqLinuxRelayEventType::TestMarker;
                 event.Value = 1000 + i;
-                assert(worker.EnqueueForTest(std::move(event)));
+                if (!worker.EnqueueForTest(std::move(event))) return;
             }
         });
         producerA.join();
         producerB.join();
 
         TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        assert(snapshot.PendingEvents == 256);
-        assert(snapshot.EventProducerThreadsObserved >= 2);
-        assert(snapshot.MultipleEventProducerThreadsObserved);
+        if (snapshot.EventQueueCapacity != 1024) return 112;
+        if (snapshot.PendingEvents != 256) return 113;
+        if (snapshot.EventProducerThreadsObserved < 2) return 114;
+        if (!snapshot.MultipleEventProducerThreadsObserved) return 115;
 
-        assert(worker.DrainForTest(256) == 256);
+        if (worker.DrainForTest(256) != 256) return 116;
         snapshot = worker.Snapshot();
-        assert(snapshot.EventsProcessed == 256);
-        assert(snapshot.PendingEvents == 0);
+        if (snapshot.EventsProcessed != 256) return 117;
+        if (snapshot.PendingEvents != 0) return 118;
+        const uint64_t pushCasRetries = snapshot.EventQueuePushCasRetries;
+        const uint64_t popCasRetries = snapshot.EventQueuePopCasRetries;
+        (void)pushCasRetries;
+        (void)popCasRetries;
 
+        worker.Stop();
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventQueueCapacity = 3;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 119;
+        TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.EventQueueCapacity != 4) return 120;
         worker.Stop();
     }
 

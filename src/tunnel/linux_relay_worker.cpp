@@ -3268,6 +3268,10 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
     snapshot.PendingEvents = EventQueue.SizeApprox();
+    snapshot.EventQueueCapacity = EventQueue.Capacity();
+    const TqLinuxRelayEventQueueStats queueStats = EventQueue.Stats();
+    snapshot.EventQueuePushCasRetries = queueStats.PushCasRetries;
+    snapshot.EventQueuePopCasRetries = queueStats.PopCasRetries;
     snapshot.TcpReadBatches = TcpReadBatches.load();
     snapshot.TcpReadBytes = TcpReadBytes.load();
     snapshot.QuicSendOperations = QuicSendOperations.load();
@@ -3676,6 +3680,8 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
     for (uint32_t i = 0; i < workerCount; ++i) {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = tuning.LinuxRelayWorkerEventBudget;
+        config.EventQueueCapacity = tuning.LinuxRelayEventQueueCapacity;
+        config.TrackEventProducers = true;
         config.WorkerIndex = i;
         config.ByteBudgetPerTick = tuning.LinuxRelayWorkerByteBudgetPerTick;
         config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
@@ -3724,6 +3730,14 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.EventsProcessed += snapshot.EventsProcessed;
         total.WakeupWrites += snapshot.WakeupWrites;
         total.PendingEvents += snapshot.PendingEvents;
+        total.EventQueueCapacity = std::max(total.EventQueueCapacity, snapshot.EventQueueCapacity);
+        total.EventQueuePushCasRetries += snapshot.EventQueuePushCasRetries;
+        total.EventQueuePopCasRetries += snapshot.EventQueuePopCasRetries;
+        total.EventProducerThreadsObserved =
+            std::max(total.EventProducerThreadsObserved, snapshot.EventProducerThreadsObserved);
+        total.MultipleEventProducerThreadsObserved =
+            total.MultipleEventProducerThreadsObserved ||
+            snapshot.MultipleEventProducerThreadsObserved;
         total.PendingBytes += snapshot.PendingBytes;
         total.ActiveRelays += snapshot.ActiveRelays;
         total.SnapshotActiveRelaysScanned += snapshot.SnapshotActiveRelaysScanned;

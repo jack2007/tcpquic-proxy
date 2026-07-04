@@ -162,6 +162,10 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes > 0) {
         out.LinuxRelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
     }
+    if (cfg.TuningOverrideLinuxRelayEventQueueCapacity > 0) {
+        out.LinuxRelayEventQueueCapacity =
+            TqNormalizeLinuxRelayEventQueueCapacity(cfg.TuningOverrideLinuxRelayEventQueueCapacity);
+    }
     if (cfg.TuningOverrideQuicIw > 0) {
         out.InitialWindowPackets = cfg.TuningOverrideQuicIw;
     }
@@ -187,6 +191,7 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t 
         out.LinuxRelayReadBatchBytes = 256 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
         out.LinuxRelayWorkerEventBudget = 1024;
+        out.LinuxRelayEventQueueCapacity = 4096;
         out.LinuxRelayWorkerByteBudgetPerTick = 16ull * 1024 * 1024;
     } else {
         out.LinuxRelayMaxIov = 16;
@@ -194,6 +199,7 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t 
         out.LinuxRelayReadBatchBytes = 1024 * 1024;
         out.LinuxRelayQuicRecvBatchBytes = 1024 * 1024;
         out.LinuxRelayWorkerEventBudget = 4096;
+        out.LinuxRelayEventQueueCapacity = 4096;
         out.LinuxRelayWorkerByteBudgetPerTick = 64ull * 1024 * 1024;
     }
 
@@ -294,6 +300,24 @@ TqTuningMode TqParseTuningMode(const char* value) {
         return TqTuningMode::Wan;
     }
     return TqTuningMode::Wan;
+}
+
+uint32_t TqNormalizeLinuxRelayEventQueueCapacity(uint32_t capacity) {
+    if (capacity <= TqLinuxRelayEventQueueCapacityMin) {
+        return TqLinuxRelayEventQueueCapacityMin;
+    }
+    if (capacity >= TqLinuxRelayEventQueueCapacityMax) {
+        return TqLinuxRelayEventQueueCapacityMax;
+    }
+
+    --capacity;
+    capacity |= capacity >> 1;
+    capacity |= capacity >> 2;
+    capacity |= capacity >> 4;
+    capacity |= capacity >> 8;
+    capacity |= capacity >> 16;
+    ++capacity;
+    return std::min(capacity, TqLinuxRelayEventQueueCapacityMax);
 }
 
 void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {

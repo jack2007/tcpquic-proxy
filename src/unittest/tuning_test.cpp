@@ -3,6 +3,17 @@
 
 #include <cassert>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <system_error>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #define TQ_TEST_REQUIRE(expr) \
     do { \
@@ -30,6 +41,54 @@ static bool ParseClientOption(const char* option, const char* value, TqConfig& c
         const_cast<char**>(args),
         cfg,
         err);
+}
+
+static int CurrentProcessId() {
+#ifdef _WIN32
+    return _getpid();
+#else
+    return getpid();
+#endif
+}
+
+static std::filesystem::path UniqueTempJsonPath(const char* name) {
+    static unsigned counter = 0;
+    std::ostringstream pathName;
+    pathName << name << "-" << CurrentProcessId() << "-" << counter++ << ".json";
+    return std::filesystem::temp_directory_path() / pathName.str();
+}
+
+class ScopedTempFile {
+public:
+    explicit ScopedTempFile(const char* name)
+        : Path(UniqueTempJsonPath(name)),
+          PathString(Path.string()) {}
+
+    ~ScopedTempFile() {
+        std::error_code ignored;
+        std::filesystem::remove(Path, ignored);
+    }
+
+    const char* c_str() const {
+        return PathString.c_str();
+    }
+
+    const std::filesystem::path& path() const {
+        return Path;
+    }
+
+private:
+    std::filesystem::path Path;
+    std::string PathString;
+};
+
+static bool WriteTextFile(const std::filesystem::path& path, const char* text) {
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << text;
+    return out.good();
 }
 
 int main() {
@@ -373,6 +432,90 @@ int main() {
         TqFinalizeConfig(cfg);
         assert(cfg.Tuning.LinuxRelayTcpWriteMaxBytes == 4194304);
         assert(cfg.Tuning.LinuxRelayTcpWriteBurstBytes == 16777216);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--ca";
+        char arg9[] = "ca.pem";
+        char arg10[] = "--linux-relay-event-queue-capacity";
+        char arg11[] = "65535";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        TQ_TEST_REQUIRE(TqParseArgs(12, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayEventQueueCapacity == 65536);
+    }
+
+    {
+        const char* invalidValues[] = {"0", "1048577"};
+        for (const char* invalidValue : invalidValues) {
+            TqConfig cfg{};
+            std::string err;
+            TQ_TEST_REQUIRE(!ParseClientOption(
+                "--linux-relay-event-queue-capacity",
+                invalidValue,
+                cfg,
+                err));
+            TQ_TEST_REQUIRE(
+                err.find("invalid value for --linux-relay-event-queue-capacity") !=
+                std::string::npos);
+        }
+    }
+
+    {
+        const ScopedTempFile file("tcpquic-tuning-event-queue-capacity-valid");
+        TQ_TEST_REQUIRE(WriteTextFile(
+            file.path(),
+            "{"
+            "\"tls\":{\"cert\":\"cert.pem\",\"key\":\"key.pem\",\"ca\":\"ca.pem\"},"
+            "\"proto\":{\"profile\":\"max-throughput\"},"
+            "\"relay\":{\"linux\":{\"event_queue_capacity\":32767}},"
+            "\"client\":{},"
+            "\"peers\":[{\"id\":\"p1\",\"proto_peer\":\"127.0.0.1:4433\","
+            "\"socks_listen\":\"127.0.0.1:11080\"}]"
+            "}"));
+
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--config";
+        char* argv[] = {arg0, arg1, arg2, const_cast<char*>(file.c_str())};
+        TQ_TEST_REQUIRE(TqParseArgs(4, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayEventQueueCapacity == 32768);
+    }
+
+    {
+        const ScopedTempFile file("tcpquic-tuning-event-queue-capacity-invalid");
+        TQ_TEST_REQUIRE(WriteTextFile(
+            file.path(),
+            "{"
+            "\"tls\":{\"cert\":\"cert.pem\",\"key\":\"key.pem\",\"ca\":\"ca.pem\"},"
+            "\"relay\":{\"linux\":{\"event_queue_capacity\":0}},"
+            "\"peers\":[{\"id\":\"p1\",\"proto_peer\":\"127.0.0.1:4433\","
+            "\"socks_listen\":\"127.0.0.1:11080\"}]"
+            "}"));
+
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--config";
+        char* argv[] = {arg0, arg1, arg2, const_cast<char*>(file.c_str())};
+        TQ_TEST_REQUIRE(!TqParseArgs(4, argv, cfg, err));
+        TQ_TEST_REQUIRE(
+            err.find("invalid relay.linux.event_queue_capacity") != std::string::npos);
     }
 
     {

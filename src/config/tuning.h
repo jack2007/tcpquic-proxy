@@ -7,6 +7,8 @@
 constexpr uint32_t TqValidationFlowWindowBytes = 0x80000000u;
 constexpr uint64_t TqValidationInitialIdealSendFallbackBytes = 128ull * 1024 * 1024;
 constexpr uint64_t TqValidationRelaySendBufferCapBytes = 512ull * 1024 * 1024;
+constexpr uint32_t TqLinuxRelayEventQueueCapacityMin = 2;
+constexpr uint32_t TqLinuxRelayEventQueueCapacityMax = 1048576;
 
 enum class TqTuningMode {
     Auto,
@@ -37,6 +39,7 @@ struct TqTuningConfig {
     uint64_t MaxPendingBufferBytesPerRelay{32ull * 1024 * 1024};
     uint64_t LinuxRelayPerTunnelPendingBytes{4ull * 1024 * 1024};
     uint32_t LinuxRelayWorkerEventBudget{4096};
+    uint32_t LinuxRelayEventQueueCapacity{4096};
     uint64_t LinuxRelayWorkerByteBudgetPerTick{64ull * 1024 * 1024};
     uint64_t LinuxRelayQuicReceiveCompleteBatchBytes{0};
     uint64_t WindowsRelayMaxPendingQuicReceiveBytesPerRelay{16ull * 1024 * 1024};
@@ -63,6 +66,7 @@ struct TqCompressionObservations {
 struct TqConfig;
 
 TqTuningMode TqParseTuningMode(const char* value);
+uint32_t TqNormalizeLinuxRelayEventQueueCapacity(uint32_t capacity);
 void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out);
 void TqPrintTuning(const TqTuningConfig& tuning, FILE* out);
 void TqPrintRelayMemoryBudget(FILE* out);

@@ -547,6 +547,14 @@ private:
                 if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes)) return Error("invalid relay.linux.tcp_write_max_bytes");
             } else if (key == "tcp_write_burst_bytes") {
                 if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes)) return Error("invalid relay.linux.tcp_write_burst_bytes");
+            } else if (key == "event_queue_capacity") {
+                if (!ReadUint32InRange(
+                        item.value(),
+                        TqLinuxRelayEventQueueCapacityMin,
+                        TqLinuxRelayEventQueueCapacityMax,
+                        cfg.TuningOverrideLinuxRelayEventQueueCapacity)) {
+                    return Error("invalid relay.linux.event_queue_capacity");
+                }
             } else {
                 return Error("unknown relay.linux key: " + key);
             }
@@ -921,6 +929,8 @@ void TqPrintUsage(FILE* out) {
         "                              Cap each Linux relay TCP sendmsg\n"
         "  --linux-relay-tcp-write-burst-bytes <bytes>\n"
         "                              Cap bytes per Linux relay TCP write flush\n"
+        "  --linux-relay-event-queue-capacity <events>\n"
+        "                              Linux relay event queue capacity (2..1048576)\n"
         "\n"
         "Diagnostics:\n"
         "  --trace                      Event + periodic trace (enabled by default)\n"
@@ -1346,6 +1356,21 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             if (!ParseUint32(value, cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes) ||
                 cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes == 0) {
                 err = "invalid value for --linux-relay-tcp-write-burst-bytes";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--linux-relay-event-queue-capacity", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--linux-relay-event-queue-capacity", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqLinuxRelayEventQueueCapacityMin,
+                    TqLinuxRelayEventQueueCapacityMax,
+                    cfg.TuningOverrideLinuxRelayEventQueueCapacity)) {
+                err = "invalid value for --linux-relay-event-queue-capacity";
                 return false;
             }
         } else if (GetOptionValue(arg, "--iw", value)) {

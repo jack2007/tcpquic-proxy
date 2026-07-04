@@ -105,6 +105,7 @@ TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot() {
     aggregate.TcpReadBytes = metrics.TcpReadBytes;
     aggregate.TcpWriteBytes = metrics.TcpWriteBytes;
     aggregate.Errors = metrics.Errors;
+    aggregate.EventQueueCapacity = metrics.LinuxRelayEventQueueCapacity;
     return aggregate;
 }
 
@@ -119,6 +120,7 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
     worker.TcpReadBytes = snapshot.TcpReadBytes;
     worker.TcpWriteBytes = snapshot.TcpWriteBytes;
     worker.Errors = snapshot.Errors;
+    worker.EventQueueCapacity = snapshot.EventQueueCapacity;
     return worker;
 }
 
@@ -229,6 +231,7 @@ nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
         {"tcp_read_bytes", worker.TcpReadBytes},
         {"tcp_write_bytes", worker.TcpWriteBytes},
         {"errors", worker.Errors},
+        {"event_queue_capacity", worker.EventQueueCapacity},
     };
 }
 
@@ -356,6 +359,12 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
     metrics.Errors = snapshot.Errors;
     metrics.EventQueueFullErrors = snapshot.EventQueueFullErrors;
+    metrics.LinuxRelayEventQueueCapacity = snapshot.EventQueueCapacity;
+    metrics.LinuxRelayEventQueuePushCasRetries = snapshot.EventQueuePushCasRetries;
+    metrics.LinuxRelayEventQueuePopCasRetries = snapshot.EventQueuePopCasRetries;
+    metrics.LinuxRelayEventProducerThreadsObserved = snapshot.EventProducerThreadsObserved;
+    metrics.LinuxRelayMultipleEventProducerThreadsObserved =
+        snapshot.MultipleEventProducerThreadsObserved;
     metrics.TcpReadBufferAcquireFailures = snapshot.TcpReadBufferAcquireFailures;
     metrics.TcpReadBufferAcquirePendingBudgetFailures =
         snapshot.TcpReadBufferAcquirePendingBudgetFailures;
@@ -715,6 +724,16 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
     out << ",\"linux_relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
     out << ",\"linux_relay_errors\":" << metrics.Errors;
     out << ",\"linux_relay_event_queue_full_errors\":" << metrics.EventQueueFullErrors;
+    out << ",\"linux_relay_event_queue_capacity\":"
+        << metrics.LinuxRelayEventQueueCapacity;
+    out << ",\"linux_relay_event_queue_push_cas_retries\":"
+        << metrics.LinuxRelayEventQueuePushCasRetries;
+    out << ",\"linux_relay_event_queue_pop_cas_retries\":"
+        << metrics.LinuxRelayEventQueuePopCasRetries;
+    out << ",\"linux_relay_event_producer_threads_observed\":"
+        << metrics.LinuxRelayEventProducerThreadsObserved;
+    out << ",\"linux_relay_multiple_event_producer_threads_observed\":"
+        << (metrics.LinuxRelayMultipleEventProducerThreadsObserved ? "true" : "false");
     out << ",\"linux_relay_tcp_read_buffer_acquire_failures\":"
         << metrics.TcpReadBufferAcquireFailures;
     out << ",\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":"

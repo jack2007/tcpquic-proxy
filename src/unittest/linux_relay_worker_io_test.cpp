@@ -3441,6 +3441,53 @@ int main() {
             TqLinuxRelayRuntime::Instance().Stop();
             return 3298;
         }
+
+        bool producerAFailed = false;
+        bool producerBFailed = false;
+        std::thread producerA([runtimeWorker, &producerAFailed]() {
+            for (uint64_t i = 0; i < 16; ++i) {
+                TqLinuxRelayEvent event{};
+                event.Type = TqLinuxRelayEventType::TestMarker;
+                event.Value = i;
+                if (!runtimeWorker->EnqueueForTest(std::move(event))) {
+                    producerAFailed = true;
+                    return;
+                }
+            }
+        });
+        std::thread producerB([runtimeWorker, &producerBFailed]() {
+            for (uint64_t i = 0; i < 16; ++i) {
+                TqLinuxRelayEvent event{};
+                event.Type = TqLinuxRelayEventType::TestMarker;
+                event.Value = 1000 + i;
+                if (!runtimeWorker->EnqueueForTest(std::move(event))) {
+                    producerBFailed = true;
+                    return;
+                }
+            }
+        });
+        producerA.join();
+        producerB.join();
+        if (producerAFailed || producerBFailed) {
+            runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+            ::close(runtimeFds[1]);
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 3299;
+        }
+        const auto producerAggregate = TqLinuxRelayRuntime::Instance().Snapshot();
+        if (producerAggregate.EventProducerThreadsObserved < 2 ||
+            !producerAggregate.MultipleEventProducerThreadsObserved) {
+            std::fprintf(
+                stderr,
+                "runtime producer aggregate mismatch observed=%llu multiple=%u\n",
+                static_cast<unsigned long long>(
+                    producerAggregate.EventProducerThreadsObserved),
+                producerAggregate.MultipleEventProducerThreadsObserved ? 1u : 0u);
+            runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+            ::close(runtimeFds[1]);
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 3300;
+        }
         runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
         ::close(runtimeFds[1]);
         TqLinuxRelayRuntime::Instance().Stop();

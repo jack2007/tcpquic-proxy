@@ -105,6 +105,11 @@ struct TqRelayMetricsSnapshot {
     uint64_t QuicReceiveResumedCount{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
+    uint64_t LinuxRelayEventQueueCapacity{0};
+    uint64_t LinuxRelayEventQueuePushCasRetries{0};
+    uint64_t LinuxRelayEventQueuePopCasRetries{0};
+    uint64_t LinuxRelayEventProducerThreadsObserved{0};
+    bool LinuxRelayMultipleEventProducerThreadsObserved{false};
     uint64_t TcpReadBufferAcquireFailures{0};
     uint64_t TcpReadBufferAcquirePendingBudgetFailures{0};
     uint64_t TcpReadBufferAcquireAllocFailures{0};
@@ -206,6 +211,7 @@ struct TqRelayWorkerSnapshot {
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
     uint64_t Errors{0};
+    uint64_t EventQueueCapacity{0};
 };
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();

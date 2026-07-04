@@ -19,10 +19,10 @@ Linux 生产路径不是 per-tunnel 线程模型，而是固定数量 `TqLinuxRe
 
 配置入口来自 CLI 和 JSON：
 
-- CLI：`--relay-io-size`、`--linux-relay-read-chunk-size`、`--linux-relay-tcp-write-max-bytes`、`--linux-relay-tcp-write-burst-bytes`、`--max-memory-mb`、`--tuning`。
-- JSON：`relay.io_size`、`relay.linux.read_chunk_size`、`relay.linux.tcp_write_max_bytes`、`relay.linux.tcp_write_burst_bytes`。
+- CLI：`--relay-io-size`、`--linux-relay-read-chunk-size`、`--linux-relay-tcp-write-max-bytes`、`--linux-relay-tcp-write-burst-bytes`、`--linux-relay-event-queue-capacity`、`--max-memory-mb`、`--tuning`。
+- JSON：`relay.io_size`、`relay.linux.read_chunk_size`、`relay.linux.tcp_write_max_bytes`、`relay.linux.tcp_write_burst_bytes`、`relay.linux.event_queue_capacity`。
 - `relay.linux.worker_slots` 仍可解析，但当前只 warning，已废弃并被忽略。
-- `EventQueueCapacity` 在 `TqLinuxRelayWorkerConfig` 中存在，默认 4096；当前 `TqTuningConfig`、CLI、JSON 没有对外暴露该配置，`TqLinuxRelayRuntime::Start()` 也没有从 tuning 设置它。
+- `EventQueueCapacity` 通过 `TqTuningConfig::LinuxRelayEventQueueCapacity` 传入 `TqLinuxRelayWorkerConfig`，默认 4096；取值范围为 `2..1048576`，非 power-of-two 会 normalize 到下一个 power-of-two。
 
 ```mermaid
 flowchart TD
@@ -35,7 +35,7 @@ flowchart TD
     G --> H[TqRelayStart]
     H --> I[TqLinuxRelayRuntime::Start]
     I --> J[创建 W 个 TqLinuxRelayWorker]
-    J --> K[worker: eventfd + epoll + EventQueue 默认 4096]
+    J --> K[worker: eventfd + epoll + EventQueue 可配置容量]
     H --> L[TqLinuxRelayRuntime::PickWorker]
     L --> M[TqLinuxRelayWorker::RegisterRelayWithId]
     M --> N[worker 本地 RegisterRelayWithIdLocal]
@@ -53,6 +53,7 @@ flowchart TD
 | `LinuxRelayReadChunkSize` | LAN/WAN 默认 128 KiB，可 override | 单个 TCP read buffer 大小。 |
 | `LinuxRelayReadBatchBytes` | LAN 256 KiB，WAN 1 MiB | 单轮 TCP read 批量预算。 |
 | `LinuxRelayWorkerEventBudget` | LAN 1024，WAN 4096 | 每次 eventfd wake 后最多处理的 event 数。 |
+| `LinuxRelayEventQueueCapacity` | 默认 4096，可 override | worker event queue 容量；CLI 为 `--linux-relay-event-queue-capacity`，JSON 为 `relay.linux.event_queue_capacity`，范围 `2..1048576`，非 power-of-two normalize 到下一个 power-of-two。 |
 | `LinuxRelayWorkerByteBudgetPerTick` | LAN 16 MiB，WAN 64 MiB | worker 单 tick 字节预算上限。 |
 | `LinuxRelayTcpWriteMaxBytes` | 默认 0，可 override | 单次 TCP `writev` 尝试字节上限，0 表示不额外限制。 |
 | `LinuxRelayTcpWriteBurstBytes` | 默认 0，可 override | 单轮 TCP write flush 字节上限。 |
@@ -256,7 +257,7 @@ admin API 行为：
 
 | 排名 | 同步点 | 位置 | 触发频率/热度 | 当前作用 | 建议 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | `TqLinuxRelayEventQueue` 的 `EnqueuePos` / `DequeuePos` / per-cell `Sequence` 原子 CAS | `src/tunnel/linux_relay_event_queue.h` | 最高；每个 QUIC receive、send complete、ideal send、abort/shutdown 和控制事件都会经过 | 固定容量 MPMC 风格 ring buffer，把 MsQuic callback 和控制面事件转交给 owner worker | 持续关注 `linux_relay_pending_events`、`linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。若多 producer 竞争明显，可做 per-worker 多 shard MPSC 队列或按 stream 分片队列。 |
+| 1 | `TqLinuxRelayEventQueue` 的 `EnqueuePos` / `DequeuePos` / per-cell `Sequence` 原子 CAS | `src/tunnel/linux_relay_event_queue.h` | 最高；每个 QUIC receive、send complete、ideal send、abort/shutdown 和控制事件都会经过 | 固定容量 MPMC 风格 ring buffer，把 MsQuic callback 和控制面事件转交给 owner worker | 持续关注 `linux_relay_pending_events`、`linux_relay_event_queue_capacity`、`linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`、`linux_relay_event_queue_push_cas_retries` 和 `linux_relay_multiple_event_producer_threads_observed`。若多 producer 竞争明显，可做 per-worker 多 shard MPSC 队列或按 stream 分片队列。 |
 | 2 | `WakeArmed` 原子 + `eventfd` | `TqLinuxRelayWorker::Wake()` / `DrainEvents()` | 高；每次跨线程 enqueue 后尝试唤醒 worker | `WakeArmed.exchange(true)` 合并 wake，减少 eventfd write storm | 当前设计合理。若 wake 仍过多，可改成队列空->非空才写 eventfd，但需要更精确的空队列同步。 |
 | 3 | `StreamRelayBinding::{Relay,Handle,CallbackRefs,Closing}` 原子 | `StreamCallback()` / `OnStreamEventWithBinding()` / detach | 高；每个 QUIC callback 进入 relay 时都会访问 | 避免 callback 线程持容器锁，同时防止 unregister/detach 后 use-after-free | 方向正确。若小包 callback 极多，可评估 generation id 或 callback 批处理，但不能直接删除生命周期校验。 |
 | 4 | relay buffer budget 原子：`PendingBufferBytes` CAS、`AllocateCount` | `src/tunnel/relay_buffer.cpp` | 高；TCP read buffer、压缩输出、解压输出都会分配/释放 | 控制单 relay pending buffer 内存，失败时形成读侧背压 | 可引入 per-worker/per-relay buffer pool 和本地 credit cache，减少高吞吐下的 malloc/free 与 CAS。 |
@@ -280,20 +281,16 @@ admin API 行为：
 
 当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。实现行为见 [1.7 Active relay snapshot 和 admin API](#17-active-relay-snapshot-和-admin-api)，详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
 
-### 3.2 Event queue capacity 未暴露配置
+### 3.2 Event queue capacity 已补齐配置
 
-现象：`TqLinuxRelayWorkerConfig::EventQueueCapacity` 默认 4096，单测可直接设置，但生产 `TqTuningConfig` 没有对应字段；CLI/JSON 也没有配置项。
+历史现象：`TqLinuxRelayWorkerConfig::EventQueueCapacity` 默认 4096，单测可直接设置，但生产 `TqTuningConfig` 曾没有对应字段；CLI/JSON 也没有配置项。
 
-影响：
+当前状态：Linux relay event queue 容量已接入生产配置链路。CLI 使用 `--linux-relay-event-queue-capacity <events>`，JSON 使用 `relay.linux.event_queue_capacity`，范围为 `2..1048576`；非 power-of-two 输入会 normalize 到下一个 power-of-two。runtime 启动 worker 时会把 normalized capacity 传入 `TqLinuxRelayWorkerConfig::EventQueueCapacity`。
 
-- 代码已经有 `EventQueueFullErrors` 和 `QuicReceiveViewBackpressureQueued` 指标，但用户无法通过配置扩大 queue，只能改源码。
-- 高并发小包或多 MsQuic callback producer 下，event queue 满会进入 `CallbackPendingQuicReceives` 锁路径，并暂停 receive。
+排障语义：
 
-建议：
-
-- 在 `TqTuningConfig` 增加 `LinuxRelayEventQueueCapacity`。
-- JSON 增加 `relay.linux.event_queue_capacity`，CLI 增加 `--linux-relay-event-queue-capacity`。
-- 文档中明确 power-of-two normalize 行为、建议范围和过大容量的内存成本。
+- `linux_relay_pending_events` 长时间接近 `linux_relay_event_queue_capacity`，且 `linux_relay_event_queue_full_errors` 或 `linux_relay_quic_receive_view_backpressure_queued` 上升时，优先评估调大 `relay.linux.event_queue_capacity`。
+- 容量越大，worker queue 内存占用越高；如果 queue full 仍持续出现，下一步应检查 worker event budget、CPU 饱和或 queue shard，而不是无限增大容量。
 
 ### 3.3 QUIC receive 背压没有 hysteresis
 
@@ -370,19 +367,19 @@ admin API 行为：
 - worker 线程独占更新、snapshot 也在 worker event 中读取的字段可改普通整数。
 - 高频指标可以按 worker 本地聚合，admin snapshot 时再汇总。
 
-### 3.8 运行时缺少锁/队列等待时间指标
+### 3.8 运行时仍缺锁等待时间指标，queue 观测已补齐
 
-现象：Windows relay metrics 暴露了 `windows_relay_worker_lock_wait_nanos`、`find_relay_by_id_count`、callback dispatch nanos 等；Linux 没有类似 event queue CAS retry、ControlLock wait、Runtime lock wait、command wait 的指标。
+现象：Windows relay metrics 暴露了 `windows_relay_worker_lock_wait_nanos`、`find_relay_by_id_count`、callback dispatch nanos 等；Linux queue 侧已经补齐 capacity、push/pop CAS retry 和多 producer 观测，但仍没有 ControlLock wait、Runtime lock wait、command wait 等锁/等待时间指标。
 
 影响：
 
-- 只能通过 queue depth/full 和 pending bytes 间接判断瓶颈。
+- queue 容量、CAS 竞争和多 producer 线索已经可直接观察，但控制面锁等待仍只能通过 snapshot 慢、建链慢或 queue/full/pending 等结果指标间接推断。
 - “锁热点排序”目前主要依赖代码结构和路径频率，缺少生产现场的直接等待时间证据。
 
 建议：
 
-- 增加 Linux `event_queue_push_failures/retries`、`event_queue_cas_retry_count`、`control_lock_wait_nanos`、`runtime_lock_wait_nanos`、`snapshot_command_wait_nanos`。
-- 把 `MultipleEventProducerThreadsObserved` 暴露到 JSON metrics，辅助判断是否需要 queue shard。
+- 继续补齐 `control_lock_wait_nanos`、`runtime_lock_wait_nanos`、`snapshot_command_wait_nanos` 等控制面等待时间。
+- 使用 `linux_relay_event_queue_push_cas_retries`、`linux_relay_event_queue_pop_cas_retries` 和 `linux_relay_multiple_event_producer_threads_observed` 辅助判断是否需要 queue shard。
 - 对 queue full 降级路径增加每 relay callback pending depth/top N。
 
 ### 3.9 relay id lookup 已优化，但 fd/stream fallback 仍有线性扫描
@@ -403,10 +400,11 @@ admin API 行为：
 
 生产排查 Linux relay 性能时建议按下面顺序看指标：
 
-1. 队列压力：`linux_relay_pending_events`、`linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。
-2. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
-3. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
-4. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
-5. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
+1. 队列压力：对比 `linux_relay_pending_events` 和 `linux_relay_event_queue_capacity`，同时看 `linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。
+2. 队列竞争：`linux_relay_event_queue_push_cas_retries` / `linux_relay_event_queue_pop_cas_retries` 持续增长说明 CAS 竞争上升；若 `linux_relay_multiple_event_producer_threads_observed` 为 true，说明已观测到多 producer，调大容量只能缓解 burst，不一定解决竞争。
+3. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
+4. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
+5. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
+6. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
 
-Linux active relay 明细已补齐。当前最值得优先补齐的是 event queue capacity 配置，让 queue full 降级路径有可操作的调优手段；其次是 QUIC receive 背压 hysteresis 和 runtime snapshot 持锁范围收敛。
+Linux active relay 明细和 event queue capacity/queue 竞争观测已补齐。当前仍值得优先处理的是 QUIC receive 背压 hysteresis、runtime snapshot 持锁范围收敛，以及控制面锁/command wait 时间指标。

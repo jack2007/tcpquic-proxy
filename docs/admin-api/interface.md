@@ -233,6 +233,14 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
 
 `GET /api/v1/relay/metrics` 的基础字段：`backend`、`active_relays`、`pending_bytes`、`tcp_read_bytes`、`tcp_write_bytes`、`errors`。Linux/Windows/macOS 平台会追加不同的 relay 诊断计数器。
 
+Linux relay 额外包含：
+
+- `linux_relay_event_queue_capacity`：当前 Linux worker event queue 容量。
+- `linux_relay_event_queue_push_cas_retries`：producer push 侧 CAS 重试次数。
+- `linux_relay_event_queue_pop_cas_retries`：worker pop 侧 CAS 重试次数。
+- `linux_relay_event_producer_threads_observed`：已观测到的 event producer 线程数量下界。
+- `linux_relay_multiple_event_producer_threads_observed`：是否观测到多个 event producer 线程。
+
 `GET /api/v1/relay/active-relays` 在不支持逐 relay 明细的平台返回类似：
 
 ```json
@@ -268,13 +276,14 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
       "pending_bytes": 0,
       "tcp_read_bytes": 0,
       "tcp_write_bytes": 0,
-      "errors": 0
+      "errors": 0,
+      "event_queue_capacity": 4096
     }
   ]
 }
 ```
 
-`GET /api/v1/relay/workers/{worker_id}` 返回 worker 指标，并包含 `relays` 数组。当前 `per_worker_active_relays:false`，因此 `relays` 为空数组。
+`GET /api/v1/relay/workers/{worker_id}` 返回 worker 指标，并包含 `relays` 数组。Linux worker 对象包含 `event_queue_capacity`，用于和 queue depth/pending events 对照。当前 `per_worker_active_relays:false`，因此 `relays` 为空数组。
 
 `POST /api/v1/memory/allocator:dump` 返回：
 
