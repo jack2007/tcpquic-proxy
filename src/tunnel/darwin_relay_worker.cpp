@@ -1894,7 +1894,13 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin) {
-    if (binding == nullptr || stream == nullptr || buffers == nullptr || bufferCount == 0) {
+    if (binding == nullptr || stream == nullptr) {
+        return false;
+    }
+    if (bufferCount != 0 && buffers == nullptr) {
+        return false;
+    }
+    if (!fin && (buffers == nullptr || bufferCount == 0)) {
         return false;
     }
 
