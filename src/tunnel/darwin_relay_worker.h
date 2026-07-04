@@ -222,7 +222,7 @@ private:
     void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
-    // Raw lookup: caller must either be the sole worker-map owner or already hold RelayMutex.
+    // Raw worker-thread lookup; non-worker lifecycle access must use eventized commands.
     std::shared_ptr<RelayState> FindRelayLocal(uint64_t relayId) const;
     std::shared_ptr<RelayState> FindRetiredRelayLocal(uint64_t relayId) const;
     void AssertWorkerThreadForRelayState() const;

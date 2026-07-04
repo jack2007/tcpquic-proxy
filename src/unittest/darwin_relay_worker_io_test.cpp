@@ -446,6 +446,102 @@ void UnregisterWakesAfterFullQueueWakeFailures() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void SnapshotRetriesAfterFullQueue() {
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    std::thread snapshotThread([&] {
+        snapshot = worker.Snapshot();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_one();
+    });
+
+    bool doneBeforeDrain = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        doneBeforeDrain = cv.wait_for(lock, std::chrono::milliseconds(50), [&] { return done; });
+    }
+    CHECK(!doneBeforeDrain);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        (void)worker.DrainOneEventForTest();
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (cv.wait_for(lock, std::chrono::milliseconds(10), [&] { return done; })) {
+                break;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        CHECK(done);
+    }
+    snapshotThread.join();
+    CHECK(snapshot.PendingEvents == 0);
+    worker.Stop();
+}
+
+void UnregisterQueuesDuringStartupWindow() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    worker.MarkWorkerThreadExitedForTest();
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done = false;
+    std::thread unregisterThread([&] {
+        worker.UnregisterRelay(result.RelayId);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_one();
+    });
+
+    bool doneBeforeDrain = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        doneBeforeDrain = cv.wait_for(lock, std::chrono::milliseconds(50), [&] { return done; });
+    }
+    CHECK(!doneBeforeDrain);
+
+    CHECK(worker.DrainOneEventForTest());
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        CHECK(cv.wait_for(lock, std::chrono::seconds(2), [&] { return done; }));
+    }
+    unregisterThread.join();
+
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void WorkerRegistersTcpReadinessShell() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -3181,6 +3277,8 @@ int main() {
     WorkerStartsAndStopsCleanly();
     ControlEventRetriesAfterWakeFailure();
     UnregisterWakesAfterFullQueueWakeFailures();
+    SnapshotRetriesAfterFullQueue();
+    UnregisterQueuesDuringStartupWindow();
     WorkerRegistersTcpReadinessShell();
     EventizedUnregisterClearsHandleAndRelayCount();
     WorkerObservesTcpReadBytes();

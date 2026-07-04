@@ -1297,10 +1297,10 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelay(
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelayLocal(uint64_t relayId) const {
+    AssertWorkerThreadForRelayState();
 #if defined(TCPQUIC_TESTING)
     FindRelayLocalCount.fetch_add(1, std::memory_order_relaxed);
 #endif
-    std::shared_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     const auto it = Relays.find(relayId);
     if (it != Relays.end()) {
         return it->second;
@@ -1319,7 +1319,7 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetire
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetiredRelayLocal(uint64_t relayId) const {
-    std::shared_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
+    AssertWorkerThreadForRelayState();
     for (const auto& relay : RetiredRelays) {
         if (relay->Id == relayId) {
             return relay;
@@ -2646,7 +2646,7 @@ void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
         bool queued = false;
         {
             std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
-            if (KqueueFd < 0 || WorkerThreadExited()) {
+            if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
                 fallbackLocal = true;
             } else {
                 TqDarwinRelayEvent event{};
@@ -2746,17 +2746,27 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
     }
 
     SnapshotCommand command{};
-    {
-        std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
-        if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
-            return SnapshotLocal();
-        }
+    uint32_t attempts = 0;
+    for (;;) {
+        {
+            std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+            if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
+                return SnapshotLocal();
+            }
 
-        TqDarwinRelayEvent event{};
-        event.Type = TqDarwinRelayEventType::Snapshot;
-        event.Control = &command;
-        if (EnqueueControlEvent(std::move(event)) == ControlEnqueueResult::Failed) {
-            return SnapshotLocal();
+            TqDarwinRelayEvent event{};
+            event.Type = TqDarwinRelayEventType::Snapshot;
+            event.Control = &command;
+            if (EventQueue.TryPush(std::move(event))) {
+                (void)Wake();
+                break;
+            }
+        }
+        if ((attempts++ & 0x3F) == 0) {
+            (void)Wake();
+            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
+        } else {
+            std::this_thread::yield();
         }
     }
 
