@@ -365,6 +365,26 @@ uint64_t TqDarwinRelayWorker::RetiredRelayPurgeCountForTest() const {
     return RetiredRelayPurgeCount.load(std::memory_order_relaxed);
 }
 
+uint64_t TqDarwinRelayWorker::KnownSendLockedCountForTest() const {
+    return KnownSendLockedCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::CompletionStateLockedCountForTest() const {
+    return CompletionStateLockedCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::ActiveSendLocalRegisterCountForTest() const {
+    return ActiveSendLocalRegisterCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::ActiveSendLocalCompleteCountForTest() const {
+    return ActiveSendLocalCompleteCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::FallbackSendCompletionCountForTest() const {
+    return FallbackSendCompletionCount.load(std::memory_order_relaxed);
+}
+
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
     std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
     FailRegisterTcpFiltersForTest = fail;
@@ -1069,10 +1089,16 @@ void TqDarwinRelayWorker::RegisterKnownSendOperation(
     const KnownSendOperationInfo& info) {
     auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner);
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         KnownSendOperations.emplace(operation, info);
     }
     if (binding != nullptr && binding->Completions != nullptr) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
         binding->Completions->KnownSendOperations.emplace(operation, info);
         binding->Completions->KnownSendOperationCount.fetch_add(1, std::memory_order_acq_rel);
@@ -1082,12 +1108,21 @@ void TqDarwinRelayWorker::RegisterKnownSendOperation(
 void TqDarwinRelayWorker::RegisterKnownSendOperationLocal(
     TqDarwinRelaySendOperation* operation,
     const KnownSendOperationInfo& info) {
+#if defined(TCPQUIC_TESTING)
+    ActiveSendLocalRegisterCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner);
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         KnownSendOperations.emplace(operation, info);
     }
     if (binding != nullptr && binding->Completions != nullptr) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
         binding->Completions->KnownSendOperations.emplace(operation, info);
         binding->Completions->KnownSendOperationCount.fetch_add(1, std::memory_order_acq_rel);
@@ -1099,6 +1134,9 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(
     KnownSendOperationInfo* info) {
     std::shared_ptr<CompletionState> completions;
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         const auto it = KnownSendOperations.find(operation);
         if (it == KnownSendOperations.end()) {
@@ -1113,6 +1151,9 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(
         }
     }
     if (completions != nullptr) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> completionLock(completions->Mutex);
         const auto it = completions->KnownSendOperations.find(operation);
         if (it != completions->KnownSendOperations.end()) {
@@ -1130,6 +1171,9 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmittedLocal(
     KnownSendOperationInfo* info) {
     std::shared_ptr<CompletionState> completions;
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         const auto it = KnownSendOperations.find(operation);
         if (it == KnownSendOperations.end()) {
@@ -1144,6 +1188,9 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmittedLocal(
         }
     }
     if (completions != nullptr) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> completionLock(completions->Mutex);
         const auto it = completions->KnownSendOperations.find(operation);
         if (it != completions->KnownSendOperations.end()) {
@@ -1163,6 +1210,9 @@ bool TqDarwinRelayWorker::TryClaimKnownSendCompletionEvent(
     if (binding == nullptr || operation == nullptr || binding->Completions == nullptr) {
         return false;
     }
+#if defined(TCPQUIC_TESTING)
+    CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
     const auto it = binding->Completions->KnownSendOperations.find(operation);
     if (it == binding->Completions->KnownSendOperations.end()) {
@@ -1202,6 +1252,9 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperation(
     KnownSendOperationInfo localInfo{};
     bool removedFromWorker = false;
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         const auto it = KnownSendOperations.find(operation);
         if (it != KnownSendOperations.end()) {
@@ -1217,6 +1270,9 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperation(
         *info = localInfo;
     }
     if (auto binding = std::static_pointer_cast<StreamBinding>(localInfo.BindingOwner)) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         (void)UnregisterCompletionStateOperation(binding->Completions, operation, nullptr);
         ClearRetiredStreamCallbackIfSafe(binding.get());
     }
@@ -1229,6 +1285,9 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperationLocal(
     KnownSendOperationInfo localInfo{};
     bool removedFromWorker = false;
     {
+#if defined(TCPQUIC_TESTING)
+        KnownSendLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         const auto it = KnownSendOperations.find(operation);
         if (it != KnownSendOperations.end()) {
@@ -1244,6 +1303,9 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperationLocal(
         *info = localInfo;
     }
     if (auto binding = std::static_pointer_cast<StreamBinding>(localInfo.BindingOwner)) {
+#if defined(TCPQUIC_TESTING)
+        CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         (void)UnregisterCompletionStateOperation(binding->Completions, operation, nullptr);
         ClearRetiredStreamCallbackIfSafe(binding.get());
     }
@@ -1279,6 +1341,13 @@ bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDar
     if (binding == nullptr || operation == nullptr) {
         return false;
     }
+    TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
+#if defined(TCPQUIC_TESTING)
+    if (worker != nullptr) {
+        worker->FallbackSendCompletionCount.fetch_add(1, std::memory_order_relaxed);
+        worker->CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     KnownSendOperationInfo info{};
     if (!UnregisterCompletionStateOperation(binding->Completions, operation, &info)) {
         return false;
@@ -1814,6 +1883,11 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
         return;
     }
     const bool workerThread = IsWorkerThread();
+#if defined(TCPQUIC_TESTING)
+    if (!workerThread) {
+        FallbackSendCompletionCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     KnownSendOperationInfo info{};
     const bool unregistered = workerThread
         ? UnregisterKnownSendOperationLocal(operation, &info)
@@ -1822,6 +1896,11 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
         Errors.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+#if defined(TCPQUIC_TESTING)
+    if (workerThread) {
+        ActiveSendLocalCompleteCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     if (operation->Magic != TqDarwinRelaySendOperation::MagicValue) {
         Errors.fetch_add(1, std::memory_order_relaxed);
     }

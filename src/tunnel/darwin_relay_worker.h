@@ -135,6 +135,11 @@ public:
     uint64_t FindRelayLockedCountForTest() const;
     uint64_t FindRelayLocalCountForTest() const;
     uint64_t RetiredRelayPurgeCountForTest() const;
+    uint64_t KnownSendLockedCountForTest() const;
+    uint64_t CompletionStateLockedCountForTest() const;
+    uint64_t ActiveSendLocalRegisterCountForTest() const;
+    uint64_t ActiveSendLocalCompleteCountForTest() const;
+    uint64_t FallbackSendCompletionCountForTest() const;
     void* StreamCallbackContextForTest(uint64_t relayId);
     std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
     std::shared_ptr<void> DetachRelayFromActiveMapForTest(uint64_t relayId);
@@ -333,6 +338,11 @@ private:
     mutable std::atomic<uint64_t> FindRelayLockedCount{0};
     mutable std::atomic<uint64_t> FindRelayLocalCount{0};
     mutable std::atomic<uint64_t> RetiredRelayPurgeCount{0};
+    mutable std::atomic<uint64_t> KnownSendLockedCount{0};
+    mutable std::atomic<uint64_t> CompletionStateLockedCount{0};
+    mutable std::atomic<uint64_t> ActiveSendLocalRegisterCount{0};
+    mutable std::atomic<uint64_t> ActiveSendLocalCompleteCount{0};
+    mutable std::atomic<uint64_t> FallbackSendCompletionCount{0};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};

@@ -952,6 +952,55 @@ void ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void ActiveWorkerSendCompleteCurrentlyUsesKnownSendLocks() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 16;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Handle = &handle;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const uint64_t knownBefore = worker.KnownSendLockedCountForTest();
+    const uint64_t completionBefore = worker.CompletionStateLockedCountForTest();
+    const uint64_t localRegisterBefore = worker.ActiveSendLocalRegisterCountForTest();
+    const uint64_t localCompleteBefore = worker.ActiveSendLocalCompleteCountForTest();
+
+    const char payload[] = "active-worker-send-lock-characterization";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+
+    CHECK(worker.CompleteOneInFlightSendForTest(result.RelayId) != 0);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
+    CHECK(worker.KnownSendOperationCountForTest() == 0);
+    CHECK(worker.ActiveSendLocalRegisterCountForTest() > localRegisterBefore);
+    CHECK(worker.ActiveSendLocalCompleteCountForTest() > localCompleteBefore);
+    CHECK(worker.KnownSendLockedCountForTest() > knownBefore);
+    CHECK(worker.CompletionStateLockedCountForTest() > completionBefore);
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void SendCompleteEnqueueFailureWaitsForWorkerAccounting() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -3307,6 +3356,7 @@ int main() {
     SendCompleteAfterUnregisterReleasesOperation();
     SendCompleteCallbackQueuesUntilWorkerDrain();
     ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays();
+    ActiveWorkerSendCompleteCurrentlyUsesKnownSendLocks();
     SendCompleteEnqueueFailureWaitsForWorkerAccounting();
     SendCompleteAfterRunningFalseWaitsForWorkerExit();
     SendCompleteFallsBackToBindingRelayWhenMapLookupMisses();
