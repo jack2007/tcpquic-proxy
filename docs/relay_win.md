@@ -321,11 +321,15 @@ QUIC receive 背压：
 - `TraceTarget` 是 `std::string`，外部写与 worker 读之间没有同一把锁或 IOCP 串行化，存在数据竞争风险。
 - 这个问题通常只在 relay 启动后短窗口出现，但 C++ 数据竞争本身属于未定义行为。
 
-建议：
+修复方向：
 
-- 把 `SetRelayTraceContext()` 改成投递一个 IOCP operation，由 worker 线程更新 trace 字段。
-- 或者在 `RelayContext` 增加专用 trace mutex，`SetRelayTraceContext()` 和 `BuildRelayTraceState()` 同锁访问。
-- 更简单的结构性方案：在 `RegisterRelayCommand` 中带上 trace tunnel id/target，让 relay 创建时一次性初始化，避免接管后跨线程写。
+- `TqWindowsRelayWorker::SetRelayTraceContext()` 不直接写 `RelayContext`，而是复制 `target` 并投递 `SetTraceContext` IOCP operation。
+- worker 线程解析 relay id/generation 后更新 `TraceTunnelId` 和 `TraceTarget`，与 `BuildRelayTraceState()` 的读取保持同一 worker 串行模型。
+- 迟到 operation 在 relay 不存在或 generation 不匹配时丢弃，不复活 relay；shutdown 后投递失败也不写 relay 字段。
+
+验证：
+
+- `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target。
 
 ### 3.7 per-relay mutex 声明和实际模型不一致
 
