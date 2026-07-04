@@ -1370,24 +1370,26 @@ TqLinuxRelayWorker::ControlState TqLinuxRelayWorker::GetControlState() const {
 
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     const TqLinuxRelayRegistration& registration) {
-    if (IsWorkerThread()) {
-        return RegisterRelayWithIdLocal(registration);
-    }
-
-    const ControlState state = GetControlState();
-    if (!state.Running || state.IsWorkerThread) {
-        return RegisterRelayWithIdLocal(registration);
-    }
-
     auto command = std::make_shared<RegisterRelayCommand>();
     command->Registration = registration;
 
     for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
-        TqLinuxRelayEvent event{};
-        event.Type = TqLinuxRelayEventType::RegisterRelay;
-        event.Control = command.get();
-        event.ControlOwner = command;
-        if (!Enqueue(std::move(event))) {
+        bool enqueued = false;
+        {
+            const auto current = std::this_thread::get_id();
+            auto controlGuard = AcquireControlLockForMetrics();
+            if (!Running.load(std::memory_order_acquire) || current == WorkerThreadId) {
+                return RegisterRelayWithIdLocal(registration);
+            }
+
+            TqLinuxRelayEvent event{};
+            event.Type = TqLinuxRelayEventType::RegisterRelay;
+            event.Control = command.get();
+            event.ControlOwner = command;
+            enqueued = Enqueue(std::move(event));
+        }
+
+        if (!enqueued) {
             ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
             Wake();
             std::this_thread::yield();
@@ -1561,26 +1563,27 @@ bool TqLinuxRelayWorker::RelayIndexesConsistentForTestLocal() const {
 }
 
 void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
-    if (IsWorkerThread()) {
-        UnregisterRelayLocal(relayId);
-        return;
-    }
-
-    const ControlState state = GetControlState();
-    if (!state.Running || state.IsWorkerThread) {
-        UnregisterRelayLocal(relayId);
-        return;
-    }
-
     auto command = std::make_shared<UnregisterRelayCommand>();
     command->RelayId = relayId;
 
     for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
-        TqLinuxRelayEvent event{};
-        event.Type = TqLinuxRelayEventType::UnregisterRelay;
-        event.Control = command.get();
-        event.ControlOwner = command;
-        if (!Enqueue(std::move(event))) {
+        bool enqueued = false;
+        {
+            const auto current = std::this_thread::get_id();
+            auto controlGuard = AcquireControlLockForMetrics();
+            if (!Running.load(std::memory_order_acquire) || current == WorkerThreadId) {
+                UnregisterRelayLocal(relayId);
+                return;
+            }
+
+            TqLinuxRelayEvent event{};
+            event.Type = TqLinuxRelayEventType::UnregisterRelay;
+            event.Control = command.get();
+            event.ControlOwner = command;
+            enqueued = Enqueue(std::move(event));
+        }
+
+        if (!enqueued) {
             ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
             Wake();
             std::this_thread::yield();
@@ -3398,23 +3401,25 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
-    if (IsWorkerThread()) {
-        return SnapshotLocal();
-    }
-
-    const ControlState state = GetControlState();
-    if (!state.Running || state.IsWorkerThread) {
-        return SnapshotLocal();
-    }
-
     auto command = std::make_shared<SnapshotCommand>();
 
     for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
-        TqLinuxRelayEvent event{};
-        event.Type = TqLinuxRelayEventType::Snapshot;
-        event.Control = command.get();
-        event.ControlOwner = command;
-        if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
+        bool enqueued = false;
+        {
+            const auto current = std::this_thread::get_id();
+            auto controlGuard = AcquireControlLockForMetrics();
+            if (!Running.load(std::memory_order_acquire) || current == WorkerThreadId) {
+                return SnapshotLocal();
+            }
+
+            TqLinuxRelayEvent event{};
+            event.Type = TqLinuxRelayEventType::Snapshot;
+            event.Control = command.get();
+            event.ControlOwner = command;
+            enqueued = const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event));
+        }
+
+        if (!enqueued) {
             ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
             const_cast<TqLinuxRelayWorker*>(this)->Wake();
             std::this_thread::yield();
