@@ -322,6 +322,8 @@ admin API 行为：
 - worker lifetime 可通过 `shared_ptr` 或停止阶段 join 前 drain snapshot 请求保证。
 - 聚合 snapshot 可以允许返回部分 worker 超时结果，并暴露超时计数。
 
+推进状态：已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`，与 3.5、3.8 合并为同一轮控制面 wait/snapshot 持锁收敛工作。
+
 ### 3.5 `ControlLock` 持锁等待 worker command
 
 现象：`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()` 在持有 `ControlLock` 后 enqueue command，并等待 command `Cv`。event queue 满时部分路径会释放锁重试，但 register 和 snapshot 的首次 enqueue 失败直接返回。
@@ -336,6 +338,8 @@ admin API 行为：
 - 缩小 `ControlLock` 到 running/thread id 检查，不要持锁等待 command 完成。
 - register/snapshot enqueue 失败可采用 bounded retry + 明确错误日志，而不是静默返回空结果。
 - command wait 增加超时，超时后标记 relay/backend 状态，避免调用方无限阻塞。
+
+推进状态：已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`，与 3.4、3.8 合并处理 command lifetime、timeout、bounded retry 和 wait metrics。
 
 ### 3.6 收到 MsQuic fake FIN 时直接 abort 进程
 
@@ -382,6 +386,8 @@ admin API 行为：
 - 使用 `linux_relay_event_queue_push_cas_retries`、`linux_relay_event_queue_pop_cas_retries` 和 `linux_relay_multiple_event_producer_threads_observed` 辅助判断是否需要 queue shard。
 - 对 queue full 降级路径增加每 relay callback pending depth/top N。
 
+推进状态：控制面锁等待、runtime lock 等待和 command wait 指标已纳入 `docs/superpowers/specs/2026-07-04-linux-relay-control-plane-wait-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-control-plane-wait.md`；per-relay callback pending top N 保持为后续低优先级观测增强。
+
 ### 3.9 relay id lookup 已优化，但 fd/stream fallback 仍有线性扫描
 
 现象：主路径 epoll 通过 relay id 走 `RelaysById`；但 `FindRelayByFd()` 和 `FindRelayIdByStream()` 仍扫描 `Relays`。其中 fd 查找主要用于测试，stream 查找已有 `StreamLookupScanCount` 指标。
@@ -407,4 +413,4 @@ admin API 行为：
 5. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
 6. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
 
-Linux active relay 明细和 event queue capacity/queue 竞争观测已补齐。当前仍值得优先处理的是 QUIC receive 背压 hysteresis、runtime snapshot 持锁范围收敛，以及控制面锁/command wait 时间指标。
+Linux active relay 明细和 event queue capacity/queue 竞争观测已补齐。当前推进重点是 runtime snapshot 持锁范围收敛、`ControlLock` 持锁等待 worker command 收敛，以及控制面锁/command wait 时间指标补齐；QUIC receive 背压 hysteresis 本轮不处理。
