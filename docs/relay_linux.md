@@ -339,19 +339,19 @@ admin API 行为：
 
 推进状态：本轮已落地 `ControlLock` 长等待收敛、command timeout、bounded enqueue retry 和 wait metrics；后续重点是根据生产指标判断是否需要 queue shard 或更细粒度降级。
 
-### 3.6 收到 MsQuic fake FIN 时直接 abort 进程
+### 3.6 收到 MsQuic fake FIN 时不再 abort 进程
 
-现象：`OnStreamEventWithBinding()` 遇到 `TqIsMsQuicFakeFinReceive()` 时执行 `assert(false)` 和 `std::abort()`。
+当前状态：`OnStreamEventWithBinding()` 遇到 `TqIsMsQuicFakeFinReceive()` 时不再执行 `assert(false)` / `std::abort()`。callback 会记录 `receive_fake_fin` trace 和 `linux_relay_fake_fin_receive_count`，尝试从 callback abort 当前 MsQuic stream，然后投递 worker-owned fatal shutdown，让 owner worker 对当前 relay 执行一次单 relay fatal reset；如果投递失败，则降级标记当前 relay/handle stopped。该路径返回 `QUIC_STATUS_SUCCESS`，进程不应退出。
 
 影响：
 
-- 即使这是“不应发生”的 MsQuic 事件形态，生产进程直接退出会扩大单 stream 异常的影响面。
-- 该路径在 relay callback 中，崩溃时可能影响所有 active tunnels。
+- fake FIN 仍按异常 relay 处理，但影响面限制在当前 relay/stream，不应导致整个进程退出。
+- callback 线程不直接执行 relay fatal cleanup；它只做当前 stream abort、入队和必要的 stopped 降级标记，relay fatal reset 由 owner worker 串行完成。
 
-推进方案：
+设计路径：
 
-- 已形成 callback hardening 设计和开发计划，见 `docs/superpowers/specs/2026-07-04-linux-relay-callback-hardening-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-callback-hardening.md`。
-- 目标行为是记录 `receive_fake_fin` trace 和 `linux_relay_fake_fin_receive_count`，随后通过单 relay fatal reset 关闭当前 relay/stream；callback 返回 `QUIC_STATUS_SUCCESS`，因为该分支不持有 MsQuic receive buffer。
+- callback hardening 设计和开发计划见 `docs/superpowers/specs/2026-07-04-linux-relay-callback-hardening-design.md` 和 `docs/superpowers/plans/2026-07-04-linux-relay-callback-hardening.md`。
+- 最终实现基于该计划调整为 worker-owned fatal shutdown：fake FIN callback 记录 trace/指标、尝试 abort 当前 stream 并入队，owner worker 负责实际 fatal reset；入队失败时退化为标记当前 relay/handle stopped。
 
 ### 3.7 metrics 原子内存序偏保守
 
@@ -392,11 +392,11 @@ admin API 行为：
 
 - 当前不属于主热路径；如果 `StreamLookupScanCount` 在生产中上升，说明存在 fallback 或旧路径仍在使用。
 
-建议：
+当前状态：
 
 - 继续以 relay id map 和 callback binding 为主路径。
-- 本轮不新增 `RelaysByFd` / `RelaysByStream` map；先按 `docs/superpowers/plans/2026-07-04-linux-relay-callback-hardening.md` 把已有 `StreamLookupScanCount` 贯通到 admin metrics，输出 `linux_relay_stream_lookup_scan_count`。
-- 如果生产中该指标持续增长，再根据调用来源决定是否增加 stream/fd map 或 slot/generation id。
+- 本轮没有新增 `RelaysByFd` / `RelaysByStream` map；已有 `StreamLookupScanCount` 已贯通到 admin metrics，输出为 `linux_relay_stream_lookup_scan_count`。
+- 是否增加 stream/fd map 取决于生产信号；如果 `linux_relay_stream_lookup_scan_count` 持续增长，再根据调用来源决定是否增加 stream/fd map 或 slot/generation id。
 
 ## 4. 排障优先级
 

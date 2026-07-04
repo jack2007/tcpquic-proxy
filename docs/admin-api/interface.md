@@ -246,6 +246,8 @@ Linux relay 额外包含：
 - `linux_relay_control_command_wait_count`：控制命令等待次数。
 - `linux_relay_control_command_timeouts`：控制命令等待超时次数。
 - `linux_relay_control_command_enqueue_failures`：控制命令投递到 worker event queue 失败次数。
+- `linux_relay_fake_fin_receive_count`：Linux relay 收到 MsQuic fake FIN receive 的次数；用于观察该异常路径是否发生，处理会隔离当前 relay/stream，不应退出进程。
+- `linux_relay_stream_lookup_scan_count`：Linux relay 按 stream fallback 扫描 relay 的次数；正常主路径应主要依赖 callback binding/relay id。
 - `linux_relay_snapshot_command_wait_nanos`：snapshot 命令累计等待 worker 完成的时间。
 - `linux_relay_snapshot_command_wait_count`：snapshot 命令等待次数。
 - `linux_relay_snapshot_command_timeouts`：snapshot 命令等待超时次数。
