@@ -1821,6 +1821,7 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
         if (worker.KnownSendOperationCountForTest() == 0) {
             break;
         }
+        CHECK(worker.DrainOneEventForTest());
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     } while (std::chrono::steady_clock::now() < completionDeadline);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
@@ -3060,11 +3061,14 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
@@ -3080,7 +3084,7 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
-    CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_PENDING);
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_PENDING);
     CHECK(worker.FindRelayLockedCountForTest() == before);
     const uint64_t drainLockedBefore = worker.FindRelayLockedCountForTest();
     const uint64_t drainLocalBefore = worker.FindRelayLocalCountForTest();
@@ -3100,11 +3104,14 @@ void QuicShutdownCallbackClosesViaWorkerEventWithoutLockedLookup() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
@@ -3113,7 +3120,7 @@ void QuicShutdownCallbackClosesViaWorkerEventWithoutLockedLookup() {
     const uint64_t before = worker.FindRelayLockedCountForTest();
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.FindRelayLockedCountForTest() == before);
 
     CHECK(worker.Snapshot().ActiveRelays == 1);
@@ -3133,11 +3140,14 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
@@ -3154,7 +3164,7 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
     std::condition_variable callbackCv;
     bool callbackDone = false;
     std::thread callbackThread([&] {
-        CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_SUCCESS);
+        CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
         {
             std::lock_guard<std::mutex> lock(callbackMutex);
             callbackDone = true;
@@ -3192,11 +3202,14 @@ void StopPurgesQueuedShutdownCloseWithoutLockedLookup() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
@@ -3205,7 +3218,7 @@ void StopPurgesQueuedShutdownCloseWithoutLockedLookup() {
     const uint64_t before = worker.FindRelayLockedCountForTest();
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.FindRelayLockedCountForTest() == before);
 
     worker.Stop();
@@ -3220,17 +3233,20 @@ void RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
     CHECK(result.Ok);
-    CHECK(stream.Context != nullptr);
-    CHECK(stream.Callback == TqDarwinRelayWorker::StreamCallback);
+    CHECK(stream->Context != nullptr);
+    CHECK(stream->Callback == TqDarwinRelayWorker::StreamCallback);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -3244,11 +3260,14 @@ void SnapshotDuringConcurrentUnregisterRemainsBestEffort() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
 
-    MsQuicStream stream{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
     TqRelayHandle handle{};
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
-    registration.Stream = &stream;
+    registration.Stream = stream;
     registration.Handle = &handle;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
