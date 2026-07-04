@@ -2740,6 +2740,34 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void StopPurgesQueuedShutdownCloseWithoutLockedLookup() {
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    CHECK(worker.StartForTest());
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    MsQuicStream stream{};
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = &stream;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const uint64_t before = worker.FindRelayLockedCountForTest();
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.FindRelayLockedCountForTest() == before);
+
+    worker.Stop();
+    CHECK(worker.FindRelayLockedCountForTest() == before);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement() {
     TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
     CHECK(worker.Start());
@@ -2816,6 +2844,7 @@ int main() {
     CallbackReceiveDoesNotUseLockedRelayLookup();
     QuicShutdownCallbackClosesViaWorkerEventWithoutLockedLookup();
     QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup();
+    StopPurgesQueuedShutdownCloseWithoutLockedLookup();
     RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement();
     return 0;
 }

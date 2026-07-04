@@ -609,8 +609,8 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
         case TqDarwinRelayEventType::QuicShutdownComplete:
-            if (auto relay = FindRelay(event.RelayId)) {
-                CloseRelay(relay);
+            if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
+                CloseRelay(relay, 1);
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
