@@ -311,7 +311,8 @@ private:
     static bool UnregisterCompletionStateOperation(
         const std::shared_ptr<CompletionState>& state,
         TqDarwinRelaySendOperation* operation,
-        KnownSendOperationInfo* info);
+        KnownSendOperationInfo* info,
+        TqDarwinRelayWorker* testingWorker = nullptr);
     static void ClearRetiredStreamCallbackIfSafe(StreamBinding* binding);
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
 
