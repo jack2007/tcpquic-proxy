@@ -1152,6 +1152,8 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         "callback_iocp_posts=%llu callback_iocp_post_failures=%llu "
         "receive_ready_posts=%llu receive_drain_scheduled=%llu "
         "receive_drain_coalesced=%llu posted_callback_stale_drops=%llu "
+        "win_cb_recv_budget_rejected=%llu win_cb_recv_budget_paused=%llu "
+        "win_cb_recv_copy_bytes=%llu win_cb_recv_copy_nanos=%llu "
         "win_maint_drains=%llu win_maint_nanos=%llu win_maint_relays=%llu "
         "win_maint_full_scans=%llu win_maint_full_scan_relays=%llu "
         "win_recv_finish_linear=%llu win_recv_finish_linear_nanos=%llu "
@@ -1205,6 +1207,10 @@ std::string TqFormatRelayMetricsSnapshotLine(const TqRelayMetricsSnapshot& metri
         static_cast<unsigned long long>(metrics.WindowsReceiveDrainScheduledCount),
         static_cast<unsigned long long>(metrics.WindowsReceiveDrainCoalescedCount),
         static_cast<unsigned long long>(metrics.WindowsPostedCallbackStaleDropCount),
+        static_cast<unsigned long long>(metrics.WindowsRelayCallbackReceiveBudgetRejectedCount),
+        static_cast<unsigned long long>(metrics.WindowsRelayCallbackReceiveBudgetPausedCount),
+        static_cast<unsigned long long>(metrics.WindowsRelayCallbackReceiveCopyBytes),
+        static_cast<unsigned long long>(metrics.WindowsRelayCallbackReceiveCopyNanos),
         static_cast<unsigned long long>(metrics.WindowsRelayMaintenanceDrainCount),
         static_cast<unsigned long long>(metrics.WindowsRelayMaintenanceDrainNanos),
         static_cast<unsigned long long>(metrics.WindowsRelayMaintenanceRelaysProcessed),

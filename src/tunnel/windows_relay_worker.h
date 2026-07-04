@@ -130,6 +130,10 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t WorkerLockWaitNanos{0};
     uint64_t FindRelayByIdCount{0};
     uint64_t CallbackDispatchNanos{0};
+    uint64_t CallbackReceiveBudgetRejectedCount{0};
+    uint64_t CallbackReceiveBudgetPausedCount{0};
+    uint64_t CallbackReceiveCopyBytes{0};
+    uint64_t CallbackReceiveCopyNanos{0};
     uint64_t SnapshotBuildNanos{0};
     uint64_t SnapshotActiveRelaysScanned{0};
     uint64_t MaintenanceDrainCount{0};
@@ -474,6 +478,10 @@ private:
     mutable std::atomic<uint64_t> WorkerLockWaitNanos_{0};
     std::atomic<uint64_t> FindRelayByIdCount_{0};
     std::atomic<uint64_t> CallbackDispatchNanos_{0};
+    std::atomic<uint64_t> CallbackReceiveBudgetRejectedCount_{0};
+    std::atomic<uint64_t> CallbackReceiveBudgetPausedCount_{0};
+    std::atomic<uint64_t> CallbackReceiveCopyBytes_{0};
+    std::atomic<uint64_t> CallbackReceiveCopyNanos_{0};
     mutable std::atomic<uint64_t> SnapshotBuildNanos_{0};
     mutable std::atomic<uint64_t> SnapshotActiveRelaysScanned_{0};
     std::atomic<uint64_t> MaintenanceDrainCount_{0};

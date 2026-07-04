@@ -403,6 +403,10 @@ bool TestWindowsRelayLockAndCallbackMetricsInitialState() {
            snapshot.WorkerLockWaitNanos >= 0 &&
            snapshot.FindRelayByIdCount == 0 &&
            snapshot.CallbackDispatchNanos == 0 &&
+           snapshot.CallbackReceiveBudgetRejectedCount == 0 &&
+           snapshot.CallbackReceiveBudgetPausedCount == 0 &&
+           snapshot.CallbackReceiveCopyBytes == 0 &&
+           snapshot.CallbackReceiveCopyNanos == 0 &&
            snapshot.SnapshotBuildNanos > 0 &&
            snapshot.SnapshotActiveRelaysScanned == 0 &&
            snapshot.MaintenanceDrainCount == 0 &&

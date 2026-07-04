@@ -537,6 +537,12 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.WindowsRelayWorkerLockWaitNanos = snapshot.WorkerLockWaitNanos;
     metrics.WindowsRelayFindRelayByIdCount = snapshot.FindRelayByIdCount;
     metrics.WindowsRelayCallbackDispatchNanos = snapshot.CallbackDispatchNanos;
+    metrics.WindowsRelayCallbackReceiveBudgetRejectedCount =
+        snapshot.CallbackReceiveBudgetRejectedCount;
+    metrics.WindowsRelayCallbackReceiveBudgetPausedCount =
+        snapshot.CallbackReceiveBudgetPausedCount;
+    metrics.WindowsRelayCallbackReceiveCopyBytes = snapshot.CallbackReceiveCopyBytes;
+    metrics.WindowsRelayCallbackReceiveCopyNanos = snapshot.CallbackReceiveCopyNanos;
     metrics.WindowsRelaySnapshotBuildNanos = snapshot.SnapshotBuildNanos;
     metrics.WindowsRelaySnapshotActiveRelaysScanned = snapshot.SnapshotActiveRelaysScanned;
     metrics.WindowsRelayMaintenanceDrainCount = snapshot.MaintenanceDrainCount;
@@ -862,6 +868,14 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.WindowsRelayFindRelayByIdCount;
     out << ",\"windows_relay_callback_dispatch_nanos\":"
         << metrics.WindowsRelayCallbackDispatchNanos;
+    out << ",\"windows_relay_callback_receive_budget_rejected_count\":"
+        << metrics.WindowsRelayCallbackReceiveBudgetRejectedCount;
+    out << ",\"windows_relay_callback_receive_budget_paused_count\":"
+        << metrics.WindowsRelayCallbackReceiveBudgetPausedCount;
+    out << ",\"windows_relay_callback_receive_copy_bytes\":"
+        << metrics.WindowsRelayCallbackReceiveCopyBytes;
+    out << ",\"windows_relay_callback_receive_copy_nanos\":"
+        << metrics.WindowsRelayCallbackReceiveCopyNanos;
     out << ",\"windows_relay_snapshot_build_nanos\":"
         << metrics.WindowsRelaySnapshotBuildNanos;
     out << ",\"windows_relay_snapshot_active_relays_scanned\":"

@@ -379,6 +379,14 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         PostedTraceContextStaleDropCount_.load(std::memory_order_relaxed);
     snapshot.FindRelayByIdCount = FindRelayByIdCount_.load(std::memory_order_relaxed);
     snapshot.CallbackDispatchNanos = CallbackDispatchNanos_.load(std::memory_order_relaxed);
+    snapshot.CallbackReceiveBudgetRejectedCount =
+        CallbackReceiveBudgetRejectedCount_.load(std::memory_order_relaxed);
+    snapshot.CallbackReceiveBudgetPausedCount =
+        CallbackReceiveBudgetPausedCount_.load(std::memory_order_relaxed);
+    snapshot.CallbackReceiveCopyBytes =
+        CallbackReceiveCopyBytes_.load(std::memory_order_relaxed);
+    snapshot.CallbackReceiveCopyNanos =
+        CallbackReceiveCopyNanos_.load(std::memory_order_relaxed);
     snapshot.EventsProcessed = 0;
     snapshot.TcpReadResumeByBacklogEvents =
         TcpReadResumeByBacklogEvents_.load(std::memory_order_relaxed);
@@ -4042,6 +4050,10 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.WorkerLockWaitNanos += snapshot.WorkerLockWaitNanos;
         total.FindRelayByIdCount += snapshot.FindRelayByIdCount;
         total.CallbackDispatchNanos += snapshot.CallbackDispatchNanos;
+        total.CallbackReceiveBudgetRejectedCount += snapshot.CallbackReceiveBudgetRejectedCount;
+        total.CallbackReceiveBudgetPausedCount += snapshot.CallbackReceiveBudgetPausedCount;
+        total.CallbackReceiveCopyBytes += snapshot.CallbackReceiveCopyBytes;
+        total.CallbackReceiveCopyNanos += snapshot.CallbackReceiveCopyNanos;
         total.SnapshotBuildNanos += snapshot.SnapshotBuildNanos;
         total.SnapshotActiveRelaysScanned += snapshot.SnapshotActiveRelaysScanned;
         total.MaintenanceDrainCount += snapshot.MaintenanceDrainCount;
