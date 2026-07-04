@@ -3551,5 +3551,32 @@ int main() {
         TqLinuxRelayRuntime::Instance().Stop();
     }
 
+    {
+        TqLinuxRelayRuntime::Instance().Stop();
+        TqTuningConfig tuning{};
+        tuning.LinuxRelayWorkerCount = 1;
+        tuning.LinuxRelayEventQueueCapacity = 1024;
+        if (!TqLinuxRelayRuntime::Instance().Start(tuning)) return 3410;
+        std::atomic<bool> stop{false};
+        std::thread snapshots([&]() {
+            for (uint32_t i = 0; i < 100 && !stop.load(std::memory_order_acquire); ++i) {
+                (void)TqLinuxRelayRuntime::Instance().Snapshot();
+            }
+        });
+        bool pickOk = true;
+        for (uint32_t i = 0; i < 100; ++i) {
+            if (TqLinuxRelayRuntime::Instance().PickWorker() == nullptr) {
+                pickOk = false;
+                break;
+            }
+        }
+        stop.store(true, std::memory_order_release);
+        snapshots.join();
+        const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
+        TqLinuxRelayRuntime::Instance().Stop();
+        if (!pickOk) return 3411;
+        if (snapshot.RuntimeLockAcquireCount == 0) return 3412;
+    }
+
     return 0;
 }

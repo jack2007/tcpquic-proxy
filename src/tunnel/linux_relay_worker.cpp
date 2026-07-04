@@ -3859,8 +3859,49 @@ TqLinuxRelayRuntime& TqLinuxRelayRuntime::Instance() {
     return runtime;
 }
 
+std::unique_lock<std::mutex> TqLinuxRelayRuntime::AcquireRuntimeLockForMetrics() const {
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(Lock);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    RuntimeLockWaitNanos.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+        std::memory_order_relaxed);
+    RuntimeLockAcquireCount.fetch_add(1, std::memory_order_relaxed);
+    return lock;
+}
+
+std::vector<TqLinuxRelayWorker*> TqLinuxRelayRuntime::AcquireSnapshotWorkers() const {
+    std::vector<TqLinuxRelayWorker*> workers;
+    {
+        auto runtimeGuard = AcquireRuntimeLockForMetrics();
+        workers.reserve(Workers.size());
+        for (const auto& worker : Workers) {
+            workers.push_back(worker.get());
+        }
+        std::lock_guard<std::mutex> snapshotGuard(SnapshotLock);
+        ++RuntimeSnapshotsInFlight;
+        RuntimeSnapshotInFlightMax.store(
+            std::max<uint64_t>(
+                RuntimeSnapshotInFlightMax.load(std::memory_order_relaxed),
+                RuntimeSnapshotsInFlight),
+            std::memory_order_relaxed);
+    }
+    return workers;
+}
+
+void TqLinuxRelayRuntime::ReleaseSnapshotWorkers() const {
+    std::lock_guard<std::mutex> snapshotGuard(SnapshotLock);
+    if (RuntimeSnapshotsInFlight > 0) {
+        --RuntimeSnapshotsInFlight;
+    }
+    if (RuntimeSnapshotsInFlight == 0) {
+        SnapshotCv.notify_all();
+    }
+}
+
 bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
-    std::lock_guard<std::mutex> guard(Lock);
+    auto guard = AcquireRuntimeLockForMetrics();
     if (!Workers.empty()) {
         return true;
     }
@@ -3896,13 +3937,19 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
 }
 
 void TqLinuxRelayRuntime::Stop() {
-    std::lock_guard<std::mutex> guard(Lock);
+    auto guard = AcquireRuntimeLockForMetrics();
+    {
+        std::unique_lock<std::mutex> snapshotGuard(SnapshotLock);
+        SnapshotCv.wait(snapshotGuard, [this]() {
+            return RuntimeSnapshotsInFlight == 0;
+        });
+    }
     Workers.clear();
     NextWorker = 0;
 }
 
 TqLinuxRelayWorker* TqLinuxRelayRuntime::PickWorker() {
-    std::lock_guard<std::mutex> guard(Lock);
+    auto guard = AcquireRuntimeLockForMetrics();
     if (Workers.empty()) {
         return nullptr;
     }
@@ -3912,10 +3959,18 @@ TqLinuxRelayWorker* TqLinuxRelayRuntime::PickWorker() {
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
-    std::lock_guard<std::mutex> guard(Lock);
+    const auto workers = AcquireSnapshotWorkers();
+    struct SnapshotReleaseGuard {
+        const TqLinuxRelayRuntime* Runtime;
+        ~SnapshotReleaseGuard() { Runtime->ReleaseSnapshotWorkers(); }
+    } release{this};
+
     TqLinuxRelayWorkerSnapshot total{};
-    total.ActiveRelayStates.reserve(Workers.size());
-    for (const auto& worker : Workers) {
+    total.RuntimeLockWaitNanos = RuntimeLockWaitNanos.load(std::memory_order_relaxed);
+    total.RuntimeLockAcquireCount = RuntimeLockAcquireCount.load(std::memory_order_relaxed);
+    total.RuntimeSnapshotInFlightMax = RuntimeSnapshotInFlightMax.load(std::memory_order_relaxed);
+    total.ActiveRelayStates.reserve(workers.size());
+    for (const auto* worker : workers) {
         const auto snapshot = worker->Snapshot();
         total.EventsProcessed += snapshot.EventsProcessed;
         total.WakeupWrites += snapshot.WakeupWrites;
@@ -4072,10 +4127,15 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
 }
 
 std::vector<TqLinuxRelayWorkerSnapshot> TqLinuxRelayRuntime::SnapshotWorkers() const {
-    std::lock_guard<std::mutex> guard(Lock);
+    const auto workers = AcquireSnapshotWorkers();
+    struct SnapshotReleaseGuard {
+        const TqLinuxRelayRuntime* Runtime;
+        ~SnapshotReleaseGuard() { Runtime->ReleaseSnapshotWorkers(); }
+    } release{this};
+
     std::vector<TqLinuxRelayWorkerSnapshot> snapshots;
-    snapshots.reserve(Workers.size());
-    for (const auto& worker : Workers) {
+    snapshots.reserve(workers.size());
+    for (const auto* worker : workers) {
         snapshots.push_back(worker->Snapshot());
     }
     return snapshots;

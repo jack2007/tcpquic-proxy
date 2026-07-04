@@ -225,6 +225,9 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t SnapshotCommandWaitNanos{0};
     uint64_t SnapshotCommandWaitCount{0};
     uint64_t SnapshotCommandTimeouts{0};
+    uint64_t RuntimeLockWaitNanos{0};
+    uint64_t RuntimeLockAcquireCount{0};
+    uint64_t RuntimeSnapshotInFlightMax{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t TcpReadBufferAcquireFailures{0};
@@ -670,7 +673,17 @@ public:
 
 private:
     TqLinuxRelayRuntime() = default;
+    std::unique_lock<std::mutex> AcquireRuntimeLockForMetrics() const;
+    std::vector<TqLinuxRelayWorker*> AcquireSnapshotWorkers() const;
+    void ReleaseSnapshotWorkers() const;
+
     mutable std::mutex Lock;
+    mutable std::mutex SnapshotLock;
+    mutable std::condition_variable SnapshotCv;
+    mutable uint32_t RuntimeSnapshotsInFlight{0};
+    mutable std::atomic<uint64_t> RuntimeLockWaitNanos{0};
+    mutable std::atomic<uint64_t> RuntimeLockAcquireCount{0};
+    mutable std::atomic<uint64_t> RuntimeSnapshotInFlightMax{0};
     std::vector<std::unique_ptr<TqLinuxRelayWorker>> Workers;
     size_t NextWorker{0};
 };
