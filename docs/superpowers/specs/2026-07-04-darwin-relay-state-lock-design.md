@@ -1,231 +1,183 @@
-# Darwin relay `RelayState::Mutex` + `RelayMutex` 热路径出清设计
+# Darwin relay state/map lock 热路径出清设计
 
 ## 背景
 
-`docs/relay_macos.md` 把 macOS relay 转发路径中热度最高的前两把锁列为：
+`docs/relay_macos.md` 将 macOS relay 转发路径中热度最高的同步点列为：
 
-- `RelayState::Mutex`：单 relay 锁，当前覆盖 TCP/QUIC 数据面状态、半关闭状态、pending 队列、压缩缓冲和 snapshot 读取。
-- `TqDarwinRelayWorker::RelayMutex`：单 worker 全局 relay map 锁，当前覆盖 `FindRelay()`、register/unregister、retire/purge、snapshot 和 callback 查找。
+1. `RelayState::Mutex`：单 relay 数据面状态锁。
+2. `TqDarwinRelayWorker::RelayMutex`：单 worker relay map 生命周期锁。
 
-这两把锁应作为同一阶段处理。`RelayState::Mutex` 的核心优化是把 active relay 数据面收敛为 worker-thread-only；但如果 worker 数据面仍通过 `FindRelay()` 取 relay，就会继续打到 `RelayMutex`。反过来，如果 callback 为了避开 `RelayMutex` 直接改 `RelayState` 字段，又会保留 `RelayState::Mutex` 热点和跨线程状态写入。因此本设计目标不是一次性删除两把锁，而是把它们从稳定转发热路径中移走。
+send completion 锁出清和 receive callback hardening 已经完成之后，当前代码已经具备若干前置能力：
+
+- active TCP->QUIC send completion 已迁到 `ActiveSendOperations` + operation 原子状态，正常 SEND_COMPLETE 不再走 `KnownSendMutex` / `CompletionState::Mutex`。
+- RECEIVE callback 已改为 `TqDarwinQuicReceiveEnqueueResult`，并支持 `CallbackPendingQuicReceives` queue-full backpressure。
+- `StreamBinding` 已持有 `std::weak_ptr<RelayState> Relay`，callback 不再需要通过 `FindRelay()` 查 worker map 才能拿到 relay owner。
+- worker kqueue / receive view 主路径已经开始使用 `FindRelayLocal()`。
+- 非 worker `UnregisterRelay()` 已事件化优先，只有 worker 已停止或 kqueue 不可用时才 fallback local unregister。
+- `RelayMapAccessMutex` 已引入，用于隔离 worker-local map 读和 lifecycle map/deque 修改。
+
+因此本设计不是重新执行旧计划，而是从当前代码出发，完成剩余热路径锁边界收敛：将 `RelayState::Mutex` 和 `RelayMutex` 明确限制在生命周期、stop、fallback、测试辅助和 best-effort snapshot 边界，避免稳定转发数据面再依赖这些锁。
 
 ## 目标
 
-1. worker 线程数据面路径不再持有 `RelayState::Mutex`。
-2. worker 线程数据面路径不再调用需要 `RelayMutex` 的 `FindRelay()`，统一使用 `FindRelayLocal()` 或已持有的 relay shared_ptr。
-3. MsQuic callback 不直接修改 `RelayState` 数据面字段，也不通过 `RelayMutex` 查 worker map；callback 只读取 `StreamBinding` 上的原子状态和稳定 relay 标识，并投递事件。
-4. 运行中 `Snapshot()` 保持事件化，由 worker 线程构造快照；`SnapshotLocal()` 不再逐条加 `RelayState::Mutex`。
-5. register/unregister/retire/purge 等生命周期路径继续允许使用 `RelayMutex`；非 worker direct unregister 的语义暂不重写。
-6. 不改变 TCP/QUIC 转发语义、背压阈值、pending receive ownership、send complete 释放规则和 public metrics 字段。
+1. worker 线程数据面函数不持有 `RelayState::Mutex`。
+2. worker 线程数据面函数不调用需要 `RelayMutex` 的 `FindRelay()`，统一使用 `FindRelayLocal()` 或事件自带 owner。
+3. callback 不直接写 `RelayState` worker-only 字段；需要改变 relay 状态时只投递 worker event，或在 worker 已停止的 fallback 路径执行 lifecycle close。
+4. running worker 的 `Snapshot()` 保持事件化；`SnapshotLocal()` 不逐条加 `RelayState::Mutex`，只做 worker-thread / stopped-state best-effort 读取。
+5. 保留 `RelayMutex` 用于 register/unregister/retire/purge/stop/snapshot map 边界，保留 `RelayState::Mutex` 用于 lifecycle cleanup、非 worker fallback、测试辅助和 retired relay 观察。
+6. 不改变 TCP/QUIC 转发语义、receive ownership、send completion 释放规则、fake FIN fail-fast 行为或 public metrics 字段。
 
 ## 非目标
 
-- 不删除 `RelayMutex` 本身；本阶段只把它从热路径中移走。
-- 不在本阶段重写 `KnownSendMutex` 或 `CompletionState::Mutex`。这两把锁属于下一组 send completion 生命周期重构。
-- 不改 event queue 的 wake/coalesce 策略。
+- 不删除 `RelayState::Mutex` 或 `RelayMutex` 本身。
+- 不重写 `ActiveSendMutex`、`KnownSendMutex`、`CompletionState::Mutex`。
 - 不实现 Darwin receive sink。
-- 不调整 Linux/Windows relay 行为。
+- 不做平台中性 tuning/metrics 命名重构。
+- 不优化 `FlushTcpWrites()` 中 pending receive 查找复杂度；该 P2 性能问题单独计划。
+- 不改 Linux/Windows relay 行为。
 
-## 方案选择
+## 当前剩余问题
 
-推荐方案：两把锁同阶段、分步骤出清热路径。
+### 1. callback 仍有直接 worker-only 字段写入
 
-第一步先建立 worker-only 访问边界和测试护栏；第二步把 worker kqueue/event queue 路径改为 `FindRelayLocal()`；第三步把 callback 的 relay map lookup 去掉，让 `StreamBinding` 承载 callback 所需的稳定信息；第四步移除 worker 数据面上的 `RelayState::Mutex`；最后审计剩余锁点，只允许生命周期和 fallback 路径保留。
+`StreamCallback()` 在部分 receive 失败分支中通过 `binding->Relay.lock()` 后直接写：
 
-不推荐把前四把锁一次解决。`KnownSendMutex` 和 `CompletionState::Mutex` 共同维护 send operation 生命周期，和 relay map/data-plane ownership 是另一个风险面。把四把锁一起改会同时触碰 relay lifecycle、callback ownership、send completion、late callback 和 stop/unregister fallback，问题定位成本过高。
+- `relay->Closing = true`（allocation failed）
+- `relay->QuicReceivePaused = true`（budget rejected）
 
-也不推荐完全逐锁处理。`RelayState::Mutex` 和 `RelayMutex` 在 worker lookup、callback receive、abort/shutdown、snapshot 上天然耦合，硬拆会制造过渡状态和返工。
+`QueueDeferredQuicReceive()` queue-full 分支也会 lock relay 并写 `relay->QuicReceivePaused = true`。
+
+这些字段属于 worker-owned 数据面状态。callback 可调用 MsQuic `ReceiveSetEnabled(false)` 或投递 close 事件，但不应直接修改 relay 状态。否则 `RelayState::Mutex` 无法真正从 callback/data-plane 交界处退场。
+
+### 2. `UpdateTcpInterest()` 仍是锁读取版本
+
+当前同时存在：
+
+- `UpdateTcpInterest()`：读取 `TcpReadArmed` / `TcpWriteArmed` 时加 `RelayState::Mutex`。
+- `UpdateTcpInterestLocal()`：worker-thread-only，不加 relay lock。
+
+数据面路径应全部调用 `UpdateTcpInterestLocal()`；`UpdateTcpInterest()` 仅保留给非 worker lifecycle fallback，或被审计后删除。
+
+### 3. lifecycle cleanup 仍需要锁，但边界要文档化
+
+`RetireRelay()`、`CloseRelay()`、`PurgeRetiredRelaysIfSafe()` 会在 stop/unregister/retired cleanup 中读取或修改 relay 字段。这些路径可以保留 `RelayState::Mutex` / `RelayMutex`，但必须被明确标记为 lifecycle-only，不能被 worker 数据面复用。
+
+### 4. snapshot 是 best-effort 数据读取
+
+running worker 的 `Snapshot()` 通过 event queue 在 worker 线程执行 `SnapshotLocal()`。因此 active relay 字段可以在 worker 线程无 per-relay lock 读取。worker 停止后的 `SnapshotLocal()` 是静止状态 best-effort 读取。这个契约需要写入计划并由测试覆盖并发 unregister/snapshot 不挂起。
 
 ## 设计
 
-### RelayState 线程所有权
+### RelayState 字段所有权
 
-`RelayState` 按访问来源分三类。
+将 `RelayState` 字段分为三类：
 
-worker-only 字段只允许 worker 线程读写：
+**worker-only 数据面字段**，只允许 worker 线程读写：
 
-- `TcpReadArmed`、`TcpWriteArmed`、`TcpReadPausedByQuicBacklog`
-- `TcpReadClosed`、`TcpWriteClosed`、`QuicSendClosed`、`QuicReceiveClosed`
-- `QuicSendFinSubmitted`、`QuicSendFinCompleted`
-- `SubmittingQuicSends`、`InFlightQuicSends`、`InFlightQuicSendBytes`
-- `TcpReadBytes`、`TcpWriteBytes`
-- `PendingQuicReceives`、`PendingQuicReceiveBytes`、`QuicReceivePaused`
-- `PendingTcpWrites`、`PendingTcpWriteBytes`、`TcpWriteShutdownQueued`
-- `PendingQuicSends`、`TcpReadBuffers`
-- `CompressionOutput`、`DecompressionOutput`
+- kqueue readiness / backpressure：`TcpReadArmed`、`TcpWriteArmed`、`TcpReadPausedByQuicBacklog`
+- half-close 状态：`TcpReadClosed`、`TcpWriteClosed`、`QuicSendClosed`、`QuicReceiveClosed`、`QuicSendFinSubmitted`、`QuicSendFinCompleted`
+- send accounting：`SubmittingQuicSends`、`InFlightQuicSends`、`InFlightQuicSendBytes`、`PendingQuicSends`
+- receive/write queues：`PendingQuicReceives`、`PendingQuicReceiveBytes`、`PendingTcpWrites`、`PendingTcpWriteBytes`、`TcpWriteShutdownQueued`
+- pause/resume：`QuicReceivePaused`
+- byte counters and buffers：`TcpReadBytes`、`TcpWriteBytes`、`TcpReadBuffers`、`CompressionOutput`、`DecompressionOutput`
+- data-plane close marker while active：`Closing`
 
-lifecycle 字段可在外部线程边界读取或修改，但必须集中在 lifecycle helper 或 close/retire/unregister 路径：
+**lifecycle fields**，可由 lifecycle helper 在锁边界修改：
 
-- `Closing`
+- `TcpFd`
 - `Stream`
 - `PublicHandle`
 - `Binding`
+- retired cleanup 中观察的 `InFlightQuicSends`
 
-immutable-after-register 字段在 `RegisterRelayWithIdLocal()` 建好后不再改：
+**immutable-after-register fields**，注册完成后不再修改：
 
 - `Id`
-- `TcpFd`
 - `Compressor`、`Decompressor`、`CompressAlgo`
 - `EnableQuicSends`
 
-新增 helper：
+### callback 状态变更原则
 
-```cpp
-void TqDarwinRelayWorker::AssertWorkerThreadForRelayState() const;
-bool TqDarwinRelayWorker::IsRelayClosingLocal(const RelayState& relay) const;
-void TqDarwinRelayWorker::MarkRelayClosingLocal(RelayState& relay) const;
-MsQuicStream* TqDarwinRelayWorker::RelayStreamLocal(const RelayState& relay) const;
-```
+callback 不直接写 worker-only relay 字段。
 
-这些 helper 在 testing/debug 构建中断言 worker 线程，release 构建保持低成本。
+- RECEIVE enqueue success：返回 `QUIC_STATUS_PENDING`，worker 处理 `QuicReceiveView` 后维护 relay 状态。
+- `EventQueueFull`：callback 只将 receive 暂存在 `StreamBinding::CallbackPendingQuicReceives`，调用 `ReceiveSetEnabled(false)`，返回 `PENDING`；worker drain 后 retry 并决定是否 resume。callback 不写 `relay->QuicReceivePaused`。
+- `CallbackBudgetRejected`：callback 可以调用 `ReceiveSetEnabled(false)` 并 `ReceiveComplete(totalLength)`，但不写 `relay->QuicReceivePaused`。需要后续 resume 时，由 worker 侧 flush/retry 或下一次状态处理决定。
+- `AllocationFailed`：callback 投递 close event；若 worker 已停止才走 fallback close。callback 不写 `relay->Closing`。
+- abort/shutdown：callback 通过 `EnqueueRelayCloseFromCallback()` 投递 close event；队列不可用且 worker stopped 时 fallback `CloseRelay()`。
 
-### RelayMutex 热路径边界
+### Relay map 边界
 
-`RelayMutex` 继续保护 `Relays` 和 `RetiredRelays` 的结构性修改：
+- `FindRelay()`：只允许 public/test/fallback/lifecycle 路径使用。
+- `FindRelayLocal()`：worker kqueue/event/data-plane 路径使用。
+- `Relays` / `RetiredRelays` 结构性修改：继续由 `RelayMapAccessMutex` + `RelayMutex` 保护。
+- worker-local map read：由 worker 线程独占执行；必要时在 `FindRelayLocal()` 内用 shared access guard 或 assert 保护，与当前 `RelayMapAccessMutex` 契约一致。
 
-- register 分配 relay id 并插入 map
-- unregister 从 active map 移除 relay
-- retire/purge 管理 retired relay
-- stop 清空 active relay
-- fallback 查询 retired relay
+### 数据面函数边界
 
-以下路径不得调用 `FindRelay()`：
+以下函数应保持 worker-thread-only，不持有 `RelayState::Mutex`：
 
 - `ProcessTcpEvents()`
-- `DrainEvents()` 中所有 worker-thread event handler
-- `DrainEventsLocalOnly()` 中所有 local event handler
-- `SnapshotLocal()` 运行在 worker 线程时的 active relay 遍历
-- `StreamCallback()` 的 RECEIVE、peer abort、peer receive abort、shutdown complete
-
-worker 线程路径改用 `FindRelayLocal()`。callback 路径通过 `StreamBinding` 拿到必要信息，避免 map lookup。
-
-### StreamBinding callback 数据
-
-`StreamBinding` 增加弱 relay 引用或等价的 callback-safe 句柄：
-
-```cpp
-std::weak_ptr<RelayState> Relay;
-```
-
-`RegisterRelayWithIdLocal()` 创建 relay 和 binding 后，在同一初始化阶段设置：
-
-```cpp
-binding->RelayId = relay->Id;
-binding->Relay = relay;
-relay->Binding = binding;
-```
-
-callback 使用规则：
-
-- RECEIVE callback 不调用 `worker->FindRelay()`。
-- 若只需要 relay id 和 stream ownership，使用 `binding->RelayId`。
-- 若 fallback 需要 close relay，使用 `binding->Relay.lock()`；lock 失败说明 relay 已 unregister/retire，callback 返回成功或完成 receive cleanup。
-- callback 不写 worker-only 字段。
-
-`QueueDeferredQuicReceive()` 签名应改为不依赖 relay map lookup。推荐形态：
-
-```cpp
-bool QueueDeferredQuicReceive(
-    const std::shared_ptr<StreamBinding>& binding,
-    MsQuicStream* stream,
-    const QUIC_BUFFER* buffers,
-    uint32_t bufferCount,
-    bool fin);
-```
-
-该函数只做 receive view 构造、callback budget 预留和事件投递。worker 处理 `QuicReceiveView` 时通过 `receive->RelayId` 使用 `FindRelayLocal()` 查 active relay；找不到则 `DiscardDeferredQuicReceive(nullptr, receive)`。
-
-### worker 数据面
-
-worker 线程处理 kqueue 和 event queue 时：
-
-- `ProcessTcpEvents()` 使用 `FindRelayLocal()`。
-- `QuicReceiveView` event 在 worker 线程中使用 `FindRelayLocal()`。
-- send complete event 在 worker 线程中使用 operation 上的 relay id 和 `FindRelayLocal()`。
-- peer abort/shutdown/stop relay event 在 worker 线程中使用 `FindRelayLocal()`。
-- 数据面函数入口调用 `AssertWorkerThreadForRelayState()`。
-
-正常路径直接读写 worker-only 字段：
-
 - `DrainTcpReadable()`
 - `SubmitTcpBatchToQuic()`
 - `TrySubmitQuicSendOperation()`
-- `CompleteQuicSend()`
 - `RetryPendingQuicSends()`
+- `CompleteQuicSend()` 的 worker-thread active relay 分支
 - `ProcessQuicReceiveViewEvent()`
 - `EnqueueQuicReceiveForTcp()`
+- `DiscardDeferredQuicReceive()` 的 worker relay 分支
 - `FlushTcpWrites()`
+- `SetTcpReadBackpressure()`
+- `SetQuicReceiveEnabled()`
 - `MaybePauseQuicReceive()`
 - `MaybeResumeQuicReceive()`
+- `FlushAllCallbackPendingQuicReceivesLocal()`
+- `SnapshotLocal()` running-worker scan
 
-### snapshot
+### lifecycle / fallback 允许锁点
 
-运行中 `Snapshot()` 已通过 event queue 让 worker 线程执行 `SnapshotLocal()`。本阶段保留这一机制。
+以下路径允许保留 `RelayState::Mutex` 和/或 `RelayMutex`：
 
-`SnapshotLocal()` 中 active relay 遍历仍可在 `RelayMutex` 下复制或遍历 map，但不应逐条加 `RelayState::Mutex`。如果后续要进一步减少 snapshot 对 `RelayMutex` 的影响，可单独做“复制 shared_ptr 列表后释放 map 锁”的冷路径优化；这不属于本阶段热路径目标。
-
-### unregister 和 close
-
-非 worker `UnregisterRelay()` 直接执行 local unregister 的现状暂不重写。原因是当前注释说明 worker 可能阻塞在 `FlushTcpWrites()`，事件化 unregister 可能等待不到控制事件。
-
-本阶段边界：
-
-- `UnregisterRelayLocal()` 可以继续使用 `RelayMutex` 修改 map 和移除 kqueue filter。
-- `RetireRelay()`、`CloseRelay()` 可以继续使用 lifecycle 同步处理 public handle、binding inactive、pending receive discard。
-- worker 数据面只处理 active map 中查到的 relay；relay 从 map 删除后，后续 worker event lookup miss 即返回。
+- `RegisterRelayWithIdLocal()` 初始化 relay，直到后续任务移除多余初始锁。
+- `UnregisterRelayLocal()` map erase + kqueue filter removal。
+- `RetireRelay()` 和 `CloseRelay()` cleanup。
+- `PurgeRetiredRelaysIfSafe()` retired relay 是否可释放的观察。
+- `Stop()` worker 已退出后的 relay swap / retire。
+- 非 worker fallback `CompleteQuicSend()` / retired binding cleanup。
+- `TCPQUIC_TESTING` helper。
 
 ## 测试策略
 
-新增或调整 `src/unittest/darwin_relay_worker_io_test.cpp`：
+新增或更新 `src/unittest/darwin_relay_worker_io_test.cpp`：
 
-- callback shutdown/abort 只通过 worker event 关闭 relay，不直接写 worker-only 字段。
-- receive callback 在 active relay 上不需要 `RelayMutex` map lookup，事件进入 worker 后仍能写 TCP 并 `ReceiveComplete()`。
-- receive event 到 worker 时 relay 已 unregister，必须 complete/discard receive 且 pending bytes 归零。
-- QUIC->TCP partial write 与 concurrent unregister 保持安全。
-- snapshot 与 unregister/stop 并发不崩溃、不挂起。
+1. receive callback queue-full / budget-reject 不增加 locked relay lookup，也不依赖 direct relay field write 才能恢复。
+2. allocation failure callback 投递 close event，最终 active relay 归零，locked lookup count 不增加。
+3. kqueue TCP read/write path locked lookup count 不增加。
+4. worker receive view path locked lookup count 不增加，并保持 `ReceiveComplete()` 语义。
+5. snapshot 与 unregister 并发不崩溃、不挂起。
 
-新增或调整 `src/unittest/darwin_relay_worker_queue_test.cpp`：
+保留已有 Darwin relay tests：
 
-- event queue 中的 receive view 在 relay 缺失时仍可被 worker drain，不泄漏 callback budget。
-
-新增测试辅助指标，建议只在 `TCPQUIC_TESTING` 下暴露：
-
-- `FindRelayLockedCountForTest()` 或 snapshot 字段 `RelayMapLockedLookupCount`
-- worker-local lookup count 可选，用于证明路径转移
-
-验证命令在 macOS 上执行：
-
-```bash
-rtk cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-rtk cmake --build build --target tcpquic_darwin_relay_worker_io_test tcpquic_darwin_relay_worker_queue_test tcpquic_darwin_relay_metrics_test -j$(sysctl -n hw.ncpu)
-rtk build/src/tcpquic_darwin_relay_worker_io_test
-rtk build/src/tcpquic_darwin_relay_worker_queue_test
-rtk build/src/tcpquic_darwin_relay_metrics_test
-```
-
-Linux 开发机不能运行 Darwin kqueue 测试时，至少执行配置和非 Darwin 单测：
-
-```bash
-rtk cmake -S . -B build
-rtk cmake --build build --target tcpquic_relay_buffer_test tcpquic_relay_alloc_test -j$(nproc)
-rtk build/src/tcpquic_relay_buffer_test
-rtk build/src/tcpquic_relay_alloc_test
-```
+- `tcpquic_darwin_relay_worker_io_test`
+- `tcpquic_darwin_relay_worker_queue_test`
+- `tcpquic_darwin_relay_metrics_test`
+- `tcpquic_darwin_reactor_test`
 
 ## 风险
 
-- `UnregisterRelay()` 非 worker 直删仍是主要竞态风险。本阶段不重写该路径，只把数据面无锁范围限定在 active worker-local relay 上，并用并发测试守住边界。
-- `StreamBinding::Relay` 弱引用如果使用不当，可能延长或缩短 relay 生命周期。callback 只能临时 lock，不能把 shared_ptr 长期保存到外部对象。
-- callback 入队失败不能丢失 receive ownership。入队失败或 relay missing 必须显式 complete/discard receive。
-- `SnapshotLocal()` 删除 per-relay lock 后只适合 worker 线程和 stop 后静止状态。外部运行中 snapshot 必须继续事件化。
-- 压缩/解压输出缓冲变成 worker-owned 后，不能从 callback 或 close fallback 读取其内容。
+- callback 不再写 `QuicReceivePaused` 后，必须确保 worker 能在 backpressure drain 后 resume，否则可能出现 stream 长期 paused。测试需覆盖 queue-full retry/resume。
+- direct unregister 重新事件化后，worker 长时间 `FlushTcpWrites()` 仍可能拖慢 unregister；本阶段通过 retry wake 和 bounded burst 保持现状，不进一步重写 flush fairness。
+- `SnapshotLocal()` 无 per-relay lock 读取是 best-effort，不应被解释为严格一致快照。
+- `RelayMapAccessMutex` 与 `RelayMutex` 锁顺序必须保持一致：先 map access，再 `RelayMutex`。
+- `StreamBinding::Relay` 只能作为 callback 临时 owner/fallback close 入口，不能长期延长 relay 生命周期。
 
 ## 验收标准
 
-- 稳定数据面函数不再出现 `std::lock_guard<std::mutex> relayLock(relay->Mutex)`。
-- worker-thread event/kqueue 处理路径不再调用 `FindRelay()`，改用 `FindRelayLocal()`。
-- `StreamCallback()` RECEIVE、peer abort、peer receive abort、shutdown complete 不调用 `FindRelay()`。
-- `RelayMutex` 只保留在 register/unregister/retire/purge/stop/snapshot map 边界和 fallback 查询。
-- `SnapshotLocal()` 不再逐条加 `RelayState::Mutex`。
-- Darwin relay worker IO/queue/metrics 测试通过。
-- `docs/relay_macos.md` 中排名 1、2 的建议可以标记为已有实施计划；排名 3、4 作为下一组 send completion 重构处理。
+- `StreamCallback()` RECEIVE / abort / shutdown 正常 running-worker 路径不调用 `FindRelay()`。
+- callback RECEIVE 失败分支不直接写 `relay->Closing` 或 `relay->QuicReceivePaused`。
+- worker kqueue/event/data-plane 路径不调用 `FindRelay()`。
+- worker data-plane 函数不持有 `std::lock_guard<std::mutex> relayLock(relay->Mutex)`。
+- `RelayState::Mutex` 剩余使用点仅在 lifecycle/fallback/test/retired cleanup 中。
+- `RelayMutex` 剩余使用点仅在 register/unregister/retire/purge/stop/snapshot map 边界和 fallback/test 中。
+- Darwin relay worker IO/queue/metrics/reactor 测试通过。
+- `docs/relay_macos.md` 更新为 rank 1–2 已完成或正在实施，并保留 P0/P2/P3 后续事项。
