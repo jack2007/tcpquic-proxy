@@ -1388,7 +1388,7 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
     TqDarwinRelayWorker worker(config);
     worker.SetStreamSendForTest(FakeStreamSend);
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -1401,6 +1401,7 @@ void StopThenLateTcpEventIgnoresRetiredRelay() {
 
     const char payload[] = "late-tcp-event";
     CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     do {
@@ -1648,7 +1649,7 @@ void TcpErrorEventClosesAndRetiresRelay() {
     TqDarwinRelayWorkerConfig config{};
     TqDarwinRelayWorker worker(config);
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[1];
@@ -2665,7 +2666,11 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     event.RECEIVE.TotalBufferLength = sizeof(payload);
     CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_PENDING);
     CHECK(worker.FindRelayLockedCountForTest() == before);
+    const uint64_t drainLockedBefore = worker.FindRelayLockedCountForTest();
+    const uint64_t drainLocalBefore = worker.FindRelayLocalCountForTest();
     CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.FindRelayLockedCountForTest() == drainLockedBefore);
+    CHECK(worker.FindRelayLocalCountForTest() > drainLocalBefore);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();

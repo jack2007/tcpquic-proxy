@@ -17,6 +17,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -306,6 +307,8 @@ private:
     mutable std::mutex WorkerThreadIdMutex;
     mutable std::mutex LifecycleMutex;
     mutable std::mutex RelayMutex;
+    // Serializes worker-local map reads with lifecycle map/deque mutation without taking RelayMutex.
+    mutable std::shared_mutex RelayMapAccessMutex;
     mutable std::mutex KnownSendMutex;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;

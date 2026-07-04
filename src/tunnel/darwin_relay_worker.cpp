@@ -211,6 +211,7 @@ void TqDarwinRelayWorker::Stop() {
 
         if (KqueueFd >= 0) {
             {
+                std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
                 std::lock_guard<std::mutex> lock(RelayMutex);
                 relays.swap(Relays);
             }
@@ -614,7 +615,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
-            if (auto relay = FindRelayLocal(event.RelayId)) {
+            if (auto relay = FindRelay(event.RelayId)) {
                 RetryPendingQuicSends(relay);
             }
             break;
@@ -839,6 +840,7 @@ void TqDarwinRelayWorker::RetireRelay(
         }
     }
     ClearPublicHandle(relay);
+    std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     std::lock_guard<std::mutex> lock(RelayMutex);
     uint64_t inFlight = 0;
     {
@@ -861,6 +863,7 @@ void TqDarwinRelayWorker::CloseRelay(
     }
 
     {
+        std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
         const auto it = Relays.find(relay->Id);
         if (it == Relays.end() || it->second != relay) {
@@ -874,6 +877,7 @@ void TqDarwinRelayWorker::CloseRelay(
 }
 
 void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
+    std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     std::lock_guard<std::mutex> lock(RelayMutex);
     for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
         uint64_t sends = 0;
@@ -1199,13 +1203,18 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelay(
     FindRelayLockedCount.fetch_add(1, std::memory_order_relaxed);
 #endif
     std::lock_guard<std::mutex> lock(RelayMutex);
-    return FindRelayLocal(relayId);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end()) {
+        return it->second;
+    }
+    return nullptr;
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelayLocal(uint64_t relayId) const {
 #if defined(TCPQUIC_TESTING)
     FindRelayLocalCount.fetch_add(1, std::memory_order_relaxed);
 #endif
+    std::shared_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     const auto it = Relays.find(relayId);
     if (it != Relays.end()) {
         return it->second;
@@ -1215,10 +1224,16 @@ std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRelayL
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetiredRelay(uint64_t relayId) {
     std::lock_guard<std::mutex> lock(RelayMutex);
-    return FindRetiredRelayLocal(relayId);
+    for (const auto& relay : RetiredRelays) {
+        if (relay->Id == relayId) {
+            return relay;
+        }
+    }
+    return nullptr;
 }
 
 std::shared_ptr<TqDarwinRelayWorker::RelayState> TqDarwinRelayWorker::FindRetiredRelayLocal(uint64_t relayId) const {
+    std::shared_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     for (const auto& relay : RetiredRelays) {
         if (relay->Id == relayId) {
             return relay;
@@ -1958,7 +1973,8 @@ void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
     if (receive == nullptr) {
         return;
     }
-    auto relay = FindRelay(receive->RelayId);
+    const bool workerThread = IsWorkerThread();
+    auto relay = workerThread ? FindRelayLocal(receive->RelayId) : FindRelay(receive->RelayId);
     if (relay == nullptr) {
         ReleaseCallbackReceiveBudget(receive);
         (void)DiscardDeferredQuicReceive(nullptr, receive);
@@ -2455,6 +2471,7 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     relay->Binding = binding;
 
     {
+        std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
         relay->Id = NextRelayId++;
         binding->RelayId = relay->Id;
@@ -2466,6 +2483,7 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         RemoveTcpFilters(relay);
         Errors.fetch_add(1, std::memory_order_relaxed);
         {
+            std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
             std::lock_guard<std::mutex> lock(RelayMutex);
             Relays.erase(relay->Id);
         }
@@ -2528,6 +2546,7 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithId(
 void TqDarwinRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     std::shared_ptr<RelayState> relay;
     {
+        std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
         const auto it = Relays.find(relayId);
         if (it == Relays.end()) {
