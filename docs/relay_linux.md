@@ -1,244 +1,386 @@
-# Linux relay 数据转发路径
+# Linux relay 转发实现梳理
 
-本文记录当前 Linux 实现中 TCP/QUIC 数据面从控制面建链到 relay worker 接管后的转发路径、线程模型、报文分发、TCP 背压、QUIC 背压和队列设计。代码入口主要在 `src/ingress/client_ingress_reactor.cpp`、`src/tunnel/tcp_tunnel.cpp`、`src/tunnel/relay.cpp`、`src/tunnel/linux_relay_worker.cpp`。
+本文基于当前源码记录 Linux 数据转发路径、配置生效流程、线程同步热点和已发现的问题。范围主要覆盖：
 
-## 总体结构
+- `src/tunnel/relay.cpp`
+- `src/tunnel/linux_relay_worker.h`
+- `src/tunnel/linux_relay_worker.cpp`
+- `src/tunnel/linux_relay_event_queue.h`
+- `src/tunnel/relay_buffer.*`
+- `src/config/tuning.*`
+- `src/config/config.cpp`
+- `src/runtime/relay_metrics.*`
 
-Linux 数据面由 `TqLinuxRelayRuntime` 管理一组固定 `TqLinuxRelayWorker`。每条 tunnel 在 OPEN 成功后调用 `TqRelayStart()`，运行时选择一个 worker，把 TCP fd、MsQuic stream、压缩器/解压器和 `TqRelayHandle` 注册到该 worker。
+Linux 生产路径不是 per-tunnel 线程模型，而是固定数量 `TqLinuxRelayWorker` 分片处理全部 TCP fd。每个 worker 一个 `epoll` + `eventfd` 循环；relay 状态、fd interest、pending queue 和绝大多数数据面状态只在 owner worker 线程内读写。MsQuic callback、控制面 register/unregister/snapshot 通过 `TqLinuxRelayEventQueue` 投递到 owner worker。
 
-线程边界如下：
+## 1. Linux 转发逻辑和实现
 
-- client ingress 控制面线程：监听、accept、SOCKS5/HTTP CONNECT/port-forward 握手、发起 client OPEN、写代理协议响应。
-- server dial 控制面线程：server 收到 OPEN 后做 ACL、DNS、非阻塞 TCP connect。
-- MsQuic worker 线程：触发 stream callback，包括 OPEN 阶段的控制报文、relay 阶段的 QUIC receive/send complete/abort/shutdown 事件。
-- Linux relay worker 线程：每个 worker 一个 epoll/eventfd 循环，负责 TCP fd readiness、worker 事件队列、TCP/QUIC 数据转发。
-- tunnel reaper 线程：回收已停止的 tunnel context。
+### 1.1 配置生效流程
 
-控制面只负责建立 tunnel。`TqRelayStart()` 成功后，TCP fd 的读写和 QUIC stream 数据事件都由 `TqLinuxRelayWorker` 处理。
+配置入口来自 CLI 和 JSON：
 
-## client tcp->quic
+- CLI：`--relay-io-size`、`--linux-relay-read-chunk-size`、`--linux-relay-tcp-write-max-bytes`、`--linux-relay-tcp-write-burst-bytes`、`--max-memory-mb`、`--tuning`。
+- JSON：`relay.io_size`、`relay.linux.read_chunk_size`、`relay.linux.tcp_write_max_bytes`、`relay.linux.tcp_write_burst_bytes`。
+- `relay.linux.worker_slots` 仍可解析，但当前只 warning，已废弃并被忽略。
+- `EventQueueCapacity` 在 `TqLinuxRelayWorkerConfig` 中存在，默认 4096；当前 `TqTuningConfig`、CLI、JSON 没有对外暴露该配置，`TqLinuxRelayRuntime::Start()` 也没有从 tuning 设置它。
 
-路径是：
+```mermaid
+flowchart TD
+    A[启动参数 / cfg.json] --> B[src/config/config.cpp 解析]
+    B --> C[TqConfig: tuning override]
+    C --> D[TqComputeTuning]
+    D --> E[TqApplyLinuxRelayDefaults]
+    E --> F[按 auto/lan/wan 计算 LinuxRelay* 参数]
+    F --> G[TqApplyRelayPoolBudget]
+    G --> H[TqRelayStart]
+    H --> I[TqLinuxRelayRuntime::Start]
+    I --> J[创建 W 个 TqLinuxRelayWorker]
+    J --> K[worker: eventfd + epoll + EventQueue 默认 4096]
+    H --> L[TqLinuxRelayRuntime::PickWorker]
+    L --> M[TqLinuxRelayWorker::RegisterRelayWithId]
+    M --> N[worker 本地 RegisterRelayWithIdLocal]
+    N --> O[设置 TCP non-blocking / keepalive / user timeout]
+    O --> P[epoll_ctl ADD TCP fd]
+    P --> Q[替换 MsQuic stream callback 为 Linux relay callback]
+    Q --> R[relay 数据面开始]
+```
+
+关键 tuning 字段：
+
+| 字段 | 默认/来源 | 作用 |
+| --- | --- | --- |
+| `LinuxRelayWorkerCount` | `TqDetectLinuxRelayWorkers()` | Linux relay worker 数。 |
+| `LinuxRelayReadChunkSize` | LAN/WAN 默认 128 KiB，可 override | 单个 TCP read buffer 大小。 |
+| `LinuxRelayReadBatchBytes` | LAN 256 KiB，WAN 1 MiB | 单轮 TCP read 批量预算。 |
+| `LinuxRelayWorkerEventBudget` | LAN 1024，WAN 4096 | 每次 eventfd wake 后最多处理的 event 数。 |
+| `LinuxRelayWorkerByteBudgetPerTick` | LAN 16 MiB，WAN 64 MiB | worker 单 tick 字节预算上限。 |
+| `LinuxRelayTcpWriteMaxBytes` | 默认 0，可 override | 单次 TCP `writev` 尝试字节上限，0 表示不额外限制。 |
+| `LinuxRelayTcpWriteBurstBytes` | 默认 0，可 override | 单轮 TCP write flush 字节上限。 |
+| `LinuxRelayPerTunnelPendingBytes` | 由内存预算和 profile 计算 | 单 relay QUIC receive pending 上限。 |
+| `MaxPendingBufferBytesPerRelay` | 由全局 relay memory 和 worker 数计算 | relay buffer budget 上限。 |
+| `InitialQuicReadAheadBytes` | 默认 1 MiB | 初始 ideal send/backlog 阈值，后续可由网络统计更新。 |
+
+### 1.2 建链和 worker 接管
+
+client 和 server 的控制面都只负责建立 tunnel。OPEN 成功后统一调用 `TqRelayStart()`：
 
 ```text
-listen socket
+TqRelayStart()
+  -> TqRelayRegisterActive()
+  -> TqApplyRelayPoolBudget()
+  -> TqLinuxRelayRuntime::Start()
+  -> TqLinuxRelayRuntime::PickWorker()
+  -> TqLinuxRelayWorker::RegisterRelayWithId()
+  -> worker event: RegisterRelay
+  -> RegisterRelayWithIdLocal()
+  -> epoll ADD tcp fd
+  -> stream callback = TqLinuxRelayWorker::StreamCallback
+  -> TqRelayHandle 记录 LinuxWorker + LinuxRelayId
+```
+
+`RegisterRelayWithIdLocal()` 在 worker 线程中完成 TCP fd 和 stream binding 初始化：
+
+- TCP fd 设置 non-blocking。
+- 配置 keepalive 和 `TCP_USER_TIMEOUT`。
+- 注册 `EPOLLIN | EPOLLRDHUP | EPOLLERR`。
+- `epoll_event.data.u64` 放 relay id，worker 通过 `RelaysById` O(1) 找回 relay。
+- 为 MsQuic stream 建立 `StreamRelayBinding`，callback 侧通过 binding 原子字段拿到 relay。
+
+### 1.3 TCP -> QUIC
+
+TCP 可读事件只在 owner worker 线程处理。
+
+```mermaid
+flowchart LR
+    A[epoll: EPOLLIN / RDHUP] --> B[ProcessTcpEvents]
+    B --> C[DrainTcpReadable]
+    C --> D{QUIC backlog 超阈值?}
+    D -- 是 --> E[暂停 EPOLLIN]
+    D -- 否 --> F[TqAllocateRelayBuffer]
+    F --> G[readv 批量读取 TCP]
+    G --> H{启用压缩?}
+    H -- 否 --> I[TqBufferView 直接发送]
+    H -- 是 --> J[zstd compress + 重新切块]
+    I --> K[SubmitTcpBatchToQuic]
+    J --> K
+    K --> L[TqLinuxRelaySendOperation 持有 buffer]
+    L --> M[MsQuic Stream::Send]
+    M --> N[SEND_COMPLETE event 回 worker]
+    N --> O[释放 send operation / buffer]
+```
+
+实现要点：
+
+- `DrainTcpReadable()` 按 `min(ReadBatchBytes, ByteBudgetPerTick)` 控制单轮读取。
+- 每轮构造多个 `iovec`，调用 `readv()` 批量读取。
+- 非压缩路径直接把 `TqRelayBuffer` 包装成 `TqBufferView`。
+- zstd 路径先写入 `CompressionOutput`，再重新申请 relay buffer 切成 QUIC send views。
+- `SubmitTcpBatchToQuic()` 创建 `TqLinuxRelaySendOperation`，其中持有 `TqBufferView` 和 `QUIC_BUFFER`。
+- `TrySubmitQuicSendOperation()` 成功后增加 `OutstandingQuicSends` / `OutstandingQuicSendBytes`；`SEND_COMPLETE` 回到 worker 后减少 outstanding 并释放 operation。
+- TCP EOF 会设置 `TcpReadClosed`，关闭 EPOLLIN，并用 QUIC FIN 结束对端读方向；压缩模式会先 flush compressor。
+
+TCP 读侧背压：
+
+- `ShouldPauseTcpReadForQuicBacklog()` 使用 `OutstandingQuicSendBytes >= CurrentRelayIdealSendBytes()` 判断是否暂停。
+- ideal send 初始来自 `InitialQuicReadAheadBytes`；收到 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE` 后只增长到更大的 `ByteCount`。
+- MsQuic send 返回 `QUIC_STATUS_OUT_OF_MEMORY` 或 `QUIC_STATUS_BUFFER_TOO_SMALL` 时，operation 进入 `PendingQuicSendRetries`，同时暂停 TCP read。
+
+### 1.4 QUIC -> TCP
+
+MsQuic receive callback 不直接写 TCP。Linux relay callback 只保存 MsQuic buffer view、投递 event，然后返回 `QUIC_STATUS_PENDING`。真正写 TCP 和 `ReceiveComplete()` 都由 owner worker 完成。
+
+```mermaid
+flowchart LR
+    A[MsQuic RECEIVE callback] --> B[StreamRelayBinding 原子校验]
+    B --> C[QueueDeferredQuicReceive]
+    C --> D{EventQueue push 成功?}
+    D -- 是 --> E[QuicReceiveView event]
+    D -- 否 --> F[CallbackPendingQuicReceives 降级队列]
+    F --> G[ReceiveSetEnabled(false)]
+    E --> H[worker DrainEvents]
+    G --> H
+    H --> I[ProcessQuicReceiveViewEvent]
+    I --> J[PendingQuicReceives]
+    J --> K{启用解压?}
+    K -- 否 --> L[writev TCP]
+    K -- 是 --> M[zstd DecompressInto + PendingTcpWrites]
+    M --> L
+    L --> N{写完 view?}
+    N -- 否/EAGAIN --> O[保留 offset + 打开 EPOLLOUT]
+    N -- 是 --> P[ReceiveComplete]
+    P --> Q{FIN?}
+    Q -- 是 --> R[shutdown TCP SHUT_WR]
+```
+
+实现要点：
+
+- `TqPendingQuicReceive` 保存 MsQuic buffer slice、当前 slice offset、已完成长度、待批量 `ReceiveComplete` 字节数和 FIN 标记。
+- `ProcessQuicReceiveViewEvent()` 把 view 放入 `PendingQuicReceives`，增加 `PendingQuicReceiveBytes`，必要时 `ReceiveSetEnabled(false)`。
+- 非压缩路径直接基于 MsQuic buffer slice 构造 `iovec` 调 `writev()`。
+- 压缩路径通过 `DrainCompressedQuicReceiveView()` 增量解压到 relay buffer，再写入 `PendingTcpWrites`。
+- `FlushDeferredReceiveCompletion()` 可按 `LinuxRelayQuicReceiveCompleteBatchBytes` 批量归还 MsQuic receive buffer；默认阈值 0 时更及时归还。
+- `EAGAIN/EWOULDBLOCK` 时保留 view offset，打开 EPOLLOUT，后续 writable 继续。
+
+QUIC receive 背压：
+
+- high watermark 是 `MaxPendingQuicReceiveBytesPerRelay()`，配置优先用 `LinuxRelayPerTunnelPendingBytes`，否则回退到 `MaxPendingBufferBytes`。
+- low watermark 当前等于 high watermark，即 pending bytes 只要低于上限就恢复 receive。
+- event queue 满时走 `CallbackPendingQuicReceives` 降级路径，并暂停 receive；worker 后续 `DrainCallbackPendingQuicReceives()` 转入正常 pending 队列。
+
+### 1.5 client/server 差异
+
+client ingress 路径：
+
+```text
+listen fd
   -> TqClientIngressReactor accept
   -> SOCKS5 / HTTP CONNECT / port-forward 握手
   -> TqStartClientTunnelAsync()
-  -> client OPEN request over QUIC
+  -> QUIC OPEN request
   -> server OPEN response
-  -> ingress 写 SOCKS/HTTP 成功响应
+  -> ingress 写 SOCKS5 reply / HTTP 200
   -> TqAcceptClientTunnelOpen()
   -> TqRelayStart()
-  -> TqLinuxRelayWorker::RegisterRelayWithId()
-  -> epoll TCP readable
-  -> readv
-  -> Stream::Send()
 ```
 
-`TqClientIngressReactor` 在握手阶段只读取代理协议边界内的数据，避免把 early data 预读进 ingress buffer。OPEN 成功后，ingress 先把 SOCKS5 reply 或 HTTP 200 写回本地客户端，然后调用 `TqAcceptClientTunnelOpen()`。accept 后 `TqTunnelContext::StartRelay()` 调用 `TqRelayStart()`，并把 TCP fd 所有权交给 relay；此后 ingress 不再操作该 fd。
-
-Linux 注册 relay 时会：
-
-- 设置 TCP fd non-blocking。
-- 配置 keepalive / TCP user timeout。
-- 将 TCP fd 注册进 worker epoll，初始关注 `EPOLLIN | EPOLLRDHUP | EPOLLERR`。
-- 把 MsQuic stream callback 替换为 `TqLinuxRelayWorker::StreamCallback`。
-- 在 `TqRelayHandle` 中记录 `LinuxWorker` 和 `LinuxRelayId`。
-
-TCP 可读时，worker 执行 `DrainTcpReadable()`：
-
-- 按 `ReadBatchBytes` 和 `ByteBudgetPerTick` 计算本轮读预算。
-- 每次分配多个 `TqRelayBuffer`，构造 `iovec`，用 `readv()` 批量读取。
-- 非压缩模式下直接把读取结果作为 `TqBufferView` 提交 QUIC。
-- zstd 模式下先经 compressor 生成压缩输出，再重新切成 `TqBufferView`。
-- 调用 `SubmitTcpBatchToQuic()` 构造 `TqLinuxRelaySendOperation`，其中持有 buffer owner 和 `QUIC_BUFFER` 数组。
-- 调用 MsQuic `Stream::Send()`；send 成功后 buffer 生命周期由 send operation 持有，直到 `SEND_COMPLETE`。
-
-TCP EOF 时，worker 关闭 TCP 读方向，停止关注 TCP readable，并发送 QUIC FIN。若启用压缩，会先 flush compressor，把尾部压缩数据和 FIN 一起提交。
-
-## client quic->tcp
-
-client 侧从 QUIC 收到数据时，MsQuic 在线程内调用 `TqLinuxRelayWorker::StreamCallback()`。relay 阶段的 RECEIVE 不在 callback 内直接写 TCP，而是走 deferred receive：
+server 路径：
 
 ```text
-MsQuic QUIC_STREAM_EVENT_RECEIVE
-  -> StreamCallback
-  -> QueueDeferredQuicReceive()
-  -> TqLinuxRelayEventQueue: QuicReceiveView
-  -> worker eventfd wake
-  -> ProcessQuicReceiveViewEvent()
-  -> PendingQuicReceives
-  -> FlushDeferredQuicReceives()
-  -> writev TCP
-  -> stream->ReceiveComplete()
-```
-
-callback 把 MsQuic 提供的 `QUIC_BUFFER` 切片保存为 `TqPendingQuicReceive`，入 `TqLinuxRelayEventQueue` 后返回 `QUIC_STATUS_PENDING`。这表示 QUIC receive buffer 的所有权暂时由应用持有，直到数据实际写入 TCP 后再调用 `ReceiveComplete()` 归还。
-
-worker 线程处理 `QuicReceiveView` 事件时：
-
-- 将 view 放入 relay 的 `PendingQuicReceives`。
-- 增加 `PendingQuicReceiveBytes`。
-- 如超过 QUIC receive pending 上限，调用 `ReceiveSetEnabled(false)` 暂停 MsQuic 对该 stream 的继续 receive 回调。
-- 调用 `FlushDeferredQuicReceives()` 尝试写 TCP。
-
-写 TCP 使用 `writev()`，单轮受 `TcpWriteMaxBytes`、`TcpWriteBurstBytes` 和 `MaxIov` 限制。写成功后推进 view 的 slice offset 和 completed length，并把已写入字节累计到 `PendingCompleteBytes`；达到 `DeferredReceiveCompleteBatchBytes` 或 view 完成时调用 `ReceiveComplete()`。如果 TCP 写返回 `EAGAIN/EWOULDBLOCK`，worker 打开 EPOLLOUT，等待后续 writable 再继续。
-
-如果 QUIC receive 带 FIN，worker 会等该 view 全部写入 TCP 后执行 `shutdown(tcpFd, SHUT_WR)`，形成 TCP 写方向半关闭。
-
-## server quic->tcp
-
-server 侧新 QUIC stream 先由 `TqServerIncomingStreamDispatcher` 解析控制流类型。普通 OPEN 流被移交给 `TqTunnelContext`：
-
-```text
-server MsQuic incoming stream
-  -> dispatcher 收 OPEN bytes
+MsQuic incoming stream
+  -> TqServerIncomingStreamDispatcher
   -> TqTunnelContext::TryHandleServerOpen()
-  -> decode TqOpenRequest
   -> TqServerDialReactor::Submit()
   -> ACL / c-ares DNS / non-blocking TCP connect
-  -> Send OPEN response
-  -> Send complete 后 StartPendingServerRelay()
+  -> OPEN response send complete
+  -> StartPendingServerRelay()
   -> TqRelayStart()
 ```
 
-server OPEN 可能和首批数据粘在同一个 QUIC receive 中。`TryHandleServerOpen()` 会把 OPEN 头部之后的多余 bytes 保存到 `PendingRelayRx`。relay 启动后 `DispatchPendingRelayRx()` 构造一个 synthetic `QUIC_STREAM_EVENT_RECEIVE` 投给新的 relay stream callback，确保 OPEN 后的 early data 不丢。
+server 侧 OPEN 和首批 relay 数据可能粘在同一个 QUIC receive 中。`TryHandleServerOpen()` 会把控制头之后的 bytes 保存到 `PendingRelayRx`，relay 启动后再构造 synthetic receive 交给 Linux relay callback，避免 early data 丢失。
 
-DNS 和 TCP connect 由 `TqServerDialReactor` 处理。literal IP 目标跳过 DNS，域名目标走 c-ares 异步解析；解析结果经过 ACL 后逐个非阻塞 connect。成功后把 connected fd 返回给 tunnel context。server 发送 OPEN response 成功后，等待该响应的 MsQuic send complete，再启动 relay，避免客户端在收到 OPEN response 前数据面状态不一致。
+### 1.6 关闭和生命周期
 
-relay 启动后，server 的 QUIC->TCP 路径与 client quic->tcp 相同：MsQuic receive callback 入 `TqLinuxRelayEventQueue`，worker 将 `PendingQuicReceives` 写入目标 TCP fd，并按写入进度调用 `ReceiveComplete()`。
+relay 正常关闭需要满足：
 
-## server tcp->quic
+- TCP read closed。
+- TCP write closed。
+- QUIC FIN 已提交并完成。
+- `OutstandingQuicSends == 0`。
+- `PendingQuicSendRetries`、`PendingQuicReceives`、`PendingTcpWrites` 均为空。
+- `PendingQuicReceiveBytes == 0`。
 
-server 侧 TCP fd 是 dial reactor 建好的目标连接 fd。OPEN response send complete 后，`StartPendingServerRelay()` 调用 `StartRelay()`，Linux worker 开始监听目标 TCP fd readable。
+fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 
-后续路径与 client tcp->quic 相同：
+- 设置 `TqRelayHandle::Stop`。
+- 从 epoll 删除 TCP fd。
+- reset/close TCP fd。
+- detach stream binding。
+- 清空 pending queue，并对未完成 receive 调 `ReceiveComplete()` 归还 MsQuic buffer。
 
-```text
-target TCP readable
-  -> epoll
-  -> DrainTcpReadable()
-  -> readv batch
-  -> optional zstd compress
-  -> TqLinuxRelaySendOperation
-  -> MsQuic Stream::Send()
-  -> SEND_COMPLETE
-```
+## 2. Linux 线程锁和同步热点排序
 
-目标 TCP EOF 会被映射为 QUIC FIN。目标 TCP 硬错误会触发 fatal relay reset，并关闭/abort 对应 stream 和 TCP fd。
+下面按对转发热路径影响从高到低排序。这里把原子 CAS、eventfd wake、mutex 都列入“线程同步热点”，因为 Linux relay 的主要成本已经从传统大锁转为跨线程事件和原子同步。
 
-## 报文分发和事件队列
+| 排名 | 同步点 | 位置 | 触发频率/热度 | 当前作用 | 建议 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `TqLinuxRelayEventQueue` 的 `EnqueuePos` / `DequeuePos` / per-cell `Sequence` 原子 CAS | `src/tunnel/linux_relay_event_queue.h` | 最高；每个 QUIC receive、send complete、ideal send、abort/shutdown 和控制事件都会经过 | 固定容量 MPMC 风格 ring buffer，把 MsQuic callback 和控制面事件转交给 owner worker | 持续关注 `linux_relay_pending_events`、`linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。若多 producer 竞争明显，可做 per-worker 多 shard MPSC 队列或按 stream 分片队列。 |
+| 2 | `WakeArmed` 原子 + `eventfd` | `TqLinuxRelayWorker::Wake()` / `DrainEvents()` | 高；每次跨线程 enqueue 后尝试唤醒 worker | `WakeArmed.exchange(true)` 合并 wake，减少 eventfd write storm | 当前设计合理。若 wake 仍过多，可改成队列空->非空才写 eventfd，但需要更精确的空队列同步。 |
+| 3 | `StreamRelayBinding::{Relay,Handle,CallbackRefs,Closing}` 原子 | `StreamCallback()` / `OnStreamEventWithBinding()` / detach | 高；每个 QUIC callback 进入 relay 时都会访问 | 避免 callback 线程持容器锁，同时防止 unregister/detach 后 use-after-free | 方向正确。若小包 callback 极多，可评估 generation id 或 callback 批处理，但不能直接删除生命周期校验。 |
+| 4 | relay buffer budget 原子：`PendingBufferBytes` CAS、`AllocateCount` | `src/tunnel/relay_buffer.cpp` | 高；TCP read buffer、压缩输出、解压输出都会分配/释放 | 控制单 relay pending buffer 内存，失败时形成读侧背压 | 可引入 per-worker/per-relay buffer pool 和本地 credit cache，减少高吞吐下的 malloc/free 与 CAS。 |
+| 5 | 高频 metrics 原子 `fetch_add/load` | `TqLinuxRelayWorker` 多个计数字段 | 中高；按 read/write batch、receive view、send complete、错误事件计数 | 给 admin metrics 和排障使用 | 纯统计计数优先改 `memory_order_relaxed`；worker 独占更新的计数可用普通字段，snapshot 在 worker 线程读。 |
+| 6 | `RelayState::CallbackPendingQuicReceiveLock` | `QueueDeferredQuicReceiveFromOffset()` / `DrainCallbackPendingQuicReceives()` / unregister | 中；正常路径不走，event queue 满时才走 | event queue push 失败时临时保存 MsQuic receive view，并暂停 receive | 这是降级保护，不应成为常态。若指标显示频繁触发，优先扩大/暴露 event queue capacity 或队列分片；再考虑 per-relay lock-free overflow queue。 |
+| 7 | `TqLinuxRelayWorker::ControlLock` | `Start()`、`Stop()`、`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()`、test helper | 中低；建链、拆链、snapshot 触发，不在每包读写路径 | 串行化控制命令提交、worker running/thread id 检查和栈上 command 生命周期 | 缩小锁范围：避免持 `ControlLock` 等待 worker command 完成；用 atomic running/thread id 和明确 command lifetime 管理替代长持锁。 |
+| 8 | `TqLinuxRelayRuntime::Lock` | `Start()`、`Stop()`、`PickWorker()`、`Snapshot()`、`SnapshotWorkers()` | 中低；每条 relay 建链会 `Start()` + `PickWorker()`，admin snapshot 也会持有 | 保护 worker vector 和 round-robin `NextWorker` | `Start()` 可启动期一次完成，`NextWorker` 可 atomic；snapshot 应复制 worker 指针后释放 runtime lock，再逐 worker snapshot。 |
+| 9 | `TqLinuxRelayWorker::RetiredBindingLock` | `DetachRelayStreamBinding()` | 低；关闭/detach 路径 | 延迟持有 `StreamRelayBinding`，避免 callback 未退出时释放 | 当前可接受。关闭风暴下可迁移到 worker 私有 retired 队列或 epoch 回收。 |
+| 10 | 同步 command 的 `Mutex/Cv` | `RegisterRelayCommand`、`UnregisterRelayCommand`、`SnapshotCommand` 等 | 低；控制面同步 API 使用 | 让调用方等待 worker 完成本地操作 | 建议给 register/unregister/snapshot 增加超时和错误日志，避免 worker 卡住时调用方无限等待。 |
+| 11 | runtime tuning `g_Runtime.Lock` | `src/config/tuning.cpp` | 低；吞吐/RTT/压缩观察更新和日志 | 保护运行时观测状态 | 不在 Linux relay 每包转发主路径。若观测采样频率升高，可改为分片计数再周期聚合。 |
 
-Linux worker 使用两个事件来源：
+结论：当前 Linux 转发路径已经避免了 per-relay 大 mutex。真正的热点优先级是 event queue 原子竞争、eventfd wake、stream binding 原子、buffer budget CAS 和 metrics 原子写压力；传统 mutex 主要集中在控制面、降级路径和生命周期回收。
 
-- epoll：TCP readable/writable、rdhup/error、eventfd wake。
-- `TqLinuxRelayEventQueue`：跨线程事件队列，主要由 MsQuic callback 或外部控制路径写入。
+## 3. 当前问题和解决方案建议
 
-`TqLinuxRelayEventQueue` 是固定容量、power-of-two ring buffer，使用 per-cell sequence 的 MPSC/MPMC 风格无锁 push/pop。容量来自 `EventQueueCapacity`，默认配置为 4096。事件类型包括：
+### 3.1 Linux active relay 明细缺失
 
-- `QuicReceiveView`
-- `QuicSendComplete`
-- `QuicIdealSendBuffer`
-- `QuicPeerSendAborted`
-- `QuicPeerReceiveAborted`
-- `QuicShutdownComplete`
-- `RegisterRelay`
-- `UnregisterRelay`
-- `Snapshot`
-- `TcpWritable`
-- `Shutdown`
+现象：`TqSnapshotActiveRelays()` 当前只在 Windows 分支填充 `ActiveRelayStates`，Linux 下 `/api/v1/relay/active-relays` 返回空列表。Linux 聚合 metrics 已有 hot relay 字段，但无法列出所有 active relay 的细节。
 
-其中 `RegisterRelay`、`UnregisterRelay`、`Snapshot` 是同步控制事件，用于保持外部 API 的同步语义，同时把 relay 容器读写收敛到 worker 线程内。测试代码还会使用 `TakeCapturedQuicBytesForTest`、`EnqueueQuicReceiveForTest`、`FlushTcpWritableForTest`、`RelayIndexesConsistentForTest`、`DispatchTcpEventsForTest` 等 test-only 控制事件。
+影响：
 
-MsQuic receive callback 正常把 view 入 event queue。如果 queue 满，Linux 实现会把 view 临时放进 relay 的 `CallbackPendingQuicReceives`，同时暂停 QUIC receive，并 wake worker；worker 后续调用 `DrainCallbackPendingQuicReceives()` 把这些 callback pending view 转移到正常 pending 队列。
+- 排查单连接卡顿时只能看聚合 `linux_relay_hot_relay_*`，无法通过 API 枚举所有 relay。
+- `docs/relay_linux.md` 中建议关注 per-relay pending/backpressure，但实际 API 不完整。
 
-## TCP 背压
+建议：
 
-Linux 有两类 TCP 背压：
+- 增加 Linux active relay snapshot 结构，至少包含 relay id、worker index、pending receive bytes/queue、outstanding QUIC send bytes、pending retry 数、TCP read/write bytes、read/write armed、last errno、local/peer address。
+- 在 worker `SnapshotLocal()` 或单独 active-relay event 中构建明细；如果担心 snapshot 成本，支持分页或只返回 top N hot relays。
+- 让 `/api/v1/relay/active-relays/{id}` 同时支持 Linux。
 
-1. TCP 读侧背压，也就是暂停 tcp->quic 的 `readv()`。
-2. TCP 写侧自然背压，也就是 quic->tcp 写目标 TCP 时遇到 `EAGAIN`。
+### 3.2 Event queue capacity 未暴露配置
 
-TCP 读侧背压由 QUIC send backlog 驱动。`ShouldPauseTcpReadForQuicBacklog()` 比较 `OutstandingQuicSendBytes` 和当前 relay 的 ideal send buffer。ideal send buffer 来自 MsQuic `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE`，没有事件时使用 fallback。达到阈值后：
+现象：`TqLinuxRelayWorkerConfig::EventQueueCapacity` 默认 4096，单测可直接设置，但生产 `TqTuningConfig` 没有对应字段；CLI/JSON 也没有配置项。
 
-- 设置 `TcpReadPausedByQuicBacklog=true`。
-- 通过 `ArmTcpReadable(false)` 修改 epoll interest，暂停继续读 TCP。
-- send complete 降低 outstanding 后，如低于阈值则恢复 readable。
+影响：
 
-TCP 写侧背压由内核 send buffer 体现。`writev()` 返回 `EAGAIN/EWOULDBLOCK` 时，当前 view 保留在 `PendingQuicReceives`，worker 启用 EPOLLOUT，后续 writable 再从保存的 slice offset 继续写。
+- 代码已经有 `EventQueueFullErrors` 和 `QuicReceiveViewBackpressureQueued` 指标，但用户无法通过配置扩大 queue，只能改源码。
+- 高并发小包或多 MsQuic callback producer 下，event queue 满会进入 `CallbackPendingQuicReceives` 锁路径，并暂停 receive。
 
-buffer 分配也会形成读侧背压。`TqAllocateRelayBuffer()` 受 `MaxPendingBufferBytes` 限制，如果 pending bytes 超限，读取路径会停下并取消 readable，等已提交 buffer 随 QUIC send complete 或 TCP write complete 释放后再恢复。
+建议：
 
-## QUIC 背压
+- 在 `TqTuningConfig` 增加 `LinuxRelayEventQueueCapacity`。
+- JSON 增加 `relay.linux.event_queue_capacity`，CLI 增加 `--linux-relay-event-queue-capacity`。
+- 文档中明确 power-of-two normalize 行为、建议范围和过大容量的内存成本。
 
-QUIC send 背压主要由 MsQuic `Stream::Send()` 返回资源类错误和 outstanding bytes 共同处理：
+### 3.3 QUIC receive 背压没有 hysteresis
 
-- send 成功时增加 `OutstandingQuicSends` 和 `OutstandingQuicSendBytes`。
-- `SEND_COMPLETE` 事件经 event queue 回到 worker 后减少 outstanding，并释放 send operation 持有的 buffer。
-- 如果 `Stream::Send()` 返回 backpressure 类状态，operation 被放进 `PendingQuicSendRetries`，同时暂停 TCP read。
-- 后续 send complete 或 ideal send buffer 事件会触发 retry。
+现象：`LowPendingQuicReceiveBytesPerRelay()` 当前直接返回 high watermark。也就是说 pending bytes 一旦低于上限就恢复 receive。
 
-QUIC receive 背压由 `PendingQuicReceiveBytes` 控制：
+影响：
 
-- `PendingQuicReceiveBytes >= MaxPendingQuicReceiveBytesPerRelay()` 时暂停 `ReceiveSetEnabled(false)`。
-- 写入 TCP 后减少 pending bytes。
-- Linux 当前 low watermark 等于 high watermark，即 pending bytes 低于上限后恢复 receive。
+- 在 TCP 写端轻微抖动时，`ReceiveSetEnabled(false/true)` 可能围绕阈值频繁切换。
+- metrics 中 `linux_relay_quic_receive_paused_count` / `resumed_count` 上升时，不容易判断是稳定背压还是阈值抖动。
 
-因为 receive callback 返回 `QUIC_STATUS_PENDING`，未完成的 QUIC receive view 不会被 MsQuic 复用。真正完成点是 TCP 写入后调用 `ReceiveComplete()`。
+建议：
 
-## 队列和生命周期
+- 设置 low watermark，例如 high 的 50% 或 75%。
+- metrics 增加当前 high/low watermark，便于现场判断。
+- 对不同 tuning profile 设置不同 hysteresis：LAN 更低延迟，WAN 更强调吞吐和减少 callback 抖动。
 
-每条 relay 主要队列如下：
+### 3.4 runtime snapshot 持锁范围偏大
 
-- `PendingQuicSendRetries`：QUIC send 资源不足时等待重试的 send operation。
-- `PendingQuicReceives`：QUIC->TCP 方向等待写 TCP 的 receive view。
-- `CallbackPendingQuicReceives`：event queue 满时，callback 线程临时挂起的 receive view。
-- `PendingTcpWrites`：Linux 代码保留的 TCP 写 pending 队列，主要用于部分路径和 metrics；常规 QUIC receive view 直接保留在 `PendingQuicReceives`。
-- relay buffer budget：`PendingBufferBytes` 限制 worker/relay 持有的 TCP read buffer 和压缩输出 buffer。
+现象：`TqLinuxRelayRuntime::Snapshot()` 和 `SnapshotWorkers()` 持有 `Runtime::Lock` 时逐个调用 `worker->Snapshot()`。worker snapshot 会投递同步 event 并等待 worker 完成。
 
-关闭条件要求两边方向都 drain 完成：TCP read closed、TCP write closed、QUIC FIN submitted/completed、outstanding QUIC sends 为 0、pending receive/write 队列为空。满足后 worker 调用停止逻辑，`TqTunnelReaper` 最终回收 tunnel context。
+影响：
 
-## 锁和同步开销
+- admin snapshot 慢或 worker 忙时，`PickWorker()` 会被 runtime lock 阻塞，短连接建链可能被 metrics 请求影响。
+- 如果未来 snapshot 更重，控制面抖动会更明显。
 
-Linux relay 的目标是让每条 relay 的状态尽量只由所属 `TqLinuxRelayWorker` 线程修改。常规 TCP `readv/writev`、QUIC send retry、pending receive 推进、TCP/QUIC 背压状态切换都不使用每连接互斥锁；跨线程入口通过 stream binding 原子状态、无锁 event queue 和少量生命周期锁交给 worker 串行处理。
+建议：
 
-当前流程中的同步点如下：
+- runtime lock 内只复制 worker 指针/引用，随后释放 lock，再调用各 worker snapshot。
+- worker lifetime 可通过 `shared_ptr` 或停止阶段 join 前 drain snapshot 请求保证。
+- 聚合 snapshot 可以允许返回部分 worker 超时结果，并暴露超时计数。
 
-| 同步点 | 代码位置 | 触发路径 | 粒度和性能影响 | 更合适的处理办法 |
-| --- | --- | --- | --- | --- |
-| `TqLinuxRelayRuntime::Lock` | `src/tunnel/linux_relay_worker.h` / `.cpp` | `Start()`、`Stop()`、`PickWorker()`、`Snapshot()` | runtime 级互斥锁。`TqRelayStart()` 每建一条 relay 会进入 `Start()` 和 `PickWorker()`，属于建链/拆链级别，不在报文转发热路径。高并发短连接下可能让建链线程在 worker 选择处串行化；`Snapshot()` 还会在持有 runtime 锁时遍历 worker 快照，可能和建链互相影响。 | worker 初始化可以用 `std::call_once` 或启动期一次性完成；`NextWorker` 可改为 atomic round-robin，`PickWorker()` 无锁；metrics snapshot 可复制 worker 指针后释放 runtime 锁，再逐个 snapshot。 |
-| relay 容器 / `TqLinuxRelayWorker::RelayLock`（已移除） | `Relays` / `RetiredRelays` / `RelaysById` / `RetiredRelaysById` / `NextRelayId` | `RegisterRelayWithId()`、`UnregisterRelay()`、`FindRelayById()`、`FindRelayByFd()`、`Snapshot()`、`PurgeRetiredRelaysIfIdle()` | Stage 1 先增加 `RelaysById` / `RetiredRelaysById`，把 relay id 查找从线性扫描降为 O(1)，但仍保留容器锁。Stage 2 将 register、unregister、snapshot 事件化，并让 `Relays`、`RetiredRelays`、`RelaysById`、`RetiredRelaysById` 只归 worker 线程读写，因此 `RelayLock` 已移除。当前热路径剩余成本是跨线程 event queue 入队，以及 worker 内本地 map 查找。 | 如果本地 map 查找仍在压测中显著占热，可进一步改成 slot/generation id，或让 epoll data 直接携带 slot 指针并由 generation 校验生命周期。 |
-| `TqLinuxRelayWorker::ControlLock` | `src/tunnel/linux_relay_worker.h` / `.cpp` | `RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()`、`Stop()`、test-only 控制 helper | `RelayLock` 移除后仍保留的 lifecycle/control 锁。它串行化 register、unregister、snapshot 等同步控制命令提交和 `Stop()`，保护 `WorkerThreadId` / running-state 检查，以及栈上同步 command 在等待 worker 完成前的生命周期。它不是每 relay 数据面或容器读写锁，不保护 worker-owned relay 容器，也不会被 worker 侧 local helper / completion 路径持有。 | 当前定位合理：只覆盖控制面命令提交和停止边界，不进入报文转发热路径。若控制面提交频率成为瓶颈，可进一步拆分 stop 状态和 command lifetime 同步，但不应重新引入跨线程容器共享。 |
-| `RelayState::CallbackPendingQuicReceiveLock` | `CallbackPendingQuicReceives` | `QueueDeferredQuicReceive()` 在 event queue 满时写入；worker 的 `DrainCallbackPendingQuicReceives()`、abort/unregister 清理 | 连接级互斥锁，但只在 event queue 满的降级路径使用。正常 QUIC receive 只进无锁 event queue，不持该锁；当 queue 满时，callback 线程会拿该锁追加 pending view，并暂停 QUIC receive。此时性能主要已经受队列容量/worker drain 能力限制，该锁会进一步增加 callback 延迟。 | 首选通过容量、worker 数、event budget 避免进入该路径。若压测显示频繁触发，可改为每 relay lock-free overflow queue，或让 overflow 只记录一个“需要 drain”标记并把 view 放进预分配 MPSC 队列。 |
-| `TqLinuxRelayWorker::RetiredBindingLock` | `RetiredStreamBindings` | `DetachRelayStreamBinding()` | 生命周期级互斥锁。只在 stream binding 解除和延迟释放时使用，通常发生在关闭、fatal reset 或最后一个 QUIC send 完成后，不参与正常报文转发。 | 当前成本可接受。若关闭风暴中有竞争，可把 retired binding 回收移动到 worker 线程私有队列，或用 epoch/RCU 风格延迟释放。 |
-| `TqLinuxRelayEventQueue` 的 `EnqueuePos` / `DequeuePos` / per-cell `Sequence` 原子 CAS | `src/tunnel/linux_relay_event_queue.h` | MsQuic callback 入队 `QuicReceiveView`、`QuicSendComplete`、abort/shutdown/ideal buffer；worker `DrainEvents()` 出队 | 报文/事件级同步。它是固定容量 ring buffer，没有互斥锁；每次 push/pop 有 CAS 和 acquire/release 原子操作。相比 mutex 更适合 MsQuic callback 到 worker 的跨线程转交，但多个 MsQuic callback 线程同时向同一 worker 入队时仍会在 `EnqueuePos` cache line 上竞争。 | 如果 `MultipleEventProducerThreadsObserved` 或 event queue full 指标升高，可按 producer/stream 分片队列，或者让每个 worker 有多个 MPSC shard 后由 worker 轮询；如果能保证单 producer，则可替换为 SPSC ring 降低 CAS 成本。 |
-| `WakeArmed` 原子和 `eventfd` wake | `Wake()` / `DrainEvents()` | 每次跨线程 enqueue 后唤醒 worker | 事件级同步。`WakeArmed.exchange(true)` 合并 wake，避免每个事件都写 `eventfd`；成本是一条原子 RMW，收益是减少系统调用和 epoll wake storm。 | 当前方式合理。可进一步只在队列从空变非空时写 `eventfd`，但需要更精确的队列空状态同步，复杂度会上升。 |
-| `StreamRelayBinding` 的 `Relay` / `Closing` / `CallbackRefs` 原子 | `StreamCallback()` / `OnStreamEventWithBinding()` / `DetachRelayStreamBinding()` | MsQuic stream callback 进入 relay 后校验生命周期 | QUIC callback 级同步。RECEIVE、ideal buffer、shutdown/abort 事件会 `fetch_add/fetch_sub` callback ref，并 acquire-load relay 指针和 closing 标志；SEND_COMPLETE 当前先直接入 event queue，不走 callback ref。该设计避免 callback 线程持 `RelayLock`，也避免注销时 use-after-free，开销通常小于互斥查找。 | 当前设计方向正确。若小包 callback 极多，可评估让 MsQuic callback 只做最少原子校验和批量入队，或用 generation id 降低 ref 计数频率；不能简单移除，除非能从 MsQuic callback 串行性和对象生命周期上证明安全。 |
-| `TqRelayHandle::Stop` 原子 | `TqRelayStart()` / `TqRelayStop()` / `SetRelayStop()` | 控制面停止 relay，worker 标记停止条件 | 连接生命周期级同步，不在每个报文上读写。成本低，主要用于跨线程观察停止状态。 | 保持 atomic bool 即可。 |
-| 全局 active relay 计数 | `TqRelayRegisterActive()` / `TqRelayUnregisterActive()` | `TqRelayStart()`、`TqRelayStop()` | 建链/拆链级原子计数，用于根据活跃 relay 数调整 pool budget。不是转发热路径；短连接风暴时可能成为轻微共享 cache line 热点。 | 如果建链压力很高，可改为分 worker/per-thread 计数并周期聚合；现阶段不应优先优化。 |
-| relay buffer budget 原子 | `TqRelayBufferBudget::PendingBufferBytes` / `AllocateCount` | TCP read buffer、压缩输出 buffer、QUIC receive TCP buffer 分配和释放 | buffer 分配级同步。每分配一个 `TqRelayBuffer` 都会 CAS 增加 pending bytes，释放时 fetch_sub。由于读路径按 `ReadChunkSize` 和 `readv` 批量分配，粒度是 buffer/chunk 而不是每字节；在高吞吐下，真正成本通常与内存分配一起出现。 | 可用 per-worker/per-relay buffer pool 和本地 credit cache 减少全局分配与 CAS；如果确认所有释放都回到 worker 线程，也可把部分计数改为 worker 私有非原子，并把跨线程释放转成 worker 事件。 |
-| 统计和指标原子 | `TcpReadBytes`、`TcpWriteBytes`、`QuicReceiveViewCount`、错误计数等 | read/write batch、receive view、send complete、错误路径、snapshot | 多数是批次/事件级 `fetch_add/load`，用于 metrics 和 trace，不保护业务状态。它们不改变转发语义，但在小包、高事件率或频繁 snapshot 时可能产生 cache line 写压力；当前不少 `fetch_add()` 使用默认内存序，成本可能高于纯计数所需。 | 对只用于统计的计数优先使用 `memory_order_relaxed`；worker 线程独占更新的计数可改成普通字段，snapshot 在 worker 线程上下文读取；高频指标可做采样或按线程分片聚合。 |
+### 3.5 `ControlLock` 持锁等待 worker command
 
-因此，从转发性能角度看，当前最需要关注的不是传统大锁，而是：
+现象：`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()` 在持有 `ControlLock` 后 enqueue command，并等待 command `Cv`。event queue 满时部分路径会释放锁重试，但 register 和 snapshot 的首次 enqueue 失败直接返回。
 
-1. event queue 入队和 worker 本地 relay id map 查找是否在每个 TCP/QUIC 事件上放大。
-2. event queue 的 CAS 竞争和 queue full 后的 callback pending 降级路径。
-3. buffer 分配预算 CAS、内存分配和高频统计原子在小包场景中的累计成本。
+影响：
 
-实现备注：当前 Linux relay 查找优化分两阶段完成：先在保留锁的前提下增加 relay id map，再把容器读写收敛到 worker event loop 中，移除跨线程容器共享。
+- worker 忙或 event queue 满时，控制面调用可能长时间占用 `ControlLock`，阻塞同 worker 的 stop/snapshot/register。
+- register enqueue 失败直接返回失败，短时 queue full 可能造成建链失败，而 unregister/test helper 有 retry。
 
-如果要继续改进，建议先确认 worker 本地 map 查找是否仍是热点；若是，再评估 slot/generation id 或 epoll data slot 指针。之后再根据 metrics 判断是否需要队列分片、buffer pool 或统计计数降频。
+建议：
 
-## 关键参数
+- 缩小 `ControlLock` 到 running/thread id 检查，不要持锁等待 command 完成。
+- register/snapshot enqueue 失败可采用 bounded retry + 明确错误日志，而不是静默返回空结果。
+- command wait 增加超时，超时后标记 relay/backend 状态，避免调用方无限阻塞。
 
-- `ReadChunkSize`：单个 relay buffer 大小，默认 128 KiB。
-- `ReadBatchBytes`：单次 TCP read drain 的批量预算，默认 1 MiB。
-- `ByteBudgetPerTick`：worker 单 tick 字节预算。
-- `MaxIov`：`readv/writev` 最大 iov 数。
-- `TcpWriteMaxBytes`：单次 TCP write 尝试最大字节数，0 表示不额外限制。
-- `TcpWriteBurstBytes`：单轮 TCP write burst 限制。
-- `MaxPendingBufferBytes`：relay buffer 总 pending 上限。
-- `MaxPendingQuicReceiveBytesPerRelay`：QUIC receive pending 上限，0 时回退到 `MaxPendingBufferBytes`。
-- `DeferredReceiveCompleteBatchBytes`：批量归还 MsQuic receive buffer 的阈值。
-- `MaxInFlightQuicSends` / `MaxBufferedQuicSendBytes`：QUIC send 侧背压上限。
+### 3.6 收到 MsQuic fake FIN 时直接 abort 进程
+
+现象：`OnStreamEventWithBinding()` 遇到 `TqIsMsQuicFakeFinReceive()` 时执行 `assert(false)` 和 `std::abort()`。
+
+影响：
+
+- 即使这是“不应发生”的 MsQuic 事件形态，生产进程直接退出会扩大单 stream 异常的影响面。
+- 该路径在 relay callback 中，崩溃时可能影响所有 active tunnels。
+
+建议：
+
+- 改为记录 fatal relay error，调用 `AbortRelayFromCallback()` 或投递 fatal event 给 worker，关闭当前 relay/stream。
+- 保留 debug build assert，但 release build 不应 `std::abort()`。
+- 增加单测覆盖 fake FIN receive，验证只重置当前 relay。
+
+### 3.7 metrics 原子内存序偏保守
+
+现象：很多计数器 `fetch_add()` / `load()` 未显式内存序，默认 `seq_cst`。这些计数器多数只用于观测，不参与业务状态同步。
+
+影响：
+
+- 小包、高事件率压测下，统计写入可能形成额外 cache line 和内存序成本。
+- 真正业务状态多在 worker 线程独占，部分原子属于历史保守实现。
+
+建议：
+
+- 对纯统计字段统一使用 `memory_order_relaxed`。
+- worker 线程独占更新、snapshot 也在 worker event 中读取的字段可改普通整数。
+- 高频指标可以按 worker 本地聚合，admin snapshot 时再汇总。
+
+### 3.8 运行时缺少锁/队列等待时间指标
+
+现象：Windows relay metrics 暴露了 `windows_relay_worker_lock_wait_nanos`、`find_relay_by_id_count`、callback dispatch nanos 等；Linux 没有类似 event queue CAS retry、ControlLock wait、Runtime lock wait、command wait 的指标。
+
+影响：
+
+- 只能通过 queue depth/full 和 pending bytes 间接判断瓶颈。
+- “锁热点排序”目前主要依赖代码结构和路径频率，缺少生产现场的直接等待时间证据。
+
+建议：
+
+- 增加 Linux `event_queue_push_failures/retries`、`event_queue_cas_retry_count`、`control_lock_wait_nanos`、`runtime_lock_wait_nanos`、`snapshot_command_wait_nanos`。
+- 把 `MultipleEventProducerThreadsObserved` 暴露到 JSON metrics，辅助判断是否需要 queue shard。
+- 对 queue full 降级路径增加每 relay callback pending depth/top N。
+
+### 3.9 relay id lookup 已优化，但 fd/stream fallback 仍有线性扫描
+
+现象：主路径 epoll 通过 relay id 走 `RelaysById`；但 `FindRelayByFd()` 和 `FindRelayIdByStream()` 仍扫描 `Relays`。其中 fd 查找主要用于测试，stream 查找已有 `StreamLookupScanCount` 指标。
+
+影响：
+
+- 当前不属于主热路径；如果 `StreamLookupScanCount` 在生产中上升，说明存在 fallback 或旧路径仍在使用。
+
+建议：
+
+- 继续以 relay id map 为主路径。
+- 如需生产使用 fd/stream 查找，增加 `RelaysByFd` / `RelaysByStream` map 或 slot/generation id。
+- 在 metrics 中暴露 `StreamLookupScanCount`，若非零则排查调用来源。
+
+## 4. 排障优先级
+
+生产排查 Linux relay 性能时建议按下面顺序看指标：
+
+1. 队列压力：`linux_relay_pending_events`、`linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。
+2. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
+3. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
+4. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
+5. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
+
+当前最值得优先补齐的是 Linux active relay 明细和 event queue capacity 配置；前者提升定位能力，后者让 queue full 降级路径有可操作的调优手段。
