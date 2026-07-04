@@ -371,8 +371,10 @@ admin API 行为：
 建议：
 
 - 对纯统计字段统一使用 `memory_order_relaxed`。
-- worker 线程独占更新、snapshot 也在 worker event 中读取的字段可改普通整数。
-- 高频指标可以按 worker 本地聚合，admin snapshot 时再汇总。
+- 保留 `Running`、`WakeArmed`、stream binding、handle stop、event queue 等同步原子的 acquire/release/acq_rel 语义。
+- 本阶段不把字段改成普通整数，先做低风险显式 relaxed 收敛；后续如果生产压测仍显示 metrics cache line 压力，再评估 worker-local 普通计数或分层聚合。
+
+推进状态：已选为下一步处理项。设计文档见 `docs/superpowers/specs/2026-07-04-linux-relay-metrics-relaxed-design.md`，开发计划见 `docs/superpowers/plans/2026-07-04-linux-relay-metrics-relaxed.md`。
 
 ### 3.8 queue 和控制面等待指标已补齐
 
@@ -417,4 +419,4 @@ admin API 行为：
 7. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、`linux_relay_fake_fin_receive_count`、last errno/status。
 8. fallback 扫描：`linux_relay_stream_lookup_scan_count` 非零或持续增长时，说明仍有按 stream 扫描 relay 的 fallback 路径被触发，需要结合调用来源判断是否增加 `RelaysByStream` / slot generation。
 
-Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛、控制面 wait metrics、fake FIN 单 relay 隔离和 stream lookup fallback 观测已补齐。后续重点是根据生产指标决定是否需要 queue shard、per-relay callback pending top N、stream/fd lookup map 等低优先级观测或结构增强；QUIC receive 背压 hysteresis 本轮不处理。
+Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛、控制面 wait metrics、fake FIN 单 relay 隔离和 stream lookup fallback 观测已补齐。下一步建议执行 `docs/superpowers/plans/2026-07-04-linux-relay-metrics-relaxed.md`，先收敛 Linux relay 纯 metrics 原子的默认 `seq_cst` 成本；queue shard、per-relay callback pending top N、stream/fd lookup map 等继续根据生产指标决定是否排期；QUIC receive 背压 hysteresis 本轮不处理。
