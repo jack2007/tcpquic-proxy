@@ -285,11 +285,12 @@ QUIC receive 背压：
 - `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 不能阻止单次超大 view 的复制。
 - callback 线程承担 memcpy 成本，会增加 `CallbackDispatchNanos`。
 
-建议：
+当前状态：
 
-- 在 callback 中用 `CallbackBinding::RelayHint` 快速读取 relay 的 generation、pending bytes 和上限，先做轻量预算判断。
-- 对单个 receive view 增加最大尺寸策略，超过阈值时先暂停 receive 或走分片处理。
-- 中期可评估是否使用 MsQuic pending receive 的 buffer ownership，减少复制；如果保留复制模型，也应把复制前的预算拒绝路径做清楚。
+- callback 线程在复制前通过 `CallbackBinding::RelayHint` 读取 relay generation、pending bytes 和上限，先做轻量预算判断。
+- 对不含 FIN 且会超过 `WindowsRelayMaxPendingQuicReceiveBytesPerRelay` 的 receive，callback 线程会暂停后续 QUIC receive 并跳过复制。
+- worker 侧 `EnqueueDeferredQuicReceiveView()` 仍保留预算检查，作为并发竞态兜底。
+- copy 字节和耗时通过 `windows_relay_callback_receive_copy_bytes` / `windows_relay_callback_receive_copy_nanos` 观测，预算拒绝和暂停通过对应 callback receive budget 指标观测。
 
 ### 3.5 `StreamCallback()` 遇到 fake FIN 会 `abort()` 是设计行为
 
@@ -361,10 +362,10 @@ QUIC receive 背压：
 
 - 高并发 Windows 性能问题发生时，可能只能看到 backlog 或延迟结果，难以判断根因是 callback copy、全表 maintenance、TCP 写慢还是 worker map 锁。
 
-当前剩余缺口：
+当前状态：
 
-- callback 复制字节/耗时还没有直接指标。
-- receive callback 复制前预算控制仍未实现，相关观测可在后续 3.4 方案中补齐。
+- maintenance 扫描耗时、每轮扫描 relay 数、receive view 线性查找成本、callback 复制字节/耗时均已有指标。
+- 后续如果继续优化 receive callback，可评估 MsQuic buffer ownership 或分片处理，但当前观测缺口已关闭。
 
 ## 建议优先级
 
@@ -375,6 +376,6 @@ QUIC receive 背压：
 | 中 | 为 Windows 增加独立 worker count 配置名 | 配置语义和后续调优需要。 |
 | 已完成 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 常规路径已改为事件驱动 maintenance queue，并保留低频兜底扫描。 |
 | 已完成 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 正常路径 O(1)，异常路径有计数和 trace。 |
-| 中 | receive callback 复制前加入预算判断和指标 | 降低 callback 线程 CPU/内存尖峰。 |
+| 已完成 | receive callback 复制前加入预算判断和指标 | 超限 receive 会在复制前被拒绝并暂停后续 receive，copy 成本已有指标。 |
 | 低 | 清理或注释 per-relay 残留 mutex | 降低维护误解。 |
-| 部分完成 | 补齐 maintenance/copy/linear-search 指标 | maintenance 和 linear-search 指标已补齐，callback copy 指标留待 receive callback 预算方案处理。 |
+| 已完成 | 补齐 maintenance/copy/linear-search 指标 | maintenance、linear-search 和 callback copy 指标均已补齐。 |
