@@ -2317,7 +2317,7 @@ void RegisterAfterStopFailsWithoutPublishingHandle() {
     CloseSocketPairBoth(fds);
 }
 
-void ReceiveEnqueueFailureCurrentlyReturnsSuccess() {
+void ReceiveCallbackQueueFullReturnsPendingWithoutCompleting() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     ResetFakeReceiveComplete();
@@ -2517,6 +2517,11 @@ void ReceiveCallbackBudgetRejectPausesAndCompletes() {
     CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 0);
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(secondPayload) - 1);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.FlushTcpWritableForTest(result.RelayId));
+    CHECK(g_receiveSetEnabledCalls.load(std::memory_order_acquire) == 2);
+    CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 1);
 
     worker.SetReceiveSetEnabledForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -3711,7 +3716,7 @@ int main() {
     UnknownSendCompleteAfterStopIsIgnored();
     RegisterFilterFailureRollsBackRelayAndHandle();
     RegisterAfterStopFailsWithoutPublishingHandle();
-    ReceiveEnqueueFailureCurrentlyReturnsSuccess();
+    ReceiveCallbackQueueFullReturnsPendingWithoutCompleting();
     ReceiveCallbackQueueFullBackpressureRetriesAfterDrain();
     ReceiveCallbackBudgetRejectPausesAndCompletes();
     QuicReceiveCallbackReturnsPending();

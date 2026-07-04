@@ -3217,6 +3217,9 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             return QUIC_STATUS_SUCCESS;
         }
         case TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected:
+            if (std::shared_ptr<RelayState> relay = binding->Relay.lock()) {
+                relay->QuicReceivePaused = true;
+            }
             worker->PauseMsQuicReceiveFromCallback(stream);
             worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
             return QUIC_STATUS_SUCCESS;
