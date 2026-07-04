@@ -307,6 +307,10 @@ public:
         _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
+    friend bool TqLinuxRelayWorkerEnqueueCancelledRegisterForTest(
+        TqLinuxRelayWorker& worker,
+        const TqLinuxRelayRegistration& registration);
+
     enum class RelayErrorKind {
         EventQueueFull,
         TcpReadBufferAcquire,
@@ -328,6 +332,7 @@ private:
         std::mutex Mutex;
         std::condition_variable Cv;
         uint64_t WaitNanos{0};
+        bool Cancelled{false};
         bool Done{false};
     };
 
@@ -336,6 +341,7 @@ private:
         std::mutex Mutex;
         std::condition_variable Cv;
         uint64_t WaitNanos{0};
+        bool Cancelled{false};
         bool Done{false};
     };
 
@@ -344,6 +350,7 @@ private:
         std::mutex Mutex;
         std::condition_variable Cv;
         uint64_t WaitNanos{0};
+        bool Cancelled{false};
         bool Done{false};
     };
 

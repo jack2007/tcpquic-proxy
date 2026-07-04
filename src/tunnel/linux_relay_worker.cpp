@@ -188,6 +188,7 @@ bool WaitForCommandDone(
     waitNanos.fetch_add(command.WaitNanos, std::memory_order_relaxed);
     waitCount.fetch_add(1, std::memory_order_relaxed);
     if (!done) {
+        command.Cancelled = true;
         timeouts.fetch_add(1, std::memory_order_relaxed);
     }
     return done;
@@ -1016,24 +1017,50 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
         }
         case TqLinuxRelayEventType::RegisterRelay: {
             auto* command = static_cast<RegisterRelayCommand*>(event.Control);
-            TqLinuxRelayRegistrationResult result{};
             if (command != nullptr) {
-                result = RegisterRelayWithIdLocal(command->Registration);
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    if (!command->Cancelled) {
+                        command->Result = RegisterRelayWithIdLocal(command->Registration);
+                    }
+                    command->Done = true;
+                }
+                command->Cv.notify_one();
+            } else {
+                CompleteRegisterCommand(command, {});
             }
-            CompleteRegisterCommand(command, result);
             break;
         }
         case TqLinuxRelayEventType::UnregisterRelay: {
             auto* command = static_cast<UnregisterRelayCommand*>(event.Control);
             if (command != nullptr) {
-                UnregisterRelayLocal(command->RelayId);
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    if (!command->Cancelled) {
+                        UnregisterRelayLocal(command->RelayId);
+                    }
+                    command->Done = true;
+                }
+                command->Cv.notify_one();
+            } else {
+                CompleteUnregisterCommand(command);
             }
-            CompleteUnregisterCommand(command);
             break;
         }
         case TqLinuxRelayEventType::Snapshot: {
             auto* command = static_cast<SnapshotCommand*>(event.Control);
-            CompleteSnapshotCommand(command, SnapshotLocal());
+            if (command != nullptr) {
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    if (!command->Cancelled) {
+                        command->Result = SnapshotLocal();
+                    }
+                    command->Done = true;
+                }
+                command->Cv.notify_one();
+            } else {
+                CompleteSnapshotCommand(command, {});
+            }
             break;
         }
         case TqLinuxRelayEventType::Shutdown:
