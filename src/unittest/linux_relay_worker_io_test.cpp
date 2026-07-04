@@ -2554,6 +2554,99 @@ int main() {
     {
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) {
+            return 372;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            return 373;
+        }
+
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.EnableQuicSends = false;
+        if (!worker.RegisterRelayForTest(registration)) {
+            worker.Stop();
+            ::close(fds[0]);
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 374;
+        }
+
+        QUIC_STREAM_EVENT fakeFin{};
+        fakeFin.Type = QUIC_STREAM_EVENT_RECEIVE;
+        fakeFin.RECEIVE.AbsoluteOffset = UINT64_MAX;
+        fakeFin.RECEIVE.TotalBufferLength = 0;
+        fakeFin.RECEIVE.BufferCount = 0;
+        fakeFin.RECEIVE.Buffers = nullptr;
+        fakeFin.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+
+        const QUIC_STATUS status = worker.DispatchStreamEventForTest(fakeStream, &fakeFin);
+        if (status != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr, "expected fake FIN to return SUCCESS, got %d\n", status);
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 375;
+        }
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.FakeFinReceiveCount != 1) {
+            std::fprintf(stderr, "expected fake FIN count 1, got %llu\n",
+                static_cast<unsigned long long>(snapshot.FakeFinReceiveCount));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 376;
+        }
+        if (snapshot.FatalRelayResets != 1) {
+            std::fprintf(stderr, "expected fatal relay resets 1, got %llu\n",
+                static_cast<unsigned long long>(snapshot.FatalRelayResets));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 377;
+        }
+        if (snapshot.DeferredReceiveCompletes != 0) {
+            std::fprintf(stderr, "fake FIN must not complete deferred receive buffers\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 378;
+        }
+        if (snapshot.ClosingRelays == 0) {
+            std::fprintf(stderr, "expected fake FIN relay to be closing\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 379;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
         config.ReadChunkSize = 1024;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
