@@ -1005,6 +1005,7 @@ void ActiveWorkerSendCompleteDoesNotUseKnownSendLocks() {
 
     const uint64_t knownBefore = worker.KnownSendLockedCountForTest();
     const uint64_t completionBefore = worker.CompletionStateLockedCountForTest();
+    const uint64_t fallbackBefore = worker.FallbackSendCompletionCountForTest();
     const uint64_t localRegisterBefore = worker.ActiveSendLocalRegisterCountForTest();
     const uint64_t localCompleteBefore = worker.ActiveSendLocalCompleteCountForTest();
 
@@ -1021,6 +1022,7 @@ void ActiveWorkerSendCompleteDoesNotUseKnownSendLocks() {
     CHECK(worker.ActiveSendLocalCompleteCountForTest() > localCompleteBefore);
     CHECK(worker.KnownSendLockedCountForTest() == knownBefore);
     CHECK(worker.CompletionStateLockedCountForTest() == completionBefore);
+    CHECK(worker.FallbackSendCompletionCountForTest() == fallbackBefore);
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();

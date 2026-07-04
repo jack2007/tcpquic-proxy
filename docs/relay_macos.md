@@ -139,7 +139,7 @@ relay 生命周期由三层对象托住：
 
 ## 2. macOS 线程锁热点排序
 
-> 跟进计划：`docs/superpowers/specs/2026-07-04-darwin-relay-state-lock-design.md` 和 `docs/superpowers/plans/2026-07-04-darwin-relay-state-lock.md` 已覆盖排名 1、2 的锁热点热路径出清。排名 3、4 的 send completion 锁应作为下一组独立设计处理。
+> 跟进计划：`docs/superpowers/specs/2026-07-04-darwin-relay-state-lock-design.md` 和 `docs/superpowers/plans/2026-07-04-darwin-relay-state-lock.md` 已覆盖排名 1、2 的锁热点热路径出清。排名 3、4 的 send completion 锁已在 `docs/superpowers/plans/2026-07-04-darwin-send-completion-lock.md` 中完成 active worker 主路径出清。
 
 下面按对转发热路径影响从高到低排序。这里的“热度”按代码路径频率、是否跨连接共享、是否进入 callback 或 worker 数据面综合判断。
 
@@ -147,8 +147,8 @@ relay 生命周期由三层对象托住：
 |---:|---|---|---|---|---|
 | 1 | `RelayState::Mutex` | 单 relay | `DrainTcpReadable()`、`SubmitTcpBatchToQuic()`、`TrySubmitQuicSendOperation()`、`CompleteQuicSend()` fallback/retired 分支、`ProcessQuicReceiveViewEvent()`、`EnqueueQuicReceiveForTcp()`、`FlushTcpWrites()`、pause/resume receive | 每个 TCP read batch、QUIC receive view、TCP write flush 都会多次进入；active worker send completion 已改为 worker-local accounting，不再等同 fallback/retired cleanup。虽然是单连接锁，但数据面频率最高，并且会和 MsQuic callback、stop/snapshot 交叉。 | 已规划分阶段实现：active relay 数据面字段归 worker thread 独占，callback 只投递事件，snapshot 继续事件化构造；`RelayState::Mutex` 保留为生命周期和非 worker fallback 边界。 |
 | 2 | `TqDarwinRelayWorker::RelayMutex` | 单 worker 全局 | `FindRelay()`、`FindRetiredRelay()`、register/unregister、retire/purge、snapshot、callback close/receive 查找 | 所有分配到同一 worker 的 relay 共享；TCP kqueue event、QUIC receive callback、send complete 和关闭路径都会查 map。高并发短连接或小包 receive 会放大竞争。 | 已纳入同一阶段热路径出清：worker kqueue/event 路径使用 `FindRelayLocal()`；callback 通过 `StreamBinding` 持有稳定 relay 信息，不再为 RECEIVE/abort/shutdown 查 worker map；`RelayMutex` 保留 register/unregister/retire/purge 等生命周期 map 边界。 |
-| 3 | `KnownSendMutex` | 单 worker 全局 | `RegisterKnownSendOperation*()`、`MarkKnownSendOperationSubmitted*()`、`UnregisterKnownSendOperation*()`、test helper、stop drain | 每个 TCP->QUIC send operation 至少插入、标记 submitted、删除一次。所有 relay 共用一个 worker map，因此 send complete 密集时跨连接竞争明显。 | 将 worker 正常路径的 known operation map 改为 worker-only；callback 的 SEND_COMPLETE 只在 `CompletionState` claim 后投递事件，worker 事件内再访问本地 map。保留 fallback 但移出主路径。 |
-| 4 | `CompletionState::Mutex` | 单 stream binding | SEND_COMPLETE claim、known operation 注册/注销、detached/late completion | 每个 send operation 也会更新 per-binding map；单连接内频率高，但不跨连接共享。 | 若保留同步 completion 支持，可将 state 改成 intrusive operation 状态机，使用 operation 内原子位替代 per-binding unordered_map 查找。 |
+| 3 | `KnownSendMutex` | 单 worker 全局 | 非 worker `RegisterKnownSendOperation()`、`MarkKnownSendOperationSubmitted()`、`UnregisterKnownSendOperation()` fallback、test helper、stop drain | active worker 主路径已改用 worker-local `ActiveSendOperations`；`KnownSendMutex` 仅保护 fallback registry 和 stop drain。 | 已完成 active worker 主路径出清：worker-local active send operation set 负责正常注册/提交/完成；`KnownSendMutex` 保留为非 worker fallback、stop drain 和 detached completion 边界。 |
+| 4 | `CompletionState::Mutex` | 单 stream binding | fallback `RegisterKnownSendOperation()`、`UnregisterCompletionStateOperation()`、`CompleteDetachedQuicSend()`、`DetachActiveSendOperationsForStop()`、retired cleanup | 正常 SEND_COMPLETE claim 已通过 operation 原子状态完成，不再查 per-binding unordered_map；`CompletionState::Mutex` 仅服务 fallback/detached/late completion。 | 已完成正常 SEND_COMPLETE claim 热路径出清：callback 通过 operation 原子状态 claim completion，不再查 per-binding unordered_map；`CompletionState::Mutex` 保留为 fallback registry、detached/late completion 和 retired binding cleanup 边界。 |
 | 5 | `TqDarwinRelayEventQueue` 原子 CAS + kqueue wake | 单 worker 队列 | QUIC receive view、send complete event、control event | 不是 mutex，但每个 QUIC receive view 都会 push + wake，多个 MsQuic callback producer 会竞争 `EnqueuePos`；wake 系统调用成本明显。 | 批量投递 wake：从空队列变非空时 wake，或 per-callback 批量 coalesce；增加队列满的 backpressure/重试策略和指标。 |
 | 6 | `StreamBinding::CallbackRefs`、`CallbackPendingReceiveBytes/Events` 原子 | 单 stream binding | 每次 MsQuic callback、receive budget 预留/释放 | 避免了 callback 入口 mutex，但高 receive 频率下同一 cache line 反复写。 | 拆分 cache line；把 bytes/events 分开对齐；事件进入 worker 后统一扣减，减少 CAS 循环次数。 |
 | 7 | `TqRelayBufferBudget::PendingBufferBytes` 原子 | 单 relay budget | TCP read buffer、压缩输出、QUIC->TCP pending write buffer 分配/释放 | 成本随 buffer 数线性增长；`ReadChunkSize` 越小越频繁。 | 调大 batch/chunk 或按 batch 一次性预留预算；对 QUIC->TCP 解压输出使用更少大块 buffer。 |
@@ -157,6 +157,8 @@ relay 生命周期由三层对象托住：
 | 10 | 控制命令 mutex/CV：`RegisterRelayCommand::Mutex`、`SnapshotCommand::Mutex` 等 | 单次命令 | 非 worker 线程同步 register/snapshot | 只在控制命令等待完成时使用。 | 保持；需要记录超时/重试次数，避免 wake 失败时无观测。 |
 | 11 | `TqTunnelContext::Lock`、`StreamOpLock` | 单 tunnel 控制面 | OPEN、relay 启动、early data 移交、pre-relay send/shutdown | 接管 relay 后不在每包数据面使用。 | 保持；重点是避免在持锁状态调用外部 callback。 |
 | 12 | `WorkerThreadIdMutex` | 单 worker | `IsWorkerThread()`、start/stop/test | `TrySubmitQuicSendOperation()`、completion 路径会调用 `IsWorkerThread()`，因此比纯控制锁更热，但临界区很小。 | 用 `std::atomic<std::thread::id>` 不可移植；可改为 `std::atomic<uint64_t>` 存平台 thread id，或在 worker 路径显式传入 `workerThread=true` 减少查询。 |
+
+> 跟进计划：send completion active worker 主路径已完成 rank 3、4 锁出清；剩余 fallback 锁只服务 worker stop、late callback、retired cleanup。下一组建议处理 receive callback 失败语义和 fake FIN abort。
 
 ## 3. 目前代码问题和建议
 
