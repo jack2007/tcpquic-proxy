@@ -823,6 +823,7 @@ bool TqDarwinRelayWorker::RegisterTcpFilters(const std::shared_ptr<RelayState>& 
     return kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) == 0;
 }
 
+// Lifecycle/fallback helper: worker data-plane paths must use UpdateTcpInterestLocal().
 bool TqDarwinRelayWorker::UpdateTcpInterest(const std::shared_ptr<RelayState>& relay) {
     if (relay == nullptr || KqueueFd < 0) {
         return false;
