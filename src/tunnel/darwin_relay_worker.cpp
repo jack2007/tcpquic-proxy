@@ -822,7 +822,6 @@ void TqDarwinRelayWorker::RetireRelay(
     }
     if (binding != nullptr) {
         binding->Active.store(false, std::memory_order_release);
-        binding->Relay.reset();
         static constexpr uint32_t kMaxCallbackRefYields = 100000;
         uint32_t callbackRefYields = 0;
         while (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs &&
@@ -833,6 +832,7 @@ void TqDarwinRelayWorker::RetireRelay(
         if (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs) {
             Errors.fetch_add(1, std::memory_order_relaxed);
         }
+        binding->Relay.reset();
         const auto completions = binding->Completions;
         if (completions == nullptr || completions->KnownSendOperationCount.load(std::memory_order_acquire) == 0) {
             binding->Worker.store(nullptr, std::memory_order_release);
