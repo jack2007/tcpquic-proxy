@@ -3035,6 +3035,78 @@ bool TqWindowsRelayWorker::QueueDeferredQuicReceive(
     return EnqueueDeferredQuicReceiveView(relay, view);
 }
 
+bool TqWindowsRelayWorker::ComputeReceiveEventBytes(
+    const QUIC_STREAM_EVENT& event,
+    uint64_t* outBytes) {
+    if (outBytes == nullptr || event.Type != QUIC_STREAM_EVENT_RECEIVE) {
+        return false;
+    }
+    if (event.RECEIVE.BufferCount != 0 && event.RECEIVE.Buffers == nullptr) {
+        return false;
+    }
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < event.RECEIVE.BufferCount; ++i) {
+        const QUIC_BUFFER& buffer = event.RECEIVE.Buffers[i];
+        if (buffer.Length != 0 && buffer.Buffer == nullptr) {
+            return false;
+        }
+        const uint64_t next = total + buffer.Length;
+        if (next < total) {
+            return false;
+        }
+        total = next;
+    }
+    *outBytes = total;
+    return true;
+}
+
+void TqWindowsRelayWorker::PauseQuicReceiveFromCallback(
+    const CallbackBinding& binding,
+    RelayContext& relay,
+    MsQuicStream* stream) {
+    (void)binding;
+    if (relay.QuicReceivePaused.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
+    CallbackReceiveBudgetPausedCount_.fetch_add(1, std::memory_order_relaxed);
+    QuicReceivePausedCount_.fetch_add(1, std::memory_order_relaxed);
+    if (MsQuic != nullptr && MsQuic->StreamReceiveSetEnabled != nullptr &&
+        stream != nullptr && stream->Handle != nullptr) {
+        const QUIC_STATUS status = MsQuic->StreamReceiveSetEnabled(stream->Handle, FALSE);
+        if (QUIC_FAILED(status)) {
+            Errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+bool TqWindowsRelayWorker::ShouldRejectReceiveInCallback(
+    const CallbackBinding& binding,
+    MsQuicStream* stream,
+    const QUIC_STREAM_EVENT& event,
+    uint64_t receiveBytes) {
+    const bool fin = (event.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+    if (fin || receiveBytes == 0) {
+        return false;
+    }
+    auto* relay = binding.RelayHint.load(std::memory_order_acquire);
+    if (relay == nullptr ||
+        relay->Generation != binding.Generation ||
+        relay->Closing.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const uint64_t limit = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
+    if (limit == 0) {
+        return false;
+    }
+    const uint64_t pending = relay->PendingQuicReceiveBytes.load(std::memory_order_acquire);
+    if (pending < limit && receiveBytes <= limit - pending) {
+        return false;
+    }
+    CallbackReceiveBudgetRejectedCount_.fetch_add(1, std::memory_order_relaxed);
+    PauseQuicReceiveFromCallback(binding, *relay, stream);
+    return true;
+}
+
 std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferredQuicReceiveView(
     const CallbackBinding& binding,
     MsQuicStream* stream,
@@ -3897,6 +3969,14 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             std::abort();
         }
         if (binding->Closing.load(std::memory_order_acquire)) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        uint64_t receiveBytes = 0;
+        if (!ComputeReceiveEventBytes(*event, &receiveBytes)) {
+            worker->Errors_.fetch_add(1, std::memory_order_relaxed);
+            return QUIC_STATUS_SUCCESS;
+        }
+        if (worker->ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes)) {
             return QUIC_STATUS_SUCCESS;
         }
         auto view = worker->BuildDeferredQuicReceiveView(

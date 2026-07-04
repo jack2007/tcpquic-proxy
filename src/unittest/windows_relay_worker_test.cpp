@@ -528,6 +528,55 @@ bool TestWindowsRelayCallbackReceiveCopyMetricsForTest() {
            after.CallbackReceiveCopyNanos >= before.CallbackReceiveCopyNanos;
 }
 
+bool TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    g_StreamReceiveSetEnabledCalls = 0;
+    g_LastStreamReceiveEnabled = TRUE;
+
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        MsQuic = nullptr;
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay = 8;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    const auto before = worker.Snapshot();
+    uint8_t payload[16]{};
+    QUIC_BUFFER buffer{sizeof(payload), payload};
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = sizeof(payload);
+    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const auto after = worker.Snapshot();
+    worker.Stop();
+    MsQuic = nullptr;
+    return status == QUIC_STATUS_SUCCESS &&
+           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount + 1 &&
+           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount + 1 &&
+           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes &&
+           g_StreamReceiveSetEnabledCalls == 1 &&
+           g_LastStreamReceiveEnabled == FALSE;
+}
+
 bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
     TqWindowsRelayWorker worker;
     worker.SetMaintenanceBudgetForTest(1);
@@ -1712,6 +1761,10 @@ int main() {
         return 126;
     }
 
+    if (!TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest()) {
+        return 128;
+    }
+
     if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
         return 127;
     }
@@ -2832,29 +2885,21 @@ int main() {
         event.RECEIVE.Buffers = &buffer;
 
         const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
-        if (status != QUIC_STATUS_PENDING) {
+        if (status != QUIC_STATUS_SUCCESS) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 62;
         }
-        const auto pauseDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-        TqWindowsRelayWorkerSnapshot snapshot{};
-        do {
-            snapshot = receiveWorker.Snapshot();
-            if (snapshot.PendingQuicReceiveBytes == sizeof(data) &&
-                snapshot.PendingQuicReceiveQueueDepth == 1 &&
-                snapshot.QuicReceivePausedCount == 1) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } while (std::chrono::steady_clock::now() < pauseDeadline);
-        if (snapshot.PendingQuicReceiveBytes != sizeof(data) ||
-            snapshot.PendingQuicReceiveQueueDepth != 1) {
+        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+        if (snapshot.PendingQuicReceiveBytes != 0 ||
+            snapshot.PendingQuicReceiveQueueDepth != 0) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 63;
         }
-        if (snapshot.QuicReceivePausedCount != 1) {
+        if (snapshot.QuicReceivePausedCount != 1 ||
+            snapshot.CallbackReceiveBudgetRejectedCount != 1 ||
+            snapshot.CallbackReceiveBudgetPausedCount != 1) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 64;

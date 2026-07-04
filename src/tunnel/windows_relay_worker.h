@@ -315,6 +315,18 @@ private:
         uint32_t bufferCount,
         bool fin,
         uint64_t completeBatchBytes);
+    static bool ComputeReceiveEventBytes(
+        const QUIC_STREAM_EVENT& event,
+        uint64_t* outBytes);
+    bool ShouldRejectReceiveInCallback(
+        const CallbackBinding& binding,
+        MsQuicStream* stream,
+        const QUIC_STREAM_EVENT& event,
+        uint64_t receiveBytes);
+    void PauseQuicReceiveFromCallback(
+        const CallbackBinding& binding,
+        RelayContext& relay,
+        MsQuicStream* stream);
     bool EnqueueDeferredQuicReceiveView(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
