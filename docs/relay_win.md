@@ -325,12 +325,13 @@ QUIC receive 背压：
 
 - `TqWindowsRelayWorker::SetRelayTraceContext()` 不直接写 `RelayContext`，而是复制 `target` 并投递 `SetTraceContext` IOCP operation。
 - worker 线程解析 relay id/generation 后更新 `TraceTunnelId` 和 `TraceTarget`，与 `BuildRelayTraceState()` 的读取保持同一 worker 串行模型。
-- 迟到 operation 在 relay 不存在或 generation 不匹配时丢弃，不复活 relay；shutdown 后投递失败也不写 relay 字段。
+- 迟到 operation 在 relay 不存在、generation 不匹配或 relay 已进入 `Closing` 时丢弃，不复活 relay；丢弃次数计入 `windows_relay_posted_trace_context_stale_drops`。
+- shutdown 后投递失败也不写 relay 字段；`PostQueuedCompletionStatus` 失败时递增 `Errors_`。
 - trace context 的写入和读取现在都由 worker IOCP 串行化，上述外部线程直写风险已消除。
 
 验证覆盖：
 
-- `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target。
+- `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation / closing relay 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target，以及零 id、relay 不存在、worker 已停止和投递失败等 fire-and-forget 负路径。
 
 ### 3.7 per-relay mutex 声明和实际模型不一致
 

@@ -375,6 +375,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         ReceiveDrainCoalescedCount_.load(std::memory_order_relaxed);
     snapshot.WindowsPostedCallbackStaleDropCount =
         PostedCallbackStaleDropCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsPostedTraceContextStaleDropCount =
+        PostedTraceContextStaleDropCount_.load(std::memory_order_relaxed);
     snapshot.FindRelayByIdCount = FindRelayByIdCount_.load(std::memory_order_relaxed);
     snapshot.CallbackDispatchNanos = CallbackDispatchNanos_.load(std::memory_order_relaxed);
     snapshot.EventsProcessed = 0;
@@ -1036,8 +1038,13 @@ void TqWindowsRelayWorker::Run() {
              op->Event == TqWindowsIocpOperationType::SetTraceContext) &&
             op->RelayId != 0) {
             relay = FindRelayByIdLocal(op->RelayId);
-            if (relay && op->Generation != 0 && relay->Generation != op->Generation) {
-                relay.reset();
+            if (relay) {
+                if (op->Generation != 0 && relay->Generation != op->Generation) {
+                    relay.reset();
+                } else if (op->Event == TqWindowsIocpOperationType::SetTraceContext &&
+                           relay->Closing.load(std::memory_order_acquire)) {
+                    relay.reset();
+                }
             }
         }
         if (!relay && op->Event != TqWindowsIocpOperationType::QuicSendComplete) {
@@ -1046,6 +1053,9 @@ void TqWindowsRelayWorker::Run() {
             }
             if (!callbackSourced ||
                 op->Event == TqWindowsIocpOperationType::RelayReceiveReady) {
+                if (op->Event == TqWindowsIocpOperationType::SetTraceContext) {
+                    PostedTraceContextStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
+                }
                 continue;
             }
         }
@@ -1354,6 +1364,8 @@ bool TqWindowsRelayWorker::TestGetRelayTraceStateForTest(
     uint64_t relayId,
     TqTraceLinuxRelayStreamState* out,
     std::string* targetStorage) const {
+    // Test-only observer: Lock_ protects Relays_ lookup only. Callers must
+    // synchronize with the worker thread (Snapshot()/queue block) before reading.
     if (out == nullptr || targetStorage == nullptr) {
         return false;
     }
@@ -1406,6 +1418,10 @@ bool TqWindowsRelayWorker::TestPostTraceContextForTest(
         return false;
     }
     return true;
+}
+
+void TqWindowsRelayWorker::TestForceNextTraceContextPostFailureForTest() {
+    ForceTraceContextPostFailureForTest_.store(true, std::memory_order_release);
 }
 
 bool TqWindowsRelayWorker::TestPostWorkerQueueBlockForTest(
@@ -3600,6 +3616,13 @@ void TqWindowsRelayWorker::SetRelayTraceContext(
         op->Text = target;
     }
 
+#if defined(TQ_UNIT_TESTING)
+    if (ForceTraceContextPostFailureForTest_.exchange(false, std::memory_order_acq_rel)) {
+        Errors_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+#endif
+
     IoOperation* raw = op.release();
     if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
         delete raw;
@@ -3851,6 +3874,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.WindowsReceiveDrainScheduledCount += snapshot.WindowsReceiveDrainScheduledCount;
         total.WindowsReceiveDrainCoalescedCount += snapshot.WindowsReceiveDrainCoalescedCount;
         total.WindowsPostedCallbackStaleDropCount += snapshot.WindowsPostedCallbackStaleDropCount;
+        total.WindowsPostedTraceContextStaleDropCount +=
+            snapshot.WindowsPostedTraceContextStaleDropCount;
         total.WorkerLockAcquireCount += snapshot.WorkerLockAcquireCount;
         total.WorkerLockWaitNanos += snapshot.WorkerLockWaitNanos;
         total.FindRelayByIdCount += snapshot.FindRelayByIdCount;
