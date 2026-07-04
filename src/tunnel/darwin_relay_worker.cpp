@@ -766,6 +766,35 @@ bool TqDarwinRelayWorker::UpdateTcpInterest(const std::shared_ptr<RelayState>& r
     return kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) == 0;
 }
 
+bool TqDarwinRelayWorker::UpdateTcpInterestLocal(const std::shared_ptr<RelayState>& relay) {
+    if (relay == nullptr || KqueueFd < 0) {
+        return false;
+    }
+    AssertWorkerThreadForRelayState();
+
+    const bool readArmed = relay->TcpReadArmed;
+    const bool writeArmed = relay->TcpWriteArmed;
+
+    struct kevent changes[2];
+    EV_SET(
+        &changes[0],
+        static_cast<uintptr_t>(relay->TcpFd),
+        EVFILT_READ,
+        readArmed ? EV_ENABLE : EV_DISABLE,
+        0,
+        0,
+        reinterpret_cast<void*>(relay->Id));
+    EV_SET(
+        &changes[1],
+        static_cast<uintptr_t>(relay->TcpFd),
+        EVFILT_WRITE,
+        writeArmed ? EV_ENABLE : EV_DISABLE,
+        0,
+        0,
+        reinterpret_cast<void*>(relay->Id));
+    return kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) == 0;
+}
+
 void TqDarwinRelayWorker::RemoveTcpFilters(const std::shared_ptr<RelayState>& relay) {
     if (relay == nullptr || KqueueFd < 0 || !TqSocketValid(relay->TcpFd)) {
         return;
@@ -1468,7 +1497,7 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
         if (received == 0) {
             relay->TcpReadClosed = true;
             relay->TcpReadArmed = false;
-            if (!UpdateTcpInterest(relay)) {
+            if (!UpdateTcpInterestLocal(relay)) {
                 Errors.fetch_add(1, std::memory_order_relaxed);
                 relay->Closing = true;
                 return false;
@@ -1658,14 +1687,29 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
 bool TqDarwinRelayWorker::EnqueueQuicSendCompleteFromCallback(
     uint64_t relayId,
     TqDarwinRelaySendOperation* operation) {
-    if (!Running.load(std::memory_order_acquire)) {
-        return false;
+    uint32_t attempts = 0;
+    const bool workerThread = IsWorkerThread();
+    while (Running.load(std::memory_order_acquire)) {
+        TqDarwinRelayEvent event{};
+        event.Type = TqDarwinRelayEventType::QuicSendComplete;
+        event.RelayId = relayId;
+        event.Value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(operation));
+        if (EventQueue.TryPush(std::move(event))) {
+            (void)Wake();
+            return true;
+        }
+        if (workerThread) {
+            CompleteQuicSend(operation);
+            return true;
+        }
+        if ((attempts++ & 0x3F) == 0) {
+            (void)Wake();
+            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
+        } else {
+            std::this_thread::yield();
+        }
     }
-    TqDarwinRelayEvent event{};
-    event.Type = TqDarwinRelayEventType::QuicSendComplete;
-    event.RelayId = relayId;
-    event.Value = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(operation));
-    return EnqueueEvent(std::move(event));
+    return false;
 }
 
 void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay) {
@@ -1791,7 +1835,7 @@ bool TqDarwinRelayWorker::SetTcpReadBackpressure(const std::shared_ptr<RelayStat
     oldArmed = relay->TcpReadArmed;
     relay->TcpReadPausedByQuicBacklog = paused;
     relay->TcpReadArmed = !paused && !relay->TcpReadClosed;
-    if (UpdateTcpInterest(relay)) {
+    if (UpdateTcpInterestLocal(relay)) {
         return true;
     }
     relay->TcpReadPausedByQuicBacklog = oldPaused;

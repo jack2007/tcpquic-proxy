@@ -213,6 +213,7 @@ private:
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
+    bool UpdateTcpInterestLocal(const std::shared_ptr<RelayState>& relay);
     void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
     void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
