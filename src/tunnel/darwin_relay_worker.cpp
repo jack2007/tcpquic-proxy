@@ -1810,7 +1810,9 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     const bool completionAlreadyRan = workerThread
         ? !MarkKnownSendOperationSubmittedLocal(raw, &submittedInfo)
         : !MarkKnownSendOperationSubmitted(raw, &submittedInfo);
-    (void)raw->TryMarkSubmitted();
+    if (!completionAlreadyRan) {
+        (void)raw->TryMarkSubmitted();
+    }
     if (relay->SubmittingQuicSends > 0) {
         --relay->SubmittingQuicSends;
     }
