@@ -2305,7 +2305,7 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     stream->Callback = MsQuicStream::NoOpCallback;
     stream->Context = nullptr;
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
@@ -2325,6 +2325,7 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     receiveEvent.RECEIVE.BufferCount = 1;
     receiveEvent.RECEIVE.Buffers = &quicBuffer;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+    CHECK(worker.DrainOneEventForTest());
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (g_receiveCompleteCalls.load(std::memory_order_acquire) == 0 &&
@@ -2447,7 +2448,7 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
     stream->Callback = MsQuicStream::NoOpCallback;
     stream->Context = nullptr;
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
@@ -2466,6 +2467,7 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
     receiveEvent.RECEIVE.BufferCount = 1;
     receiveEvent.RECEIVE.Buffers = &quicBuffer;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+    CHECK(worker.DrainOneEventForTest());
 
     const auto firstDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (g_sendMsgCalls.load(std::memory_order_acquire) == 0 &&
@@ -2517,7 +2519,7 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     stream->Callback = MsQuicStream::NoOpCallback;
     stream->Context = nullptr;
     TqRelayHandle handle{};
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
@@ -2536,6 +2538,7 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     receiveEvent.RECEIVE.BufferCount = 1;
     receiveEvent.RECEIVE.Buffers = &quicBuffer;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
+    CHECK(worker.DrainOneEventForTest());
 
     const auto pauseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     TqDarwinRelayWorkerSnapshot snapshot{};
@@ -2591,6 +2594,7 @@ void MissingRelayQuicReceiveCompletesAndReleases() {
     ResetFakeReceiveComplete();
     TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
     worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    CHECK(worker.StartForTest());
 
     const char payload[] = "missing-relay";
     auto receive = std::make_shared<TqDarwinPendingQuicReceive>();
@@ -2610,6 +2614,7 @@ void MissingRelayQuicReceiveCompletesAndReleases() {
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
     CHECK(receive->CompletedLength == receive->TotalLength);
     worker.SetReceiveCompleteForTest(nullptr);
+    worker.Stop();
 }
 
 void CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes() {

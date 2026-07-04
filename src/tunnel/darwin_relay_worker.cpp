@@ -383,7 +383,8 @@ void TqDarwinRelayWorker::SetSendMsgForTest(TqDarwinRelaySendMsgForTest sendMsgF
 }
 
 bool TqDarwinRelayWorker::FlushTcpWritableForTest(uint64_t relayId) {
-    auto relay = FindRelay(relayId);
+    AssertWorkerThreadForRelayState();
+    auto relay = FindRelayLocal(relayId);
     if (relay == nullptr) {
         return false;
     }
@@ -400,6 +401,7 @@ bool TqDarwinRelayWorker::InvokeQuicReceiveViewForTest(
     if (receive == nullptr) {
         return false;
     }
+    AssertWorkerThreadForRelayState();
     ProcessQuicReceiveViewEvent(receive);
     return true;
 }
@@ -2024,43 +2026,31 @@ void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
     if (receive == nullptr) {
         return;
     }
-    const bool workerThread = IsWorkerThread();
-    auto relay = workerThread ? FindRelayLocal(receive->RelayId) : FindRelay(receive->RelayId);
+    AssertWorkerThreadForRelayState();
+    auto relay = FindRelayLocal(receive->RelayId);
     if (relay == nullptr) {
         ReleaseCallbackReceiveBudget(receive);
         (void)DiscardDeferredQuicReceive(nullptr, receive);
         return;
     }
-    bool shouldDiscard = false;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            shouldDiscard = true;
-        } else {
-            relay->PendingQuicReceiveBytes += receive->TotalLength;
-            relay->PendingQuicReceives.push_back(receive);
-        }
-    }
-    ReleaseCallbackReceiveBudget(receive);
-    if (shouldDiscard) {
+    if (relay->Closing) {
+        ReleaseCallbackReceiveBudget(receive);
         (void)DiscardDeferredQuicReceive(relay, receive);
         return;
     }
+    relay->PendingQuicReceiveBytes += receive->TotalLength;
+    relay->PendingQuicReceives.push_back(receive);
+    ReleaseCallbackReceiveBudget(receive);
     if (receive->PendingCompleteBytes != 0) {
         CompleteDeferredQuicReceive(relay, receive);
         return;
     }
     MaybePauseQuicReceive(relay);
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        shouldDiscard = relay->Closing;
-    }
-    if (shouldDiscard) {
+    if (relay->Closing) {
         (void)DiscardDeferredQuicReceive(relay, receive);
         return;
     }
     if (!EnqueueQuicReceiveForTcp(relay, receive)) {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->Closing = true;
     }
     (void)FlushTcpWrites(relay);
@@ -2073,16 +2063,12 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
         return false;
     }
 
-    bool needsDecompress = false;
-    ITqDecompressor* decompressor = nullptr;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            return false;
-        }
-        needsDecompress = relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd;
-        decompressor = relay->Decompressor;
+    AssertWorkerThreadForRelayState();
+    if (relay->Closing) {
+        return false;
     }
+    const bool needsDecompress = relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd;
+    ITqDecompressor* decompressor = relay->Decompressor;
 
     std::deque<std::shared_ptr<TqDarwinRelayPendingTcpWrite>> tcpWrites;
     const size_t chunkSize = std::max<size_t>(1, Config.ReadChunkSize);
@@ -2113,80 +2099,65 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
     if (needsDecompress) {
         if (decompressor == nullptr) {
             (void)DiscardDeferredQuicReceive(relay, receive);
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->CompressedReceiveRejected = true;
-                relay->Closing = true;
-            }
+            relay->CompressedReceiveRejected = true;
+            relay->Closing = true;
             return true;
         }
         std::vector<uint8_t> decompressed;
         for (const auto& slice : receive->Slices) {
             if (!decompressor->Decompress(slice.Data, slice.Length, decompressed)) {
                 (void)DiscardDeferredQuicReceive(relay, receive);
-                {
-                    std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                    relay->CompressedReceiveRejected = true;
-                    relay->Closing = true;
-                }
+                relay->CompressedReceiveRejected = true;
+                relay->Closing = true;
                 return true;
             }
         }
         if (!decompressed.empty() && !appendOutput(decompressed.data(), decompressed.size())) {
             (void)DiscardDeferredQuicReceive(relay, receive);
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->Closing = true;
-            }
+            relay->Closing = true;
             return false;
         }
     } else {
         for (const auto& slice : receive->Slices) {
             if (slice.Length != 0 && !appendOutput(slice.Data, slice.Length)) {
                 (void)DiscardDeferredQuicReceive(relay, receive);
-                {
-                    std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                    relay->Closing = true;
-                }
+                relay->Closing = true;
                 return false;
             }
         }
     }
 
     std::shared_ptr<TqDarwinPendingQuicReceive> completedReceive;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            return false;
+    if (relay->Closing) {
+        return false;
+    }
+    uint64_t remainingTcpWriteBytes = 0;
+    for (auto& write : tcpWrites) {
+        if (write == nullptr) {
+            continue;
         }
-        uint64_t remainingTcpWriteBytes = 0;
-        for (auto& write : tcpWrites) {
-            if (write == nullptr) {
-                continue;
+        remainingTcpWriteBytes += write->ReceiveBytesRemaining;
+        relay->PendingTcpWriteBytes += write->View.Len;
+        relay->PendingTcpWrites.push_back(std::move(write));
+    }
+    if (remainingTcpWriteBytes == 0) {
+        receive->PendingCompleteBytes = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
+            ? 0
+            : receive->TotalLength;
+        receive->CompletedLength = receive->TotalLength;
+        relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
+            ? relay->PendingQuicReceiveBytes - receive->TotalLength
+            : 0;
+        for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
+            if (*it == receive) {
+                relay->PendingQuicReceives.erase(it);
+                break;
             }
-            remainingTcpWriteBytes += write->ReceiveBytesRemaining;
-            relay->PendingTcpWriteBytes += write->View.Len;
-            relay->PendingTcpWrites.push_back(std::move(write));
         }
-        if (remainingTcpWriteBytes == 0) {
-            receive->PendingCompleteBytes = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
-                ? 0
-                : receive->TotalLength;
-            receive->CompletedLength = receive->TotalLength;
-            relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= receive->TotalLength
-                ? relay->PendingQuicReceiveBytes - receive->TotalLength
-                : 0;
-            for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
-                if (*it == receive) {
-                    relay->PendingQuicReceives.erase(it);
-                    break;
-                }
-            }
-            completedReceive = receive;
-        }
-        if (receive->Fin) {
-            relay->TcpWriteShutdownQueued = true;
-        }
+        completedReceive = receive;
+    }
+    if (receive->Fin) {
+        relay->TcpWriteShutdownQueued = true;
     }
     if (completedReceive != nullptr) {
         CompleteDeferredQuicReceive(relay, completedReceive);
@@ -2205,7 +2176,7 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     uint64_t bytesToComplete = 0;
     {
         if (relay != nullptr) {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
+            AssertWorkerThreadForRelayState();
             bytesToComplete = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
                 ? 0
                 : receive->TotalLength;
@@ -2247,54 +2218,52 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
         iov.reserve(std::max<uint32_t>(1, Config.MaxIov));
         writeSnapshot.reserve(std::max<uint32_t>(1, Config.MaxIov));
         uint64_t attemptedBytes = 0;
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            if (relay->Closing) {
-                return false;
-            }
-            if (Config.TcpWriteBurstBytes != 0 && burstBytes >= Config.TcpWriteBurstBytes) {
-                relay->TcpWriteArmed = true;
-                return true;
-            }
-            uint64_t maxWriteBytes = Config.TcpWriteMaxBytes;
-            if (Config.TcpWriteBurstBytes != 0) {
-                const uint64_t remainingBurst = Config.TcpWriteBurstBytes - burstBytes;
-                maxWriteBytes = maxWriteBytes == 0 ? remainingBurst : std::min(maxWriteBytes, remainingBurst);
-            }
-            if (!relay->PendingTcpWrites.empty()) {
-                for (const auto& write : relay->PendingTcpWrites) {
-                    if (write == nullptr) {
-                        continue;
-                    }
-                    const auto& view = write->View;
-                    if (iov.size() >= std::max<uint32_t>(1, Config.MaxIov) ||
-                        (maxWriteBytes != 0 && attemptedBytes >= maxWriteBytes)) {
-                        break;
-                    }
-                    uint64_t length = view.Len;
-                    if (maxWriteBytes != 0 && attemptedBytes + length > maxWriteBytes) {
-                        length = maxWriteBytes - attemptedBytes;
-                    }
-                    if (length == 0) {
-                        break;
-                    }
-                    iovec item{};
-                    item.iov_base = view.Data;
-                    item.iov_len = static_cast<size_t>(length);
-                    iov.push_back(item);
-                    writeSnapshot.push_back(write);
-                    attemptedBytes += length;
+        AssertWorkerThreadForRelayState();
+        if (relay->Closing) {
+            return false;
+        }
+        if (Config.TcpWriteBurstBytes != 0 && burstBytes >= Config.TcpWriteBurstBytes) {
+            relay->TcpWriteArmed = true;
+            return true;
+        }
+        uint64_t maxWriteBytes = Config.TcpWriteMaxBytes;
+        if (Config.TcpWriteBurstBytes != 0) {
+            const uint64_t remainingBurst = Config.TcpWriteBurstBytes - burstBytes;
+            maxWriteBytes = maxWriteBytes == 0 ? remainingBurst : std::min(maxWriteBytes, remainingBurst);
+        }
+        if (!relay->PendingTcpWrites.empty()) {
+            for (const auto& write : relay->PendingTcpWrites) {
+                if (write == nullptr) {
+                    continue;
                 }
-            } else if (relay->TcpWriteShutdownQueued) {
-                (void)::shutdown(relay->TcpFd, SHUT_WR);
-                relay->TcpWriteShutdownQueued = false;
-                relay->TcpWriteArmed = false;
-                relay->TcpWriteClosed = true;
-                return true;
-            } else {
-                relay->TcpWriteArmed = false;
-                return true;
+                const auto& view = write->View;
+                if (iov.size() >= std::max<uint32_t>(1, Config.MaxIov) ||
+                    (maxWriteBytes != 0 && attemptedBytes >= maxWriteBytes)) {
+                    break;
+                }
+                uint64_t length = view.Len;
+                if (maxWriteBytes != 0 && attemptedBytes + length > maxWriteBytes) {
+                    length = maxWriteBytes - attemptedBytes;
+                }
+                if (length == 0) {
+                    break;
+                }
+                iovec item{};
+                item.iov_base = view.Data;
+                item.iov_len = static_cast<size_t>(length);
+                iov.push_back(item);
+                writeSnapshot.push_back(write);
+                attemptedBytes += length;
             }
+        } else if (relay->TcpWriteShutdownQueued) {
+            (void)::shutdown(relay->TcpFd, SHUT_WR);
+            relay->TcpWriteShutdownQueued = false;
+            relay->TcpWriteArmed = false;
+            relay->TcpWriteClosed = true;
+            return true;
+        } else {
+            relay->TcpWriteArmed = false;
+            return true;
         }
 
         if (iov.empty()) {
@@ -2428,11 +2397,8 @@ bool TqDarwinRelayWorker::SetQuicReceiveEnabled(const std::shared_ptr<RelayState
     if (relay == nullptr) {
         return false;
     }
-    MsQuicStream* stream = nullptr;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        stream = relay->Stream;
-    }
+    AssertWorkerThreadForRelayState();
+    MsQuicStream* stream = relay->Stream;
     QUIC_STATUS status = QUIC_STATUS_SUCCESS;
 #if defined(TCPQUIC_TESTING)
     if (g_darwinRelayReceiveSetEnabledForTest != nullptr) {
@@ -2458,17 +2424,14 @@ void TqDarwinRelayWorker::MaybePauseQuicReceive(const std::shared_ptr<RelayState
     if (relay == nullptr) {
         return;
     }
-    bool shouldPause = false;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        const uint64_t pendingPressure = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
-        if (!relay->QuicReceivePaused && pendingPressure >= MaxPendingQuicReceiveBytesPerRelay()) {
-            relay->QuicReceivePaused = true;
-            shouldPause = true;
-        }
+    AssertWorkerThreadForRelayState();
+    const uint64_t pendingPressure = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
+    const bool shouldPause = !relay->QuicReceivePaused &&
+        pendingPressure >= MaxPendingQuicReceiveBytesPerRelay();
+    if (shouldPause) {
+        relay->QuicReceivePaused = true;
     }
     if (shouldPause && !SetQuicReceiveEnabled(relay, false)) {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->QuicReceivePaused = false;
         relay->Closing = true;
     }
@@ -2478,17 +2441,14 @@ void TqDarwinRelayWorker::MaybeResumeQuicReceive(const std::shared_ptr<RelayStat
     if (relay == nullptr) {
         return;
     }
-    bool shouldResume = false;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        const uint64_t pendingPressure = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
-        if (relay->QuicReceivePaused && pendingPressure <= LowPendingQuicReceiveBytesPerRelay()) {
-            relay->QuicReceivePaused = false;
-            shouldResume = true;
-        }
+    AssertWorkerThreadForRelayState();
+    const uint64_t pendingPressure = relay->PendingQuicReceiveBytes + relay->PendingTcpWriteBytes;
+    const bool shouldResume = relay->QuicReceivePaused &&
+        pendingPressure <= LowPendingQuicReceiveBytesPerRelay();
+    if (shouldResume) {
+        relay->QuicReceivePaused = false;
     }
     if (shouldResume && !SetQuicReceiveEnabled(relay, true)) {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->QuicReceivePaused = true;
         relay->Closing = true;
     }
