@@ -3401,6 +3401,21 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
+    auto snapshotControlCounters = [this]() {
+        TqLinuxRelayWorkerSnapshot snapshot{};
+        snapshot.ControlLockWaitNanos = ControlLockWaitNanos.load(std::memory_order_relaxed);
+        snapshot.ControlLockAcquireCount = ControlLockAcquireCount.load(std::memory_order_relaxed);
+        snapshot.ControlCommandWaitNanos = ControlCommandWaitNanos.load(std::memory_order_relaxed);
+        snapshot.ControlCommandWaitCount = ControlCommandWaitCount.load(std::memory_order_relaxed);
+        snapshot.ControlCommandTimeouts = ControlCommandTimeouts.load(std::memory_order_relaxed);
+        snapshot.ControlCommandEnqueueFailures =
+            ControlCommandEnqueueFailures.load(std::memory_order_relaxed);
+        snapshot.SnapshotCommandWaitNanos = SnapshotCommandWaitNanos.load(std::memory_order_relaxed);
+        snapshot.SnapshotCommandWaitCount = SnapshotCommandWaitCount.load(std::memory_order_relaxed);
+        snapshot.SnapshotCommandTimeouts = SnapshotCommandTimeouts.load(std::memory_order_relaxed);
+        return snapshot;
+    };
+
     auto command = std::make_shared<SnapshotCommand>();
 
     for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
@@ -3427,20 +3442,21 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
         }
 
         if (!WaitSnapshotCommand(*command)) {
-            return {};
+            return snapshotControlCounters();
         }
-        command->Result.ControlLockWaitNanos = ControlLockWaitNanos.load();
-        command->Result.ControlLockAcquireCount = ControlLockAcquireCount.load();
-        command->Result.ControlCommandWaitNanos = ControlCommandWaitNanos.load();
-        command->Result.ControlCommandWaitCount = ControlCommandWaitCount.load();
-        command->Result.ControlCommandTimeouts = ControlCommandTimeouts.load();
-        command->Result.ControlCommandEnqueueFailures = ControlCommandEnqueueFailures.load();
-        command->Result.SnapshotCommandWaitNanos = SnapshotCommandWaitNanos.load();
-        command->Result.SnapshotCommandWaitCount = SnapshotCommandWaitCount.load();
-        command->Result.SnapshotCommandTimeouts = SnapshotCommandTimeouts.load();
+        const auto counters = snapshotControlCounters();
+        command->Result.ControlLockWaitNanos = counters.ControlLockWaitNanos;
+        command->Result.ControlLockAcquireCount = counters.ControlLockAcquireCount;
+        command->Result.ControlCommandWaitNanos = counters.ControlCommandWaitNanos;
+        command->Result.ControlCommandWaitCount = counters.ControlCommandWaitCount;
+        command->Result.ControlCommandTimeouts = counters.ControlCommandTimeouts;
+        command->Result.ControlCommandEnqueueFailures = counters.ControlCommandEnqueueFailures;
+        command->Result.SnapshotCommandWaitNanos = counters.SnapshotCommandWaitNanos;
+        command->Result.SnapshotCommandWaitCount = counters.SnapshotCommandWaitCount;
+        command->Result.SnapshotCommandTimeouts = counters.SnapshotCommandTimeouts;
         return command->Result;
     }
-    return {};
+    return snapshotControlCounters();
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
