@@ -388,6 +388,7 @@ private:
     void CloseRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
     void PurgeRetiredRelaysIfSafe();
     bool WaitForKnownOperationsToDrain();
+    void DetachActiveSendOperationsForStop();
     void DetachRetiredBindingsForDestruction();
     void RegisterKnownSendOperation(
         TqDarwinRelaySendOperation* operation,

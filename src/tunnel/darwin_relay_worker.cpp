@@ -75,7 +75,7 @@ QUIC_STATUS TqDarwinRelayStreamSend(
 
 struct TqDarwinRelayWorker::CompletionState {
     mutable std::mutex Mutex;
-    std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> KnownSendOperations;
+    std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> FallbackSendOperations;
     std::atomic<uint64_t> KnownSendOperationCount{0};
 };
 
@@ -762,6 +762,7 @@ void TqDarwinRelayWorker::Run() {
             ProcessKqueueEvent(events[i]);
         }
     }
+    DetachActiveSendOperationsForStop();
     {
         std::lock_guard<std::mutex> lock(WorkerThreadIdMutex);
         WorkerThreadId = std::thread::id{};
@@ -1035,6 +1036,34 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
     }
 }
 
+void TqDarwinRelayWorker::DetachActiveSendOperationsForStop() {
+    AssertWorkerThreadForRelayState();
+    std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> activeOperations;
+    {
+        std::lock_guard<std::mutex> lock(ActiveSendMutex);
+        activeOperations.swap(ActiveSendOperations);
+    }
+#if defined(TCPQUIC_TESTING)
+    ActiveSendOperationsSize.store(0, std::memory_order_relaxed);
+#endif
+    for (auto& entry : activeOperations) {
+        TqDarwinRelaySendOperation* operation = entry.first;
+        KnownSendOperationInfo info = entry.second;
+        if (operation != nullptr) {
+            (void)operation->MarkDetached();
+        }
+        if (auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner)) {
+            if (binding->Completions != nullptr) {
+#if defined(TCPQUIC_TESTING)
+                CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+                std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
+                binding->Completions->FallbackSendOperations.emplace(operation, info);
+            }
+        }
+    }
+}
+
 bool TqDarwinRelayWorker::WaitForKnownOperationsToDrain() {
     static constexpr uint32_t kMaxDrainYields = 100000;
     for (uint32_t attempt = 0; attempt < kMaxDrainYields; ++attempt) {
@@ -1117,7 +1146,7 @@ void TqDarwinRelayWorker::RegisterKnownSendOperation(
         CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
 #endif
         std::lock_guard<std::mutex> completionLock(binding->Completions->Mutex);
-        binding->Completions->KnownSendOperations.emplace(operation, info);
+        binding->Completions->FallbackSendOperations.emplace(operation, info);
         binding->Completions->KnownSendOperationCount.fetch_add(1, std::memory_order_acq_rel);
     }
 }
@@ -1169,8 +1198,8 @@ bool TqDarwinRelayWorker::MarkKnownSendOperationSubmitted(
         CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
 #endif
         std::lock_guard<std::mutex> completionLock(completions->Mutex);
-        const auto it = completions->KnownSendOperations.find(operation);
-        if (it != completions->KnownSendOperations.end()) {
+        const auto it = completions->FallbackSendOperations.find(operation);
+        if (it != completions->FallbackSendOperations.end()) {
             it->second.Submitting = false;
             if (info != nullptr) {
                 *info = it->second;
@@ -1251,15 +1280,15 @@ bool TqDarwinRelayWorker::UnregisterCompletionStateOperation(
     }
 #endif
     std::lock_guard<std::mutex> completionLock(state->Mutex);
-    const auto it = state->KnownSendOperations.find(operation);
-    if (it == state->KnownSendOperations.end()) {
+    const auto it = state->FallbackSendOperations.find(operation);
+    if (it == state->FallbackSendOperations.end()) {
         return false;
     }
     KnownSendOperationInfo localInfo = it->second;
     if (info != nullptr) {
         *info = localInfo;
     }
-    state->KnownSendOperations.erase(it);
+    state->FallbackSendOperations.erase(it);
     state->KnownSendOperationCount.fetch_sub(1, std::memory_order_acq_rel);
     return true;
 }
@@ -1376,16 +1405,15 @@ bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDar
         return false;
     }
     TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
-#if defined(TCPQUIC_TESTING)
-    // Worker may be null when the binding outlives worker teardown (detached-after-destroy).
-    if (worker != nullptr) {
-        worker->FallbackSendCompletionCount.fetch_add(1, std::memory_order_relaxed);
-    }
-#endif
     KnownSendOperationInfo info{};
     if (!UnregisterCompletionStateOperation(binding->Completions, operation, &info, worker)) {
         return false;
     }
+#if defined(TCPQUIC_TESTING)
+    if (worker != nullptr) {
+        worker->FallbackSendCompletionCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
     ClearRetiredStreamCallbackIfSafe(binding);
     delete operation;
     return true;
