@@ -162,7 +162,7 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 
 ## 2. macOS 线程锁热点排序
 
-> 跟进计划：`docs/superpowers/specs/2026-07-04-darwin-relay-state-lock-design.md` 和 `docs/superpowers/plans/2026-07-04-darwin-relay-state-lock.md` 已覆盖排名 1、2 的锁热点热路径出清。排名 3–5 的 send completion 锁已在 `docs/superpowers/plans/2026-07-04-darwin-send-completion-lock.md` 中完成 active worker 主路径出清（实现 commit 范围 `800e8c5`–`7b6e798`）。
+> 跟进计划：`docs/superpowers/specs/2026-07-04-darwin-relay-state-lock-design.md` 和 `docs/superpowers/plans/2026-07-04-darwin-relay-state-lock.md` 已覆盖排名 1、2 的锁热点热路径出清。排名 3–5 的 send completion 锁已在 `docs/superpowers/plans/2026-07-04-darwin-send-completion-lock.md` 中完成 active worker 主路径出清（实现 commit 范围 `800e8c5`–`7b6e798`）。receive callback 失败语义与 event queue 背压已在 `docs/superpowers/plans/2026-07-04-darwin-receive-callback-hardening.md` 中完成（实现 commit 范围 `ce05f0c`–`32340fe`）。
 
 下面按对转发热路径影响从高到低排序。这里的“热度”按代码路径频率、是否跨连接共享、是否进入 callback 或 worker 数据面综合判断。
 
@@ -173,7 +173,7 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 | 3 | `ActiveSendMutex` | 单 worker 全局 | worker 线程 `RegisterKnownSendOperationLocal()`、`MarkKnownSendOperationSubmittedLocal()`、`UnregisterKnownSendOperationLocal()`；callback `TryClaimKnownSendCompletionEvent()` membership 检查 | active send map 需被 MsQuic callback 线程与 worker 线程并发访问；临界区仅 map 查找/更新，比原先 `KnownSendMutex` + `CompletionState::Mutex` 双锁热路径更窄。 | 已完成 active worker 主路径出清；保留为 worker-local active registry 边界，不再与 per-binding completion map 叠加。 |
 | 4 | `KnownSendMutex` | 单 worker 全局 | 非 worker `RegisterKnownSendOperation()`、`MarkKnownSendOperationSubmitted()`、`UnregisterKnownSendOperation()` fallback、test helper、`WaitForKnownOperationsToDrain()` | active worker 主路径已迁出；仅保护 fallback registry 和 stop drain。 | 已完成 active worker 主路径出清；保留为非 worker fallback、stop drain 和 detached completion 边界。 |
 | 5 | `CompletionState::Mutex` | 单 stream binding | fallback `RegisterKnownSendOperation()`、`UnregisterCompletionStateOperation()`、`CompleteDetachedQuicSend()`、`DetachActiveSendOperationsForStop()`、retired cleanup | 正常 SEND_COMPLETE claim 已通过 operation 原子状态完成，不再查 per-binding unordered_map；`CompletionState::Mutex` 仅服务 fallback/detached/late completion。 | 已完成正常 SEND_COMPLETE claim 热路径出清；保留为 fallback registry、detached/late completion 和 retired binding cleanup 边界。 |
-| 6 | `TqDarwinRelayEventQueue` 原子 CAS + kqueue wake | 单 worker 队列 | QUIC receive view、send complete event、control event | 不是 mutex，但每个 QUIC receive view 都会 push + wake，多个 MsQuic callback producer 会竞争 `EnqueuePos`；wake 系统调用成本明显。 | 批量投递 wake：从空队列变非空时 wake，或 per-callback 批量 coalesce；增加队列满的 backpressure/重试策略和指标。 |
+| 6 | `TqDarwinRelayEventQueue` 原子 CAS + kqueue wake | 单 worker 队列 | QUIC receive view、send complete event、control event | 不是 mutex，但每个 QUIC receive view 都会 push + wake，多个 MsQuic callback producer 会竞争 `EnqueuePos`；wake 系统调用成本明显。 | 已完成 queue-full backpressure：`CallbackPendingQuicReceives` 暂存 + worker drain 重试；snapshot 暴露 `EventQueueFullErrors`、`WakeFailures`、`QuicReceiveViewBackpressureQueued` 等细分计数。仍可优化 wake coalesce。 |
 | 7 | `StreamBinding::CallbackRefs`、`CallbackPendingReceiveBytes/Events` 原子 | 单 stream binding | 每次 MsQuic callback、receive budget 预留/释放 | 避免了 callback 入口 mutex，但高 receive 频率下同一 cache line 反复写。 | 拆分 cache line；把 bytes/events 分开对齐；事件进入 worker 后统一扣减，减少 CAS 循环次数。 |
 | 8 | `TqRelayBufferBudget::PendingBufferBytes` 原子 | 单 relay budget | TCP read buffer、压缩输出、QUIC->TCP pending write buffer 分配/释放 | 成本随 buffer 数线性增长；`ReadChunkSize` 越小越频繁。 | 调大 batch/chunk 或按 batch 一次性预留预算；对 QUIC->TCP 解压输出使用更少大块 buffer。 |
 | 9 | `TqDarwinRelayWorker::LifecycleMutex` | 单 worker | start/stop/register control event | 注册、注销、停止时使用，不进入稳定长连接数据面。 | 保持即可；注意不要在持锁时等待 worker 线程可能反向依赖的操作。 |
@@ -182,7 +182,7 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 | 12 | `TqTunnelContext::Lock`、`StreamOpLock` | 单 tunnel 控制面 | OPEN、relay 启动、early data 移交、pre-relay send/shutdown | 接管 relay 后不在每包数据面使用。 | 保持；重点是避免在持锁状态调用外部 callback。 |
 | 13 | `WorkerThreadIdMutex` | 单 worker | `IsWorkerThread()`、start/stop/test | `TrySubmitQuicSendOperation()`、completion 路径会调用 `IsWorkerThread()`，因此比纯控制锁更热，但临界区很小。 | 用 `std::atomic<std::thread::id>` 不可移植；可改为 `std::atomic<uint64_t>` 存平台 thread id，或在 worker 路径显式传入 `workerThread=true` 减少查询。 |
 
-> 跟进计划：send completion active worker 主路径已完成 rank 3–5 锁出清（`ActiveSendMutex` 替代原先 active path 上的 `KnownSendMutex` + `CompletionState::Mutex` 双锁）；剩余 fallback 锁只服务 worker stop、late callback、retired cleanup。下一组建议处理 receive callback 失败语义（P1）和 fake FIN abort（P1）。
+> 跟进计划：send completion active worker 主路径已完成 rank 3–5 锁出清（`ActiveSendMutex` 替代原先 active path 上的 `KnownSendMutex` + `CompletionState::Mutex` 双锁）；剩余 fallback 锁只服务 worker stop、late callback、retired cleanup。receive callback 入队失败语义与 event queue 背压已在 `docs/superpowers/plans/2026-07-04-darwin-receive-callback-hardening.md` 完成（`ce05f0c`–`32340fe`）。fake FIN abort 为设计行为，不在该 plan 范围内。
 
 ## 3. 目前代码问题和建议
 
@@ -210,28 +210,35 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 2. 若需要支持，给 `TqDarwinRelayRegistration` 增加 `SinkQuicReceives` 和 `SinkQuicReceiveBytes`，复用 `QueueDeferredQuicReceive()` 的 ownership/backpressure，但 worker 处理时只统计 bytes 并 `ReceiveComplete()`。
 3. 若暂不支持，在配置和启动日志中给出明确错误，不要只表现为 relay start failed。
 
-### P1：QUIC receive callback 在队列满或预算拒绝时返回 SUCCESS，可能影响上游背压语义
+### P1：QUIC receive callback 在队列满或预算拒绝时返回 SUCCESS，可能影响上游背压语义 — **已完成**
 
-现象：`StreamCallback()` 的 RECEIVE 路径中，`QueueDeferredQuicReceive()` 失败后会记录错误并标记 relay closing，但 callback 返回 `QUIC_STATUS_SUCCESS`。失败可能来自队列满、callback receive budget 预留失败、空 buffer、分配失败等。
+> 实现：`docs/superpowers/plans/2026-07-04-darwin-receive-callback-hardening.md`（commit 范围 `ce05f0c`–`32340fe`）；设计：`docs/superpowers/specs/2026-07-04-darwin-receive-callback-hardening-design.md`。
 
-影响：对已经接管但没有完成的 receive，返回 SUCCESS 意味着 MsQuic 可能认为 callback 已接受该事件的默认处理语义；代码当前没有显式 `ReceiveComplete()`，关闭路径也依赖后续清理。这个路径需要在真实 MsQuic 行为下确认是否存在 buffer ownership 或流控歧义。
+原问题：`StreamCallback()` RECEIVE 路径中，`QueueDeferredQuicReceive()` 失败时仅递增 `Errors` 并返回 `QUIC_STATUS_SUCCESS`，MsQuic buffer ownership 边界不清。
 
-建议：
+已完成：
 
-1. 为 `QueueDeferredQuicReceive()` 增加失败原因枚举。
-2. 对已获得 ownership 但入队失败的情况，显式 `ReceiveComplete(totalLength)` 或返回适合 MsQuic 的错误状态，并补充单测。
-3. 队列满时优先暂停 receive、投递关闭事件或使用有界重试，而不是只增加 `Errors`。
+1. `QueueDeferredQuicReceive()` 返回 `TqDarwinQuicReceiveEnqueueResult`（`Ok`、`InvalidArgs`、`AllocationFailed`、`EmptyNonFin`、`NullBuffer`、`CallbackBudgetRejected`、`EventQueueFull`），并按原因递增 `QuicReceiveEnqueueFailures` 及细分计数。
+2. `StreamCallback()` 按结果分支处理 `ReceiveComplete()` 边界：
+   - `Ok` / `EventQueueFull`（backpressure 暂存后 worker 接管）：返回 `QUIC_STATUS_PENDING`。
+   - `InvalidArgs` / `EmptyNonFin` / `NullBuffer`：无 buffer 可持有，返回 `QUIC_STATUS_SUCCESS`。
+   - `AllocationFailed`：标记 relay closing 并投递 close event；若有 payload 则 `ReceiveComplete(totalLength)` 后返回 `SUCCESS`。
+   - `CallbackBudgetRejected`：pause receive + `ReceiveComplete(totalLength)` + `SUCCESS`。
+3. queue 满时 pause receive，将 view 暂存到 `StreamBinding::CallbackPendingQuicReceives`，worker drain 后 `FlushCallbackPendingQuicReceives()` 重试入队（详见 P2）。
+4. `TqDarwinRelayWorkerSnapshot` / runtime aggregate 暴露 `EventQueueFullErrors`、`WakeFailures`、`CallbackReceiveBudgetRejects`、`QuicReceiveEnqueueFailures`、`QuicReceiveViewBackpressureQueued`。
 
-### P1：`StreamCallback()` 对 fake FIN 使用 `assert(false)` 和 `std::abort()`
+### fake FIN：`StreamCallback()` 遇到 fake FIN 会 `abort()` 是设计行为
 
-现象：Darwin receive callback 检测到 `TqIsMsQuicFakeFinReceive()` 后记录 trace，然后 `assert(false)` 并 `std::abort()`。
+设计说明：
 
-影响：如果生产环境真实触发该 MsQuic 事件形态，整个进程会退出。relay 数据面不应因为单条 stream 异常直接 abort。
+- `TqIsMsQuicFakeFinReceive()` 命中后，Darwin receive callback 记录 `receive_fake_fin` trace，然后 `assert(false)` 并 `std::abort()`。
+- 这是有意保留的 fail-fast 行为，用于暴露违反当前 Darwin relay receive 假设的 MsQuic 事件形态（FIN-only receive 且无已知 final size）。
+- fake FIN 不作为单 relay 可恢复错误处理；若该条件在生产环境触发，应优先调查 MsQuic receive 语义或上游状态机，而不是在 relay 内静默降级。
 
-建议：
+当前状态：
 
-1. 改为关闭当前 relay/stream，记录错误和 trace，不终止进程。
-2. 补充 macOS 单测：fake FIN receive 触发后 relay 关闭、fd 清理、pending receive 完成或丢弃、进程继续运行。
+- 无需作为待修复问题处理。Linux relay 已单独实现 graceful shutdown 路径（`FakeFinReceiveShutdown`）；Darwin 与 Windows 仍保持 abort 契约。
+- trace 保留 absolute offset、total buffer length、buffer count、flags，便于定位触发条件。
 
 ### P1：worker 级 `RelayMutex` 仍在部分 callback 和控制路径上
 
@@ -280,17 +287,17 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 1. 若 Darwin 不打算批量归还，删除或忽略时明确记录。
 2. 若要对齐 Windows/Linux，给 relay 增加 per-stream deferred completion accumulator，在 FIN、暂停、关闭或达到 batch bytes 时 flush。
 
-### P2：event queue 满后的 backpressure 和可观测性不足
+### P2：event queue 满后的 backpressure 和可观测性不足 — **已完成**
 
-现象：`TqDarwinRelayEventQueue::TryPush()` 满时直接失败；`EnqueueEvent()` 只增加 worker `Errors`。当前 snapshot 没有队列满、wake 失败、receive view enqueue failure 等分类指标。
+> 实现 commit 范围 `ce05f0c`–`32340fe`（与 P1 同一 plan）。
 
-影响：生产环境只能看到 Errors 增加，无法区分队列满、wake 失败、buffer 预算、send failure 或 receive pause failure。
+原问题：`TqDarwinRelayEventQueue::TryPush()` 满时直接失败；snapshot 无队列满、wake 失败、receive view enqueue failure 等分类指标。
 
-建议：
+已完成：
 
-1. 增加 Darwin 细分计数：`EventQueueFull`、`WakeFailures`、`QuicReceiveEnqueueFailures`、`CallbackReceiveBudgetRejects`、`SendCompleteFallbacks`。
-2. admin metrics 和 trace 中暴露这些字段。
-3. 队列满时优先暂停该 stream receive，再安排 worker drain，而不是立即关闭。
+1. queue 满时 pause 该 stream receive，将 `TqDarwinPendingQuicReceive` 暂存到 `StreamBinding::CallbackPendingQuicReceives`；worker 事件循环 drain 后 `FlushCallbackPendingQuicReceives()` 重试入队，暂存清空后 `MaybeResumeQuicReceive()`。
+2. callback 在 backpressure 暂存后返回 `QUIC_STATUS_PENDING`（buffer 生命周期由 worker 侧结构接管）。
+3. snapshot 细分计数：`EventQueueFullErrors`、`WakeFailures`、`QuicReceiveEnqueueFailures`、`CallbackReceiveBudgetRejects`、`QuicReceiveViewBackpressureQueued`（`SnapshotLocal()` + `TqDarwinRelayRuntime::Snapshot()` 聚合）。
 
 ### P2：Darwin metrics 命名仍带 Linux
 
