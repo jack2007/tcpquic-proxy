@@ -480,6 +480,40 @@ bool TestWindowsRelayFinishReceiveViewNotFrontIsCounted() {
            after.ReceiveViewFinishNotFrontCount == before.ReceiveViewFinishNotFrontCount + 1;
 }
 
+bool TestWindowsRelayMaintenanceQueueBudgetForTest() {
+    TqWindowsRelayWorker worker;
+    worker.SetMaintenanceBudgetForTest(1);
+    if (!StartRelayWorkerForTest(worker)) {
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorageA[sizeof(MsQuicStream)]{};
+    alignas(MsQuicStream) unsigned char streamStorageB[sizeof(MsQuicStream)]{};
+    auto* streamA = reinterpret_cast<MsQuicStream*>(streamStorageA);
+    auto* streamB = reinterpret_cast<MsQuicStream*>(streamStorageB);
+    streamA->Callback = MsQuicStream::NoOpCallback;
+    streamB->Callback = MsQuicStream::NoOpCallback;
+    TqRelayHandle handleA{};
+    TqRelayHandle handleB{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelayForTest(streamA, &handleA, tuning, TqCompressAlgo::None) ||
+        !worker.RegisterRelayForTest(streamB, &handleB, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        return false;
+    }
+    worker.TestScheduleMaintenanceForTest(handleA.WindowsRelayId);
+    worker.TestScheduleMaintenanceForTest(handleB.WindowsRelayId);
+    const auto before = worker.Snapshot();
+    worker.TestDrainMaintenanceForTest();
+    const auto afterOne = worker.Snapshot();
+    worker.TestDrainMaintenanceForTest();
+    const auto afterTwo = worker.Snapshot();
+    worker.Stop();
+    return afterOne.MaintenanceRelaysProcessed == before.MaintenanceRelaysProcessed + 1 &&
+           afterTwo.MaintenanceRelaysProcessed == before.MaintenanceRelaysProcessed + 2;
+}
+
 bool TestWindowsRelayCallbackOperationGenerationMismatchDropsForTest() {
     TqWindowsRelayWorker worker;
     alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
@@ -1630,6 +1664,10 @@ int main() {
 
     if (!TestWindowsRelayFinishReceiveViewNotFrontIsCounted()) {
         return 125;
+    }
+
+    if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
+        return 126;
     }
 
     if (!TestWindowsRelaySnapshotConcurrentWithRegisterAndStop()) {

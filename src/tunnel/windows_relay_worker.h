@@ -21,11 +21,13 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct MsQuicStream;
@@ -239,6 +241,9 @@ public:
     bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;
     void TestConfigureQuicSendBacklog(uint64_t relayId, uint64_t maxBufferedBytes, uint64_t outstandingBytes);
     void TestProcessQuicSendCompleteForTest(uint64_t relayId, uint64_t completedBytes);
+    void SetMaintenanceBudgetForTest(size_t budget);
+    bool TestScheduleMaintenanceForTest(uint64_t relayId);
+    void TestDrainMaintenanceForTest();
 #endif
 
     void StopRelay(uint64_t relayId);
@@ -260,6 +265,9 @@ private:
     bool RegisterRelayLocal(RegisterRelayCommand& command);
     TqWindowsRelayWorkerSnapshot BuildSnapshotLocal() const;
     void DrainPerRelayMaintenance();
+    void ScheduleRelayMaintenance(const std::shared_ptr<RelayContext>& relay);
+    bool RelayNeedsMaintenance(const std::shared_ptr<RelayContext>& relay) const;
+    void EnqueueFullMaintenanceScan();
     void ProcessQuicSendCompleteOperation(
         uint64_t relayId,
         uint64_t generation,
@@ -487,6 +495,10 @@ private:
     bool LastPostedCallbackHadReceiveView_{false};
     std::vector<TqWindowsIocpOperationType> PostedCallbackSequence_;
 #endif
+    std::deque<std::shared_ptr<RelayContext>> MaintenanceQueue_;
+    std::unordered_set<uint64_t> MaintenanceQueuedRelayIds_;
+    size_t MaintenanceBudget_{64};
+    uint32_t MaintenanceFullScanCountdown_{0};
     mutable std::mutex ControlCommandLock_;
     mutable std::mutex Lock_;
     std::unordered_map<uint64_t, std::shared_ptr<RelayContext>> Relays_;
