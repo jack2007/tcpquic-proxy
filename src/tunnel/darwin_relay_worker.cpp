@@ -2203,30 +2203,34 @@ void TqDarwinRelayWorker::ReleaseCallbackReceiveBudget(
     receive->BindingOwner.reset();
 }
 
-bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
+TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
     const std::shared_ptr<StreamBinding>& binding,
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin) {
-    if (binding == nullptr || stream == nullptr) {
+    auto recordFailure = [this](TqDarwinQuicReceiveEnqueueResult result) -> TqDarwinQuicReceiveEnqueueResult {
         QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        if (result == TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected) {
+            CallbackReceiveBudgetRejects.fetch_add(1, std::memory_order_relaxed);
+        }
+        return result;
+    };
+
+    if (binding == nullptr || stream == nullptr) {
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
     }
     if (bufferCount != 0 && buffers == nullptr) {
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
     }
     if (!fin && (buffers == nullptr || bufferCount == 0)) {
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
     }
 
     auto receive = std::shared_ptr<TqDarwinPendingQuicReceive>(new (std::nothrow) TqDarwinPendingQuicReceive{});
     if (!receive) {
         Errors.fetch_add(1, std::memory_order_relaxed);
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::AllocationFailed);
     }
     receive->RelayId = binding->RelayId;
     receive->Stream = stream;
@@ -2240,22 +2244,18 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         }
         if (buffers[i].Buffer == nullptr) {
             Errors.fetch_add(1, std::memory_order_relaxed);
-            QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-            return false;
+            return recordFailure(TqDarwinQuicReceiveEnqueueResult::NullBuffer);
         }
         receive->Slices.push_back(TqDarwinQuicReceiveSlice{buffers[i].Buffer, buffers[i].Length});
         receive->TotalLength += buffers[i].Length;
     }
     if (receive->TotalLength == 0 && !fin) {
         Errors.fetch_add(1, std::memory_order_relaxed);
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::EmptyNonFin);
     }
     if (!ReserveCallbackReceiveBudget(binding.get(), receive->TotalLength)) {
         Errors.fetch_add(1, std::memory_order_relaxed);
-        CallbackReceiveBudgetRejects.fetch_add(1, std::memory_order_relaxed);
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected);
     }
     QuicReceiveViewCount.fetch_add(1, std::memory_order_relaxed);
     QuicReceiveViewBytes.fetch_add(receive->TotalLength, std::memory_order_relaxed);
@@ -2270,10 +2270,9 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         ReleaseCallbackReceiveBudget(receive);
         QuicReceiveViewCount.fetch_sub(1, std::memory_order_relaxed);
         QuicReceiveViewBytes.fetch_sub(receive->TotalLength, std::memory_order_relaxed);
-        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
-        return false;
+        return recordFailure(TqDarwinQuicReceiveEnqueueResult::EventQueueFull);
     }
-    return true;
+    return TqDarwinQuicReceiveEnqueueResult::Ok;
 }
 
 void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
@@ -3076,12 +3075,13 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
             assert(false && "MsQuic delivered FIN-only receive without known final size");
             std::abort();
         }
-        if (!worker->QueueDeferredQuicReceive(
-                bindingOwner,
-                stream,
-                event->RECEIVE.Buffers,
-                event->RECEIVE.BufferCount,
-                fin)) {
+        const TqDarwinQuicReceiveEnqueueResult enqueueResult = worker->QueueDeferredQuicReceive(
+            bindingOwner,
+            stream,
+            event->RECEIVE.Buffers,
+            event->RECEIVE.BufferCount,
+            fin);
+        if (enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok) {
             worker->Errors.fetch_add(1, std::memory_order_relaxed);
             return QUIC_STATUS_SUCCESS;
         }
