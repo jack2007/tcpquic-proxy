@@ -1346,11 +1346,9 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
     if (relay == nullptr) {
         return true;
     }
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing || relay->TcpReadClosed) {
-            return true;
-        }
+    AssertWorkerThreadForRelayState();
+    if (relay->Closing || relay->TcpReadClosed) {
+        return true;
     }
     if (ShouldPauseTcpReadForQuicBacklog(relay)) {
         return SetTcpReadBackpressure(relay, true);
@@ -1412,10 +1410,7 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             }
 
             readBytes += static_cast<uint64_t>(received);
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->TcpReadBytes += static_cast<uint64_t>(received);
-            }
+            relay->TcpReadBytes += static_cast<uint64_t>(received);
             TcpReadBatches.fetch_add(1, std::memory_order_relaxed);
             TcpReadBytes.fetch_add(static_cast<uint64_t>(received), std::memory_order_relaxed);
 
@@ -1456,12 +1451,8 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             if (!SubmitTcpBatchToQuic(relay, std::move(sendViews), false)) {
                 return false;
             }
-            bool shouldPause = false;
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                shouldPause = Config.MaxInFlightQuicSends != 0 &&
-                    relay->InFlightQuicSends >= Config.MaxInFlightQuicSends;
-            }
+            bool shouldPause = Config.MaxInFlightQuicSends != 0 &&
+                relay->InFlightQuicSends >= Config.MaxInFlightQuicSends;
             if (shouldPause) {
                 if (!SetTcpReadBackpressure(relay, true)) {
                     return false;
@@ -1477,14 +1468,10 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             continue;
         }
         if (received == 0) {
-            {
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
-                relay->TcpReadClosed = true;
-                relay->TcpReadArmed = false;
-            }
+            relay->TcpReadClosed = true;
+            relay->TcpReadArmed = false;
             if (!UpdateTcpInterest(relay)) {
                 Errors.fetch_add(1, std::memory_order_relaxed);
-                std::lock_guard<std::mutex> relayLock(relay->Mutex);
                 relay->Closing = true;
                 return false;
             }
@@ -1520,10 +1507,7 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             break;
         }
         Errors.fetch_add(1, std::memory_order_relaxed);
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            relay->Closing = true;
-        }
+        relay->Closing = true;
         return false;
     }
     return true;
@@ -1536,23 +1520,19 @@ bool TqDarwinRelayWorker::SubmitTcpBatchToQuic(
     if (relay == nullptr) {
         return false;
     }
-    bool enableQuicSends = false;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing) {
-            return false;
-        }
-        if (fin) {
-            relay->QuicSendFinSubmitted = true;
-        }
-        enableQuicSends = relay->EnableQuicSends;
+    AssertWorkerThreadForRelayState();
+    if (relay->Closing) {
+        return false;
     }
+    if (fin) {
+        relay->QuicSendFinSubmitted = true;
+    }
+    const bool enableQuicSends = relay->EnableQuicSends;
     if (views.empty() && !fin) {
         return true;
     }
     if (!enableQuicSends) {
         if (fin) {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
             relay->QuicSendFinCompleted = true;
             relay->QuicSendClosed = true;
         }
@@ -1564,13 +1544,8 @@ bool TqDarwinRelayWorker::SubmitTcpBatchToQuic(
         Errors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    uint64_t relayId = 0;
-    std::shared_ptr<StreamBinding> binding;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        relayId = relay->Id;
-        binding = relay->Binding;
-    }
+    const uint64_t relayId = relay->Id;
+    std::shared_ptr<StreamBinding> binding = relay->Binding;
     operation->RelayId = relayId;
     operation->Fin = fin;
     operation->BindingOwner = binding;
@@ -1607,19 +1582,17 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     info.TotalBytes = raw->TotalBytes;
     info.Fin = raw->Fin;
     info.Submitting = true;
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->Closing || relay->Stream == nullptr) {
-            Errors.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
-        stream = relay->Stream;
-        info.BindingOwner = relay->Binding;
-        raw->BindingOwner = relay->Binding;
-        ++relay->SubmittingQuicSends;
-        ++relay->InFlightQuicSends;
-        relay->InFlightQuicSendBytes += raw->TotalBytes;
+    AssertWorkerThreadForRelayState();
+    if (relay->Closing || relay->Stream == nullptr) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
+    stream = relay->Stream;
+    info.BindingOwner = relay->Binding;
+    raw->BindingOwner = relay->Binding;
+    ++relay->SubmittingQuicSends;
+    ++relay->InFlightQuicSends;
+    relay->InFlightQuicSendBytes += raw->TotalBytes;
     if (workerThread) {
         RegisterKnownSendOperationLocal(raw, info);
     } else {
@@ -1636,11 +1609,8 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     const bool completionAlreadyRan = workerThread
         ? !MarkKnownSendOperationSubmittedLocal(raw, &submittedInfo)
         : !MarkKnownSendOperationSubmitted(raw, &submittedInfo);
-    {
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
-        if (relay->SubmittingQuicSends > 0) {
-            --relay->SubmittingQuicSends;
-        }
+    if (relay->SubmittingQuicSends > 0) {
+        --relay->SubmittingQuicSends;
     }
     if (workerThread && submittedInfo.CompletionEventClaimed) {
         (void)DrainEvents(1);
@@ -1661,21 +1631,17 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         } else {
             (void)UnregisterKnownSendOperation(raw, &removedInfo);
         }
-        {
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
-            if (relay->InFlightQuicSends > 0) {
-                --relay->InFlightQuicSends;
-            }
-            relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= removedInfo.TotalBytes
-                ? relay->InFlightQuicSendBytes - removedInfo.TotalBytes
-                : 0;
+        if (relay->InFlightQuicSends > 0) {
+            --relay->InFlightQuicSends;
         }
+        relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= removedInfo.TotalBytes
+            ? relay->InFlightQuicSendBytes - removedInfo.TotalBytes
+            : 0;
         if (status == QUIC_STATUS_OUT_OF_MEMORY || status == QUIC_STATUS_BUFFER_TOO_SMALL) {
             QuicSendBackpressureEvents.fetch_add(1, std::memory_order_relaxed);
             if (!SetTcpReadBackpressure(relay, true)) {
                 return false;
             }
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
             if (relay->Closing) {
                 return false;
             }
@@ -1683,7 +1649,6 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
             return true;
         }
         Errors.fetch_add(1, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->Closing = true;
         return false;
     }
