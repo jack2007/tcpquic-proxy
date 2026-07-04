@@ -19,9 +19,11 @@
 #endif
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +39,7 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicSendComplete,
     QuicSendRetry,
     CloseRelay,
+    SetTraceContext,
     StopWorker,
     RegisterRelay,
     Snapshot,
@@ -46,6 +49,9 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
     QuicShutdownComplete,
+#if defined(TQ_UNIT_TESTING)
+    TestBlockWorkerQueue,
+#endif
 };
 
 struct TqWindowsRelayActiveSnapshot {
@@ -137,6 +143,15 @@ struct TqWindowsRelayWorkerSnapshot {
     std::vector<TqWindowsRelayActiveSnapshot> ActiveRelayStates;
 };
 
+#if defined(TQ_UNIT_TESTING)
+struct TqWindowsRelayWorkerQueueBlockForTest {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    bool Entered{false};
+    bool Release{false};
+};
+#endif
+
 class TqWindowsRelayWorker {
 public:
     explicit TqWindowsRelayWorker(uint32_t workerIndex = 0);
@@ -192,6 +207,20 @@ public:
         uint64_t relayId,
         bool* closeAfterDrained,
         bool* tcpRecvClosed) const;
+    bool TestGetRelayTraceStateForTest(
+        uint64_t relayId,
+        TqTraceLinuxRelayStreamState* out,
+        std::string* targetStorage) const;
+    bool TestPostTraceContextForTest(
+        uint64_t relayId,
+        uint64_t generation,
+        uint64_t tunnelId,
+        const char* target);
+    bool TestPostWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest* block);
+    bool TestWaitWorkerQueueBlockEnteredForTest(
+        TqWindowsRelayWorkerQueueBlockForTest& block,
+        uint32_t timeoutMs) const;
+    void TestReleaseWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest& block) const;
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
     bool MaybePostTcpRecvForTest(uint64_t relayId);
@@ -235,6 +264,10 @@ private:
         uint32_t status);
     void HandleQuicIdealSendBuffer(uint64_t relayId, uint64_t byteCount);
     void HandleQuicIdealSendBuffer(const std::shared_ptr<RelayContext>& relay, uint64_t byteCount);
+    void ApplyRelayTraceContext(
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t tunnelId,
+        const std::string& target);
     void QueueQuicSendCompleteFromCallback(TqWindowsQuicSendOperation* operation);
     void QueueQuicSendCompleteByIdFromCallback(
         const CallbackBinding& binding,
@@ -277,7 +310,7 @@ private:
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
     bool HandleTcpReadClosed(std::unique_ptr<IoOperation> op);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
-    void TryRetireRelay(const std::shared_ptr<RelayContext>& relay);
+    void TryRetireRelay(const std::shared_ptr<RelayContext>& relay, bool traceState = true);
     bool ScheduleRelayReceiveDrain(const std::shared_ptr<RelayContext>& relay);
     void ScheduleRelayReceiveDrainOrFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void DrainRelayReceives(const std::shared_ptr<RelayContext>& relay);
@@ -334,11 +367,13 @@ private:
     void CloseRelay(
         const std::shared_ptr<RelayContext>& relay,
         TqRelayCloseMode mode,
-        const char* reason = nullptr);
+        const char* reason = nullptr,
+        bool traceState = true);
     void MarkRelayCloseReason(const std::shared_ptr<RelayContext>& relay, const char* reason);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
     bool HasPendingAfterStreamShutdown(const std::shared_ptr<RelayContext>& relay) const;
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
+    void FailRelayFatalFromCallback(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void RecordTcpHardErrorAndFail(
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,
