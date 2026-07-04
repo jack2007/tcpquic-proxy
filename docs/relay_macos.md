@@ -135,7 +135,7 @@ relay 生命周期由三层对象托住：
 
 - `RelayState`：单条 relay 的 TCP fd、stream、pending 队列、in-flight send、背压和压缩状态。
 - `StreamBinding`：stream callback 上下文，持有 worker 指针、active 标志、callback refs、callback receive 预算和 completion state。
-- `CompletionState` + worker `KnownSendOperations`：跟踪已提交或正在提交的 QUIC send operation，处理同步 completion、迟到 completion、worker stop 后 completion 和 detached callback。
+- Send operation registry 分两层：`ActiveSendOperations`（worker-local，`ActiveSendMutex`）负责 active worker 主路径 register/submit/complete，配合 operation 原子状态处理正常 SEND_COMPLETE claim；`KnownSendOperations` + `CompletionState::FallbackSendOperations` 保留为非 worker fallback、stop drain、迟到 completion 和 detached callback 边界。
 
 ## 2. macOS 线程锁热点排序
 

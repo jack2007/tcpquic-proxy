@@ -933,8 +933,10 @@ void SendOperationStateTransitionsAreSingleClaim() {
     CHECK(!operation.TryMarkRegistered());
     CHECK(operation.TryClaimCompletion());
     CHECK(!operation.TryClaimCompletion());
+    CHECK(!operation.MarkDetached());
     CHECK(operation.TryMarkCompleted());
     CHECK(!operation.TryMarkCompleted());
+    CHECK(!operation.MarkDetached());
 }
 
 void ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays() {

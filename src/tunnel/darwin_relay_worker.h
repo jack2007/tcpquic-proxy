@@ -131,7 +131,8 @@ struct TqDarwinRelaySendOperation {
         for (;;) {
             const auto state = static_cast<TqDarwinSendOperationState>(value);
             if (state == TqDarwinSendOperationState::Completed ||
-                state == TqDarwinSendOperationState::Detached) {
+                state == TqDarwinSendOperationState::Detached ||
+                state == TqDarwinSendOperationState::CompletionClaimed) {
                 return false;
             }
             if (State.compare_exchange_weak(
