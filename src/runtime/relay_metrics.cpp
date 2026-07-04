@@ -524,6 +524,14 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.WindowsRelayCallbackDispatchNanos = snapshot.CallbackDispatchNanos;
     metrics.WindowsRelaySnapshotBuildNanos = snapshot.SnapshotBuildNanos;
     metrics.WindowsRelaySnapshotActiveRelaysScanned = snapshot.SnapshotActiveRelaysScanned;
+    metrics.WindowsRelayMaintenanceDrainCount = snapshot.MaintenanceDrainCount;
+    metrics.WindowsRelayMaintenanceDrainNanos = snapshot.MaintenanceDrainNanos;
+    metrics.WindowsRelayMaintenanceRelaysProcessed = snapshot.MaintenanceRelaysProcessed;
+    metrics.WindowsRelayMaintenanceFullScanCount = snapshot.MaintenanceFullScanCount;
+    metrics.WindowsRelayMaintenanceFullScanRelaysScanned = snapshot.MaintenanceFullScanRelaysScanned;
+    metrics.WindowsRelayReceiveViewFinishLinearSearchCount = snapshot.ReceiveViewFinishLinearSearchCount;
+    metrics.WindowsRelayReceiveViewFinishLinearSearchNanos = snapshot.ReceiveViewFinishLinearSearchNanos;
+    metrics.WindowsRelayReceiveViewFinishNotFrontCount = snapshot.ReceiveViewFinishNotFrontCount;
 #endif
     return metrics;
 }
@@ -815,6 +823,22 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.WindowsRelaySnapshotBuildNanos;
     out << ",\"windows_relay_snapshot_active_relays_scanned\":"
         << metrics.WindowsRelaySnapshotActiveRelaysScanned;
+    out << ",\"windows_relay_maintenance_drain_count\":"
+        << metrics.WindowsRelayMaintenanceDrainCount;
+    out << ",\"windows_relay_maintenance_drain_nanos\":"
+        << metrics.WindowsRelayMaintenanceDrainNanos;
+    out << ",\"windows_relay_maintenance_relays_processed\":"
+        << metrics.WindowsRelayMaintenanceRelaysProcessed;
+    out << ",\"windows_relay_maintenance_full_scan_count\":"
+        << metrics.WindowsRelayMaintenanceFullScanCount;
+    out << ",\"windows_relay_maintenance_full_scan_relays_scanned\":"
+        << metrics.WindowsRelayMaintenanceFullScanRelaysScanned;
+    out << ",\"windows_relay_receive_view_finish_linear_search_count\":"
+        << metrics.WindowsRelayReceiveViewFinishLinearSearchCount;
+    out << ",\"windows_relay_receive_view_finish_linear_search_nanos\":"
+        << metrics.WindowsRelayReceiveViewFinishLinearSearchNanos;
+    out << ",\"windows_relay_receive_view_finish_not_front_count\":"
+        << metrics.WindowsRelayReceiveViewFinishNotFrontCount;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }
 

@@ -400,10 +400,19 @@ bool TestWindowsRelayLockAndCallbackMetricsInitialState() {
     TqWindowsRelayWorker worker;
     const TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
     return snapshot.WorkerLockAcquireCount == 1 &&
+           snapshot.WorkerLockWaitNanos >= 0 &&
            snapshot.FindRelayByIdCount == 0 &&
            snapshot.CallbackDispatchNanos == 0 &&
            snapshot.SnapshotBuildNanos > 0 &&
-           snapshot.SnapshotActiveRelaysScanned == 0;
+           snapshot.SnapshotActiveRelaysScanned == 0 &&
+           snapshot.MaintenanceDrainCount == 0 &&
+           snapshot.MaintenanceDrainNanos == 0 &&
+           snapshot.MaintenanceRelaysProcessed == 0 &&
+           snapshot.MaintenanceFullScanCount == 0 &&
+           snapshot.MaintenanceFullScanRelaysScanned == 0 &&
+           snapshot.ReceiveViewFinishLinearSearchCount == 0 &&
+           snapshot.ReceiveViewFinishLinearSearchNanos == 0 &&
+           snapshot.ReceiveViewFinishNotFrontCount == 0;
 }
 
 bool TestWindowsRelayCallbackOperationGenerationMismatchDropsForTest() {

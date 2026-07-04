@@ -475,6 +475,22 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
     snapshot.SnapshotActiveRelaysScanned =
         SnapshotActiveRelaysScanned_.fetch_add(relays.size(), std::memory_order_relaxed) +
         relays.size();
+    snapshot.MaintenanceDrainCount =
+        MaintenanceDrainCount_.load(std::memory_order_relaxed);
+    snapshot.MaintenanceDrainNanos =
+        MaintenanceDrainNanos_.load(std::memory_order_relaxed);
+    snapshot.MaintenanceRelaysProcessed =
+        MaintenanceRelaysProcessed_.load(std::memory_order_relaxed);
+    snapshot.MaintenanceFullScanCount =
+        MaintenanceFullScanCount_.load(std::memory_order_relaxed);
+    snapshot.MaintenanceFullScanRelaysScanned =
+        MaintenanceFullScanRelaysScanned_.load(std::memory_order_relaxed);
+    snapshot.ReceiveViewFinishLinearSearchCount =
+        ReceiveViewFinishLinearSearchCount_.load(std::memory_order_relaxed);
+    snapshot.ReceiveViewFinishLinearSearchNanos =
+        ReceiveViewFinishLinearSearchNanos_.load(std::memory_order_relaxed);
+    snapshot.ReceiveViewFinishNotFrontCount =
+        ReceiveViewFinishNotFrontCount_.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -3882,6 +3898,14 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.CallbackDispatchNanos += snapshot.CallbackDispatchNanos;
         total.SnapshotBuildNanos += snapshot.SnapshotBuildNanos;
         total.SnapshotActiveRelaysScanned += snapshot.SnapshotActiveRelaysScanned;
+        total.MaintenanceDrainCount += snapshot.MaintenanceDrainCount;
+        total.MaintenanceDrainNanos += snapshot.MaintenanceDrainNanos;
+        total.MaintenanceRelaysProcessed += snapshot.MaintenanceRelaysProcessed;
+        total.MaintenanceFullScanCount += snapshot.MaintenanceFullScanCount;
+        total.MaintenanceFullScanRelaysScanned += snapshot.MaintenanceFullScanRelaysScanned;
+        total.ReceiveViewFinishLinearSearchCount += snapshot.ReceiveViewFinishLinearSearchCount;
+        total.ReceiveViewFinishLinearSearchNanos += snapshot.ReceiveViewFinishLinearSearchNanos;
+        total.ReceiveViewFinishNotFrontCount += snapshot.ReceiveViewFinishNotFrontCount;
         total.EventsProcessed += snapshot.EventsProcessed;
         total.TcpReadResumeByBacklogEvents += snapshot.TcpReadResumeByBacklogEvents;
         total.LateTeardownDowngradedCount += snapshot.LateTeardownDowngradedCount;

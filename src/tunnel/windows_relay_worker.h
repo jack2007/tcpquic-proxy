@@ -130,6 +130,14 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t CallbackDispatchNanos{0};
     uint64_t SnapshotBuildNanos{0};
     uint64_t SnapshotActiveRelaysScanned{0};
+    uint64_t MaintenanceDrainCount{0};
+    uint64_t MaintenanceDrainNanos{0};
+    uint64_t MaintenanceRelaysProcessed{0};
+    uint64_t MaintenanceFullScanCount{0};
+    uint64_t MaintenanceFullScanRelaysScanned{0};
+    uint64_t ReceiveViewFinishLinearSearchCount{0};
+    uint64_t ReceiveViewFinishLinearSearchNanos{0};
+    uint64_t ReceiveViewFinishNotFrontCount{0};
     uint64_t EventsProcessed{0};
     uint64_t TcpReadResumeByBacklogEvents{0};
     uint64_t LateTeardownDowngradedCount{0};
@@ -458,6 +466,14 @@ private:
     std::atomic<uint64_t> CallbackDispatchNanos_{0};
     mutable std::atomic<uint64_t> SnapshotBuildNanos_{0};
     mutable std::atomic<uint64_t> SnapshotActiveRelaysScanned_{0};
+    std::atomic<uint64_t> MaintenanceDrainCount_{0};
+    std::atomic<uint64_t> MaintenanceDrainNanos_{0};
+    std::atomic<uint64_t> MaintenanceRelaysProcessed_{0};
+    std::atomic<uint64_t> MaintenanceFullScanCount_{0};
+    std::atomic<uint64_t> MaintenanceFullScanRelaysScanned_{0};
+    std::atomic<uint64_t> ReceiveViewFinishLinearSearchCount_{0};
+    std::atomic<uint64_t> ReceiveViewFinishLinearSearchNanos_{0};
+    std::atomic<uint64_t> ReceiveViewFinishNotFrontCount_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
