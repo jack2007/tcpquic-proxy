@@ -233,7 +233,7 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
 
 `GET /api/v1/relay/metrics` 的基础字段：`backend`、`active_relays`、`pending_bytes`、`tcp_read_bytes`、`tcp_write_bytes`、`errors`。Linux/Windows/macOS 平台会追加不同的 relay 诊断计数器。
 
-`GET /api/v1/relay/active-relays` 返回：
+`GET /api/v1/relay/active-relays` 在不支持逐 relay 明细的平台返回类似：
 
 ```json
 {
@@ -246,8 +246,9 @@ Server 模式由 `RunServer()` 的 admin handler 加 `TqHandleServerAdmin()` 提
 }
 ```
 
-- Windows 后端可通过 active relay snapshot 返回逐 relay 明细。
-- 当前 Linux/macOS 后端没有逐 relay 明细时，`GET /api/v1/relay/active-relays/{relay_id}` 返回 `503 not_supported`。
+- Windows 和 Linux 后端可通过 active relay snapshot 返回逐 relay 明细。
+- macOS 或不支持逐 relay 明细的平台，`GET /api/v1/relay/active-relays/{relay_id}` 返回 `503 not_supported`。
+- Linux 明细额外包含 `tcp_fd`、`tcp_read_armed`、`tcp_write_armed`、`pending_quic_send_retries`、`ideal_send_bytes`、`tcp_write_eagain_count`、`epoll_out_events`、`pending_tcp_write_queue_depth`、`pending_tcp_write_bytes`、`relay_buffer_bytes_in_use`、`local_address`、`peer_address`。
 
 `GET /api/v1/relay/workers` 返回：
 

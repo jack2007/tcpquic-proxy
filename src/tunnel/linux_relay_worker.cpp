@@ -3366,6 +3366,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
 
     snapshot.ActiveRelays = Relays.size();
     snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
+    snapshot.ActiveRelayStates.reserve(Relays.size());
     bool hasHotRelay = false;
     for (const auto& relay : Relays) {
         uint64_t relayPendingBytes =
@@ -3402,17 +3403,23 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
         snapshot.OutstandingQuicSends += relay->OutstandingQuicSends;
         snapshot.OutstandingQuicSendBytes += relay->OutstandingQuicSendBytes;
         snapshot.OutstandingQuicSends += relay->PendingQuicSendRetries.size();
+        uint64_t retryBytes = 0;
         for (const auto& retry : relay->PendingQuicSendRetries) {
             if (retry != nullptr) {
-                snapshot.OutstandingQuicSendBytes += retry->TotalBytes;
-                relayPendingBytes += retry->TotalBytes;
+                retryBytes += retry->TotalBytes;
             }
         }
+        snapshot.OutstandingQuicSendBytes += retryBytes;
+        relayPendingBytes += retryBytes;
         snapshot.MaxBufferedQuicSendBytes += CurrentRelayIdealSendBytes(relay.get());
         snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
-        for (const auto& view : relay->PendingTcpWrites) {
-            relayPendingBytes += view.Len;
-            snapshot.PendingTcpWriteBytes += view.Len;
+        const uint64_t pendingTcpWriteBytes = PendingTcpWriteBytes(relay->PendingTcpWrites);
+        relayPendingBytes += pendingTcpWriteBytes;
+        snapshot.PendingTcpWriteBytes += pendingTcpWriteBytes;
+        uint64_t callbackPendingDepth = 0;
+        {
+            std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
+            callbackPendingDepth = relay->CallbackPendingQuicReceives.size();
         }
         relayPendingBytes += relay->PendingQuicReceiveBytes;
         snapshot.CurrentPendingQuicReceiveBytes += relay->PendingQuicReceiveBytes;
@@ -3450,7 +3457,44 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
             snapshot.HotRelayLocalAddress = GetSocketNameString(relay->TcpFd, false);
             snapshot.HotRelayPeerAddress = GetSocketNameString(relay->TcpFd, true);
         }
+        TqLinuxRelayActiveSnapshot active{};
+        active.WorkerIndex = Config.WorkerIndex;
+        active.RelayId = relay->Id;
+        active.TcpFd = relay->TcpFd;
+        active.InFlightQuicSends = static_cast<uint32_t>(
+            relay->OutstandingQuicSends + relay->PendingQuicSendRetries.size());
+        active.PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes;
+        active.PendingQuicReceiveQueueDepth = relay->PendingQuicReceives.size();
+        active.CallbackPendingQuicReceiveDepth = callbackPendingDepth;
+        active.OutstandingQuicSendBytes = relay->OutstandingQuicSendBytes + retryBytes;
+        active.PendingQuicSendRetries = relay->PendingQuicSendRetries.size();
+        active.IdealSendBytes = CurrentRelayIdealSendBytes(relay.get());
+        active.TcpReadBytes = relay->TcpReadBytes;
+        active.TcpWriteBytes = relay->TcpWriteBytes;
+        active.TcpWriteEagainCount = relay->TcpWriteEagainCount;
+        active.EpollOutEvents = relay->EpollOutEvents;
+        active.PendingTcpWriteQueueDepth = relay->PendingTcpWrites.size();
+        active.PendingTcpWriteBytes = pendingTcpWriteBytes;
+        active.RelayBufferBytesInUse =
+            relay->PendingBufferBytes.load(std::memory_order_relaxed) + retryBytes +
+            pendingTcpWriteBytes;
+        active.LastTcpWriteErrno = relay->LastTcpWriteErrno;
+        active.Closing = relay->Closing;
+        active.TcpReadClosed = relay->TcpReadClosed;
+        active.TcpWriteClosed = relay->TcpWriteClosed;
+        active.TcpReadArmed = relay->TcpReadArmed;
+        active.TcpWriteArmed = relay->TcpWriteArmed;
+        active.TcpReadPausedByQuicBacklog = relay->TcpReadPausedByQuicBacklog;
+        active.QuicSendFinSubmitted = relay->QuicSendFinSubmitted;
+        active.QuicSendFinCompleted = relay->QuicSendFinCompleted;
+        active.StopPublished =
+            relay->Handle != nullptr && relay->Handle->Stop.load(std::memory_order_acquire);
+        active.StreamDetached = relay->StreamBinding == nullptr;
+        active.LocalAddress = GetSocketNameString(relay->TcpFd, false);
+        active.PeerAddress = GetSocketNameString(relay->TcpFd, true);
+        snapshot.ActiveRelayStates.push_back(std::move(active));
     }
+    snapshot.SnapshotActiveRelaysScanned = snapshot.ActiveRelayStates.size();
     snapshot.MaxWorkerPendingBytes = snapshot.PendingBytes;
     return snapshot;
 }
@@ -3674,6 +3718,7 @@ TqLinuxRelayWorker* TqLinuxRelayRuntime::PickWorker() {
 TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
     std::lock_guard<std::mutex> guard(Lock);
     TqLinuxRelayWorkerSnapshot total{};
+    total.ActiveRelayStates.reserve(Workers.size());
     for (const auto& worker : Workers) {
         const auto snapshot = worker->Snapshot();
         total.EventsProcessed += snapshot.EventsProcessed;
@@ -3681,6 +3726,11 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.PendingEvents += snapshot.PendingEvents;
         total.PendingBytes += snapshot.PendingBytes;
         total.ActiveRelays += snapshot.ActiveRelays;
+        total.SnapshotActiveRelaysScanned += snapshot.SnapshotActiveRelaysScanned;
+        total.ActiveRelayStates.insert(
+            total.ActiveRelayStates.end(),
+            snapshot.ActiveRelayStates.begin(),
+            snapshot.ActiveRelayStates.end());
         total.ActiveTcpRelays += snapshot.ActiveTcpRelays;
         total.ActiveSinkRelays += snapshot.ActiveSinkRelays;
         total.ActiveQuicSendRelays += snapshot.ActiveQuicSendRelays;

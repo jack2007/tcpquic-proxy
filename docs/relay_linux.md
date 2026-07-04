@@ -239,20 +239,13 @@ fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 
 ## 3. 当前问题和解决方案建议
 
-### 3.1 Linux active relay 明细缺失
+### 3.1 Linux active relay 明细此前缺失
 
-现象：`TqSnapshotActiveRelays()` 当前只在 Windows 分支填充 `ActiveRelayStates`，Linux 下 `/api/v1/relay/active-relays` 返回空列表。Linux 聚合 metrics 已有 hot relay 字段，但无法列出所有 active relay 的细节。
+历史现象：`TqSnapshotActiveRelays()` 曾只在 Windows 分支填充逐 relay 明细，Linux 下 `/api/v1/relay/active-relays` 只能返回空列表，`/api/v1/relay/active-relays/{id}` 返回 `503 not_supported`。
 
-影响：
+影响：排查单连接卡顿时只能看 `linux_relay_hot_relay_*` 和 worker 聚合计数，无法枚举所有 active relay 的 pending、backpressure、TCP/QUIC 方向状态和地址信息。
 
-- 排查单连接卡顿时只能看聚合 `linux_relay_hot_relay_*`，无法通过 API 枚举所有 relay。
-- `docs/relay_linux.md` 中建议关注 per-relay pending/backpressure，但实际 API 不完整。
-
-建议：
-
-- 增加 Linux active relay snapshot 结构，至少包含 relay id、worker index、pending receive bytes/queue、outstanding QUIC send bytes、pending retry 数、TCP read/write bytes、read/write armed、last errno、local/peer address。
-- 在 worker `SnapshotLocal()` 或单独 active-relay event 中构建明细；如果担心 snapshot 成本，支持分页或只返回 top N hot relays。
-- 让 `/api/v1/relay/active-relays/{id}` 同时支持 Linux。
+当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
 
 ### 3.2 Event queue capacity 未暴露配置
 

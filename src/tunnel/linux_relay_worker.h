@@ -75,6 +75,39 @@ struct TqLinuxRelaySendOperation {
     std::vector<QUIC_BUFFER> QuicBuffers;
 };
 
+struct TqLinuxRelayActiveSnapshot {
+    uint32_t WorkerIndex{0};
+    uint64_t RelayId{0};
+    int TcpFd{-1};
+    uint32_t InFlightQuicSends{0};
+    uint64_t PendingQuicReceiveBytes{0};
+    uint64_t PendingQuicReceiveQueueDepth{0};
+    uint64_t CallbackPendingQuicReceiveDepth{0};
+    uint64_t OutstandingQuicSendBytes{0};
+    uint64_t PendingQuicSendRetries{0};
+    uint64_t IdealSendBytes{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t TcpWriteEagainCount{0};
+    uint64_t EpollOutEvents{0};
+    uint64_t PendingTcpWriteQueueDepth{0};
+    uint64_t PendingTcpWriteBytes{0};
+    uint64_t RelayBufferBytesInUse{0};
+    uint64_t LastTcpWriteErrno{0};
+    bool Closing{false};
+    bool TcpReadClosed{false};
+    bool TcpWriteClosed{false};
+    bool TcpReadArmed{false};
+    bool TcpWriteArmed{false};
+    bool TcpReadPausedByQuicBacklog{false};
+    bool QuicSendFinSubmitted{false};
+    bool QuicSendFinCompleted{false};
+    bool StopPublished{false};
+    bool StreamDetached{false};
+    std::string LocalAddress;
+    std::string PeerAddress;
+};
+
 struct TqLinuxRelayWorkerSnapshot {
     uint32_t WorkerIndex{0};
     uint64_t EventsProcessed{0};
@@ -121,6 +154,8 @@ struct TqLinuxRelayWorkerSnapshot {
     bool HotRelayTcpWriteArmed{false};
     std::string HotRelayLocalAddress;
     std::string HotRelayPeerAddress;
+    uint64_t SnapshotActiveRelaysScanned{0};
+    std::vector<TqLinuxRelayActiveSnapshot> ActiveRelayStates;
     uint64_t TcpReadBatches{0};
     uint64_t TcpReadBytes{0};
     uint64_t QuicSendOperations{0};

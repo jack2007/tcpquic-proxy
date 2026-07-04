@@ -156,6 +156,7 @@ struct TqRelayActiveSnapshot {
     const char* Backend{"unsupported"};
     uint32_t WorkerIndex{0};
     uint64_t RelayId{0};
+    int TcpFd{-1};
     uint32_t ActiveHandlers{0};
     uint32_t QueuedWorkerOps{0};
     uint32_t InFlightTcpRecvs{0};
@@ -166,9 +167,16 @@ struct TqRelayActiveSnapshot {
     uint64_t CallbackPendingQuicReceiveDepth{0};
     uint64_t OutstandingQuicSendBytes{0};
     uint64_t MaxOutstandingQuicSendBytes{0};
+    uint64_t PendingQuicSendRetries{0};
+    uint64_t IdealSendBytes{0};
     uint64_t EventQueueDepth{0};
     uint64_t TcpReadBytes{0};
     uint64_t TcpWriteBytes{0};
+    uint64_t TcpWriteEagainCount{0};
+    uint64_t EpollOutEvents{0};
+    uint64_t PendingTcpWriteQueueDepth{0};
+    uint64_t PendingTcpWriteBytes{0};
+    uint64_t RelayBufferBytesInUse{0};
     uint64_t LastTcpWriteErrno{0};
     uint64_t LastTcpRecvErrno{0};
     uint64_t LastTcpSendErrno{0};
@@ -178,11 +186,15 @@ struct TqRelayActiveSnapshot {
     bool TcpReadClosed{false};
     bool TcpReadPausedByQuicBacklog{false};
     bool TcpWriteClosed{false};
+    bool TcpReadArmed{false};
+    bool TcpWriteArmed{false};
     bool CloseAfterDrained{false};
     bool QuicSendFinSubmitted{false};
     bool QuicSendFinCompleted{false};
     bool StopPublished{false};
     bool StreamDetached{false};
+    std::string LocalAddress;
+    std::string PeerAddress;
 };
 
 struct TqRelayWorkerSnapshot {

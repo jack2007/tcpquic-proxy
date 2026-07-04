@@ -1490,6 +1490,16 @@ int main() {
         }
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.ActiveRelayStates.size() != 2) {
+            std::fprintf(
+                stderr,
+                "expected 2 active relay states, got %zu\n",
+                snapshot.ActiveRelayStates.size());
+            worker.Stop();
+            ::close(fds1[1]);
+            ::close(fds2[1]);
+            return 3202;
+        }
         if (snapshot.ActiveRelays != 2 ||
             snapshot.MaxWorkerActiveRelays != 2 ||
             snapshot.MaxWorkerPendingBytes != snapshot.PendingBytes ||
@@ -3038,6 +3048,8 @@ int main() {
     {
         TqLinuxRelayWorkerConfig config{};
         config.TcpWriteMaxBytes = 1;
+        // Force one byte to remain pending after the first drain.
+        config.TcpWriteBurstBytes = 1;
         TqLinuxRelayWorker worker(config);
         if (!worker.StartForTest()) {
             return 1;
@@ -3187,16 +3199,36 @@ int main() {
         config.MaxPendingBufferBytes = 256 * 1024;
 
         TqLinuxRelayWorker worker(config);
-        assert(worker.StartForTest());
+        if (!worker.StartForTest()) {
+            return 1;
+        }
 
         constexpr int kRelayCount = 64;
-        std::vector<std::array<int, 2>> fds(kRelayCount);
+        std::vector<std::array<int, 2>> fds(
+            kRelayCount,
+            std::array<int, 2>{-1, -1});
         std::vector<TqLinuxRelayRegistrationResult> registrations;
         registrations.reserve(kRelayCount);
 
+        auto cleanupRelays = [&]() {
+            for (const auto& registration : registrations) {
+                worker.UnregisterRelay(registration.RelayId);
+            }
+            for (int i = 0; i < kRelayCount; ++i) {
+                if (fds[i][1] >= 0) {
+                    ::close(fds[i][1]);
+                    fds[i][1] = -1;
+                }
+            }
+            worker.Stop();
+        };
+
         for (int i = 0; i < kRelayCount; ++i) {
             fds[i] = std::array<int, 2>{-1, -1};
-            assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i].data()) == 0);
+            if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds[i].data()) != 0) {
+                cleanupRelays();
+                return 1;
+            }
 
             TqLinuxRelayRegistration registration{};
             registration.TcpFd = fds[i][0];
@@ -3205,27 +3237,79 @@ int main() {
             registration.EnableQuicSends = false;
 
             const auto result = worker.RegisterRelayWithId(registration);
-            assert(result.Ok);
+            if (!result.Ok) {
+                ::close(fds[i][0]);
+                fds[i][0] = -1;
+                ::close(fds[i][1]);
+                fds[i][1] = -1;
+                cleanupRelays();
+                return 1;
+            }
             registrations.push_back(result);
         }
-        assert(worker.RelayIndexesConsistentForTest());
+        if (!worker.RelayIndexesConsistentForTest()) {
+            cleanupRelays();
+            return 1;
+        }
 
         const char payload[] = "relay-index-hit";
-        assert(::write(fds[kRelayCount - 1][1], payload, sizeof(payload)) ==
-               static_cast<ssize_t>(sizeof(payload)));
-        assert(worker.DispatchTcpEventsForTest(
-            registrations[kRelayCount - 1].RelayId,
-            EPOLLIN));
+        if (::write(fds[kRelayCount - 1][1], payload, sizeof(payload)) !=
+            static_cast<ssize_t>(sizeof(payload))) {
+            cleanupRelays();
+            return 1;
+        }
+        if (!worker.DispatchTcpEventsForTest(
+                registrations[kRelayCount - 1].RelayId,
+                EPOLLIN)) {
+            cleanupRelays();
+            return 1;
+        }
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        assert(snapshot.ActiveRelays == kRelayCount);
-        assert(snapshot.TcpReadBytes >= sizeof(payload));
-
-        for (int i = 0; i < kRelayCount; ++i) {
-            worker.UnregisterRelay(registrations[i].RelayId);
-            ::close(fds[i][1]);
+        if (snapshot.ActiveRelays != kRelayCount ||
+            snapshot.TcpReadBytes < sizeof(payload)) {
+            std::fprintf(stderr,
+                "expected relay-index snapshot, relays=%llu tcp_read=%llu\n",
+                static_cast<unsigned long long>(snapshot.ActiveRelays),
+                static_cast<unsigned long long>(snapshot.TcpReadBytes));
+            cleanupRelays();
+            return 3201;
         }
-        assert(worker.RelayIndexesConsistentForTest());
+
+        bool sawFirst = false;
+        bool sawLast = false;
+        for (const auto& active : snapshot.ActiveRelayStates) {
+            if (active.WorkerIndex != config.WorkerIndex) {
+                std::fprintf(stderr, "unexpected worker index %u\n", active.WorkerIndex);
+                cleanupRelays();
+                return 3203;
+            }
+            if (active.RelayId == registrations.front().RelayId) {
+                sawFirst = true;
+            }
+            if (active.RelayId == registrations.back().RelayId) {
+                sawLast = true;
+            }
+        }
+        if (!sawFirst || !sawLast) {
+            std::fprintf(stderr, "active relay states missing registered relay ids\n");
+            cleanupRelays();
+            return 3204;
+        }
+
+        for (const auto& registration : registrations) {
+            worker.UnregisterRelay(registration.RelayId);
+        }
+        for (int i = 0; i < kRelayCount; ++i) {
+            if (fds[i][1] >= 0) {
+                ::close(fds[i][1]);
+                fds[i][1] = -1;
+            }
+        }
+        if (!worker.RelayIndexesConsistentForTest()) {
+            worker.Stop();
+            return 1;
+        }
         worker.Stop();
     }
 
@@ -3289,11 +3373,76 @@ int main() {
     {
         TqTuningConfig tuning{};
         tuning.LinuxRelayWorkerCount = 2;
-        assert(TqLinuxRelayRuntime::Instance().Start(tuning));
+        tuning.LinuxRelayWorkerEventBudget = 128;
+        tuning.LinuxRelayReadChunkSize = 4096;
+        tuning.LinuxRelayReadBatchBytes = 16 * 1024;
+        tuning.LinuxRelayMaxIov = 4;
+        tuning.MaxPendingBufferBytesPerRelay = 64 * 1024;
+        if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
+            return 1;
+        }
+        int runtimeFds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, runtimeFds) != 0) {
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 1;
+        }
+        TqLinuxRelayWorker* runtimeWorker = TqLinuxRelayRuntime::Instance().PickWorker();
+        if (runtimeWorker == nullptr) {
+            TqLinuxRelayRuntime::Instance().Stop();
+            ::close(runtimeFds[0]);
+            ::close(runtimeFds[1]);
+            return 1;
+        }
+        TqLinuxRelayRegistration runtimeRegistration{};
+        runtimeRegistration.TcpFd = runtimeFds[0];
+        runtimeRegistration.Stream = nullptr;
+        runtimeRegistration.Handle = nullptr;
+        runtimeRegistration.EnableQuicSends = false;
+        const auto runtimeRelay = runtimeWorker->RegisterRelayWithId(runtimeRegistration);
+        if (!runtimeRelay.Ok) {
+            TqLinuxRelayRuntime::Instance().Stop();
+            ::close(runtimeFds[0]);
+            ::close(runtimeFds[1]);
+            return 1;
+        }
         const auto snapshots = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
-        assert(snapshots.size() == 2);
-        assert(snapshots[0].WorkerIndex == 0);
-        assert(snapshots[1].WorkerIndex == 1);
+        if (snapshots.size() != 2) {
+            runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+            ::close(runtimeFds[1]);
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 1;
+        }
+        if (snapshots[0].WorkerIndex != 0 || snapshots[1].WorkerIndex != 1) {
+            runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+            ::close(runtimeFds[1]);
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 1;
+        }
+        const auto aggregate = TqLinuxRelayRuntime::Instance().Snapshot();
+        if (aggregate.ActiveRelays != 1 ||
+            aggregate.SnapshotActiveRelaysScanned != 1 ||
+            aggregate.ActiveRelayStates.size() != 1 ||
+            aggregate.ActiveRelayStates.front().RelayId != runtimeRelay.RelayId ||
+            aggregate.ActiveRelayStates.front().WorkerIndex != 0) {
+            std::fprintf(
+                stderr,
+                "aggregate active states mismatch active=%llu scanned=%llu states=%zu relay=%llu worker=%u\n",
+                static_cast<unsigned long long>(aggregate.ActiveRelays),
+                static_cast<unsigned long long>(aggregate.SnapshotActiveRelaysScanned),
+                aggregate.ActiveRelayStates.size(),
+                aggregate.ActiveRelayStates.empty()
+                    ? 0ull
+                    : static_cast<unsigned long long>(aggregate.ActiveRelayStates.front().RelayId),
+                aggregate.ActiveRelayStates.empty()
+                    ? 0u
+                    : aggregate.ActiveRelayStates.front().WorkerIndex);
+            runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+            ::close(runtimeFds[1]);
+            TqLinuxRelayRuntime::Instance().Stop();
+            return 3298;
+        }
+        runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
+        ::close(runtimeFds[1]);
         TqLinuxRelayRuntime::Instance().Stop();
     }
 

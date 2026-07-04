@@ -1306,12 +1306,23 @@ int main() {
         if (activeRelaysResp.find("HTTP/1.1 200 OK") == std::string::npos) return 318;
         if (activeRelaysResp.find("\"capabilities\":{") == std::string::npos) return 319;
         if (activeRelaysResp.find("\"relays\":[") == std::string::npos) return 320;
+        nlohmann::json activeRelaysJson;
+        if (!ParseJson(JsonBody(activeRelaysResp), activeRelaysJson)) return 1320;
+#if defined(__linux__)
+        if (activeRelaysJson["capabilities"]["active_relay_detail"] != true) return 1321;
+        if (activeRelaysJson["capabilities"]["per_worker_active_relays"] != false) return 1322;
+#endif
 
         TqHttpRequest missingRelay = Request("GET", "/relay/active-relays/relay-missing", "");
         std::string missingRelayResp = adminRuntime.HandleAdmin(missingRelay);
         if (missingRelayResp.find("HTTP/1.1 500 Internal Server Error") != std::string::npos) return 321;
+#if defined(__linux__)
+        if (missingRelayResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 325;
+        if (missingRelayResp.find("\"code\":\"not_found\"") == std::string::npos) return 326;
+#else
         if (missingRelayResp.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 325;
         if (missingRelayResp.find("\"code\":\"not_supported\"") == std::string::npos) return 326;
+#endif
 
         TqHttpRequest activeRelaysEmptyId = Request("GET", "/relay/active-relays/", "");
         std::string activeRelaysEmptyIdResp = adminRuntime.HandleAdmin(activeRelaysEmptyId);

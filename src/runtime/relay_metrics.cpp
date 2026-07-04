@@ -16,7 +16,7 @@
 
 namespace {
 
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
 constexpr bool kRelayActiveRelayDetailSupported = true;
 #else
 constexpr bool kRelayActiveRelayDetailSupported = false;
@@ -121,6 +121,43 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
     worker.Errors = snapshot.Errors;
     return worker;
 }
+
+TqRelayActiveSnapshot ConvertLinuxRelaySnapshot(const TqLinuxRelayActiveSnapshot& relay) {
+    TqRelayActiveSnapshot active{};
+    active.Backend = "linux";
+    active.WorkerIndex = relay.WorkerIndex;
+    active.RelayId = relay.RelayId;
+    active.InFlightQuicSends = relay.InFlightQuicSends;
+    active.PendingQuicReceiveBytes = relay.PendingQuicReceiveBytes;
+    active.PendingQuicReceiveQueueDepth = relay.PendingQuicReceiveQueueDepth;
+    active.CallbackPendingQuicReceiveDepth = relay.CallbackPendingQuicReceiveDepth;
+    active.OutstandingQuicSendBytes = relay.OutstandingQuicSendBytes;
+    active.EventQueueDepth = 0;
+    active.TcpReadBytes = relay.TcpReadBytes;
+    active.TcpWriteBytes = relay.TcpWriteBytes;
+    active.LastTcpWriteErrno = relay.LastTcpWriteErrno;
+    active.Closing = relay.Closing;
+    active.TcpReadClosed = relay.TcpReadClosed;
+    active.TcpReadPausedByQuicBacklog = relay.TcpReadPausedByQuicBacklog;
+    active.TcpWriteClosed = relay.TcpWriteClosed;
+    active.QuicSendFinSubmitted = relay.QuicSendFinSubmitted;
+    active.QuicSendFinCompleted = relay.QuicSendFinCompleted;
+    active.StopPublished = relay.StopPublished;
+    active.StreamDetached = relay.StreamDetached;
+    active.TcpFd = relay.TcpFd;
+    active.TcpReadArmed = relay.TcpReadArmed;
+    active.TcpWriteArmed = relay.TcpWriteArmed;
+    active.PendingQuicSendRetries = relay.PendingQuicSendRetries;
+    active.IdealSendBytes = relay.IdealSendBytes;
+    active.TcpWriteEagainCount = relay.TcpWriteEagainCount;
+    active.EpollOutEvents = relay.EpollOutEvents;
+    active.PendingTcpWriteQueueDepth = relay.PendingTcpWriteQueueDepth;
+    active.PendingTcpWriteBytes = relay.PendingTcpWriteBytes;
+    active.RelayBufferBytesInUse = relay.RelayBufferBytesInUse;
+    active.LocalAddress = relay.LocalAddress;
+    active.PeerAddress = relay.PeerAddress;
+    return active;
+}
 #endif
 
 nlohmann::json TqRelayCapabilitiesJsonValue() {
@@ -132,7 +169,7 @@ nlohmann::json TqRelayCapabilitiesJsonValue() {
 }
 
 nlohmann::json TqActiveRelayJsonValue(const TqRelayActiveSnapshot& relay) {
-    return {
+    nlohmann::json body{
         {"relay_id", std::to_string(relay.RelayId)},
         {"relay_id_numeric", relay.RelayId},
         {"worker_index", relay.WorkerIndex},
@@ -165,6 +202,21 @@ nlohmann::json TqActiveRelayJsonValue(const TqRelayActiveSnapshot& relay) {
         {"stop_published", relay.StopPublished},
         {"stream_detached", relay.StreamDetached},
     };
+    if (std::string(relay.Backend) == "linux") {
+        body["tcp_fd"] = relay.TcpFd;
+        body["tcp_read_armed"] = relay.TcpReadArmed;
+        body["tcp_write_armed"] = relay.TcpWriteArmed;
+        body["pending_quic_send_retries"] = relay.PendingQuicSendRetries;
+        body["ideal_send_bytes"] = relay.IdealSendBytes;
+        body["tcp_write_eagain_count"] = relay.TcpWriteEagainCount;
+        body["epoll_out_events"] = relay.EpollOutEvents;
+        body["pending_tcp_write_queue_depth"] = relay.PendingTcpWriteQueueDepth;
+        body["pending_tcp_write_bytes"] = relay.PendingTcpWriteBytes;
+        body["relay_buffer_bytes_in_use"] = relay.RelayBufferBytesInUse;
+        body["local_address"] = relay.LocalAddress;
+        body["peer_address"] = relay.PeerAddress;
+    }
+    return body;
 }
 
 nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
@@ -184,7 +236,13 @@ nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
 
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
     std::vector<TqRelayActiveSnapshot> active;
-#if defined(_WIN32)
+#if defined(__linux__)
+    const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
+    active.reserve(snapshot.ActiveRelayStates.size());
+    for (const auto& relay : snapshot.ActiveRelayStates) {
+        active.push_back(ConvertLinuxRelaySnapshot(relay));
+    }
+#elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     active.reserve(snapshot.ActiveRelayStates.size());
     for (const auto& relay : snapshot.ActiveRelayStates) {
