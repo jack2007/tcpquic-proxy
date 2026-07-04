@@ -4089,10 +4089,11 @@ bool TqWindowsRelayRuntime::Start(const TqTuningConfig& tuning) {
     if (!Workers_.empty()) {
         return true;
     }
-    uint32_t workerCount = tuning.LinuxRelayWorkerCount;
+    uint32_t workerCount = tuning.WindowsRelayWorkerCount;
     if (workerCount == 0) {
-        workerCount = 1;
+        workerCount = TqRelayWorkerCountMin;
     }
+    workerCount = std::max(TqRelayWorkerCountMin, std::min(workerCount, TqRelayWorkerCountMax));
     for (uint32_t i = 0; i < workerCount; ++i) {
         auto worker = std::make_unique<TqWindowsRelayWorker>(i);
         if (!worker->Start()) {

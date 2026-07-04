@@ -46,7 +46,7 @@ flowchart TD
     R --> S[MaybePostTcpRecv 投递首个 WSARecv]
 ```
 
-注意：当前 Windows worker 数量使用的是 `TqTuningConfig::LinuxRelayWorkerCount`，`TqWindowsRelayRuntime::Start()` 中没有独立的 Windows 命名字段。
+注意：Windows worker 数量由 `TqTuningConfig::WindowsRelayWorkerCount` 控制，默认通过 `TqDetectRelayWorkers()` 自动检测（1..8）。CLI 使用 `--windows-relay-worker-count`，JSON 使用 `relay.windows.worker_count`。
 
 ### 1.2 线程模型
 
@@ -227,23 +227,23 @@ QUIC receive 背压：
 
 ## 3. 当前问题和解决方案建议
 
-### 3.1 Windows worker 数量复用 Linux 配置字段
+### 3.1 Windows worker 数量配置
 
-现象：
+历史问题：
 
-- `TqWindowsRelayRuntime::Start()` 使用 `tuning.LinuxRelayWorkerCount` 决定 Windows worker 数。
-- `TqTuningConfig` 没有 `WindowsRelayWorkerCount` 或通用 `RelayWorkerCount`。
+- `TqWindowsRelayRuntime::Start()` 曾使用 `tuning.LinuxRelayWorkerCount` 决定 Windows worker 数。
+- `TqTuningConfig` 没有独立的 Windows 命名字段，配置语义和 tuning 输出容易误导。
 
-影响：
+当前状态：
 
-- Windows 配置语义不清晰，文档、CLI 和 tuning 输出容易误导。
-- 后续若 Linux 和 Windows worker 策略不同，继续共用字段会增加维护成本。
+- `TqTuningConfig::WindowsRelayWorkerCount` 控制 Windows IOCP worker 数；默认与 Linux 一样通过 `TqDetectRelayWorkers()` 自动检测（1..8）。
+- CLI：`--windows-relay-worker-count <n>`；JSON：`relay.windows.worker_count`。
+- Linux 侧可使用 `--linux-relay-worker-count` / `relay.linux.worker_count` 单独覆盖，不影响 Windows 字段。
+- `TqPrintTuning()` / `TqPrintRelayBackend()` 在 Windows 上输出 `WindowsRelayWorkerCount`。
 
-建议：
+后续可选：
 
-- 增加 `WindowsRelayWorkerCount`，默认复用 `TqDetectLinuxRelayWorkers()` 的结果或抽象为 `TqDetectRelayWorkers()`。
-- 更彻底的方案是把平台无关字段改名为 `RelayWorkerCount`，Linux 专属字段只保留 Linux batching/iov/tick budget。
-- CLI、配置文件、tuning 输出同时补齐 Windows 命名，保留旧字段兼容一段时间。
+- 更彻底的平台中性命名（如通用 `RelayWorkerCount`）和 Darwin 侧独立字段，可在后续批次处理。
 
 ### 3.2 `DrainPerRelayMaintenance()` 每次事件前后全量扫描 relay
 
@@ -379,7 +379,7 @@ QUIC receive 背压：
 |---|---|---|
 | 已完成 | `SetRelayTraceContext()` 通过 IOCP 串行更新 trace context | 原跨线程写 `TraceTarget` 的 C++ 数据竞争风险已消除。 |
 | 设计如此 | fake FIN 命中后 fail-fast abort | 保留为违反 receive 假设的强信号，无需降级为单 relay 错误。 |
-| 中 | 为 Windows 增加独立 worker count 配置名 | 配置语义和后续调优需要。 |
+| 已完成 | 为 Windows 增加独立 worker count 配置名 | `WindowsRelayWorkerCount`、CLI/JSON/tuning 输出已贯通。 |
 | 已完成 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 常规路径已改为事件驱动 maintenance queue，并保留低频兜底扫描。 |
 | 已完成 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 正常路径 O(1)，异常路径有计数和 trace。 |
 | 已完成 | receive callback 复制前加入预算判断和指标 | 超限 receive 会在复制前被拒绝并暂停后续 receive，copy 成本已有指标。 |

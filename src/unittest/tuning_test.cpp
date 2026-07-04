@@ -497,6 +497,92 @@ int main() {
     }
 
     {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--ca";
+        char arg9[] = "ca.pem";
+        char arg10[] = "--windows-relay-worker-count";
+        char arg11[] = "3";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        TQ_TEST_REQUIRE(TqParseArgs(12, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        TQ_TEST_REQUIRE(cfg.Tuning.WindowsRelayWorkerCount == 3);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayWorkerCount == TqDetectRelayWorkers());
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--ca";
+        char arg9[] = "ca.pem";
+        char arg10[] = "--linux-relay-worker-count";
+        char arg11[] = "2";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11};
+        TQ_TEST_REQUIRE(TqParseArgs(12, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        TQ_TEST_REQUIRE(cfg.Tuning.LinuxRelayWorkerCount == 2);
+        TQ_TEST_REQUIRE(cfg.Tuning.WindowsRelayWorkerCount == TqDetectRelayWorkers());
+    }
+
+    {
+        const char* invalidValues[] = {"0", "9", "100"};
+        for (const char* invalidValue : invalidValues) {
+            TqConfig cfg{};
+            std::string err;
+            TQ_TEST_REQUIRE(!ParseClientOption(
+                "--windows-relay-worker-count",
+                invalidValue,
+                cfg,
+                err));
+            TQ_TEST_REQUIRE(
+                err.find("invalid value for --windows-relay-worker-count") !=
+                std::string::npos);
+        }
+    }
+
+    {
+        const ScopedTempFile file("tcpquic-tuning-windows-worker-count");
+        TQ_TEST_REQUIRE(WriteTextFile(
+            file.path(),
+            "{"
+            "\"tls\":{\"cert\":\"cert.pem\",\"key\":\"key.pem\",\"ca\":\"ca.pem\"},"
+            "\"proto\":{\"profile\":\"max-throughput\"},"
+            "\"relay\":{\"windows\":{\"worker_count\":4}},"
+            "\"client\":{},"
+            "\"peers\":[{\"id\":\"p1\",\"proto_peer\":\"127.0.0.1:4433\","
+            "\"socks_listen\":\"127.0.0.1:11080\"}]"
+            "}"));
+
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--config";
+        char* argv[] = {arg0, arg1, arg2, const_cast<char*>(file.c_str())};
+        TQ_TEST_REQUIRE(TqParseArgs(4, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        TQ_TEST_REQUIRE(cfg.Tuning.WindowsRelayWorkerCount == 4);
+    }
+
+    {
         const ScopedTempFile file("tcpquic-tuning-event-queue-capacity-invalid");
         TQ_TEST_REQUIRE(WriteTextFile(
             file.path(),
@@ -592,6 +678,8 @@ int main() {
         const uint32_t autoBudgetMb = TqGetRelayMemoryBudget();
 
         assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
+        assert(cfg.Tuning.WindowsRelayWorkerCount >= 1);
+        assert(cfg.Tuning.LinuxRelayWorkerCount == cfg.Tuning.WindowsRelayWorkerCount);
         assert(cfg.Tuning.LinuxRelayMaxIov == 32);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
         assert(cfg.Tuning.LinuxRelayReadBatchBytes == 4ull * 1024 * 1024);

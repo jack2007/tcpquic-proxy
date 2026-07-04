@@ -166,6 +166,14 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
         out.LinuxRelayEventQueueCapacity =
             TqNormalizeLinuxRelayEventQueueCapacity(cfg.TuningOverrideLinuxRelayEventQueueCapacity);
     }
+    if (cfg.TuningOverrideLinuxRelayWorkerCount > 0) {
+        out.LinuxRelayWorkerCount =
+            TqNormalizeRelayWorkerCount(cfg.TuningOverrideLinuxRelayWorkerCount);
+    }
+    if (cfg.TuningOverrideWindowsRelayWorkerCount > 0) {
+        out.WindowsRelayWorkerCount =
+            TqNormalizeRelayWorkerCount(cfg.TuningOverrideWindowsRelayWorkerCount);
+    }
     if (cfg.TuningOverrideQuicIw > 0) {
         out.InitialWindowPackets = cfg.TuningOverrideQuicIw;
     }
@@ -174,16 +182,10 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     }
 }
 
-uint32_t TqDetectLinuxRelayWorkers() {
-    const unsigned int detected = std::thread::hardware_concurrency();
-    if (detected == 0) {
-        return 1;
-    }
-    return std::max(1u, std::min(detected, 8u));
-}
-
 void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t autoBudgetBytes) {
-    out.LinuxRelayWorkerCount = TqDetectLinuxRelayWorkers();
+    const uint32_t detectedWorkers = TqDetectRelayWorkers();
+    out.LinuxRelayWorkerCount = detectedWorkers;
+    out.WindowsRelayWorkerCount = detectedWorkers;
 
     if (mode == TqTuningMode::Lan) {
         out.LinuxRelayMaxIov = 8;
@@ -214,6 +216,20 @@ void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t 
 }
 
 } // namespace
+
+uint32_t TqDetectRelayWorkers() {
+    const unsigned int detected = std::thread::hardware_concurrency();
+    if (detected == 0) {
+        return TqRelayWorkerCountMin;
+    }
+    return std::max(
+        TqRelayWorkerCountMin,
+        std::min(static_cast<uint32_t>(detected), TqRelayWorkerCountMax));
+}
+
+uint32_t TqNormalizeRelayWorkerCount(uint32_t count) {
+    return std::max(TqRelayWorkerCountMin, std::min(count, TqRelayWorkerCountMax));
+}
 
 int g_TqActiveTcpSocketBuffer = 4 * 1024 * 1024;
 std::atomic<uint32_t> g_TqRelayMemoryBudgetMb{0};
@@ -628,7 +644,11 @@ void TqPrintTuning(const TqTuningConfig& tuning, FILE* out) {
         static_cast<unsigned long long>(tuning.LinuxRelayTcpWriteBurstBytes),
         static_cast<unsigned long long>(tuning.LinuxRelayQuicReceiveCompleteBatchBytes),
         static_cast<unsigned long long>(tuning.InitialQuicReadAheadBytes),
+#if defined(_WIN32)
+        tuning.WindowsRelayWorkerCount);
+#else
         tuning.LinuxRelayWorkerCount);
+#endif
 #if defined(_WIN32)
     std::fprintf(out,
         " win_pending_recv_cap=%llu win_max_buffered_quic_send=%llu",
@@ -656,7 +676,7 @@ void TqPrintRelayBackend(FILE* out, const TqTuningConfig& tuning) {
 #elif defined(_WIN32)
     std::fprintf(out,
         "tcpquic-proxy relay backend: windows-iocp (%u workers)\n",
-        std::max(1u, tuning.LinuxRelayWorkerCount));
+        std::max(1u, tuning.WindowsRelayWorkerCount));
 #elif defined(__APPLE__)
     std::fprintf(out,
         "tcpquic-proxy relay backend: darwin-kqueue (%u workers)\n",

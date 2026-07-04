@@ -92,6 +92,8 @@ struct TqConfig {
     uint32_t TuningOverrideLinuxRelayTcpWriteMaxBytes{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteBurstBytes{0};
     uint32_t TuningOverrideLinuxRelayEventQueueCapacity{0};
+    uint32_t TuningOverrideLinuxRelayWorkerCount{0};
+    uint32_t TuningOverrideWindowsRelayWorkerCount{0};
     uint32_t TuningOverrideQuicIw{0};
     uint32_t TuningOverrideQuicInitRttMs{0};
     TqTuningConfig Tuning{};

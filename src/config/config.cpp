@@ -526,6 +526,8 @@ private:
                 if (!ReadUint32(item.value(), cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
             } else if (key == "linux") {
                 if (!ParseLinuxRelayConfig(item.value(), cfg)) return false;
+            } else if (key == "windows") {
+                if (!ParseWindowsRelayConfig(item.value(), cfg)) return false;
             } else {
                 return Error("unknown relay key: " + key);
             }
@@ -555,8 +557,27 @@ private:
                         cfg.TuningOverrideLinuxRelayEventQueueCapacity)) {
                     return Error("invalid relay.linux.event_queue_capacity");
                 }
+            } else if (key == "worker_count") {
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideLinuxRelayWorkerCount)) {
+                    return Error("invalid relay.linux.worker_count");
+                }
             } else {
                 return Error("unknown relay.linux key: " + key);
+            }
+        }
+        return true;
+    }
+
+    bool ParseWindowsRelayConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "relay.windows must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
+            if (key == "worker_count") {
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideWindowsRelayWorkerCount)) {
+                    return Error("invalid relay.windows.worker_count");
+                }
+            } else {
+                return Error("unknown relay.windows key: " + key);
             }
         }
         return true;
@@ -931,6 +952,10 @@ void TqPrintUsage(FILE* out) {
         "                              Cap bytes per Linux relay TCP write flush\n"
         "  --linux-relay-event-queue-capacity <events>\n"
         "                              Linux relay event queue capacity (default 4096, 1024..1048576)\n"
+        "  --linux-relay-worker-count <n>\n"
+        "                              Linux relay worker count (default auto-detect, 1..8)\n"
+        "  --windows-relay-worker-count <n>\n"
+        "                              Windows relay worker count (default auto-detect, 1..8)\n"
         "\n"
         "Diagnostics:\n"
         "  --trace                      Event + periodic trace (enabled by default)\n"
@@ -1371,6 +1396,38 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                     TqLinuxRelayEventQueueCapacityMax,
                     cfg.TuningOverrideLinuxRelayEventQueueCapacity)) {
                 err = "invalid value for --linux-relay-event-queue-capacity";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--linux-relay-worker-count", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--linux-relay-worker-count", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqRelayWorkerCountMin,
+                    TqRelayWorkerCountMax,
+                    cfg.TuningOverrideLinuxRelayWorkerCount) ||
+                cfg.TuningOverrideLinuxRelayWorkerCount == 0) {
+                err = "invalid value for --linux-relay-worker-count";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--windows-relay-worker-count", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--windows-relay-worker-count", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqRelayWorkerCountMin,
+                    TqRelayWorkerCountMax,
+                    cfg.TuningOverrideWindowsRelayWorkerCount) ||
+                cfg.TuningOverrideWindowsRelayWorkerCount == 0) {
+                err = "invalid value for --windows-relay-worker-count";
                 return false;
             }
         } else if (GetOptionValue(arg, "--iw", value)) {
