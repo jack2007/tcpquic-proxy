@@ -99,7 +99,7 @@ endfunction()
 
 function(tcpquic_link_quic_address_deps target)
     if(WIN32)
-        target_link_libraries(${target} PRIVATE Iphlpapi)
+        target_link_libraries(${target} PRIVATE Iphlpapi ntdll)
     endif()
 endfunction()
 

@@ -123,6 +123,7 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t WindowsReceiveDrainScheduledCount{0};
     uint64_t WindowsReceiveDrainCoalescedCount{0};
     uint64_t WindowsPostedCallbackStaleDropCount{0};
+    uint64_t WindowsPostedTraceContextStaleDropCount{0};
     uint64_t WorkerLockAcquireCount{0};
     uint64_t WorkerLockWaitNanos{0};
     uint64_t FindRelayByIdCount{0};
@@ -216,6 +217,7 @@ public:
         uint64_t generation,
         uint64_t tunnelId,
         const char* target);
+    void TestForceNextTraceContextPostFailureForTest();
     bool TestPostWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest* block);
     bool TestWaitWorkerQueueBlockEnteredForTest(
         TqWindowsRelayWorkerQueueBlockForTest& block,
@@ -449,6 +451,7 @@ private:
     std::atomic<uint64_t> ReceiveDrainScheduledCount_{0};
     std::atomic<uint64_t> ReceiveDrainCoalescedCount_{0};
     std::atomic<uint64_t> PostedCallbackStaleDropCount_{0};
+    std::atomic<uint64_t> PostedTraceContextStaleDropCount_{0};
     mutable std::atomic<uint64_t> WorkerLockAcquireCount_{0};
     mutable std::atomic<uint64_t> WorkerLockWaitNanos_{0};
     std::atomic<uint64_t> FindRelayByIdCount_{0};
@@ -456,6 +459,7 @@ private:
     mutable std::atomic<uint64_t> SnapshotBuildNanos_{0};
     mutable std::atomic<uint64_t> SnapshotActiveRelaysScanned_{0};
 #if defined(TQ_UNIT_TESTING)
+    std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     std::atomic<DWORD> LastCallbackPostWin32Error_{0};

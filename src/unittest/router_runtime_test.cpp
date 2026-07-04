@@ -1314,7 +1314,7 @@ int main() {
         if (activeRelaysResp.find("\"relays\":[") == std::string::npos) return 320;
         nlohmann::json activeRelaysJson;
         if (!ParseJson(JsonBody(activeRelaysResp), activeRelaysJson)) return 1320;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
         if (activeRelaysJson["capabilities"]["active_relay_detail"] != true) return 1321;
         if (activeRelaysJson["capabilities"]["per_worker_active_relays"] != false) return 1322;
 #endif
@@ -1322,7 +1322,7 @@ int main() {
         TqHttpRequest missingRelay = Request("GET", "/relay/active-relays/relay-missing", "");
         std::string missingRelayResp = adminRuntime.HandleAdmin(missingRelay);
         if (missingRelayResp.find("HTTP/1.1 500 Internal Server Error") != std::string::npos) return 321;
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
         if (missingRelayResp.find("HTTP/1.1 404 Not Found") == std::string::npos) return 325;
         if (missingRelayResp.find("\"code\":\"not_found\"") == std::string::npos) return 326;
 #else
