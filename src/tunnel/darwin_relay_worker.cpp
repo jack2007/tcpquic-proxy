@@ -1439,7 +1439,10 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             auto buffer = TqAllocateRelayBuffer(&relay->TcpReadBuffers, readSize, &failure);
             if (!buffer) {
                 if (failure == TqBufferAcquireFailure::PendingBytesLimit) {
-                    return SetTcpReadBackpressure(relay, true);
+                    if (iov.empty()) {
+                        return SetTcpReadBackpressure(relay, true);
+                    }
+                    break;
                 }
                 Errors.fetch_add(1, std::memory_order_relaxed);
                 break;
