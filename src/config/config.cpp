@@ -930,7 +930,7 @@ void TqPrintUsage(FILE* out) {
         "  --linux-relay-tcp-write-burst-bytes <bytes>\n"
         "                              Cap bytes per Linux relay TCP write flush\n"
         "  --linux-relay-event-queue-capacity <events>\n"
-        "                              Linux relay event queue capacity (2..1048576)\n"
+        "                              Linux relay event queue capacity (default 4096, 1024..1048576)\n"
         "\n"
         "Diagnostics:\n"
         "  --trace                      Event + periodic trace (enabled by default)\n"

@@ -22,7 +22,7 @@ Linux 生产路径不是 per-tunnel 线程模型，而是固定数量 `TqLinuxRe
 - CLI：`--relay-io-size`、`--linux-relay-read-chunk-size`、`--linux-relay-tcp-write-max-bytes`、`--linux-relay-tcp-write-burst-bytes`、`--linux-relay-event-queue-capacity`、`--max-memory-mb`、`--tuning`。
 - JSON：`relay.io_size`、`relay.linux.read_chunk_size`、`relay.linux.tcp_write_max_bytes`、`relay.linux.tcp_write_burst_bytes`、`relay.linux.event_queue_capacity`。
 - `relay.linux.worker_slots` 仍可解析，但当前只 warning，已废弃并被忽略。
-- `EventQueueCapacity` 通过 `TqTuningConfig::LinuxRelayEventQueueCapacity` 传入 `TqLinuxRelayWorkerConfig`，默认 4096；取值范围为 `2..1048576`，非 power-of-two 会 normalize 到下一个 power-of-two。
+- `EventQueueCapacity` 通过 `TqTuningConfig::LinuxRelayEventQueueCapacity` 传入 `TqLinuxRelayWorkerConfig`，默认 4096；取值范围为 `1024..1048576`，非 power-of-two 会 normalize 到下一个 power-of-two。
 
 ```mermaid
 flowchart TD
@@ -53,7 +53,7 @@ flowchart TD
 | `LinuxRelayReadChunkSize` | LAN/WAN 默认 128 KiB，可 override | 单个 TCP read buffer 大小。 |
 | `LinuxRelayReadBatchBytes` | LAN 256 KiB，WAN 1 MiB | 单轮 TCP read 批量预算。 |
 | `LinuxRelayWorkerEventBudget` | LAN 1024，WAN 4096 | 每次 eventfd wake 后最多处理的 event 数。 |
-| `LinuxRelayEventQueueCapacity` | 默认 4096，可 override | worker event queue 容量；CLI 为 `--linux-relay-event-queue-capacity`，JSON 为 `relay.linux.event_queue_capacity`，范围 `2..1048576`，非 power-of-two normalize 到下一个 power-of-two。 |
+| `LinuxRelayEventQueueCapacity` | 默认 4096，可 override | worker event queue 容量；CLI 为 `--linux-relay-event-queue-capacity`，JSON 为 `relay.linux.event_queue_capacity`，范围 `1024..1048576`，非 power-of-two normalize 到下一个 power-of-two。 |
 | `LinuxRelayWorkerByteBudgetPerTick` | LAN 16 MiB，WAN 64 MiB | worker 单 tick 字节预算上限。 |
 | `LinuxRelayTcpWriteMaxBytes` | 默认 0，可 override | 单次 TCP `writev` 尝试字节上限，0 表示不额外限制。 |
 | `LinuxRelayTcpWriteBurstBytes` | 默认 0，可 override | 单轮 TCP write flush 字节上限。 |
@@ -285,7 +285,7 @@ admin API 行为：
 
 历史现象：`TqLinuxRelayWorkerConfig::EventQueueCapacity` 默认 4096，单测可直接设置，但生产 `TqTuningConfig` 曾没有对应字段；CLI/JSON 也没有配置项。
 
-当前状态：Linux relay event queue 容量已接入生产配置链路。CLI 使用 `--linux-relay-event-queue-capacity <events>`，JSON 使用 `relay.linux.event_queue_capacity`，范围为 `2..1048576`；非 power-of-two 输入会 normalize 到下一个 power-of-two。runtime 启动 worker 时会把 normalized capacity 传入 `TqLinuxRelayWorkerConfig::EventQueueCapacity`。
+当前状态：Linux relay event queue 容量已接入生产配置链路。CLI 使用 `--linux-relay-event-queue-capacity <events>`，JSON 使用 `relay.linux.event_queue_capacity`，范围为 `1024..1048576`；非 power-of-two 输入会 normalize 到下一个 power-of-two。runtime 启动 worker 时会把 normalized capacity 传入 `TqLinuxRelayWorkerConfig::EventQueueCapacity`。
 
 排障语义：
 

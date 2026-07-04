@@ -457,7 +457,7 @@ int main() {
     }
 
     {
-        const char* invalidValues[] = {"0", "1048577"};
+        const char* invalidValues[] = {"0", "1023", "1048577"};
         for (const char* invalidValue : invalidValues) {
             TqConfig cfg{};
             std::string err;
@@ -502,7 +502,7 @@ int main() {
             file.path(),
             "{"
             "\"tls\":{\"cert\":\"cert.pem\",\"key\":\"key.pem\",\"ca\":\"ca.pem\"},"
-            "\"relay\":{\"linux\":{\"event_queue_capacity\":0}},"
+            "\"relay\":{\"linux\":{\"event_queue_capacity\":1023}},"
             "\"peers\":[{\"id\":\"p1\",\"proto_peer\":\"127.0.0.1:4433\","
             "\"socks_listen\":\"127.0.0.1:11080\"}]"
             "}"));

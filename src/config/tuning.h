@@ -7,7 +7,7 @@
 constexpr uint32_t TqValidationFlowWindowBytes = 0x80000000u;
 constexpr uint64_t TqValidationInitialIdealSendFallbackBytes = 128ull * 1024 * 1024;
 constexpr uint64_t TqValidationRelaySendBufferCapBytes = 512ull * 1024 * 1024;
-constexpr uint32_t TqLinuxRelayEventQueueCapacityMin = 2;
+constexpr uint32_t TqLinuxRelayEventQueueCapacityMin = 1024;
 constexpr uint32_t TqLinuxRelayEventQueueCapacityMax = 1048576;
 
 enum class TqTuningMode {

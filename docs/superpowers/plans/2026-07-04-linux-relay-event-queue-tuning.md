@@ -83,7 +83,7 @@ uint32_t TuningOverrideLinuxRelayEventQueueCapacity{0};
 In `src/config/tuning.h`, add constants near the validation constants:
 
 ```cpp
-constexpr uint32_t TqLinuxRelayEventQueueCapacityMin = 2;
+constexpr uint32_t TqLinuxRelayEventQueueCapacityMin = 1024;
 constexpr uint32_t TqLinuxRelayEventQueueCapacityMax = 1048576;
 ```
 
@@ -150,7 +150,7 @@ In `src/unittest/tuning_test.cpp`, after the successful CLI case from Task 1, ad
         char arg2[] = "--peer";
         char arg3[] = "127.0.0.1:4433";
         char arg4[] = "--linux-relay-event-queue-capacity";
-        char arg5[] = "0";
+        char arg5[] = "1023";
         char* argv[] = {arg0, arg1, arg2, arg3, arg4, arg5};
         assert(!TqParseArgs(6, argv, cfg, err));
         assert(err.find("invalid value for --linux-relay-event-queue-capacity") != std::string::npos);
@@ -253,7 +253,7 @@ After the CLI invalid-value tests, add:
             file <<
                 "{"
                 "\"client\":{},"
-                "\"relay\":{\"linux\":{\"event_queue_capacity\":0}}"
+                "\"relay\":{\"linux\":{\"event_queue_capacity\":1023}}"
                 "}";
         }
 
