@@ -145,7 +145,7 @@ relay 生命周期由三层对象托住：
 
 | 排名 | 锁/同步点 | 粒度 | 主要路径 | 热点原因 | 建议 |
 |---:|---|---|---|---|---|
-| 1 | `RelayState::Mutex` | 单 relay | `DrainTcpReadable()`、`SubmitTcpBatchToQuic()`、`TrySubmitQuicSendOperation()`、`CompleteQuicSend()`、`ProcessQuicReceiveViewEvent()`、`EnqueueQuicReceiveForTcp()`、`FlushTcpWrites()`、pause/resume receive | 每个 TCP read batch、QUIC receive view、TCP write flush、send complete 都会多次进入。虽然是单连接锁，但数据面频率最高，并且会和 MsQuic callback、stop/snapshot 交叉。 | 已规划分阶段实现：active relay 数据面字段归 worker thread 独占，callback 只投递事件，snapshot 继续事件化构造；`RelayState::Mutex` 保留为生命周期和非 worker fallback 边界。 |
+| 1 | `RelayState::Mutex` | 单 relay | `DrainTcpReadable()`、`SubmitTcpBatchToQuic()`、`TrySubmitQuicSendOperation()`、`CompleteQuicSend()` fallback/retired 分支、`ProcessQuicReceiveViewEvent()`、`EnqueueQuicReceiveForTcp()`、`FlushTcpWrites()`、pause/resume receive | 每个 TCP read batch、QUIC receive view、TCP write flush 都会多次进入；active worker send completion 已改为 worker-local accounting，不再等同 fallback/retired cleanup。虽然是单连接锁，但数据面频率最高，并且会和 MsQuic callback、stop/snapshot 交叉。 | 已规划分阶段实现：active relay 数据面字段归 worker thread 独占，callback 只投递事件，snapshot 继续事件化构造；`RelayState::Mutex` 保留为生命周期和非 worker fallback 边界。 |
 | 2 | `TqDarwinRelayWorker::RelayMutex` | 单 worker 全局 | `FindRelay()`、`FindRetiredRelay()`、register/unregister、retire/purge、snapshot、callback close/receive 查找 | 所有分配到同一 worker 的 relay 共享；TCP kqueue event、QUIC receive callback、send complete 和关闭路径都会查 map。高并发短连接或小包 receive 会放大竞争。 | 已纳入同一阶段热路径出清：worker kqueue/event 路径使用 `FindRelayLocal()`；callback 通过 `StreamBinding` 持有稳定 relay 信息，不再为 RECEIVE/abort/shutdown 查 worker map；`RelayMutex` 保留 register/unregister/retire/purge 等生命周期 map 边界。 |
 | 3 | `KnownSendMutex` | 单 worker 全局 | `RegisterKnownSendOperation*()`、`MarkKnownSendOperationSubmitted*()`、`UnregisterKnownSendOperation*()`、test helper、stop drain | 每个 TCP->QUIC send operation 至少插入、标记 submitted、删除一次。所有 relay 共用一个 worker map，因此 send complete 密集时跨连接竞争明显。 | 将 worker 正常路径的 known operation map 改为 worker-only；callback 的 SEND_COMPLETE 只在 `CompletionState` claim 后投递事件，worker 事件内再访问本地 map。保留 fallback 但移出主路径。 |
 | 4 | `CompletionState::Mutex` | 单 stream binding | SEND_COMPLETE claim、known operation 注册/注销、detached/late completion | 每个 send operation 也会更新 per-binding map；单连接内频率高，但不跨连接共享。 | 若保留同步 completion 支持，可将 state 改成 intrusive operation 状态机，使用 operation 内原子位替代 per-binding unordered_map 查找。 |
@@ -209,7 +209,7 @@ relay 生命周期由三层对象托住：
 
 ### P1：worker 级锁仍在高频 callback 和数据路径上
 
-现象：`FindRelay()` 通过 `RelayMutex` 查 worker map；`StreamCallback()` RECEIVE、peer abort、`ProcessTcpEvents()` 和 `CompleteQuicSend()` 都会调用。`KnownSendMutex` 也仍保护 worker 级 known operation map。
+现象：`FindRelay()` 通过 `RelayMutex` 查 worker map；active worker `ProcessTcpEvents()` 和 `CompleteQuicSend()` 已使用 `FindRelayLocal()`，但 fallback/retired completion、lifecycle cleanup 和部分测试/控制路径仍会调用 `FindRelay()`/`FindRetiredRelay()`。`KnownSendMutex` 也仍保护 worker 级 known operation map。
 
 影响：单 worker 多连接小包场景下，callback 线程和 worker 线程会争用同一把锁。即使每次临界区很短，热点会按 packet/event 放大。
 

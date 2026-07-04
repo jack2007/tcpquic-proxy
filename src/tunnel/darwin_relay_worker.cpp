@@ -357,6 +357,10 @@ uint64_t TqDarwinRelayWorker::FindRelayLocalCountForTest() const {
     return FindRelayLocalCount.load(std::memory_order_relaxed);
 }
 
+uint64_t TqDarwinRelayWorker::RetiredRelayPurgeCountForTest() const {
+    return RetiredRelayPurgeCount.load(std::memory_order_relaxed);
+}
+
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
     std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
     FailRegisterTcpFiltersForTest = fail;
@@ -956,6 +960,9 @@ void TqDarwinRelayWorker::CloseRelay(
 }
 
 void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
+#if defined(TCPQUIC_TESTING)
+    RetiredRelayPurgeCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     std::lock_guard<std::mutex> lock(RelayMutex);
     for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
@@ -1812,14 +1819,18 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
         Errors.fetch_add(1, std::memory_order_relaxed);
     }
     auto relay = workerThread ? FindRelayLocal(info.RelayId) : FindRelay(info.RelayId);
+    bool completionMayReleaseRetiredStorage = !workerThread;
     if (relay == nullptr) {
         relay = workerThread ? FindRetiredRelayLocal(info.RelayId) : FindRetiredRelay(info.RelayId);
+        completionMayReleaseRetiredStorage = completionMayReleaseRetiredStorage || relay != nullptr;
     }
     bool bindingRelayFallback = false;
     if (relay == nullptr) {
         if (auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner)) {
             relay = binding->Relay.lock();
             bindingRelayFallback = relay != nullptr;
+            completionMayReleaseRetiredStorage =
+                completionMayReleaseRetiredStorage || bindingRelayFallback;
         }
     }
     delete operation;
@@ -1859,7 +1870,9 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
             }
         }
     }
-    PurgeRetiredRelaysIfSafe();
+    if (completionMayReleaseRetiredStorage) {
+        PurgeRetiredRelaysIfSafe();
+    }
 }
 
 bool TqDarwinRelayWorker::ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const {

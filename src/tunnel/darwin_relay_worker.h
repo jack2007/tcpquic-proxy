@@ -133,6 +133,7 @@ public:
     bool InvokeQuicReceiveViewForTest(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     uint64_t FindRelayLockedCountForTest() const;
     uint64_t FindRelayLocalCountForTest() const;
+    uint64_t RetiredRelayPurgeCountForTest() const;
     void* StreamCallbackContextForTest(uint64_t relayId);
     std::shared_ptr<void> StreamCallbackContextOwnerForTest(uint64_t relayId);
     std::shared_ptr<void> DetachRelayFromActiveMapForTest(uint64_t relayId);
@@ -330,6 +331,7 @@ private:
     mutable std::atomic<uint32_t> WakeFailuresForTest{0};
     mutable std::atomic<uint64_t> FindRelayLockedCount{0};
     mutable std::atomic<uint64_t> FindRelayLocalCount{0};
+    mutable std::atomic<uint64_t> RetiredRelayPurgeCount{0};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};
