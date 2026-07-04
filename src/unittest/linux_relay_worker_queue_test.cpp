@@ -117,5 +117,19 @@ int main() {
         worker.Stop();
     }
 
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.EventQueueCapacity = 1024;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.Start()) return 121;
+
+        const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.ControlCommandWaitCount == 0) return 123;
+        if (snapshot.ControlCommandWaitNanos == 0) return 124;
+        if (snapshot.SnapshotCommandWaitCount == 0) return 125;
+        if (snapshot.SnapshotCommandWaitNanos == 0) return 126;
+        worker.Stop();
+    }
+
     return 0;
 }

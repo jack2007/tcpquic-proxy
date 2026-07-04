@@ -45,6 +45,7 @@ struct TqLinuxRelayWorkerConfig {
     bool UseDynamicQuicReadAhead{false};
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
+    uint32_t ControlCommandTimeoutMs{5000};
 };
 
 struct TqLinuxRelayRegistration {
@@ -215,6 +216,15 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t QuicReceiveViewBackpressureQueued{0};
+    uint64_t ControlLockWaitNanos{0};
+    uint64_t ControlLockAcquireCount{0};
+    uint64_t ControlCommandWaitNanos{0};
+    uint64_t ControlCommandWaitCount{0};
+    uint64_t ControlCommandTimeouts{0};
+    uint64_t ControlCommandEnqueueFailures{0};
+    uint64_t SnapshotCommandWaitNanos{0};
+    uint64_t SnapshotCommandWaitCount{0};
+    uint64_t SnapshotCommandTimeouts{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t TcpReadBufferAcquireFailures{0};
@@ -317,6 +327,7 @@ private:
         TqLinuxRelayRegistrationResult Result;
         std::mutex Mutex;
         std::condition_variable Cv;
+        uint64_t WaitNanos{0};
         bool Done{false};
     };
 
@@ -324,6 +335,7 @@ private:
         uint64_t RelayId{0};
         std::mutex Mutex;
         std::condition_variable Cv;
+        uint64_t WaitNanos{0};
         bool Done{false};
     };
 
@@ -331,6 +343,7 @@ private:
         TqLinuxRelayWorkerSnapshot Result;
         std::mutex Mutex;
         std::condition_variable Cv;
+        uint64_t WaitNanos{0};
         bool Done{false};
     };
 
@@ -410,6 +423,9 @@ private:
     void CompleteDispatchTcpEventsForTestCommand(
         DispatchTcpEventsForTestCommand* command,
         bool result);
+    bool WaitRegisterCommand(RegisterRelayCommand& command) const;
+    bool WaitUnregisterCommand(UnregisterRelayCommand& command) const;
+    bool WaitSnapshotCommand(SnapshotCommand& command) const;
     void RecordError(RelayErrorKind kind);
     void RecordBufferAcquireFailure(RelayErrorKind kind, TqBufferAcquireFailure failure);
     void RecordTcpWriteAttempt(uint64_t bytes);
@@ -582,6 +598,15 @@ private:
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     std::atomic<uint64_t> QuicReceiveViewBackpressureQueued{0};
+    mutable std::atomic<uint64_t> ControlLockWaitNanos{0};
+    mutable std::atomic<uint64_t> ControlLockAcquireCount{0};
+    mutable std::atomic<uint64_t> ControlCommandWaitNanos{0};
+    mutable std::atomic<uint64_t> ControlCommandWaitCount{0};
+    mutable std::atomic<uint64_t> ControlCommandTimeouts{0};
+    mutable std::atomic<uint64_t> ControlCommandEnqueueFailures{0};
+    mutable std::atomic<uint64_t> SnapshotCommandWaitNanos{0};
+    mutable std::atomic<uint64_t> SnapshotCommandWaitCount{0};
+    mutable std::atomic<uint64_t> SnapshotCommandTimeouts{0};
     std::atomic<uint64_t> Errors{0};
     std::atomic<uint64_t> EventQueueFullErrors{0};
     std::atomic<uint64_t> TcpReadBufferAcquireFailures{0};

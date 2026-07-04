@@ -129,6 +129,8 @@ namespace {
 TqLinuxRelayStreamSendForTest g_linuxRelayStreamSendForTest = nullptr;
 #endif
 
+constexpr uint32_t kLinuxRelayControlEnqueueRetries = 8;
+
 bool TqRelayDebugEnabled() {
     static const bool enabled = []() {
         const char* value = std::getenv("TQ_TUNNEL_DEBUG");
@@ -165,6 +167,30 @@ QUIC_STATUS TqLinuxRelayStreamSend(
     }
 #endif
     return stream->Send(buffers, bufferCount, flags, context);
+}
+
+template <typename Command>
+bool WaitForCommandDone(
+    Command& command,
+    uint32_t timeoutMs,
+    std::atomic<uint64_t>& waitNanos,
+    std::atomic<uint64_t>& waitCount,
+    std::atomic<uint64_t>& timeouts) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + std::chrono::milliseconds(timeoutMs);
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    const bool done = command.Cv.wait_until(lock, deadline, [&command]() {
+        return command.Done;
+    });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    command.WaitNanos = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    waitNanos.fetch_add(command.WaitNanos, std::memory_order_relaxed);
+    waitCount.fetch_add(1, std::memory_order_relaxed);
+    if (!done) {
+        timeouts.fetch_add(1, std::memory_order_relaxed);
+    }
+    return done;
 }
 
 ssize_t WritevNoSignal(int fd, const iovec* iov, int iovcnt) {
@@ -1210,6 +1236,39 @@ void TqLinuxRelayWorker::CompleteDispatchTcpEventsForTestCommand(
     command->Cv.notify_one();
 }
 
+bool TqLinuxRelayWorker::WaitRegisterCommand(RegisterRelayCommand& command) const {
+    return WaitForCommandDone(
+        command,
+        Config.ControlCommandTimeoutMs,
+        ControlCommandWaitNanos,
+        ControlCommandWaitCount,
+        ControlCommandTimeouts);
+}
+
+bool TqLinuxRelayWorker::WaitUnregisterCommand(UnregisterRelayCommand& command) const {
+    return WaitForCommandDone(
+        command,
+        Config.ControlCommandTimeoutMs,
+        ControlCommandWaitNanos,
+        ControlCommandWaitCount,
+        ControlCommandTimeouts);
+}
+
+bool TqLinuxRelayWorker::WaitSnapshotCommand(SnapshotCommand& command) const {
+    const bool done = WaitForCommandDone(
+        command,
+        Config.ControlCommandTimeoutMs,
+        ControlCommandWaitNanos,
+        ControlCommandWaitCount,
+        ControlCommandTimeouts);
+    SnapshotCommandWaitNanos.fetch_add(command.WaitNanos, std::memory_order_relaxed);
+    SnapshotCommandWaitCount.fetch_add(1, std::memory_order_relaxed);
+    if (!done) {
+        SnapshotCommandTimeouts.fetch_add(1, std::memory_order_relaxed);
+    }
+    return done;
+}
+
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
     const TqLinuxRelayRegistration& registration) {
     if (IsWorkerThread()) {
@@ -1221,21 +1280,27 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithId(
         return RegisterRelayWithIdLocal(registration);
     }
 
-    RegisterRelayCommand command{};
-    command.Registration = registration;
+    for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
+        auto command = std::make_shared<RegisterRelayCommand>();
+        command->Registration = registration;
 
-    TqLinuxRelayEvent event{};
-    event.Type = TqLinuxRelayEventType::RegisterRelay;
-    event.Control = &command;
-    if (!Enqueue(std::move(event))) {
-        return {};
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::RegisterRelay;
+        event.Control = command.get();
+        event.ControlOwner = command;
+        if (!Enqueue(std::move(event))) {
+            ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
+            Wake();
+            std::this_thread::yield();
+            continue;
+        }
+
+        if (!WaitRegisterCommand(*command)) {
+            return {};
+        }
+        return command->Result;
     }
-
-    std::unique_lock<std::mutex> lock(command.Mutex);
-    command.Cv.wait(lock, [&command]() {
-        return command.Done;
-    });
-    return command.Result;
+    return {};
 }
 
 bool TqLinuxRelayWorker::IsWorkerThread() const {
@@ -1409,13 +1474,15 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
             return;
         }
 
-        UnregisterRelayCommand command{};
-        command.RelayId = relayId;
+        auto command = std::make_shared<UnregisterRelayCommand>();
+        command->RelayId = relayId;
 
         TqLinuxRelayEvent event{};
         event.Type = TqLinuxRelayEventType::UnregisterRelay;
-        event.Control = &command;
+        event.Control = command.get();
+        event.ControlOwner = command;
         if (!Enqueue(std::move(event))) {
+            ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
             controlGuard.unlock();
             Wake();
             std::this_thread::yield();
@@ -1423,10 +1490,7 @@ void TqLinuxRelayWorker::UnregisterRelay(uint64_t relayId) {
             continue;
         }
 
-        std::unique_lock<std::mutex> lock(command.Mutex);
-        command.Cv.wait(lock, [&command]() {
-            return command.Done;
-        });
+        (void)WaitUnregisterCommand(*command);
         return;
     }
 }
@@ -3246,20 +3310,35 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
         return SnapshotLocal();
     }
 
-    SnapshotCommand command{};
+    for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
+        auto command = std::make_shared<SnapshotCommand>();
 
-    TqLinuxRelayEvent event{};
-    event.Type = TqLinuxRelayEventType::Snapshot;
-    event.Control = &command;
-    if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
-        return {};
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::Snapshot;
+        event.Control = command.get();
+        event.ControlOwner = command;
+        if (!const_cast<TqLinuxRelayWorker*>(this)->Enqueue(std::move(event))) {
+            ControlCommandEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
+            const_cast<TqLinuxRelayWorker*>(this)->Wake();
+            std::this_thread::yield();
+            continue;
+        }
+
+        if (!WaitSnapshotCommand(*command)) {
+            return {};
+        }
+        command->Result.ControlLockWaitNanos = ControlLockWaitNanos.load();
+        command->Result.ControlLockAcquireCount = ControlLockAcquireCount.load();
+        command->Result.ControlCommandWaitNanos = ControlCommandWaitNanos.load();
+        command->Result.ControlCommandWaitCount = ControlCommandWaitCount.load();
+        command->Result.ControlCommandTimeouts = ControlCommandTimeouts.load();
+        command->Result.ControlCommandEnqueueFailures = ControlCommandEnqueueFailures.load();
+        command->Result.SnapshotCommandWaitNanos = SnapshotCommandWaitNanos.load();
+        command->Result.SnapshotCommandWaitCount = SnapshotCommandWaitCount.load();
+        command->Result.SnapshotCommandTimeouts = SnapshotCommandTimeouts.load();
+        return command->Result;
     }
-
-    std::unique_lock<std::mutex> lock(command.Mutex);
-    command.Cv.wait(lock, [&command]() {
-        return command.Done;
-    });
-    return command.Result;
+    return {};
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
@@ -3327,6 +3406,15 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load();
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load();
     snapshot.QuicReceiveViewBackpressureQueued = QuicReceiveViewBackpressureQueued.load();
+    snapshot.ControlLockWaitNanos = ControlLockWaitNanos.load();
+    snapshot.ControlLockAcquireCount = ControlLockAcquireCount.load();
+    snapshot.ControlCommandWaitNanos = ControlCommandWaitNanos.load();
+    snapshot.ControlCommandWaitCount = ControlCommandWaitCount.load();
+    snapshot.ControlCommandTimeouts = ControlCommandTimeouts.load();
+    snapshot.ControlCommandEnqueueFailures = ControlCommandEnqueueFailures.load();
+    snapshot.SnapshotCommandWaitNanos = SnapshotCommandWaitNanos.load();
+    snapshot.SnapshotCommandWaitCount = SnapshotCommandWaitCount.load();
+    snapshot.SnapshotCommandTimeouts = SnapshotCommandTimeouts.load();
     snapshot.Errors = Errors.load();
     snapshot.EventQueueFullErrors = EventQueueFullErrors.load();
     snapshot.TcpReadBufferAcquireFailures = TcpReadBufferAcquireFailures.load();
