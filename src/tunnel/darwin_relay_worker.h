@@ -40,6 +40,15 @@ struct TqDarwinRelayRegistrationResult {
     uint64_t RelayId{0};
 };
 
+enum class TqDarwinSendOperationState : uint32_t {
+    Created = 0,
+    Registered = 1,
+    Submitted = 2,
+    CompletionClaimed = 3,
+    Completed = 4,
+    Detached = 5,
+};
+
 struct TqDarwinRelaySendOperation {
     static constexpr uint64_t MagicValue = 0x545144415257534eULL;
 
@@ -50,6 +59,95 @@ struct TqDarwinRelaySendOperation {
     std::shared_ptr<void> BindingOwner;
     std::vector<TqBufferView> Views;
     std::vector<QUIC_BUFFER> QuicBuffers;
+    std::atomic<uint32_t> State{static_cast<uint32_t>(TqDarwinSendOperationState::Created)};
+    uint64_t CompletionRelayId{0};
+    uint64_t CompletionTotalBytes{0};
+    bool CompletionFin{false};
+    std::shared_ptr<void> CompletionBindingOwner;
+
+    bool TryTransition(TqDarwinSendOperationState expected, TqDarwinSendOperationState desired) {
+        uint32_t value = static_cast<uint32_t>(expected);
+        return State.compare_exchange_strong(
+            value,
+            static_cast<uint32_t>(desired),
+            std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    }
+
+    bool TryMarkRegistered() {
+        return TryTransition(TqDarwinSendOperationState::Created, TqDarwinSendOperationState::Registered);
+    }
+
+    bool TryMarkSubmitted() {
+        uint32_t value = static_cast<uint32_t>(TqDarwinSendOperationState::Registered);
+        return State.compare_exchange_strong(
+            value,
+            static_cast<uint32_t>(TqDarwinSendOperationState::Submitted),
+            std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    }
+
+    bool TryClaimCompletion() {
+        uint32_t value = State.load(std::memory_order_acquire);
+        for (;;) {
+            const auto state = static_cast<TqDarwinSendOperationState>(value);
+            if (state == TqDarwinSendOperationState::CompletionClaimed ||
+                state == TqDarwinSendOperationState::Completed ||
+                state == TqDarwinSendOperationState::Detached) {
+                return false;
+            }
+            if (State.compare_exchange_weak(
+                    value,
+                    static_cast<uint32_t>(TqDarwinSendOperationState::CompletionClaimed),
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    bool TryMarkCompleted() {
+        uint32_t value = State.load(std::memory_order_acquire);
+        for (;;) {
+            const auto state = static_cast<TqDarwinSendOperationState>(value);
+            if (state == TqDarwinSendOperationState::Completed) {
+                return false;
+            }
+            if (state == TqDarwinSendOperationState::Detached) {
+                return false;
+            }
+            if (State.compare_exchange_weak(
+                    value,
+                    static_cast<uint32_t>(TqDarwinSendOperationState::Completed),
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    bool MarkDetached() {
+        uint32_t value = State.load(std::memory_order_acquire);
+        for (;;) {
+            const auto state = static_cast<TqDarwinSendOperationState>(value);
+            if (state == TqDarwinSendOperationState::Completed ||
+                state == TqDarwinSendOperationState::Detached) {
+                return false;
+            }
+            if (State.compare_exchange_weak(
+                    value,
+                    static_cast<uint32_t>(TqDarwinSendOperationState::Detached),
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire)) {
+                return true;
+            }
+        }
+    }
+
+    bool IsCompletionClaimed() const {
+        return static_cast<TqDarwinSendOperationState>(State.load(std::memory_order_acquire)) ==
+            TqDarwinSendOperationState::CompletionClaimed;
+    }
 };
 
 #if defined(TCPQUIC_TESTING)

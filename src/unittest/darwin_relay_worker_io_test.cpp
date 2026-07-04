@@ -910,6 +910,16 @@ void SendCompleteCallbackQueuesUntilWorkerDrain() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void SendOperationStateTransitionsAreSingleClaim() {
+    TqDarwinRelaySendOperation operation{};
+    CHECK(operation.TryMarkRegistered());
+    CHECK(!operation.TryMarkRegistered());
+    CHECK(operation.TryClaimCompletion());
+    CHECK(!operation.TryClaimCompletion());
+    CHECK(operation.TryMarkCompleted());
+    CHECK(!operation.TryMarkCompleted());
+}
+
 void ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -3353,6 +3363,7 @@ int main() {
     WorkerObservesTcpReadWithSmallByteBudget();
     CompressedTcpReadFlushesWhenCompressorBuffersInput();
     TransientSendFailureQueuesWithoutSelfRetry();
+    SendOperationStateTransitionsAreSingleClaim();
     SendCompleteAfterUnregisterReleasesOperation();
     SendCompleteCallbackQueuesUntilWorkerDrain();
     ActiveWorkerSendCompleteDoesNotPurgeRetiredRelays();

@@ -1723,6 +1723,14 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     stream = relay->Stream;
     info.BindingOwner = relay->Binding;
     raw->BindingOwner = relay->Binding;
+    raw->CompletionRelayId = info.RelayId;
+    raw->CompletionTotalBytes = info.TotalBytes;
+    raw->CompletionFin = info.Fin;
+    raw->CompletionBindingOwner = info.BindingOwner;
+    if (!raw->TryMarkRegistered()) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     ++relay->SubmittingQuicSends;
     ++relay->InFlightQuicSends;
     relay->InFlightQuicSendBytes += raw->TotalBytes;
@@ -1742,6 +1750,7 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     const bool completionAlreadyRan = workerThread
         ? !MarkKnownSendOperationSubmittedLocal(raw, &submittedInfo)
         : !MarkKnownSendOperationSubmitted(raw, &submittedInfo);
+    (void)raw->TryMarkSubmitted();
     if (relay->SubmittingQuicSends > 0) {
         --relay->SubmittingQuicSends;
     }
@@ -1778,6 +1787,9 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
             if (relay->Closing) {
                 return false;
             }
+            raw->State.store(
+                static_cast<uint32_t>(TqDarwinSendOperationState::Created),
+                std::memory_order_release);
             relay->PendingQuicSends.push_back(std::move(operation));
             return true;
         }
@@ -1880,6 +1892,10 @@ void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState
 
 void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation) {
     if (operation == nullptr) {
+        return;
+    }
+    if (!operation->TryMarkCompleted()) {
+        Errors.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     const bool workerThread = IsWorkerThread();
