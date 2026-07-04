@@ -291,22 +291,18 @@ QUIC receive 背压：
 - 对单个 receive view 增加最大尺寸策略，超过阈值时先暂停 receive 或走分片处理。
 - 中期可评估是否使用 MsQuic pending receive 的 buffer ownership，减少复制；如果保留复制模型，也应把复制前的预算拒绝路径做清楚。
 
-### 3.5 `StreamCallback()` 遇到 fake FIN 会 `abort()`
+### 3.5 `StreamCallback()` 遇到 fake FIN 会 `abort()` 是设计行为
 
-现象：
+设计说明：
 
 - `TqIsMsQuicFakeFinReceive()` 命中后，当前代码 trace 后 `assert(false)` 并 `std::abort()`。
+- 这是有意保留的 fail-fast 行为，用于暴露违反当前 Windows relay receive 假设的 MsQuic 事件形态。
+- fake FIN 不作为单 relay 可恢复错误处理；如果该条件在生产环境触发，应优先调查 MsQuic receive 语义或上游状态机，而不是在 relay 内静默降级。
 
-影响：
+当前状态：
 
-- 生产环境中异常或未预期的 MsQuic receive 形态会导致整个进程退出。
-- 对代理服务而言，这种行为比关闭单条 relay 风险更高。
-
-建议：
-
-- 将 `abort()` 改为单 relay graceful close 或 abort reset，并记录 `Errors_`、trace、stale/drop 计数。
-- 单测保留断言可通过 `TQ_UNIT_TESTING` 分支实现，生产路径不能直接终止进程。
-- 在 trace 中保留 absolute offset、total buffer length、flags，方便定位 MsQuic 行为。
+- 无需作为待修复问题处理。
+- trace 保留 absolute offset、total buffer length、buffer count、flags，便于定位触发条件。
 
 ### 3.6 trace context 外部线程直写问题已修复
 
@@ -326,11 +322,13 @@ QUIC receive 背压：
 - worker 线程解析 relay id/generation 后更新 `TraceTunnelId` 和 `TraceTarget`，与 `BuildRelayTraceState()` 的读取保持同一 worker 串行模型。
 - 迟到 operation 在 relay 不存在、generation 不匹配或 relay 已进入 `Closing` 时丢弃，不复活 relay；丢弃次数计入 `windows_relay_posted_trace_context_stale_drops`。
 - shutdown 后投递失败也不写 relay 字段；`PostQueuedCompletionStatus` 失败时递增 `Errors_`。
+- MsQuic callback 线程上的 send-complete post failure 路径不会再构建 trace state：`FailRelayFatalFromCallback()` 调用 `CloseRelay(..., false)`，已 closing/stopping 分支调用 `TryRetireRelay(..., false)`，从而跳过 stop-condition 和 unregister trace 中的 `BuildRelayTraceState()`。
 - trace context 的写入和读取现在都由 worker IOCP 串行化，上述外部线程直写风险已消除。
 
 验证覆盖：
 
 - `tcpquic_windows_relay_worker_test` 覆盖 trace context 不会从调用线程立即写入、stale generation / closing relay 被丢弃、`target == nullptr` 时只设置 tunnel id 并保持空 target，以及零 id、relay 不存在、worker 已停止和投递失败等 fire-and-forget 负路径。
+- send-complete post failure 用例覆盖 callback 投递失败时的 accounting 和 fatal reset；当前代码路径已避免该分支读取 `TraceTarget`，后续可补充 trace hook 断言，直接验证不会发出 stop-condition/unregister trace。
 
 ### 3.7 per-relay mutex 声明和实际模型不一致
 
@@ -373,7 +371,7 @@ QUIC receive 背压：
 | 优先级 | 建议 | 理由 |
 |---|---|---|
 | 已完成 | `SetRelayTraceContext()` 通过 IOCP 串行更新 trace context | 原跨线程写 `TraceTarget` 的 C++ 数据竞争风险已消除。 |
-| 高 | 移除生产路径 `abort()`，把 fake FIN 降级为单 relay 错误 | 避免单连接异常杀进程。 |
+| 设计如此 | fake FIN 命中后 fail-fast abort | 保留为违反 receive 假设的强信号，无需降级为单 relay 错误。 |
 | 中 | 为 Windows 增加独立 worker count 配置名 | 配置语义和后续调优需要。 |
 | 已完成 | 优化 `DrainPerRelayMaintenance()` 全量扫描 | 常规路径已改为事件驱动 maintenance queue，并保留低频兜底扫描。 |
 | 已完成 | `FinishReceiveView()` 队首 pop 优先，异常才线性查找 | 正常路径 O(1)，异常路径有计数和 trace。 |
