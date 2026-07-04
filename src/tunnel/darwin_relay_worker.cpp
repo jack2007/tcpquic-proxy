@@ -453,6 +453,16 @@ uint64_t TqDarwinRelayWorker::InFlightQuicSendCountFromRelayForTest(
     return relay->InFlightQuicSends;
 }
 
+uint64_t TqDarwinRelayWorker::PendingQuicSendCountFromRelayForTest(
+    const std::shared_ptr<void>& relayOwner) {
+    auto relay = std::static_pointer_cast<RelayState>(relayOwner);
+    if (relay == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> relayLock(relay->Mutex);
+    return relay->PendingQuicSends.size();
+}
+
 uint64_t TqDarwinRelayWorker::CompleteOneInFlightSendForTest(uint64_t relayId) {
     TqDarwinRelaySendOperation* operation = nullptr;
     {
@@ -1748,9 +1758,11 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
     if (relay == nullptr) {
         relay = workerThread ? FindRetiredRelayLocal(info.RelayId) : FindRetiredRelay(info.RelayId);
     }
+    bool bindingRelayFallback = false;
     if (relay == nullptr) {
         if (auto binding = std::static_pointer_cast<StreamBinding>(info.BindingOwner)) {
             relay = binding->Relay.lock();
+            bindingRelayFallback = relay != nullptr;
         }
     }
     delete operation;
@@ -1770,7 +1782,7 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
             }
             closing = relay->Closing;
         }
-        if (!closing && !info.Submitting) {
+        if (!bindingRelayFallback && !closing && !info.Submitting) {
             RetryPendingQuicSends(relay);
             if (ShouldResumeTcpReadForQuicBacklog(relay)) {
                 (void)SetTcpReadBackpressure(relay, false);

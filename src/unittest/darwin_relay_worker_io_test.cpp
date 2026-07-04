@@ -849,17 +849,30 @@ void SendCompleteFallsBackToBindingRelayWhenMapLookupMisses() {
     CHECK(callbackContext != nullptr);
     CHECK(sendContext != nullptr);
 
+    g_sendStatus.store(QUIC_STATUS_OUT_OF_MEMORY, std::memory_order_release);
+    const char pendingPayload[] = "pending-after-detach";
+    CHECK(write(fds[0], pendingPayload, sizeof(pendingPayload) - 1) ==
+        static_cast<ssize_t>(sizeof(pendingPayload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 2);
+    CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 1);
+    CHECK(worker.PendingQuicSendCountForTest(result.RelayId) == 1);
+
     std::shared_ptr<void> relayOwner = worker.DetachRelayFromActiveMapForTest(result.RelayId);
     CHECK(relayOwner != nullptr);
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
     CHECK(worker.InFlightQuicSendCountFromRelayForTest(relayOwner) == 1);
+    CHECK(worker.PendingQuicSendCountFromRelayForTest(relayOwner) == 1);
 
+    g_sendStatus.store(QUIC_STATUS_SUCCESS, std::memory_order_release);
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     event.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.InFlightQuicSendCountFromRelayForTest(relayOwner) == 0);
+    CHECK(worker.PendingQuicSendCountFromRelayForTest(relayOwner) == 1);
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 2);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
 
     worker.Stop();

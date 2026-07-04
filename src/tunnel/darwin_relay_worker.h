@@ -140,6 +140,7 @@ public:
     uint64_t PendingQuicSendCountForTest(uint64_t relayId);
     uint64_t InFlightQuicSendCountForTest(uint64_t relayId);
     uint64_t InFlightQuicSendCountFromRelayForTest(const std::shared_ptr<void>& relayOwner);
+    uint64_t PendingQuicSendCountFromRelayForTest(const std::shared_ptr<void>& relayOwner);
     uint64_t CompleteOneInFlightSendForTest(uint64_t relayId);
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
     uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
