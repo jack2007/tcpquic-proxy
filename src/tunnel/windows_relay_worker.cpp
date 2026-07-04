@@ -709,7 +709,12 @@ void TqWindowsRelayWorker::QueueQuicSendCompleteFromCallback(
             reinterpret_cast<uintptr_t>(operation))) {
         std::unique_ptr<TqWindowsQuicSendOperation> cleanup(operation);
         CompleteQuicSendAccounting(relay, *cleanup);
-        FailRelayFatal(relay, "post_quic_send_complete_failed");
+        if (Stopping_.load(std::memory_order_acquire) ||
+            relay->Closing.load(std::memory_order_acquire)) {
+            TryRetireRelay(relay, false);
+        } else {
+            FailRelayFatalFromCallback(relay, "post_quic_send_complete_failed");
+        }
     }
 }
 
@@ -735,10 +740,11 @@ void TqWindowsRelayWorker::QueueQuicSendCompleteByIdFromCallback(
         }
         Errors_.fetch_add(1, std::memory_order_relaxed);
         if (relay) {
-            if (relay->Closing.load(std::memory_order_acquire)) {
-                TryRetireRelay(relay);
+            if (Stopping_.load(std::memory_order_acquire) ||
+                relay->Closing.load(std::memory_order_acquire)) {
+                TryRetireRelay(relay, false);
             } else {
-                FailRelayFatal(relay, "post_quic_send_complete_failed");
+                FailRelayFatalFromCallback(relay, "post_quic_send_complete_failed");
             }
         }
     }
@@ -2109,7 +2115,8 @@ bool TqWindowsRelayWorker::PostTcpRecv(const std::shared_ptr<RelayContext>& rela
 void TqWindowsRelayWorker::CloseRelay(
     const std::shared_ptr<RelayContext>& relay,
     TqRelayCloseMode mode,
-    const char* reason) {
+    const char* reason,
+    bool traceState) {
     MarkRelayCloseReason(relay, reason);
     if (!relay || relay->Closing.exchange(true)) {
         return;
@@ -2118,7 +2125,9 @@ void TqWindowsRelayWorker::CloseRelay(
     if (closeReason == nullptr || closeReason == kWindowsRelayCloseReasonUnknown) {
         closeReason = kWindowsRelayCloseReasonDefault;
     }
-    TqTraceRelayStopCondition("windows", WorkerIndex_, closeReason, BuildRelayTraceState(relay));
+    if (traceState) {
+        TqTraceRelayStopCondition("windows", WorkerIndex_, closeReason, BuildRelayTraceState(relay));
+    }
     if (mode == TqRelayCloseMode::AbortReset) {
         FatalRelayResets_.fetch_add(1, std::memory_order_relaxed);
         TqResetSocket(relay->TcpFd);
@@ -2137,7 +2146,7 @@ void TqWindowsRelayWorker::CloseRelay(
     relay->Stream = nullptr;
     CompleteAllPendingQuicReceives(relay);
     FinalizeQuicSendAccountingOnClose(relay);
-    TryRetireRelay(relay);
+    TryRetireRelay(relay, traceState);
 }
 
 void TqWindowsRelayWorker::MarkRelayCloseReason(
@@ -2252,6 +2261,12 @@ void TqWindowsRelayWorker::FailRelayFatal(const std::shared_ptr<RelayContext>& r
             relay->InFlightTcpSends.load(std::memory_order_relaxed));
     }
     CloseRelay(relay, TqRelayCloseMode::AbortReset, reason);
+}
+
+void TqWindowsRelayWorker::FailRelayFatalFromCallback(
+    const std::shared_ptr<RelayContext>& relay,
+    const char* reason) {
+    CloseRelay(relay, TqRelayCloseMode::AbortReset, reason, false);
 }
 
 void TqWindowsRelayWorker::RecordTcpHardErrorAndFail(
@@ -2442,7 +2457,9 @@ void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
     (void)CloseRelayIfDrained(relay);
 }
 
-void TqWindowsRelayWorker::TryRetireRelay(const std::shared_ptr<RelayContext>& relay) {
+void TqWindowsRelayWorker::TryRetireRelay(
+    const std::shared_ptr<RelayContext>& relay,
+    bool traceState) {
     if (!relay || !relay->Closing.load(std::memory_order_acquire)) {
         return;
     }
@@ -2474,7 +2491,7 @@ void TqWindowsRelayWorker::TryRetireRelay(const std::shared_ptr<RelayContext>& r
     if (relay->PublicHandle != nullptr) {
         relay->PublicHandle->Stop.store(true, std::memory_order_release);
     }
-    if (TqTraceEnabled()) {
+    if (traceState && TqTraceEnabled()) {
         TqTraceRelayUnregister("windows", BuildRelayTraceState(relay));
     }
     PruneRetiredCallbacks(true);

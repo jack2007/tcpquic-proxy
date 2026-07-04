@@ -310,7 +310,7 @@ private:
     void HandleTcpRecv(std::unique_ptr<IoOperation> op, DWORD bytes);
     bool HandleTcpReadClosed(std::unique_ptr<IoOperation> op);
     void HandleTcpSend(std::unique_ptr<IoOperation> op, DWORD bytes);
-    void TryRetireRelay(const std::shared_ptr<RelayContext>& relay);
+    void TryRetireRelay(const std::shared_ptr<RelayContext>& relay, bool traceState = true);
     bool ScheduleRelayReceiveDrain(const std::shared_ptr<RelayContext>& relay);
     void ScheduleRelayReceiveDrainOrFail(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void DrainRelayReceives(const std::shared_ptr<RelayContext>& relay);
@@ -367,11 +367,13 @@ private:
     void CloseRelay(
         const std::shared_ptr<RelayContext>& relay,
         TqRelayCloseMode mode,
-        const char* reason = nullptr);
+        const char* reason = nullptr,
+        bool traceState = true);
     void MarkRelayCloseReason(const std::shared_ptr<RelayContext>& relay, const char* reason);
     bool CloseRelayIfDrained(const std::shared_ptr<RelayContext>& relay);
     bool HasPendingAfterStreamShutdown(const std::shared_ptr<RelayContext>& relay) const;
     void FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason);
+    void FailRelayFatalFromCallback(const std::shared_ptr<RelayContext>& relay, const char* reason);
     void RecordTcpHardErrorAndFail(
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,
