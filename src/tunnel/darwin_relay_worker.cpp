@@ -2721,16 +2721,22 @@ QUIC_STATUS QUIC_API TqDarwinRelayWorker::StreamCallback(
         if (worker == nullptr || !binding->Active.load(std::memory_order_acquire)) {
             return QUIC_STATUS_SUCCESS;
         }
+        auto relay = bindingOwner->Relay.lock();
+        if (relay == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        {
+            std::lock_guard<std::mutex> relayLock(relay->Mutex);
+            if (relay->Closing) {
+                return QUIC_STATUS_SUCCESS;
+            }
+        }
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
         if (TqIsMsQuicFakeFinReceive(
                 event->RECEIVE.AbsoluteOffset,
                 event->RECEIVE.TotalBufferLength,
                 event->RECEIVE.BufferCount,
                 event->RECEIVE.Flags)) {
-            auto relay = bindingOwner->Relay.lock();
-            if (relay == nullptr) {
-                return QUIC_STATUS_SUCCESS;
-            }
             TqTraceLinuxRelayStreamState state{};
             {
                 std::lock_guard<std::mutex> relayLock(relay->Mutex);

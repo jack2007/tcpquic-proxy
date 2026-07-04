@@ -1598,6 +1598,52 @@ void PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void ReceiveCallbackAfterShutdownDoesNotTakeMsQuicBufferOwnership() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 16;
+    config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(stream->Callback(stream, stream->Context, &shutdown) == QUIC_STATUS_SUCCESS);
+
+    uint8_t payload[] = {'c', 'l', 'o', 's', 'e', 'd'};
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = payload;
+    buffer.Length = sizeof(payload);
+    QUIC_STREAM_EVENT receive{};
+    receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receive.RECEIVE.Buffers = &buffer;
+    receive.RECEIVE.BufferCount = 1;
+    receive.RECEIVE.TotalBufferLength = sizeof(payload);
+
+    CHECK(stream->Callback(stream, stream->Context, &receive) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void TcpErrorEventClosesAndRetiresRelay() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -2595,7 +2641,7 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     TqDarwinRelayWorkerConfig config{};
     config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
     TqDarwinRelayWorker worker(config);
-    CHECK(worker.Start());
+    CHECK(worker.StartForTest());
 
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -2622,6 +2668,7 @@ void CallbackReceiveDoesNotUseLockedRelayLookup() {
     event.RECEIVE.TotalBufferLength = sizeof(payload);
     CHECK(TqDarwinRelayWorker::StreamCallback(&stream, stream.Context, &event) == QUIC_STATUS_PENDING);
     CHECK(worker.FindRelayLockedCountForTest() == before);
+    CHECK(worker.DrainOneEventForTest());
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
@@ -2675,6 +2722,7 @@ int main() {
     StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends();
     ShutdownCallbackQueuesCloseUntilWorkerDrain();
     PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain();
+    ReceiveCallbackAfterShutdownDoesNotTakeMsQuicBufferOwnership();
     TcpErrorEventClosesAndRetiresRelay();
     StopAfterCompletionLeavesNoKnownOperations();
     UnknownSendCompleteContextIsIgnoredWithoutFreeing();
