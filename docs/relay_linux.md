@@ -264,9 +264,9 @@ admin API 行为：
 | 5 | 高频 metrics 原子 `fetch_add/load` | `TqLinuxRelayWorker` 多个计数字段 | 中高；按 read/write batch、receive view、send complete、错误事件计数 | 给 admin metrics 和排障使用 | 纯统计计数优先改 `memory_order_relaxed`；worker 独占更新的计数可用普通字段，snapshot 在 worker 线程读。 |
 | 6 | `RelayState::CallbackPendingQuicReceiveLock` | `QueueDeferredQuicReceiveFromOffset()` / `DrainCallbackPendingQuicReceives()` / unregister | 中；正常路径不走，event queue 满时才走 | event queue push 失败时临时保存 MsQuic receive view，并暂停 receive | 这是降级保护，不应成为常态。若指标显示频繁触发，优先扩大/暴露 event queue capacity 或队列分片；再考虑 per-relay lock-free overflow queue。 |
 | 7 | `TqLinuxRelayWorker::ControlLock` | `Start()`、`Stop()`、`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()`、test helper | 中低；建链、拆链、snapshot 触发，不在每包读写路径 | 串行化 worker running/thread id 检查和 command 入队边界；command lifetime 由 shared owner 管理 | 当前已避免持 `ControlLock` 等待 worker command 完成；继续关注 `linux_relay_control_lock_wait_nanos` 和 command wait/timeout 指标。 |
-| 8 | `TqLinuxRelayRuntime::Lock` | `Start()`、`Stop()`、`PickWorker()`、`Snapshot()`、`SnapshotWorkers()` | 中低；每条 relay 建链会 `Start()` + `PickWorker()`，admin snapshot 也会持有 | 保护 worker vector 和 round-robin `NextWorker` | `Start()` 可启动期一次完成，`NextWorker` 可 atomic；snapshot 应复制 worker 指针后释放 runtime lock，再逐 worker snapshot。 |
+| 8 | `TqLinuxRelayRuntime::Lock` | `Start()`、`Stop()`、`PickWorker()`、`Snapshot()`、`SnapshotWorkers()` | 中低；每条 relay 建链会 `Start()` + `PickWorker()`，admin snapshot 也会进入 | 保护 worker vector、round-robin `NextWorker` 和 snapshot worker 列表复制边界 | 当前 snapshot 已在 runtime lock 内复制 worker 指针并通过 in-flight guard 保护 lifetime，随后释放 lock 再逐 worker snapshot；继续关注 `linux_relay_runtime_lock_wait_nanos` 和 `linux_relay_runtime_snapshot_inflight_max`。 |
 | 9 | `TqLinuxRelayWorker::RetiredBindingLock` | `DetachRelayStreamBinding()` | 低；关闭/detach 路径 | 延迟持有 `StreamRelayBinding`，避免 callback 未退出时释放 | 当前可接受。关闭风暴下可迁移到 worker 私有 retired 队列或 epoch 回收。 |
-| 10 | 同步 command 的 `Mutex/Cv` | `RegisterRelayCommand`、`UnregisterRelayCommand`、`SnapshotCommand` 等 | 低；控制面同步 API 使用 | 让调用方等待 worker 完成本地操作 | 建议给 register/unregister/snapshot 增加超时和错误日志，避免 worker 卡住时调用方无限等待。 |
+| 10 | 同步 command 的 `Mutex/Cv` | `RegisterRelayCommand`、`UnregisterRelayCommand`、`SnapshotCommand` 等 | 低；控制面同步 API 使用 | 让调用方等待 worker 完成本地操作，timeout 后通过 cancel 标记避免 late command 继续改变调用方已放弃的状态 | 当前 register/unregister/snapshot 已有 bounded enqueue retry、wait timeout、late register rollback 和 wait/timeout 指标；继续关注 `linux_relay_control_command_*` 与 `linux_relay_snapshot_command_*`。 |
 | 11 | runtime tuning `g_Runtime.Lock` | `src/config/tuning.cpp` | 低；吞吐/RTT/压缩观察更新和日志 | 保护运行时观测状态 | 不在 Linux relay 每包转发主路径。若观测采样频率升高，可改为分片计数再周期聚合。 |
 
 结论：当前 Linux 转发路径已经避免了 per-relay 大 mutex。真正的热点优先级是 event queue 原子竞争、eventfd wake、stream binding 原子、buffer budget CAS 和 metrics 原子写压力；传统 mutex 主要集中在控制面、降级路径和生命周期回收。
@@ -307,7 +307,7 @@ admin API 行为：
 - metrics 增加当前 high/low watermark，便于现场判断。
 - 对不同 tuning profile 设置不同 hysteresis：LAN 更低延迟，WAN 更强调吞吐和减少 callback 抖动。
 
-### 3.4 runtime snapshot 持锁范围偏大
+### 3.4 runtime snapshot 持锁范围已收敛
 
 当前状态：已调整为在 `Runtime::Lock` 内只复制 worker 指针/引用，随后释放 runtime lock，再逐个调用 `worker->Snapshot()`。worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。
 
@@ -323,7 +323,7 @@ admin API 行为：
 
 推进状态：本轮已落地 runtime snapshot 持锁范围收敛、snapshot in-flight guard 和对应 metrics；后续只保留现场观测与细节优化。
 
-### 3.5 `ControlLock` 持锁等待 worker command
+### 3.5 `ControlLock` 持锁等待 worker command 已收敛
 
 当前状态：`RegisterRelayWithId()`、`UnregisterRelay()`、`Snapshot()` 已将 `ControlLock` 收敛到 running/thread id 等控制状态检查，不再持有 `ControlLock` 等待 worker command `Cv`。同步 command 使用明确 lifetime 管理、bounded enqueue retry 和 timeout metrics。
 
@@ -405,9 +405,10 @@ admin API 行为：
 
 1. 队列压力：对比 `linux_relay_pending_events` 和 `linux_relay_event_queue_capacity`，同时看 `linux_relay_event_queue_full_errors`、`linux_relay_quic_receive_view_backpressure_queued`。
 2. 队列竞争：`linux_relay_event_queue_push_cas_retries` / `linux_relay_event_queue_pop_cas_retries` 持续增长说明 CAS 竞争上升；若 `linux_relay_multiple_event_producer_threads_observed` 为 true，说明已观测到多 producer，调大容量只能缓解 burst，不一定解决竞争。
-3. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
-4. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
-5. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
-6. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
+3. 控制面等待：`linux_relay_control_lock_wait_nanos`、`linux_relay_control_command_wait_nanos`、`linux_relay_control_command_timeouts`、`linux_relay_control_command_enqueue_failures`、`linux_relay_snapshot_command_timeouts`、`linux_relay_runtime_lock_wait_nanos` 用于区分 lock 等待、worker command 等待、queue full 和 runtime snapshot 放大。
+4. QUIC->TCP 背压：`linux_relay_current_pending_quic_receive_bytes`、`linux_relay_max_relay_pending_quic_receive_bytes`、`linux_relay_tcp_write_eagain_count`、`linux_relay_hot_relay_*`。
+5. TCP->QUIC 背压：`linux_relay_outstanding_quic_send_bytes`、`linux_relay_quic_send_backpressure_events`、`linux_relay_read_disabled_count`。
+6. buffer budget：`linux_relay_buffer_bytes_in_use`、`linux_relay_tcp_read_buffer_acquire_pending_budget_failures`、`linux_relay_quic_receive_tcp_buffer_acquire_pending_budget_failures`。
+7. 错误路径：`linux_relay_tcp_write_hard_errors`、`linux_relay_tcp_read_hard_errors`、`linux_relay_quic_send_fatal_errors`、`linux_relay_fatal_relay_resets`、last errno/status。
 
 Linux active relay 明细、event queue capacity/queue 竞争观测、runtime snapshot 持锁范围收敛、`ControlLock` 长等待收敛和控制面 wait metrics 已补齐。后续重点是根据生产指标决定是否需要 queue shard、per-relay callback pending top N 等低优先级观测增强；QUIC receive 背压 hysteresis 本轮不处理。
