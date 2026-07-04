@@ -415,6 +415,71 @@ bool TestWindowsRelayLockAndCallbackMetricsInitialState() {
            snapshot.ReceiveViewFinishNotFrontCount == 0;
 }
 
+bool TestWindowsRelayFinishReceiveViewFrontPathAvoidsLinearSearch() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        return false;
+    }
+    if (!worker.TestEnqueueReceiveViewForTest(handle.WindowsRelayId, 128)) {
+        worker.Stop();
+        return false;
+    }
+    const auto before = worker.Snapshot();
+    if (!worker.TestCompleteReceiveViewForCleanup(handle.WindowsRelayId, 128)) {
+        worker.Stop();
+        return false;
+    }
+    const auto after = worker.Snapshot();
+    worker.Stop();
+    return after.ReceiveViewFinishLinearSearchCount == before.ReceiveViewFinishLinearSearchCount &&
+           after.ReceiveViewFinishNotFrontCount == before.ReceiveViewFinishNotFrontCount;
+}
+
+bool TestWindowsRelayFinishReceiveViewNotFrontIsCounted() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        worker.Stop();
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        worker.Stop();
+        return false;
+    }
+    if (!worker.TestEnqueueReceiveViewForTest(handle.WindowsRelayId, 64) ||
+        !worker.TestEnqueueReceiveViewForTest(handle.WindowsRelayId, 96)) {
+        worker.Stop();
+        return false;
+    }
+    const auto before = worker.Snapshot();
+    if (!worker.TestCompleteSecondReceiveViewForTest(handle.WindowsRelayId, 96)) {
+        worker.Stop();
+        return false;
+    }
+    const auto after = worker.Snapshot();
+    worker.Stop();
+    return after.ReceiveViewFinishLinearSearchCount == before.ReceiveViewFinishLinearSearchCount + 1 &&
+           after.ReceiveViewFinishNotFrontCount == before.ReceiveViewFinishNotFrontCount + 1;
+}
+
 bool TestWindowsRelayCallbackOperationGenerationMismatchDropsForTest() {
     TqWindowsRelayWorker worker;
     alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
@@ -1559,6 +1624,14 @@ int main() {
         return 52;
     }
 
+    if (!TestWindowsRelayFinishReceiveViewFrontPathAvoidsLinearSearch()) {
+        return 124;
+    }
+
+    if (!TestWindowsRelayFinishReceiveViewNotFrontIsCounted()) {
+        return 125;
+    }
+
     if (!TestWindowsRelaySnapshotConcurrentWithRegisterAndStop()) {
         return 53;
     }
@@ -1588,31 +1661,31 @@ int main() {
     }
 
     if (!TestWindowsRelayTraceContextDropsStaleGeneration()) {
-        return 124;
+        return 140;
     }
 
     if (!TestWindowsRelayTraceContextAllowsNullTarget()) {
-        return 125;
+        return 141;
     }
 
     if (!TestWindowsRelayTraceContextIgnoresZeroIds()) {
-        return 126;
+        return 142;
     }
 
     if (!TestWindowsRelayTraceContextIgnoredWhenRelayMissing()) {
-        return 127;
+        return 143;
     }
 
     if (!TestWindowsRelayTraceContextIgnoredWhenWorkerStopped()) {
-        return 128;
+        return 144;
     }
 
     if (!TestWindowsRelayTraceContextPostFailureIncrementsErrors()) {
-        return 129;
+        return 145;
     }
 
     if (!TestWindowsRelayTraceContextDropsWhenClosing()) {
-        return 130;
+        return 146;
     }
 
     {

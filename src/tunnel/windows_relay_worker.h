@@ -202,6 +202,8 @@ public:
     bool TestDrainPostedCallbackOperationsForTest(size_t expectedCount);
     bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);
+    bool TestEnqueueReceiveViewForTest(uint64_t relayId, uint64_t byteCount);
+    bool TestCompleteSecondReceiveViewForTest(uint64_t relayId, uint64_t completedLength);
     bool TestAdvanceReceiveViewForCompletion(uint64_t relayId, uint64_t completedLength);
     bool TestLateReceiveViewCompletionIgnored(uint64_t relayId, DWORD bytes, uint64_t postedLength);
     bool TestBufferedTcpSendZeroCompletion(uint64_t relayId);

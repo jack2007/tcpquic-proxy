@@ -1509,6 +1509,49 @@ bool TqWindowsRelayWorker::TestCompleteReceiveViewForCleanup(uint64_t relayId, u
     return CompletePendingQuicReceive(relay, view);
 }
 
+bool TqWindowsRelayWorker::TestEnqueueReceiveViewForTest(uint64_t relayId, uint64_t byteCount) {
+    auto relay = FindRelayByIdLocal(relayId);
+    if (!relay || byteCount == 0) {
+        return false;
+    }
+    auto view = std::make_shared<TqWindowsPendingQuicReceive>();
+    view->OwnedBuffer.resize(static_cast<size_t>(byteCount), 'x');
+    view->TotalLength = byteCount;
+    view->AccountedLength = byteCount;
+    view->SliceOffset = 0;
+    view->CompletedLength = 0;
+    view->PendingCompleteBytes = 0;
+    view->Drained = false;
+    view->Fin = false;
+    view->Stream = relay->Stream;
+    relay->PendingQuicReceiveBytes.fetch_add(byteCount, std::memory_order_acq_rel);
+    relay->PendingQuicReceiveQueueDepth.fetch_add(1, std::memory_order_acq_rel);
+    relay->PendingReceives.push_back(view);
+    return true;
+}
+
+bool TqWindowsRelayWorker::TestCompleteSecondReceiveViewForTest(
+    uint64_t relayId,
+    uint64_t completedLength) {
+    auto relay = FindRelayByIdLocal(relayId);
+    if (!relay) {
+        return false;
+    }
+    if (relay->PendingReceives.size() < 2) {
+        return false;
+    }
+    auto it = relay->PendingReceives.begin();
+    ++it;
+    auto view = *it;
+    if (!view || completedLength == 0 || completedLength > view->TotalLength) {
+        return false;
+    }
+    view->CompletedLength = completedLength;
+    view->AccountedLength = completedLength;
+    SaturatingFetchSub(relay->PendingQuicReceiveBytes, completedLength);
+    return CompletePendingQuicReceive(relay, view);
+}
+
 bool TqWindowsRelayWorker::TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const {
     std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
     return LastPostedCallbackType_ == TqWindowsIocpOperationType::RelayReceiveReady &&
@@ -3291,8 +3334,26 @@ bool TqWindowsRelayWorker::FinishReceiveView(
     if (!relay || !view) {
         return false;
     }
-    const auto it = std::find(relay->PendingReceives.begin(), relay->PendingReceives.end(), view);
-    if (it == relay->PendingReceives.end()) {
+    bool removed = false;
+    if (!relay->PendingReceives.empty() && relay->PendingReceives.front() == view) {
+        relay->PendingReceives.pop_front();
+        removed = true;
+        TraceReceiveViewEvent(relay, view, "finish_pop_front");
+    } else {
+        const uint64_t searchStartNanos = NowSteadyNanos();
+        const auto it = std::find(relay->PendingReceives.begin(), relay->PendingReceives.end(), view);
+        ReceiveViewFinishLinearSearchNanos_.fetch_add(
+            NowSteadyNanos() - searchStartNanos,
+            std::memory_order_relaxed);
+        ReceiveViewFinishLinearSearchCount_.fetch_add(1, std::memory_order_relaxed);
+        if (it != relay->PendingReceives.end()) {
+            ReceiveViewFinishNotFrontCount_.fetch_add(1, std::memory_order_relaxed);
+            relay->PendingReceives.erase(it);
+            removed = true;
+            TraceReceiveViewEvent(relay, view, "finish_remove_not_front");
+        }
+    }
+    if (!removed) {
         if (view->Drained || view->CompletedLength >= view->TotalLength) {
             TraceReceiveViewEvent(relay, view, "finish_already_drained");
             TqTraceRelayStopCondition(
@@ -3315,8 +3376,6 @@ bool TqWindowsRelayWorker::FinishReceiveView(
             view->PendingCompleteBytes, std::memory_order_relaxed);
         view->PendingCompleteBytes = 0;
     }
-    relay->PendingReceives.erase(it);
-    TraceReceiveViewEvent(relay, view, "finish_remove");
     if (view->AccountedLength < view->TotalLength) {
         const uint64_t remaining = view->TotalLength - view->AccountedLength;
         SaturatingFetchSub(relay->PendingQuicReceiveBytes, remaining);
