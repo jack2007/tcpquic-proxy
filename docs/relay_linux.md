@@ -22,7 +22,7 @@ Linux 生产路径不是 per-tunnel 线程模型，而是固定数量 `TqLinuxRe
 - CLI：`--relay-io-size`、`--linux-relay-read-chunk-size`、`--linux-relay-tcp-write-max-bytes`、`--linux-relay-tcp-write-burst-bytes`、`--linux-relay-event-queue-capacity`、`--max-memory-mb`、`--tuning`。
 - JSON：`relay.io_size`、`relay.linux.read_chunk_size`、`relay.linux.tcp_write_max_bytes`、`relay.linux.tcp_write_burst_bytes`、`relay.linux.event_queue_capacity`。
 - `relay.linux.worker_slots` 仍可解析，但当前只 warning，已废弃并被忽略。
-- `EventQueueCapacity` 通过 `TqTuningConfig::LinuxRelayEventQueueCapacity` 传入 `TqLinuxRelayWorkerConfig`，默认 4096；取值范围为 `1024..1048576`，非 power-of-two 会 normalize 到下一个 power-of-two。
+- `EventQueueCapacity` 通过 `TqTuningConfig::LinuxRelayEventQueueCapacity` 传入 `TqLinuxRelayWorkerConfig`；命令行帮助标注默认值 4096，取值范围为 `1024..1048576`，非 power-of-two 会 normalize 到下一个 power-of-two。
 
 ```mermaid
 flowchart TD
@@ -285,7 +285,7 @@ admin API 行为：
 
 历史现象：`TqLinuxRelayWorkerConfig::EventQueueCapacity` 默认 4096，单测可直接设置，但生产 `TqTuningConfig` 曾没有对应字段；CLI/JSON 也没有配置项。
 
-当前状态：Linux relay event queue 容量已接入生产配置链路。CLI 使用 `--linux-relay-event-queue-capacity <events>`，JSON 使用 `relay.linux.event_queue_capacity`，范围为 `1024..1048576`；非 power-of-two 输入会 normalize 到下一个 power-of-two。runtime 启动 worker 时会把 normalized capacity 传入 `TqLinuxRelayWorkerConfig::EventQueueCapacity`。
+当前状态：Linux relay event queue 容量已接入生产配置链路。CLI 使用 `--linux-relay-event-queue-capacity <events>`，命令行帮助显示默认值 4096；JSON 使用 `relay.linux.event_queue_capacity`。配置范围为 `1024..1048576`；非 power-of-two 输入会 normalize 到下一个 power-of-two。runtime 启动 worker 时会把 normalized capacity 传入 `TqLinuxRelayWorkerConfig::EventQueueCapacity`。
 
 排障语义：
 
