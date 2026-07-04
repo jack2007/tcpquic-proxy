@@ -2685,7 +2685,6 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
             if (relay == nullptr) {
                 continue;
             }
-            std::lock_guard<std::mutex> relayLock(relay->Mutex);
             if (relay->TcpReadArmed) {
                 ++snapshot.TcpReadArmedRelays;
             }

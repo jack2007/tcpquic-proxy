@@ -3099,6 +3099,39 @@ void RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void SnapshotDuringConcurrentUnregisterRemainsBestEffort() {
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    CHECK(worker.Start());
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    MsQuicStream stream{};
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = &stream;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    std::atomic<bool> done{false};
+    std::thread snapshotter([&] {
+        while (!done.load(std::memory_order_acquire)) {
+            (void)worker.Snapshot();
+        }
+    });
+
+    worker.UnregisterRelay(result.RelayId);
+    done.store(true, std::memory_order_release);
+    snapshotter.join();
+
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 } // namespace
 
 int main() {
@@ -3156,6 +3189,7 @@ int main() {
     QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup();
     StopPurgesQueuedShutdownCloseWithoutLockedLookup();
     RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement();
+    SnapshotDuringConcurrentUnregisterRemainsBestEffort();
     return 0;
 }
 
