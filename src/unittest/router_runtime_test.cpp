@@ -1522,6 +1522,18 @@ int main() {
         if (bodyText.find("ingress_buffer") != std::string::npos) return 243;
         if (bodyText.find("\"linux_relay_errors\":") == std::string::npos) return 105;
         if (bodyText.find("\"linux_relay_event_queue_full_errors\":") == std::string::npos) return 260;
+        if (bodyText.find("\"linux_relay_control_lock_wait_nanos\":") == std::string::npos) return 360;
+        if (bodyText.find("\"linux_relay_control_lock_acquire_count\":") == std::string::npos) return 361;
+        if (bodyText.find("\"linux_relay_control_command_wait_nanos\":") == std::string::npos) return 362;
+        if (bodyText.find("\"linux_relay_control_command_wait_count\":") == std::string::npos) return 363;
+        if (bodyText.find("\"linux_relay_control_command_timeouts\":") == std::string::npos) return 364;
+        if (bodyText.find("\"linux_relay_control_command_enqueue_failures\":") == std::string::npos) return 365;
+        if (bodyText.find("\"linux_relay_snapshot_command_wait_nanos\":") == std::string::npos) return 366;
+        if (bodyText.find("\"linux_relay_snapshot_command_wait_count\":") == std::string::npos) return 367;
+        if (bodyText.find("\"linux_relay_snapshot_command_timeouts\":") == std::string::npos) return 368;
+        if (bodyText.find("\"linux_relay_runtime_lock_wait_nanos\":") == std::string::npos) return 369;
+        if (bodyText.find("\"linux_relay_runtime_lock_acquire_count\":") == std::string::npos) return 370;
+        if (bodyText.find("\"linux_relay_runtime_snapshot_inflight_max\":") == std::string::npos) return 371;
         if (bodyText.find("\"linux_relay_tcp_read_buffer_acquire_failures\":") == std::string::npos) return 261;
         if (bodyText.find("\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":") == std::string::npos) return 137;
         if (bodyText.find("\"linux_relay_tcp_read_buffer_acquire_alloc_failures\":") == std::string::npos) return 139;

@@ -3978,6 +3978,15 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.EventQueueCapacity = std::max(total.EventQueueCapacity, snapshot.EventQueueCapacity);
         total.EventQueuePushCasRetries += snapshot.EventQueuePushCasRetries;
         total.EventQueuePopCasRetries += snapshot.EventQueuePopCasRetries;
+        total.ControlCommandWaitNanos += snapshot.ControlCommandWaitNanos;
+        total.ControlCommandWaitCount += snapshot.ControlCommandWaitCount;
+        total.ControlCommandTimeouts += snapshot.ControlCommandTimeouts;
+        total.ControlCommandEnqueueFailures += snapshot.ControlCommandEnqueueFailures;
+        total.SnapshotCommandWaitNanos += snapshot.SnapshotCommandWaitNanos;
+        total.SnapshotCommandWaitCount += snapshot.SnapshotCommandWaitCount;
+        total.SnapshotCommandTimeouts += snapshot.SnapshotCommandTimeouts;
+        total.ControlLockWaitNanos += snapshot.ControlLockWaitNanos;
+        total.ControlLockAcquireCount += snapshot.ControlLockAcquireCount;
         total.EventProducerThreadsObserved =
             std::max(total.EventProducerThreadsObserved, snapshot.EventProducerThreadsObserved);
         total.MultipleEventProducerThreadsObserved =

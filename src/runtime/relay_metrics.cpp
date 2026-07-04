@@ -365,6 +365,19 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LinuxRelayEventProducerThreadsObserved = snapshot.EventProducerThreadsObserved;
     metrics.LinuxRelayMultipleEventProducerThreadsObserved =
         snapshot.MultipleEventProducerThreadsObserved;
+    metrics.LinuxRelayControlLockWaitNanos = snapshot.ControlLockWaitNanos;
+    metrics.LinuxRelayControlLockAcquireCount = snapshot.ControlLockAcquireCount;
+    metrics.LinuxRelayControlCommandWaitNanos = snapshot.ControlCommandWaitNanos;
+    metrics.LinuxRelayControlCommandWaitCount = snapshot.ControlCommandWaitCount;
+    metrics.LinuxRelayControlCommandTimeouts = snapshot.ControlCommandTimeouts;
+    metrics.LinuxRelayControlCommandEnqueueFailures =
+        snapshot.ControlCommandEnqueueFailures;
+    metrics.LinuxRelaySnapshotCommandWaitNanos = snapshot.SnapshotCommandWaitNanos;
+    metrics.LinuxRelaySnapshotCommandWaitCount = snapshot.SnapshotCommandWaitCount;
+    metrics.LinuxRelaySnapshotCommandTimeouts = snapshot.SnapshotCommandTimeouts;
+    metrics.LinuxRelayRuntimeLockWaitNanos = snapshot.RuntimeLockWaitNanos;
+    metrics.LinuxRelayRuntimeLockAcquireCount = snapshot.RuntimeLockAcquireCount;
+    metrics.LinuxRelayRuntimeSnapshotInFlightMax = snapshot.RuntimeSnapshotInFlightMax;
     metrics.TcpReadBufferAcquireFailures = snapshot.TcpReadBufferAcquireFailures;
     metrics.TcpReadBufferAcquirePendingBudgetFailures =
         snapshot.TcpReadBufferAcquirePendingBudgetFailures;
@@ -743,6 +756,30 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.LinuxRelayEventProducerThreadsObserved;
     out << ",\"linux_relay_multiple_event_producer_threads_observed\":"
         << (metrics.LinuxRelayMultipleEventProducerThreadsObserved ? "true" : "false");
+    out << ",\"linux_relay_control_lock_wait_nanos\":"
+        << metrics.LinuxRelayControlLockWaitNanos;
+    out << ",\"linux_relay_control_lock_acquire_count\":"
+        << metrics.LinuxRelayControlLockAcquireCount;
+    out << ",\"linux_relay_control_command_wait_nanos\":"
+        << metrics.LinuxRelayControlCommandWaitNanos;
+    out << ",\"linux_relay_control_command_wait_count\":"
+        << metrics.LinuxRelayControlCommandWaitCount;
+    out << ",\"linux_relay_control_command_timeouts\":"
+        << metrics.LinuxRelayControlCommandTimeouts;
+    out << ",\"linux_relay_control_command_enqueue_failures\":"
+        << metrics.LinuxRelayControlCommandEnqueueFailures;
+    out << ",\"linux_relay_snapshot_command_wait_nanos\":"
+        << metrics.LinuxRelaySnapshotCommandWaitNanos;
+    out << ",\"linux_relay_snapshot_command_wait_count\":"
+        << metrics.LinuxRelaySnapshotCommandWaitCount;
+    out << ",\"linux_relay_snapshot_command_timeouts\":"
+        << metrics.LinuxRelaySnapshotCommandTimeouts;
+    out << ",\"linux_relay_runtime_lock_wait_nanos\":"
+        << metrics.LinuxRelayRuntimeLockWaitNanos;
+    out << ",\"linux_relay_runtime_lock_acquire_count\":"
+        << metrics.LinuxRelayRuntimeLockAcquireCount;
+    out << ",\"linux_relay_runtime_snapshot_inflight_max\":"
+        << metrics.LinuxRelayRuntimeSnapshotInFlightMax;
     out << ",\"linux_relay_tcp_read_buffer_acquire_failures\":"
         << metrics.TcpReadBufferAcquireFailures;
     out << ",\"linux_relay_tcp_read_buffer_acquire_pending_budget_failures\":"

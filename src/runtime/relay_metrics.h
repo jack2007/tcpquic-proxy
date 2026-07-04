@@ -110,6 +110,18 @@ struct TqRelayMetricsSnapshot {
     uint64_t LinuxRelayEventQueuePopCasRetries{0};
     uint64_t LinuxRelayEventProducerThreadsObserved{0};
     bool LinuxRelayMultipleEventProducerThreadsObserved{false};
+    uint64_t LinuxRelayControlLockWaitNanos{0};
+    uint64_t LinuxRelayControlLockAcquireCount{0};
+    uint64_t LinuxRelayControlCommandWaitNanos{0};
+    uint64_t LinuxRelayControlCommandWaitCount{0};
+    uint64_t LinuxRelayControlCommandTimeouts{0};
+    uint64_t LinuxRelayControlCommandEnqueueFailures{0};
+    uint64_t LinuxRelaySnapshotCommandWaitNanos{0};
+    uint64_t LinuxRelaySnapshotCommandWaitCount{0};
+    uint64_t LinuxRelaySnapshotCommandTimeouts{0};
+    uint64_t LinuxRelayRuntimeLockWaitNanos{0};
+    uint64_t LinuxRelayRuntimeLockAcquireCount{0};
+    uint64_t LinuxRelayRuntimeSnapshotInFlightMax{0};
     uint64_t TcpReadBufferAcquireFailures{0};
     uint64_t TcpReadBufferAcquirePendingBudgetFailures{0};
     uint64_t TcpReadBufferAcquireAllocFailures{0};
