@@ -210,6 +210,21 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t DeferredReceiveCompletes{0};
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t Errors{0};
+    uint64_t EventQueueFullErrors{0};
+    uint64_t WakeFailures{0};
+    uint64_t CallbackReceiveBudgetRejects{0};
+    uint64_t QuicReceiveEnqueueFailures{0};
+    uint64_t QuicReceiveViewBackpressureQueued{0};
+};
+
+enum class TqDarwinQuicReceiveEnqueueResult : uint8_t {
+    Ok = 0,
+    InvalidArgs,
+    AllocationFailed,
+    EmptyNonFin,
+    NullBuffer,
+    CallbackBudgetRejected,
+    EventQueueFull,
 };
 
 class TqDarwinRelayWorker final {
@@ -258,6 +273,10 @@ public:
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
     uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
     uint64_t PendingTcpWriteBytesForTest(uint64_t relayId);
+    uint64_t EventQueueFullErrorsForTest() const;
+    uint64_t CallbackReceiveBudgetRejectsForTest() const;
+    uint64_t QuicReceiveEnqueueFailuresForTest() const;
+    uint64_t QuicReceiveViewBackpressureQueuedForTest() const;
     void SetRunningForTest(bool running);
     void MarkWorkerThreadExitedForTest();
 #endif
@@ -467,6 +486,11 @@ private:
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     mutable std::atomic<uint64_t> Errors{0};
+    mutable std::atomic<uint64_t> EventQueueFullErrors{0};
+    mutable std::atomic<uint64_t> WakeFailures{0};
+    mutable std::atomic<uint64_t> CallbackReceiveBudgetRejects{0};
+    mutable std::atomic<uint64_t> QuicReceiveEnqueueFailures{0};
+    mutable std::atomic<uint64_t> QuicReceiveViewBackpressureQueued{0};
 };
 
 class TqDarwinRelayRuntime final {

@@ -252,6 +252,7 @@ bool TqDarwinRelayWorker::Wake() const {
                 std::memory_order_acquire)) {
             errno = EIO;
             Errors.fetch_add(1, std::memory_order_relaxed);
+            WakeFailures.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
     }
@@ -264,6 +265,7 @@ bool TqDarwinRelayWorker::Wake() const {
             continue;
         }
         Errors.fetch_add(1, std::memory_order_relaxed);
+        WakeFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
@@ -274,6 +276,7 @@ bool TqDarwinRelayWorker::Wake() const {
 bool TqDarwinRelayWorker::EnqueueEvent(TqDarwinRelayEvent&& event) {
     if (!EventQueue.TryPush(std::move(event))) {
         Errors.fetch_add(1, std::memory_order_relaxed);
+        EventQueueFullErrors.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     (void)Wake();
@@ -284,6 +287,7 @@ TqDarwinRelayWorker::ControlEnqueueResult TqDarwinRelayWorker::EnqueueControlEve
     TqDarwinRelayEvent&& event) const {
     if (!EventQueue.TryPush(std::move(event))) {
         Errors.fetch_add(1, std::memory_order_relaxed);
+        EventQueueFullErrors.fetch_add(1, std::memory_order_relaxed);
         return ControlEnqueueResult::Failed;
     }
     return Wake() ? ControlEnqueueResult::QueuedAndWoken : ControlEnqueueResult::QueuedWakeFailed;
@@ -383,6 +387,22 @@ uint64_t TqDarwinRelayWorker::ActiveSendLocalCompleteCountForTest() const {
 
 uint64_t TqDarwinRelayWorker::FallbackSendCompletionCountForTest() const {
     return FallbackSendCompletionCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::EventQueueFullErrorsForTest() const {
+    return EventQueueFullErrors.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::CallbackReceiveBudgetRejectsForTest() const {
+    return CallbackReceiveBudgetRejects.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::QuicReceiveEnqueueFailuresForTest() const {
+    return QuicReceiveEnqueueFailures.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::QuicReceiveViewBackpressureQueuedForTest() const {
+    return QuicReceiveViewBackpressureQueued.load(std::memory_order_relaxed);
 }
 
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
@@ -2190,18 +2210,22 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
     uint32_t bufferCount,
     bool fin) {
     if (binding == nullptr || stream == nullptr) {
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (bufferCount != 0 && buffers == nullptr) {
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (!fin && (buffers == nullptr || bufferCount == 0)) {
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     auto receive = std::shared_ptr<TqDarwinPendingQuicReceive>(new (std::nothrow) TqDarwinPendingQuicReceive{});
     if (!receive) {
         Errors.fetch_add(1, std::memory_order_relaxed);
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     receive->RelayId = binding->RelayId;
@@ -2216,6 +2240,7 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         }
         if (buffers[i].Buffer == nullptr) {
             Errors.fetch_add(1, std::memory_order_relaxed);
+            QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         receive->Slices.push_back(TqDarwinQuicReceiveSlice{buffers[i].Buffer, buffers[i].Length});
@@ -2223,10 +2248,13 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
     }
     if (receive->TotalLength == 0 && !fin) {
         Errors.fetch_add(1, std::memory_order_relaxed);
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     if (!ReserveCallbackReceiveBudget(binding.get(), receive->TotalLength)) {
         Errors.fetch_add(1, std::memory_order_relaxed);
+        CallbackReceiveBudgetRejects.fetch_add(1, std::memory_order_relaxed);
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     QuicReceiveViewCount.fetch_add(1, std::memory_order_relaxed);
@@ -2242,6 +2270,7 @@ bool TqDarwinRelayWorker::QueueDeferredQuicReceive(
         ReleaseCallbackReceiveBudget(receive);
         QuicReceiveViewCount.fetch_sub(1, std::memory_order_relaxed);
         QuicReceiveViewBytes.fetch_sub(receive->TotalLength, std::memory_order_relaxed);
+        QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     return true;
@@ -2899,6 +2928,12 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
         }
     }
     snapshot.Errors = Errors.load(std::memory_order_relaxed);
+    snapshot.EventQueueFullErrors = EventQueueFullErrors.load(std::memory_order_relaxed);
+    snapshot.WakeFailures = WakeFailures.load(std::memory_order_relaxed);
+    snapshot.CallbackReceiveBudgetRejects = CallbackReceiveBudgetRejects.load(std::memory_order_relaxed);
+    snapshot.QuicReceiveEnqueueFailures = QuicReceiveEnqueueFailures.load(std::memory_order_relaxed);
+    snapshot.QuicReceiveViewBackpressureQueued =
+        QuicReceiveViewBackpressureQueued.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -3140,6 +3175,11 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot() const {
         snapshot.DeferredReceiveCompletes += workerSnapshot.DeferredReceiveCompletes;
         snapshot.QuicSendBackpressureEvents += workerSnapshot.QuicSendBackpressureEvents;
         snapshot.Errors += workerSnapshot.Errors;
+        snapshot.EventQueueFullErrors += workerSnapshot.EventQueueFullErrors;
+        snapshot.WakeFailures += workerSnapshot.WakeFailures;
+        snapshot.CallbackReceiveBudgetRejects += workerSnapshot.CallbackReceiveBudgetRejects;
+        snapshot.QuicReceiveEnqueueFailures += workerSnapshot.QuicReceiveEnqueueFailures;
+        snapshot.QuicReceiveViewBackpressureQueued += workerSnapshot.QuicReceiveViewBackpressureQueued;
     }
     return snapshot;
 }
