@@ -91,7 +91,7 @@ flowchart LR
 client 侧 OPEN 完成后，`FinishClientOpenAndStartRelay()` 设置 pending client relay，等待 OPEN send complete 后进入 `StartRelay()`。Darwin worker 注册 relay 后，TCP read filter 初始启用；本地 TCP 可读时：
 
 1. `ProcessKqueueEvent()` 从 `event.udata` 取 relay id。
-2. `ProcessTcpEvents()` 通过 `FindRelay()` 查找 relay。
+2. `ProcessTcpEvents()` 在 worker 线程内通过 `FindRelayLocal()` 查找 relay，避免进入 worker 全局 map 锁。
 3. `DrainTcpReadable()` 在 `ReadBatchBytes`、`ByteBudgetPerTick`、`ReadChunkSize`、`MaxIov` 限制内分配 relay buffer 并 `readv()`。
 4. 如果未启用压缩，读取到的 `TqBufferView` 直接进入 `SubmitTcpBatchToQuic()`；如果启用 zstd，则先压缩到 `CompressionOutput`，再切成 buffer view。
 5. `TrySubmitQuicSendOperation()` 先登记 known send operation，增加 in-flight send 计数，再调用 MsQuic `Stream::Send()`。
@@ -103,7 +103,7 @@ TCP 读侧背压来自三类条件：`MaxInFlightQuicSends` 达到上限、`MaxB
 
 QUIC receive callback 不直接做 TCP I/O。`StreamCallback()` 收到 `QUIC_STREAM_EVENT_RECEIVE` 后：
 
-1. 通过 `FindRelay()` 找到 relay。
+1. 通过 `StreamBinding` 取得 relay id 和 callback 预算状态，不查 worker relay map。
 2. `QueueDeferredQuicReceive()` 保存 MsQuic buffer view 指针、长度和 FIN 标志。
 3. `ReserveCallbackReceiveBudget()` 先在 callback 侧原子计数中预留 pending receive bytes/events。
 4. 将 `QuicReceiveView` 事件投递到 `TqDarwinRelayEventQueue` 并返回 `QUIC_STATUS_PENDING`。
@@ -139,12 +139,14 @@ relay 生命周期由三层对象托住：
 
 ## 2. macOS 线程锁热点排序
 
+> 跟进计划：`docs/superpowers/specs/2026-07-04-darwin-relay-state-lock-design.md` 和 `docs/superpowers/plans/2026-07-04-darwin-relay-state-lock.md` 已覆盖排名 1、2 的锁热点热路径出清。排名 3、4 的 send completion 锁应作为下一组独立设计处理。
+
 下面按对转发热路径影响从高到低排序。这里的“热度”按代码路径频率、是否跨连接共享、是否进入 callback 或 worker 数据面综合判断。
 
 | 排名 | 锁/同步点 | 粒度 | 主要路径 | 热点原因 | 建议 |
 |---:|---|---|---|---|---|
-| 1 | `RelayState::Mutex` | 单 relay | `DrainTcpReadable()`、`SubmitTcpBatchToQuic()`、`TrySubmitQuicSendOperation()`、`CompleteQuicSend()`、`ProcessQuicReceiveViewEvent()`、`EnqueueQuicReceiveForTcp()`、`FlushTcpWrites()`、pause/resume receive | 每个 TCP read batch、QUIC receive view、TCP write flush、send complete 都会多次进入。虽然是单连接锁，但数据面频率最高，并且会和 MsQuic callback、stop/snapshot 交叉。 | 将 worker-thread-only 状态分离到无锁本地字段；callback 只投递事件，不直接改 `Closing/TcpReadArmed/TcpWriteArmed`；snapshot 走事件化快照或只读副本。 |
-| 2 | `TqDarwinRelayWorker::RelayMutex` | 单 worker 全局 | `FindRelay()`、`FindRetiredRelay()`、register/unregister、retire/purge、snapshot、callback close/receive 查找 | 所有分配到同一 worker 的 relay 共享；TCP kqueue event、QUIC receive callback、send complete 和关闭路径都会查 map。高并发短连接或小包 receive 会放大竞争。 | 正常 worker 线程路径使用 `FindRelayLocal()` 并明确只在 worker 线程访问；callback 侧改为从 `StreamBinding` 持有弱/共享 relay 引用或只投递 relay id，由 worker 再查本地 map。 |
+| 1 | `RelayState::Mutex` | 单 relay | `DrainTcpReadable()`、`SubmitTcpBatchToQuic()`、`TrySubmitQuicSendOperation()`、`CompleteQuicSend()`、`ProcessQuicReceiveViewEvent()`、`EnqueueQuicReceiveForTcp()`、`FlushTcpWrites()`、pause/resume receive | 每个 TCP read batch、QUIC receive view、TCP write flush、send complete 都会多次进入。虽然是单连接锁，但数据面频率最高，并且会和 MsQuic callback、stop/snapshot 交叉。 | 已规划分阶段实现：active relay 数据面字段归 worker thread 独占，callback 只投递事件，snapshot 继续事件化构造；`RelayState::Mutex` 保留为生命周期和非 worker fallback 边界。 |
+| 2 | `TqDarwinRelayWorker::RelayMutex` | 单 worker 全局 | `FindRelay()`、`FindRetiredRelay()`、register/unregister、retire/purge、snapshot、callback close/receive 查找 | 所有分配到同一 worker 的 relay 共享；TCP kqueue event、QUIC receive callback、send complete 和关闭路径都会查 map。高并发短连接或小包 receive 会放大竞争。 | 已纳入同一阶段热路径出清：worker kqueue/event 路径使用 `FindRelayLocal()`；callback 通过 `StreamBinding` 持有稳定 relay 信息，不再为 RECEIVE/abort/shutdown 查 worker map；`RelayMutex` 保留 register/unregister/retire/purge 等生命周期 map 边界。 |
 | 3 | `KnownSendMutex` | 单 worker 全局 | `RegisterKnownSendOperation*()`、`MarkKnownSendOperationSubmitted*()`、`UnregisterKnownSendOperation*()`、test helper、stop drain | 每个 TCP->QUIC send operation 至少插入、标记 submitted、删除一次。所有 relay 共用一个 worker map，因此 send complete 密集时跨连接竞争明显。 | 将 worker 正常路径的 known operation map 改为 worker-only；callback 的 SEND_COMPLETE 只在 `CompletionState` claim 后投递事件，worker 事件内再访问本地 map。保留 fallback 但移出主路径。 |
 | 4 | `CompletionState::Mutex` | 单 stream binding | SEND_COMPLETE claim、known operation 注册/注销、detached/late completion | 每个 send operation 也会更新 per-binding map；单连接内频率高，但不跨连接共享。 | 若保留同步 completion 支持，可将 state 改成 intrusive operation 状态机，使用 operation 内原子位替代 per-binding unordered_map 查找。 |
 | 5 | `TqDarwinRelayEventQueue` 原子 CAS + kqueue wake | 单 worker 队列 | QUIC receive view、send complete event、control event | 不是 mutex，但每个 QUIC receive view 都会 push + wake，多个 MsQuic callback producer 会竞争 `EnqueuePos`；wake 系统调用成本明显。 | 批量投递 wake：从空队列变非空时 wake，或 per-callback 批量 coalesce；增加队列满的 backpressure/重试策略和指标。 |

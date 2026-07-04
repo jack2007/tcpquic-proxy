@@ -1825,7 +1825,20 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
     delete operation;
     if (relay != nullptr) {
         bool closing = false;
-        {
+        if (workerThread && !bindingRelayFallback) {
+            AssertWorkerThreadForRelayState();
+            if (relay->InFlightQuicSends > 0) {
+                --relay->InFlightQuicSends;
+            }
+            relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= info.TotalBytes
+                ? relay->InFlightQuicSendBytes - info.TotalBytes
+                : 0;
+            if (info.Fin) {
+                relay->QuicSendFinCompleted = true;
+                relay->QuicSendClosed = true;
+            }
+            closing = relay->Closing;
+        } else {
             std::lock_guard<std::mutex> relayLock(relay->Mutex);
             if (relay->InFlightQuicSends > 0) {
                 --relay->InFlightQuicSends;
