@@ -209,6 +209,72 @@ bool TqDecodeOpenResponse(const uint8_t* data, size_t len, TqOpenResponse& out) 
     return errorCode != static_cast<uint8_t>(TqOpenError::Ok);
 }
 
+bool TqIsValidClientName(const std::string& name) {
+    if (name.empty() || name.size() > TQ_CLIENT_HELLO_MAX_NAME_LEN) {
+        return false;
+    }
+    for (const unsigned char ch : name) {
+        const bool ok =
+            (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') ||
+            ch == '.' || ch == '_' || ch == '-' || ch == ':';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool TqEncodeClientHello(const TqClientHello& msg, std::vector<uint8_t>& out) {
+    if (!TqIsValidClientName(msg.ClientName)) {
+        return false;
+    }
+
+    out.clear();
+    out.reserve(TQ_CLIENT_HELLO_MIN_SIZE + msg.ClientName.size());
+
+    out.push_back(TQ_MAGIC_0);
+    out.push_back(TQ_MAGIC_1);
+    out.push_back(TQ_VERSION);
+    out.push_back(TQ_CMD_CLIENT_HELLO);
+    WriteU16BE(out, static_cast<uint16_t>(msg.ClientName.size()));
+    out.insert(out.end(), msg.ClientName.begin(), msg.ClientName.end());
+
+    return out.size() == TQ_CLIENT_HELLO_MIN_SIZE + msg.ClientName.size();
+}
+
+bool TqDecodeClientHello(const uint8_t* data, size_t len, TqClientHello& out) {
+    if (data == nullptr || len < TQ_CLIENT_HELLO_MIN_SIZE) {
+        return false;
+    }
+    if (data[0] != TQ_MAGIC_0 || data[1] != TQ_MAGIC_1) {
+        return false;
+    }
+    if (data[2] != TQ_VERSION || data[3] != TQ_CMD_CLIENT_HELLO) {
+        return false;
+    }
+
+    const uint16_t nameLen = ReadU16BE(data + 4);
+    if (nameLen == 0 || nameLen > TQ_CLIENT_HELLO_MAX_NAME_LEN) {
+        return false;
+    }
+    if (len != TQ_CLIENT_HELLO_MIN_SIZE + nameLen) {
+        return false;
+    }
+
+    TqClientHello msg{};
+    msg.ClientName.assign(
+        reinterpret_cast<const char*>(data + TQ_CLIENT_HELLO_MIN_SIZE),
+        static_cast<size_t>(nameLen));
+    if (!TqIsValidClientName(msg.ClientName)) {
+        return false;
+    }
+
+    out = std::move(msg);
+    return true;
+}
+
 bool TqEncodeSpeedStart(const TqSpeedStart& msg, std::vector<uint8_t>& out) {
     if (!ValidateSpeedStart(msg)) {
         return false;

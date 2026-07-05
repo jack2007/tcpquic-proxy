@@ -78,6 +78,83 @@ int main() {
         return 18;
     }
 
+    TqClientHello hello{};
+    hello.ClientName = "office-a";
+    std::vector<uint8_t> hbuf;
+    if (!TqEncodeClientHello(hello, hbuf)) {
+        return 201;
+    }
+    const std::vector<uint8_t> validHelloBuffer = hbuf;
+    TqClientHello hdec{};
+    if (!TqDecodeClientHello(hbuf.data(), hbuf.size(), hdec)) {
+        return 202;
+    }
+    if (hdec.ClientName != "office-a") {
+        return 203;
+    }
+
+    TqClientHello oneCharHello{};
+    oneCharHello.ClientName = ":";
+    if (!TqEncodeClientHello(oneCharHello, hbuf)) {
+        return 209;
+    }
+    if (!TqDecodeClientHello(hbuf.data(), hbuf.size(), hdec)) {
+        return 210;
+    }
+    if (hdec.ClientName != ":") {
+        return 211;
+    }
+
+    TqClientHello maxHello{};
+    maxHello.ClientName = "AZaz09._-:";
+    maxHello.ClientName += std::string(54, 'x');
+    if (maxHello.ClientName.size() != TQ_CLIENT_HELLO_MAX_NAME_LEN) {
+        return 212;
+    }
+    if (!TqEncodeClientHello(maxHello, hbuf)) {
+        return 213;
+    }
+    if (!TqDecodeClientHello(hbuf.data(), hbuf.size(), hdec)) {
+        return 214;
+    }
+    if (hdec.ClientName != maxHello.ClientName) {
+        return 215;
+    }
+
+    TqClientHello emptyHello{};
+    if (TqEncodeClientHello(emptyHello, hbuf)) {
+        return 204;
+    }
+    TqClientHello badHello{};
+    badHello.ClientName = "bad name";
+    if (TqEncodeClientHello(badHello, hbuf)) {
+        return 205;
+    }
+    badHello.ClientName = std::string(65, 'a');
+    if (TqEncodeClientHello(badHello, hbuf)) {
+        return 206;
+    }
+
+    std::vector<uint8_t> invalidHello = {
+        TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, TQ_CMD_CLIENT_HELLO, 0, 3, 'a', ' ', 'b'};
+    if (TqDecodeClientHello(invalidHello.data(), invalidHello.size(), hdec)) {
+        return 207;
+    }
+    if (TqDecodeClientHello(validHelloBuffer.data(), validHelloBuffer.size() - 1, hdec)) {
+        return 208;
+    }
+    std::vector<uint8_t> zeroLenHello = {
+        TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, TQ_CMD_CLIENT_HELLO, 0, 0};
+    if (TqDecodeClientHello(zeroLenHello.data(), zeroLenHello.size(), hdec)) {
+        return 216;
+    }
+    std::vector<uint8_t> tooLongHello = {
+        TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, TQ_CMD_CLIENT_HELLO, 0, 65};
+    tooLongHello.insert(tooLongHello.end(), 65, 'a');
+    if (TqDecodeClientHello(tooLongHello.data(), tooLongHello.size(), hdec)) {
+        return 217;
+    }
+
     // DOMAIN without DNS_REMOTE must be rejected.
     TqOpenRequest badDomain = req;
     badDomain.Flags = TQ_FLAG_COMPRESS;

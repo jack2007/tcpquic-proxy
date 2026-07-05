@@ -15,6 +15,7 @@ static constexpr uint8_t TQ_CMD_SPEED_READY = 0x11;
 static constexpr uint8_t TQ_CMD_SPEED_FINISH = 0x12;
 static constexpr uint8_t TQ_CMD_SPEED_RESULT = 0x13;
 static constexpr uint8_t TQ_CMD_SPEED_ERROR = 0x14;
+static constexpr uint8_t TQ_CMD_CLIENT_HELLO = 0x20;
 
 static constexpr uint8_t TQ_ADDR_IPV4 = 0x01;
 static constexpr uint8_t TQ_ADDR_IPV6 = 0x02;
@@ -30,6 +31,8 @@ static constexpr size_t TQ_SPEED_FINISH_SIZE = 24;
 static constexpr size_t TQ_SPEED_RESULT_SIZE = 33;
 static constexpr size_t TQ_SPEED_ERROR_MIN_SIZE = 11;
 static constexpr size_t TQ_SPEED_ERROR_MAX_MESSAGE_LEN = 1024;
+static constexpr size_t TQ_CLIENT_HELLO_MIN_SIZE = 6;
+static constexpr size_t TQ_CLIENT_HELLO_MAX_NAME_LEN = 64;
 
 enum class TqSpeedDirection : uint8_t {
     Download = 1,
@@ -104,6 +107,10 @@ struct TqSpeedErrorMessage {
     std::string Message;
 };
 
+struct TqClientHello {
+    std::string ClientName;
+};
+
 bool TqEncodeOpenRequest(const TqOpenRequest& req, std::vector<uint8_t>& out);
 bool TqDecodeOpenRequest(const uint8_t* data, size_t len, TqOpenRequest& out);
 bool TqEncodeOpenResponse(const TqOpenResponse& resp, std::vector<uint8_t>& out);
@@ -119,3 +126,6 @@ bool TqEncodeSpeedResult(const TqSpeedResult& msg, std::vector<uint8_t>& out);
 bool TqDecodeSpeedResult(const uint8_t* data, size_t len, TqSpeedResult& out);
 bool TqEncodeSpeedError(const TqSpeedErrorMessage& msg, std::vector<uint8_t>& out);
 bool TqDecodeSpeedError(const uint8_t* data, size_t len, TqSpeedErrorMessage& out);
+bool TqEncodeClientHello(const TqClientHello& msg, std::vector<uint8_t>& out);
+bool TqDecodeClientHello(const uint8_t* data, size_t len, TqClientHello& out);
+bool TqIsValidClientName(const std::string& name);
