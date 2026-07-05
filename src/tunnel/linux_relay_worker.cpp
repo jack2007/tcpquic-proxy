@@ -3941,22 +3941,22 @@ bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
     }
 
     TqRelayResetQuicReadAhead(tuning.InitialQuicReadAheadBytes);
-    const uint32_t workerCount = std::max<uint32_t>(1, tuning.LinuxRelayWorkerCount);
+    const uint32_t workerCount = std::max<uint32_t>(1, tuning.RelayWorkerCount);
     for (uint32_t i = 0; i < workerCount; ++i) {
         TqLinuxRelayWorkerConfig config{};
-        config.EventBudget = tuning.LinuxRelayWorkerEventBudget;
-        config.EventQueueCapacity = tuning.LinuxRelayEventQueueCapacity;
+        config.EventBudget = tuning.RelayWorkerEventBudget;
+        config.EventQueueCapacity = tuning.RelayEventQueueCapacity;
         config.TrackEventProducers = true;
         config.WorkerIndex = i;
-        config.ByteBudgetPerTick = tuning.LinuxRelayWorkerByteBudgetPerTick;
-        config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
-        config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
-        config.MaxIov = tuning.LinuxRelayMaxIov;
-        config.TcpWriteMaxBytes = tuning.LinuxRelayTcpWriteMaxBytes;
-        config.TcpWriteBurstBytes = tuning.LinuxRelayTcpWriteBurstBytes;
+        config.ByteBudgetPerTick = tuning.RelayWorkerByteBudgetPerTick;
+        config.ReadChunkSize = tuning.RelayReadChunkSize;
+        config.ReadBatchBytes = tuning.RelayReadBatchBytes;
+        config.MaxIov = tuning.RelayMaxIov;
+        config.TcpWriteMaxBytes = tuning.RelayTcpWriteMaxBytes;
+        config.TcpWriteBurstBytes = tuning.RelayTcpWriteBurstBytes;
         config.MaxPendingBufferBytes = tuning.MaxPendingBufferBytesPerRelay;
-        config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
-        config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
+        config.MaxPendingQuicReceiveBytesPerRelay = tuning.RelayPerTunnelPendingBytes;
+        config.DeferredReceiveCompleteBatchBytes = tuning.RelayQuicReceiveCompleteBatchBytes;
         config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
         config.MaxBufferedQuicSendBytes = tuning.InitialQuicReadAheadBytes;
         config.UseDynamicQuicReadAhead = true;

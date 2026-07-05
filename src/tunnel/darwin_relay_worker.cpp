@@ -3253,20 +3253,20 @@ bool TqDarwinRelayRuntime::Start(const TqTuningConfig& tuning) {
         return true;
     }
 
-    const uint32_t count = std::max<uint32_t>(1, tuning.LinuxRelayWorkerCount);
+    const uint32_t count = std::max<uint32_t>(1, tuning.RelayWorkerCount);
     Workers.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         TqDarwinRelayWorkerConfig config{};
         config.WorkerIndex = i;
-        config.EventBudget = tuning.LinuxRelayWorkerEventBudget;
-        config.ByteBudgetPerTick = tuning.LinuxRelayWorkerByteBudgetPerTick;
-        config.ReadChunkSize = tuning.LinuxRelayReadChunkSize;
-        config.ReadBatchBytes = tuning.LinuxRelayReadBatchBytes;
-        config.MaxIov = tuning.LinuxRelayMaxIov;
-        config.TcpWriteMaxBytes = tuning.LinuxRelayTcpWriteMaxBytes;
-        config.TcpWriteBurstBytes = tuning.LinuxRelayTcpWriteBurstBytes;
-        config.MaxPendingQuicReceiveBytesPerRelay = tuning.LinuxRelayPerTunnelPendingBytes;
-        config.DeferredReceiveCompleteBatchBytes = tuning.LinuxRelayQuicReceiveCompleteBatchBytes;
+        config.EventBudget = tuning.RelayWorkerEventBudget;
+        config.ByteBudgetPerTick = tuning.RelayWorkerByteBudgetPerTick;
+        config.ReadChunkSize = tuning.RelayReadChunkSize;
+        config.ReadBatchBytes = tuning.RelayReadBatchBytes;
+        config.MaxIov = tuning.RelayMaxIov;
+        config.TcpWriteMaxBytes = tuning.RelayTcpWriteMaxBytes;
+        config.TcpWriteBurstBytes = tuning.RelayTcpWriteBurstBytes;
+        config.MaxPendingQuicReceiveBytesPerRelay = tuning.RelayPerTunnelPendingBytes;
+        config.DeferredReceiveCompleteBatchBytes = tuning.RelayQuicReceiveCompleteBatchBytes;
         config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
         config.MaxBufferedQuicSendBytes = tuning.MaxPendingBufferBytesPerRelay;
 
