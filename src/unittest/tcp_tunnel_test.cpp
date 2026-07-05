@@ -11,8 +11,19 @@
 #include "tunnel_registry.h"
 #include "trace.h"
 
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+
 struct MsQuicConnection;
 struct TqTunnelContext;
+
+static std::mutex g_test_server_connection_lock;
+static std::map<HQUIC, TqServerConnectionSnapshot> g_test_server_connections;
+static std::map<MsQuicConnection*, HQUIC> g_test_server_connection_handles;
+static uint32_t g_next_test_server_connection_id = 1;
 
 #if defined(TCPQUIC_TUNNEL_TESTING)
 TqTunnelContext* TqCreateTestRegisteredTunnel(
@@ -30,8 +41,24 @@ bool TqTestCancelServerDialAndHasPending(TqTunnelContext* context);
 #endif
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
-    (void)connection;
-    return 0;
+    if (connection == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    const auto handleIt = g_test_server_connection_handles.find(connection);
+    if (handleIt == g_test_server_connection_handles.end()) {
+        return 0;
+    }
+    const auto it = g_test_server_connections.find(handleIt->second);
+    if (it == g_test_server_connections.end()) {
+        return 0;
+    }
+    constexpr const char* kPrefix = "srv-";
+    const std::string& id = it->second.ConnectionId;
+    if (id.rfind(kPrefix, 0) != 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::strtoul(id.c_str() + std::strlen(kPrefix), nullptr, 10));
 }
 
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
@@ -57,6 +84,75 @@ MsQuicConnection* QuicClientSession::PickConnectionFrom(size_t) {
 
 uint32_t QuicClientSession::ConnectedConnectionCount() const {
     return 0;
+}
+
+uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection) {
+    if (handle == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    const uint32_t id = g_next_test_server_connection_id++;
+    TqServerConnectionSnapshot snapshot{};
+    snapshot.ConnectionId = "srv-" + std::to_string(id);
+    g_test_server_connections[handle] = std::move(snapshot);
+    if (connection != nullptr) {
+        g_test_server_connection_handles[connection] = handle;
+    }
+    return id;
+}
+
+bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName) {
+    if (connection == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    const auto handleIt = g_test_server_connection_handles.find(connection);
+    if (handleIt == g_test_server_connection_handles.end()) {
+        return false;
+    }
+    const auto it = g_test_server_connections.find(handleIt->second);
+    if (it == g_test_server_connections.end()) {
+        return false;
+    }
+    it->second.ClientName = clientName;
+    return true;
+}
+
+bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
+    if (handle == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    const auto it = g_test_server_connections.find(handle);
+    if (it == g_test_server_connections.end()) {
+        return false;
+    }
+    it->second.ClientName = clientName;
+    return true;
+}
+
+bool TqGetServerConnectionSnapshot(const std::string& connectionId, TqServerConnectionSnapshot& out) {
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    for (const auto& item : g_test_server_connections) {
+        if (item.second.ConnectionId == connectionId) {
+            out = item.second;
+            return true;
+        }
+    }
+    return false;
+}
+
+void TqUnregisterServerConnectionForTest(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    for (auto it = g_test_server_connection_handles.begin();
+         it != g_test_server_connection_handles.end();) {
+        if (it->second == handle) {
+            it = g_test_server_connection_handles.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    g_test_server_connections.erase(handle);
 }
 
 bool TqTraceEnabled() {
@@ -345,6 +441,7 @@ struct FakeQuicStreamRecord {
     std::vector<FakeQuicSendRecord> Sends;
     unsigned CloseCount{0};
     unsigned ShutdownCount{0};
+    QUIC_STREAM_SHUTDOWN_FLAGS LastShutdownFlags{QUIC_STREAM_SHUTDOWN_FLAG_NONE};
 };
 
 std::mutex g_fake_quic_lock;
@@ -384,10 +481,12 @@ QUIC_STATUS QUIC_API FakeStreamSend(
 
 QUIC_STATUS QUIC_API FakeStreamShutdown(
     HQUIC handle,
-    QUIC_STREAM_SHUTDOWN_FLAGS,
+    QUIC_STREAM_SHUTDOWN_FLAGS flags,
     QUIC_UINT62) {
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
-    ++g_fake_quic_streams[handle].ShutdownCount;
+    auto& record = g_fake_quic_streams[handle];
+    ++record.ShutdownCount;
+    record.LastShutdownFlags = flags;
     return QUIC_STATUS_SUCCESS;
 }
 
@@ -396,8 +495,12 @@ void QUIC_API FakeStreamClose(HQUIC handle) {
     ++g_fake_quic_streams[handle].CloseCount;
 }
 
+void QUIC_API FakeConnectionClose(HQUIC) {
+}
+
 void InstallFakeMsQuicForTcpTunnel(QUIC_API_TABLE& table) {
     std::memset(&table, 0, sizeof(table));
+    table.ConnectionClose = FakeConnectionClose;
     table.SetCallbackHandler = FakeSetCallbackHandler;
     table.StreamSend = FakeStreamSend;
     table.StreamShutdown = FakeStreamShutdown;
@@ -465,6 +568,14 @@ unsigned FakeShutdownCount(HQUIC handle) {
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
     const auto it = g_fake_quic_streams.find(handle);
     return it == g_fake_quic_streams.end() ? 0 : it->second.ShutdownCount;
+}
+
+QUIC_STREAM_SHUTDOWN_FLAGS FakeLastShutdownFlags(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    const auto it = g_fake_quic_streams.find(handle);
+    return it == g_fake_quic_streams.end()
+        ? QUIC_STREAM_SHUTDOWN_FLAG_NONE
+        : it->second.LastShutdownFlags;
 }
 
 bool DispatchFakeSendComplete(HQUIC handle) {
@@ -595,6 +706,17 @@ std::vector<uint8_t> BuildSpeedFinishBytes(
 
 std::vector<uint8_t> BuildUnknownCommandBytes(uint8_t cmd) {
     return std::vector<uint8_t>{TQ_MAGIC_0, TQ_MAGIC_1, TQ_VERSION, cmd};
+}
+
+std::vector<uint8_t> BuildClientHelloBytes(const char* clientName) {
+    TqClientHello hello{};
+    hello.ClientName = clientName;
+
+    std::vector<uint8_t> encoded;
+    if (!TqEncodeClientHello(hello, encoded)) {
+        encoded.clear();
+    }
+    return encoded;
 }
 
 class FakeEphemeralTargetAuthorizer final : public TqEphemeralTargetAuthorizer {
@@ -753,6 +875,111 @@ int TestServerIncomingOpenDispatchesWithInitialBytes() {
     if (!DispatchFakeSendComplete(rawStream)) return 239;
     if (!ReapPreparedFakeTunnel(wrappedStream, tunnelContext)) return 240;
     if (!DispatchFakeShutdownComplete(rawStream)) return 241;
+    return 0;
+}
+
+int TestServerIncomingClientHelloUpdatesConnectionNameOnly() {
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    auto rawConn = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7108));
+    MsQuicConnection conn(rawConn, CleanUpManual, MsQuicConnection::NoOpCallback);
+    const uint32_t serverConnId = TqRegisterServerConnectionForTest(rawConn, &conn);
+    if (serverConnId == 0) return 345;
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+
+    bool completed = false;
+    bool aclDenied = false;
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7109));
+    TqHandleServerIncomingStream(
+        &conn,
+        rawStream,
+        acl,
+        cfg,
+        nullptr,
+        [&completed]() { completed = true; },
+        [&aclDenied]() { aclDenied = true; });
+
+    const std::vector<uint8_t> helloBytes = BuildClientHelloBytes("office-a");
+    if (helloBytes.empty()) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 346;
+    }
+
+    QUIC_BUFFER firstBuffer{
+        4,
+        const_cast<uint8_t*>(helloBytes.data()),
+    };
+    QUIC_STREAM_EVENT firstEvent{};
+    firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    firstEvent.RECEIVE.BufferCount = 1;
+    firstEvent.RECEIVE.Buffers = &firstBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, firstEvent)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 347;
+    }
+
+    TqServerConnectionSnapshot partialSnapshot{};
+    if (!TqGetServerConnectionSnapshot(
+            "srv-" + std::to_string(serverConnId),
+            partialSnapshot)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 348;
+    }
+    if (!partialSnapshot.ClientName.empty()) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 349;
+    }
+
+    QUIC_BUFFER secondBuffer{
+        static_cast<uint32_t>(helloBytes.size() - 4),
+        const_cast<uint8_t*>(helloBytes.data() + 4),
+    };
+    QUIC_STREAM_EVENT secondEvent{};
+    secondEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    secondEvent.RECEIVE.BufferCount = 1;
+    secondEvent.RECEIVE.Buffers = &secondBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, secondEvent)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 350;
+    }
+
+    TqServerConnectionSnapshot snapshot{};
+    if (!TqGetServerConnectionSnapshot("srv-" + std::to_string(serverConnId), snapshot)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 351;
+    }
+    if (snapshot.ClientName != "office-a") {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 352;
+    }
+    if (TqCountConnectionTunnels(&conn) != 0) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 353;
+    }
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (WaitForFakeSend(rawStream, responseBytes, responseFlags, 100)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 354;
+    }
+    if (FakeShutdownCount(rawStream) == 0) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 355;
+    }
+    if (FakeLastShutdownFlags(rawStream) != QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 359;
+    }
+
+    TqUnregisterServerConnectionForTest(rawConn);
+    if (!DispatchFakeShutdownComplete(rawStream)) return 356;
+    if (!completed) return 357;
+    if (aclDenied) return 358;
     return 0;
 }
 
@@ -1682,6 +1909,7 @@ int main() {
     if (int rc = TestClientOpenOwnerDefersShutdownCompleteDelete()) return rc;
     if (int rc = TestDetectsMsQuicFakeFinReceive()) return rc;
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
+    if (int rc = TestServerIncomingClientHelloUpdatesConnectionNameOnly()) return rc;
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
 #if defined(__linux__)

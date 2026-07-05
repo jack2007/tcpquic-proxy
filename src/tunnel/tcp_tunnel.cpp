@@ -2293,7 +2293,7 @@ private:
     QUIC_STATUS OnStreamEvent(MsQuicStream*, QUIC_STREAM_EVENT* event) noexcept {
         switch (event->Type) {
         case QUIC_STREAM_EVENT_RECEIVE:
-            if (CloseAfterStructuredError_) {
+            if (CloseAfterStructuredError_ || CloseAfterClientHello_) {
                 break;
             }
             for (uint32_t i = 0; i < event->RECEIVE.BufferCount; ++i) {
@@ -2335,6 +2335,9 @@ private:
         case TQ_CMD_OPEN:
             HandOffToTunnelContext();
             return;
+        case TQ_CMD_CLIENT_HELLO:
+            HandleClientHello();
+            return;
         case TQ_CMD_SPEED_START:
             HandOffToSpeedControlStream();
             return;
@@ -2347,6 +2350,43 @@ private:
                 AbortOrClose();
             }
             return;
+        }
+    }
+
+    void HandleClientHello() {
+        if (BufferedRx_.size() < TQ_CLIENT_HELLO_MIN_SIZE) {
+            return;
+        }
+
+        const uint16_t nameLen =
+            static_cast<uint16_t>((static_cast<uint16_t>(BufferedRx_[4]) << 8) | BufferedRx_[5]);
+        if (nameLen > TQ_CLIENT_HELLO_MAX_NAME_LEN) {
+            AbortOrClose();
+            return;
+        }
+
+        const size_t expectedLen = TQ_CLIENT_HELLO_MIN_SIZE + nameLen;
+        if (BufferedRx_.size() < expectedLen) {
+            return;
+        }
+
+        TqClientHello hello{};
+        if (!TqDecodeClientHello(BufferedRx_.data(), expectedLen, hello)) {
+            AbortOrClose();
+            return;
+        }
+
+        if (TqSetServerConnectionClientName(Conn_, hello.ClientName)) {
+            std::fprintf(
+                stderr,
+                "tcpquic-proxy: QUIC server client hello name=%s conn=%u\n",
+                hello.ClientName.c_str(),
+                TqLookupServerConnectionId(Conn_));
+        }
+
+        CloseAfterClientHello_ = true;
+        if (Stream_ != nullptr) {
+            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
         }
     }
 
@@ -2448,6 +2488,7 @@ private:
     std::vector<uint8_t> BufferedRx_;
     bool OwnershipTransferred_{false};
     bool CloseAfterStructuredError_{false};
+    bool CloseAfterClientHello_{false};
 };
 
 void TqHandleServerIncomingStreamInternal(
