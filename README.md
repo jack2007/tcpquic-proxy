@@ -309,6 +309,7 @@ Usage: tcpquic-proxy client|server [options]
 | `--socks-listen` | client | `127.0.0.1:1080` | SOCKS5 监听地址 |
 | `--http-listen` | client | `127.0.0.1:8080` | HTTP CONNECT 监听地址 |
 | `--peer` | client | （必填） | B 节点 QUIC 地址 `host:port` |
+| `--client-name` | client | `primary` / `peer_id` | 上报给 server console 的展示名称；只用于展示，不作为认证身份 |
 | `--forward` | client | `空` | 本地端口转发，格式 `local=target`，可重复配置 |
 | `--listen` | server | （必填） | QUIC 监听 `host:port` |
 | `--cert` | server | （必填） | 服务端证书 PEM；client 模式忽略 |

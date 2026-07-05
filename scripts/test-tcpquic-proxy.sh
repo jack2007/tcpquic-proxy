@@ -7,6 +7,7 @@ RENAMED_BIN="$ROOT_DIR/build/bin/Release/raypx2"
 USER_BIN="${TCPQUIC_PROXY_BIN:-${BIN:-}}"
 BIN=""
 TMP_DIR="/tmp/tcpquic-test-$$"
+CLIENT_NAME="${CLIENT_NAME:-tcpquic-test}"
 
 SERVER_PID=""
 CLIENT_PID=""
@@ -306,6 +307,7 @@ start_client() {
         --cert "$TMP_DIR/client.crt" \
         --key "$TMP_DIR/client.key" \
         --ca "$TMP_DIR/ca.crt" \
+        --client-name "$CLIENT_NAME" \
         --connections "$quic_connections" \
         --compress "$compress_mode" \
         >"$log_file" 2>&1 &
@@ -329,6 +331,7 @@ start_client_with_forward() {
         --cert "$TMP_DIR/client.crt" \
         --key "$TMP_DIR/client.key" \
         --ca "$TMP_DIR/ca.crt" \
+        --client-name "$CLIENT_NAME" \
         --compress "$compress_mode" \
         >"$log_file" 2>&1 &
     echo "$!"
@@ -427,7 +430,7 @@ read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
 
 cat > "$TMP_DIR/client-config.json" <<EOF
-{"version":1,"peers":[{"peer_id":"healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","compress":"off"}]}
+{"version":1,"peers":[{"peer_id":"healthy","client_name":"${CLIENT_NAME}-healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","client_name":"${CLIENT_NAME}-down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","compress":"off"}]}
 EOF
 
 CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")

@@ -13,6 +13,12 @@
 
 实现中的事务顺序为：解析 patch -> 构造 next config/ACL -> 写回配置文件 -> 更新 server dial reactor ACL -> 提交 runtime state。生产路径的 `serverDial.UpdateAcl()` 当前不可失败；测试注入 update 失败时，handler 返回 503 且不提交 runtime state，但已经写入的配置文件不会自动回滚。
 
+### 0.1 server peer 名称展示
+
+server peer 名称优先来自 client 建连后上报的 `client_name`。未收到上报或老版本 client 连接时，console 回退到 `peer-${remote_address}`。`client_name` 是展示字段，不是认证身份。
+
+`/api/v1/server/connections` 和单连接详情会返回 `client_name` 与原有 `remote_address`。server overview、server peers 和 server connections 页面使用 `client_name` 聚合/展示 peer；同一 `client_name` 下出现多个远端地址时，console 会保留去重后的地址集合并在表格中显示首个地址及额外地址数量。
+
 ## 1. 背景和目标
 
 server admin-console 需要从观测面扩展到配置面。首要目标是让 server 侧 ACL 白名单和黑名单可以在 admin-console 修改后立刻生效，影响后续新建 tunnel 的目标访问决策，不要求重启进程。
