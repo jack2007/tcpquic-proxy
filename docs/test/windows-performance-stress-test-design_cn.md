@@ -25,12 +25,46 @@
 | 构建产物 | `build-x64\bin\Release\raypx2.exe` |
 | Relay 后端 | `windows-iocp`（默认 8 workers，由 `TqDetectRelayWorkers()` 检测） |
 | 典型远端 | `172.16.10.80:8443`（Linux server，管理网） |
+| 远端 SSH 用户 | `jack`（仅用于远端启停 iperf3 / 查日志；L2 内置测速**不需要** SSH） |
 | 本机 Admin | `0.0.0.0:2345`（client router 模式） |
+| 证书目录 | 仓库根 `cert/`（server/client 共用同一测试 CA） |
 
 说明：
 
 - Windows 压测**不替代** DGX 双 200G 网口回归；本方案聚焦 Windows client/server 在本机或管理网链路上的 relay 行为与稳定性。
 - 若 server 运行在 Linux 远端，数据面瓶颈可能在链路、远端 CPU 或 Linux relay，需在 `summary.md` 中区分 Windows 侧指标与端到端吞吐。
+
+### 1.1.1 T1 固定环境（当前轮次）
+
+以下为本轮 T1 压测已确认的环境，压测前写入证据目录 `env/t1-fixture.txt`：
+
+| 项 | 值 |
+|---|---|
+| Linux server 地址 | `172.16.10.80:8443` |
+| Linux SSH 用户 | `jack@172.16.10.80`（可选；非 L2 门禁前置） |
+| Server 状态 | `raypx2 server` 已在远端运行 |
+| Server 证书 | `cert/server/server.crt` + `cert/server/server.key`（Linux 侧路径与仓库 `cert/` 一致） |
+| Client CA | `cert/ca.crt`（Windows 侧 `--ca cert\ca.crt`） |
+| 内置 speed test 模式 | 单 peer CLI（`--peer 172.16.10.80:8443`）；**禁止**与 `--client-config` router 配置混用 |
+| SSH 免密 | **非必须**；仅 iperf3 长流（F09/F10/F14）或自动化远端运维时建议配置 |
+
+证书 SAN 提示：默认 `cert/` 生成脚本的 server SAN **不含** `172.16.10.80`。若 TLS 握手因 IP 不匹配失败，在 Linux 重新生成证书时加入 `IP:172.16.10.80`，或 client 改用 `--peer tcpquic-server:8443` 并在本机 `hosts` 解析该主机名。
+
+T1 快速连通（10 s）：
+
+```powershell
+$Bin = ".\build-x64\bin\Release\raypx2.exe"
+& $Bin client --peer 172.16.10.80:8443 --ca cert\ca.crt --connections 1 --compress off --download-test 10
+```
+
+T1 下载基线（F02，60 s × 3 轮）：
+
+```powershell
+1..3 | ForEach-Object {
+  Write-Host "=== Round $_ ==="
+  & $Bin client --peer 172.16.10.80:8443 --ca cert\ca.crt --connections 1 --compress off --download-test 60
+}
+```
 
 ### 1.2 核心目标
 
@@ -130,7 +164,29 @@ L4 soak        单/多隧道持续 30–120 min
 | Git Bash / WSL | 复用 `scripts/test-tcpquic-concurrent.sh` | 并发隧道 stress 可先在 Git Bash 跑通，再逐步移植 PS1 |
 | Performance Monitor / typeperf | CPU、内存、句柄采样 | 长稳与 soak 必采 |
 
-### 4.3 构建与二进制约定
+### 4.3 T1 远端前置条件（Linux `172.16.10.80`）
+
+| 检查项 | 命令 / 说明 |
+|---|---|
+| Server 进程 | Linux 上 `raypx2` 监听 `8443`（已就绪则跳过） |
+| Server 证书 | `--cert cert/server/server.crt --key cert/server/server.key` |
+| Client CA | Windows：`--ca cert\ca.crt` |
+| 网络 | Windows → `172.16.10.80:8443` UDP/TCP 可达（QUIC） |
+| SSH | 可选；L2 `--download-test` / `--upload-test` 不依赖 SSH |
+
+Linux server 启动参考（证书路径与仓库 `cert/` 对齐时）：
+
+```bash
+cd /path/to/tcpquic-proxy
+./build/bin/Release/raypx2 server \
+  --listen 0.0.0.0:8443 \
+  --cert cert/server/server.crt \
+  --key cert/server/server.key \
+  --allow-targets 0.0.0.0/0 \
+  --compress off
+```
+
+### 4.4 构建与二进制约定
 
 ```powershell
 # 增量构建（仅 src 变更）
@@ -177,7 +233,12 @@ $Bin = ".\build-x64\bin\Release\raypx2.exe"
 
 记录每轮 stdout 中的吞吐（Mbps）、RTT、ideal_send。upload 方向将 `--download-test` 换成 `--upload-test`。
 
-T1 远端模式：将 `--peer` 指向 `172.16.10.80:8443`，证书与 `--config` 使用现有 `client-config-*.json`，**不要**与 router 多 peer 配置混用内置 speed test。
+T1 远端模式：将 `--peer` 指向 `172.16.10.80:8443`，client 使用 `--ca cert\ca.crt`；**不要**与 `--client-config` router 多 peer 配置混用内置 speed test。
+
+```powershell
+& $Bin client --peer 172.16.10.80:8443 --ca cert\ca.crt --connections 1 --compress off --download-test 60
+& $Bin client --peer 172.16.10.80:8443 --ca cert\ca.crt --connections 1 --compress off --upload-test 60
+```
 
 ### 5.3 L2 — iperf3 长流（T1 示例）
 
@@ -406,6 +467,7 @@ cmake --build build-x64 --config Release --target tcpquic_windows_relay_worker_t
 - [ ] 新增 `scripts/run-windows-perf-matrix.ps1`，按本章 F01–F14 自动创建证据目录
 - [ ] 将 L1 smoke 纳入 Windows CI（GitHub Actions `windows-latest`）
 - [ ] 补充 k6 脚本压测 client admin（参考 `docs/server-admin-console.md` §7.4 模型）
+- [x] T1 固定环境与证书约定已写入本文 §1.1.1、§4.3（`172.16.10.80:8443`，`cert/ca.crt`）
 - [ ] 在 T1 环境固定 iperf3 端口转发配置，写入 `docs/test/windows-perf-t1-fixtures.json`
 
 ---
@@ -415,7 +477,38 @@ cmake --build build-x64 --config Release --target tcpquic_windows_relay_worker_t
 ```powershell
 # 日常三步
 .\scripts\test-tcpquic-proxy-windows.ps1
-.\build-x64\bin\Release\raypx2.exe client --peer 127.0.0.1:18443 --ca cert\ca.crt --connections 1 --compress off --download-test 60
+.\build-x64\bin\Release\raypx2.exe client --peer 172.16.10.80:8443 --ca cert\ca.crt --connections 1 --compress off --download-test 60
 # 查看 metrics
 curl.exe -sS -H "Authorization: Bearer <token>" http://127.0.0.1:2345/api/v1/metrics
 ```
+
+## 12. 首轮执行记录（T1）
+
+日期：2026-07-05 18:32（本地）
+
+证据目录：`docs/test/windows-perf-t1-20260705-183250/`
+
+| 项 | 结果 |
+|---|---|
+| L0 单测 | SKIP（shell 无 cmake） |
+| L1 smoke | SKIP（无 openssl） |
+| F02 download ×3 | FAIL（pump worker failed） |
+| F03 upload | PASS（111.46 MiB/s） |
+| F06 download conn=4 | FAIL |
+
+详见 `docs/test/windows-perf-t1-20260705-183250/summary/summary.md`。下载方向失败阻塞 L3/L4；需先排查 Windows client download relay 或 speed test pump。
+
+### 12.1 复测记录（T1）
+
+日期：2026-07-05 23:48（本地）
+
+证据目录：`docs/test/windows-perf-t1-20260705-234845/`
+
+| 项 | 结果 |
+|---|---|
+| 当前 `raypx2.exe` 进程 | 无存活进程；基于当前构建产物重新启动受控测速 |
+| F02 download ×3 | FAIL（均触发 local/server byte mismatch，平均 93.69 MiB/s） |
+| F03 upload ×1 | PASS（111.46 MiB/s） |
+| F06 download conn=4 | FAIL（local/server byte mismatch，111.43 MiB/s） |
+
+详见 `docs/test/windows-perf-t1-20260705-234845/summary/summary.md`。复测结论与首轮一致：upload 方向正常，download 方向可完成测速但稳定触发 byte mismatch，因此 L3/L4 继续阻塞。

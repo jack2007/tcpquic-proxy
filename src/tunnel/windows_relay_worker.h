@@ -397,6 +397,13 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         const char* action,
         const char* reason) const;
+    void TraceReceiveFlowDiag(
+        const std::shared_ptr<RelayContext>& relay,
+        const char* phase,
+        const char* detail,
+        uint64_t receiveBytes = 0,
+        uint64_t limitBytes = 0,
+        uint64_t extra = 0) const;
     bool PostTcpSend(std::unique_ptr<IoOperation> op);
     bool TrySubmitQuicSendOperation(
         const std::shared_ptr<RelayContext>& relay,

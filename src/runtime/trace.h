@@ -163,6 +163,17 @@ void TqTraceRelayBackpressureEvent(
     uint64_t pauseThreshold,
     uint64_t resumeThreshold,
     uint64_t readAheadBytes);
+void TqTraceWindowsReceiveFlowDiag(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* phase,
+    const char* detail,
+    uint64_t pendingBytes,
+    uint64_t pendingQueue,
+    bool quicReceivePaused,
+    uint64_t receiveBytes,
+    uint64_t limitBytes,
+    uint64_t extra);
 void TqTraceRelayStreamShutdown(
     const char* backend,
     const TqTraceLinuxRelayStreamState& state);

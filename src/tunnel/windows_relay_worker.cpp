@@ -325,8 +325,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
             delete raw;
             return BuildSnapshotLocal();
         }
-        WaitWindowsRelayCommand(command);
     }
+    WaitWindowsRelayCommand(command);
     return command.Result;
 }
 
@@ -514,6 +514,7 @@ void TqWindowsRelayWorker::DrainRelayReceives(const std::shared_ptr<RelayContext
     for (;;) {
         std::shared_ptr<TqWindowsPendingQuicReceive> view;
         if (relay->PendingReceives.empty()) {
+            MaybeResumeQuicReceive(relay);
             return;
         }
         view = relay->PendingReceives.front();
@@ -939,6 +940,14 @@ bool TqWindowsRelayWorker::RelayNeedsMaintenance(const std::shared_ptr<RelayCont
     if (!relay || relay->StopPublished.load(std::memory_order_acquire)) {
         return false;
     }
+    if (relay->QuicReceivePaused.load(std::memory_order_acquire)) {
+        const uint64_t maxPendingBytes = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
+        if (maxPendingBytes == 0 ||
+            relay->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed) != 0 ||
+            relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed) < maxPendingBytes / 2) {
+            return true;
+        }
+    }
     return relay->Closing.load(std::memory_order_acquire) ||
            relay->CloseAfterDrained.load(std::memory_order_acquire) ||
            relay->TcpReadPausedByQuicBacklog.load(std::memory_order_acquire) ||
@@ -980,6 +989,7 @@ void TqWindowsRelayWorker::DrainPerRelayMaintenance() {
         ++processed;
         RetryPendingQuicSends(relay);
         MaybePostTcpRecv(relay);
+        MaybeResumeQuicReceive(relay);
         (void)CloseRelayIfDrained(relay);
         TryRetireRelay(relay);
         if (RelayNeedsMaintenance(relay)) {
@@ -1336,8 +1346,8 @@ bool TqWindowsRelayWorker::RegisterRelay(
             Errors_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        WaitWindowsRelayCommand(command);
     }
+    WaitWindowsRelayCommand(command);
     return command.Ok;
 }
 
@@ -2415,6 +2425,29 @@ void TqWindowsRelayWorker::TraceRelayBackpressure(
         0);
 }
 
+void TqWindowsRelayWorker::TraceReceiveFlowDiag(
+    const std::shared_ptr<RelayContext>& relay,
+    const char* phase,
+    const char* detail,
+    uint64_t receiveBytes,
+    uint64_t limitBytes,
+    uint64_t extra) const {
+    if (!relay || !TqTraceEnabled()) {
+        return;
+    }
+    TqTraceWindowsReceiveFlowDiag(
+        WorkerIndex_,
+        relay->Id,
+        phase,
+        detail,
+        relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed),
+        relay->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed),
+        relay->QuicReceivePaused.load(std::memory_order_acquire),
+        receiveBytes,
+        limitBytes,
+        extra);
+}
+
 void TqWindowsRelayWorker::FailRelayFatal(const std::shared_ptr<RelayContext>& relay, const char* reason) {
     if (relay) {
         const size_t pendingQuicSends = relay->PendingQuicSendRetries.size();
@@ -3066,8 +3099,30 @@ void TqWindowsRelayWorker::PauseQuicReceiveFromCallback(
     MsQuicStream* stream) {
     (void)binding;
     if (relay.QuicReceivePaused.exchange(true, std::memory_order_acq_rel)) {
+        TqTraceWindowsReceiveFlowDiag(
+            WorkerIndex_,
+            relay.Id,
+            "pause_callback",
+            "already_paused",
+            relay.PendingQuicReceiveBytes.load(std::memory_order_relaxed),
+            relay.PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed),
+            true,
+            0,
+            relay.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay,
+            0);
         return;
     }
+    TqTraceWindowsReceiveFlowDiag(
+        WorkerIndex_,
+        relay.Id,
+        "pause_callback",
+        "stream_receive_set_enabled_false",
+        relay.PendingQuicReceiveBytes.load(std::memory_order_relaxed),
+        relay.PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed),
+        true,
+        0,
+        relay.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay,
+        0);
     CallbackReceiveBudgetPausedCount_.fetch_add(1, std::memory_order_relaxed);
     QuicReceivePausedCount_.fetch_add(1, std::memory_order_relaxed);
     if (MsQuic != nullptr && MsQuic->StreamReceiveSetEnabled != nullptr &&
@@ -3084,27 +3139,11 @@ bool TqWindowsRelayWorker::ShouldRejectReceiveInCallback(
     MsQuicStream* stream,
     const QUIC_STREAM_EVENT& event,
     uint64_t receiveBytes) {
-    const bool fin = (event.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
-    if (fin || receiveBytes == 0) {
-        return false;
-    }
-    auto* relay = binding.RelayHint.load(std::memory_order_acquire);
-    if (relay == nullptr ||
-        relay->Generation != binding.Generation ||
-        relay->Closing.load(std::memory_order_acquire)) {
-        return false;
-    }
-    const uint64_t limit = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
-    if (limit == 0) {
-        return false;
-    }
-    const uint64_t pending = relay->PendingQuicReceiveBytes.load(std::memory_order_acquire);
-    if (pending < limit && receiveBytes <= limit - pending) {
-        return false;
-    }
-    CallbackReceiveBudgetRejectedCount_.fetch_add(1, std::memory_order_relaxed);
-    PauseQuicReceiveFromCallback(binding, *relay, stream);
-    return true;
+    (void)binding;
+    (void)stream;
+    (void)event;
+    (void)receiveBytes;
+    return false;
 }
 
 std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferredQuicReceiveView(
@@ -3209,6 +3248,13 @@ bool TqWindowsRelayWorker::EnqueueDeferredQuicReceiveView(
         1, std::memory_order_release) + 1;
     if (maxPendingBytes != 0 && pendingBytes >= maxPendingBytes &&
         !relay->QuicReceivePaused.load(std::memory_order_acquire)) {
+        TraceReceiveFlowDiag(
+            relay,
+            "enqueue_cap",
+            "set_quic_receive_disabled",
+            view->TotalLength,
+            maxPendingBytes,
+            pendingBytes);
         SetQuicReceiveEnabled(relay, false);
     }
     DeferredReceiveQueued_.fetch_add(1, std::memory_order_relaxed);
@@ -3249,15 +3295,18 @@ bool TqWindowsRelayWorker::PostTcpSendFromReceiveView(
     }
 
     const auto& slice = view->Slices[view->SliceIndex];
+    const uint64_t remaining = static_cast<uint64_t>(slice.Length - view->SliceOffset);
+    const uint64_t sendLimit = static_cast<uint64_t>(std::max<size_t>(1, relay->Tuning.RelayIoSize));
+    const uint64_t postLength = std::min(remaining, sendLimit);
     auto op = std::make_unique<IoOperation>();
     op->Event = TqWindowsIocpOperationType::TcpSend;
     op->Relay = relay;
     op->ReceiveView = view;
     op->Offset = view->SliceOffset;
-    op->PostedLength = static_cast<uint64_t>(slice.Length - view->SliceOffset);
+    op->PostedLength = postLength;
 
     op->WsaBuffer.buf = reinterpret_cast<char*>(const_cast<uint8_t*>(slice.Data + view->SliceOffset));
-    op->WsaBuffer.len = static_cast<ULONG>(op->PostedLength);
+    op->WsaBuffer.len = static_cast<ULONG>(postLength);
     DWORD sent = 0;
     relay->InFlightTcpSends.fetch_add(1);
     view->TcpSendPending = true;
@@ -3587,12 +3636,14 @@ void TqWindowsRelayWorker::SetQuicReceiveEnabled(const std::shared_ptr<RelayCont
         if (!wasPaused) {
             return;
         }
+        TraceReceiveFlowDiag(relay, "set_enabled", "resume_stream_receive_set_enabled_true");
         QuicReceiveResumedCount_.fetch_add(1, std::memory_order_relaxed);
         TraceRelayBackpressure(relay, "resume", "pending_quic_receive_drain");
     } else {
         if (wasPaused) {
             return;
         }
+        TraceReceiveFlowDiag(relay, "set_enabled", "pause_stream_receive_set_enabled_false");
         QuicReceivePausedCount_.fetch_add(1, std::memory_order_relaxed);
         TraceRelayBackpressure(relay, "pause", "pending_quic_receive_cap");
     }
@@ -3603,19 +3654,35 @@ void TqWindowsRelayWorker::SetQuicReceiveEnabled(const std::shared_ptr<RelayCont
 }
 
 void TqWindowsRelayWorker::MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay) {
-    if (!relay || Stopping_.load(std::memory_order_acquire) ||
-        relay->Closing.load(std::memory_order_acquire) ||
-        !relay->QuicReceivePaused.load(std::memory_order_acquire)) {
+    if (!relay || Stopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (relay->Closing.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (!relay->QuicReceivePaused.load(std::memory_order_acquire)) {
         return;
     }
     const uint64_t maxPendingBytes = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
     if (maxPendingBytes == 0) {
+        TraceReceiveFlowDiag(relay, "maybe_resume", "resume_no_cap");
         SetQuicReceiveEnabled(relay, true);
         return;
     }
-    if (relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed) < maxPendingBytes / 2) {
-        SetQuicReceiveEnabled(relay, true);
+    if (relay->TcpReadPausedByQuicBacklog.load(std::memory_order_acquire)) {
+        return;
     }
+    if (relay->InFlightTcpSends.load(std::memory_order_acquire) != 0) {
+        return;
+    }
+    const uint64_t pending = relay->PendingQuicReceiveBytes.load(std::memory_order_relaxed);
+    const uint64_t pendingDepth =
+        relay->PendingQuicReceiveQueueDepth.load(std::memory_order_relaxed);
+    if (pendingDepth != 0 || pending >= maxPendingBytes / 2) {
+        return;
+    }
+    TraceReceiveFlowDiag(relay, "maybe_resume", "resume_below_half_cap", 0, maxPendingBytes, pending);
+    SetQuicReceiveEnabled(relay, true);
 }
 
 void TqWindowsRelayWorker::CompleteAllPendingQuicReceives(const std::shared_ptr<RelayContext>& relay) {
@@ -3976,9 +4043,7 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
             worker->Errors_.fetch_add(1, std::memory_order_relaxed);
             return QUIC_STATUS_SUCCESS;
         }
-        if (worker->ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes)) {
-            return QUIC_STATUS_SUCCESS;
-        }
+        (void)worker->ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes);
         auto view = worker->BuildDeferredQuicReceiveView(
             *binding,
             stream,
@@ -3996,6 +4061,13 @@ QUIC_STATUS QUIC_API TqWindowsRelayWorker::StreamCallback(
                 0,
                 view)) {
             return QUIC_STATUS_PENDING;
+        }
+        if (auto relay = worker->ResolveRelayForCallback(binding->RelayId, binding->Generation)) {
+            worker->TraceReceiveFlowDiag(
+                relay,
+                "callback_post",
+                "relay_receive_ready_post_failed",
+                view->TotalLength);
         }
         worker->CompleteRemainingReceiveOwnership(*view);
         return QUIC_STATUS_SUCCESS;

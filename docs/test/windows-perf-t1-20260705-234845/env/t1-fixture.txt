@@ -1,0 +1,3 @@
+Binary: .\build-x64\bin\Release\raypx2.exe
+Peer: 172.16.10.80:8443
+CA: cert\ca.crt

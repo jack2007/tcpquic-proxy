@@ -1021,7 +1021,7 @@ void TqRunDownloadPump(TqPumpWorker* worker, std::atomic<bool>* stop) {
         if (TqSocketInterrupted(error)) {
             continue;
         }
-        if (!stop->load(std::memory_order_relaxed)) {
+        if (!stop->load(std::memory_order_acquire)) {
             worker->Failed = true;
         }
         break;
@@ -1542,6 +1542,7 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
     };
     uint64_t finishClientBytes = 0;
     uint64_t measuredLocalBytes = 0;
+    bool downloadPumpsJoined = false;
     TqSpeedFinish finish{};
     TqSpeedResult result{};
 
@@ -1569,8 +1570,39 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
     }
 
     std::this_thread::sleep_until(deadline);
-    if (start.Direction == TqSpeedDirection::Upload) {
-        stop.store(true, std::memory_order_relaxed);
+    stop.store(true, std::memory_order_release);
+    if (start.Direction == TqSpeedDirection::Download) {
+        measuredLocalBytes = countWorkerBytes();
+        for (auto& worker : workers) {
+            if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
+                (void)TqShutdownBoth(worker.Socket);
+            }
+        }
+        const auto quiesceDeadline = TqClock::now() + std::chrono::seconds(45);
+        for (auto& worker : workers) {
+            while (!worker.Done.load(std::memory_order_acquire) &&
+                   TqClock::now() < quiesceDeadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (worker.Thread.joinable()) {
+                worker.Thread.join();
+            }
+        }
+        downloadPumpsJoined = true;
+        finishClientBytes = countWorkerBytes();
+        for (const auto& worker : workers) {
+            if (!worker.Done.load(std::memory_order_acquire)) {
+                std::fprintf(stderr,
+                    "tcpquic-proxy: speed test pump worker did not finish during quiesce\n");
+                goto cleanup;
+            }
+        }
+        for (auto& worker : workers) {
+            worker.Failed = false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    } else {
+        finishClientBytes = countWorkerBytes();
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
                 (void)TqShutdownBoth(worker.Socket);
@@ -1586,10 +1618,8 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
             std::fprintf(stderr, "tcpquic-proxy: speed test pump worker failed\n");
             goto cleanup;
         }
-    } else {
-        finishClientBytes = countWorkerBytes();
+        measuredLocalBytes = finishClientBytes;
     }
-    measuredLocalBytes = finishClientBytes;
 
     finish.SessionId = start.SessionId;
     finish.ClientBytes = finishClientBytes;
@@ -1599,26 +1629,14 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
         goto cleanup;
     }
 
-    if (!control.WaitForResult(std::chrono::seconds(15), result)) {
+    const auto resultTimeout = std::chrono::seconds(
+        std::max<int64_t>(15, static_cast<int64_t>(cfg.SpeedTestDurationSec) + 15));
+    if (!control.WaitForResult(resultTimeout, result)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
         goto cleanup;
     }
 
-    if (start.Direction == TqSpeedDirection::Download) {
-        const auto drainDeadline = TqClock::now() + std::chrono::seconds(5);
-        for (;;) {
-            bool allDone = true;
-            for (const auto& worker : workers) {
-                if (!worker.Done.load(std::memory_order_acquire)) {
-                    allDone = false;
-                    break;
-                }
-            }
-            if (allDone || TqClock::now() >= drainDeadline) {
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
+    if (!downloadPumpsJoined) {
         stop.store(true, std::memory_order_relaxed);
         for (auto& worker : workers) {
             if (!worker.Done.load(std::memory_order_acquire) && TqSocketValid(worker.Socket)) {
@@ -1630,7 +1648,7 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
                 worker.Thread.join();
             }
         }
-        if (anyWorkerFailed()) {
+        if (start.Direction == TqSpeedDirection::Download && anyWorkerFailed()) {
             std::fprintf(stderr, "tcpquic-proxy: speed test pump worker failed\n");
             goto cleanup;
         }
@@ -1657,6 +1675,7 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
             TqMiBPerSec(throughputBytes, throughputElapsedUs),
             result.AcceptedConnections,
             result.ClosedConnections);
+        std::fflush(stdout);
 
         ok = result.Status == 0;
         if (result.AcceptedConnections != parallel || result.ClosedConnections != parallel) {

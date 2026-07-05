@@ -146,6 +146,7 @@ int RunSinglePeerClient(const TqConfig& cfg) {
             return 1;
         }
         const bool ok = TqRunIngressClientSpeedTest(*controlConn, cfg);
+        manager.AbortPeerTunnels(primary.PeerId);
         manager.StopAll();
         return ok ? 0 : 1;
     }

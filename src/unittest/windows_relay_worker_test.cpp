@@ -570,12 +570,11 @@ bool TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest() {
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
-    return status == QUIC_STATUS_SUCCESS &&
-           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount + 1 &&
-           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount + 1 &&
-           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes &&
-           g_StreamReceiveSetEnabledCalls == 1 &&
-           g_LastStreamReceiveEnabled == FALSE;
+    return status == QUIC_STATUS_PENDING &&
+           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount &&
+           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount &&
+           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes + sizeof(payload) &&
+           g_StreamReceiveSetEnabledCalls == 0;
 }
 
 bool TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest() {
@@ -3051,21 +3050,30 @@ int main() {
         event.RECEIVE.Buffers = &buffer;
 
         const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
-        if (status != QUIC_STATUS_SUCCESS) {
+        if (status != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 62;
         }
-        const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
-        if (snapshot.PendingQuicReceiveBytes != 0 ||
-            snapshot.PendingQuicReceiveQueueDepth != 0) {
+        const auto enqueueDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        TqWindowsRelayWorkerSnapshot snapshot{};
+        while (std::chrono::steady_clock::now() < enqueueDeadline) {
+            snapshot = receiveWorker.Snapshot();
+            if (snapshot.PendingQuicReceiveBytes == sizeof(data) &&
+                snapshot.PendingQuicReceiveQueueDepth == 1) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (snapshot.PendingQuicReceiveBytes != sizeof(data) ||
+            snapshot.PendingQuicReceiveQueueDepth != 1) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 63;
         }
         if (snapshot.QuicReceivePausedCount != 1 ||
-            snapshot.CallbackReceiveBudgetRejectedCount != 1 ||
-            snapshot.CallbackReceiveBudgetPausedCount != 1) {
+            snapshot.CallbackReceiveBudgetRejectedCount != 0 ||
+            snapshot.CallbackReceiveBudgetPausedCount != 0) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 64;
