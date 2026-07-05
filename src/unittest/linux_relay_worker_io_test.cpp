@@ -3608,11 +3608,11 @@ int main() {
 
     {
         TqTuningConfig tuning{};
-        tuning.LinuxRelayWorkerCount = 2;
-        tuning.LinuxRelayWorkerEventBudget = 128;
-        tuning.LinuxRelayReadChunkSize = 4096;
-        tuning.LinuxRelayReadBatchBytes = 16 * 1024;
-        tuning.LinuxRelayMaxIov = 4;
+        tuning.RelayWorkerCount = 2;
+        tuning.RelayWorkerEventBudget = 128;
+        tuning.RelayReadChunkSize = 4096;
+        tuning.RelayReadBatchBytes = 16 * 1024;
+        tuning.RelayMaxIov = 4;
         tuning.MaxPendingBufferBytesPerRelay = 64 * 1024;
         if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
             return 1;
@@ -3732,8 +3732,8 @@ int main() {
     {
         TqLinuxRelayRuntime::Instance().Stop();
         TqTuningConfig tuning{};
-        tuning.LinuxRelayWorkerCount = 1;
-        tuning.LinuxRelayEventQueueCapacity = 1024;
+        tuning.RelayWorkerCount = 1;
+        tuning.RelayEventQueueCapacity = 1024;
         if (!TqLinuxRelayRuntime::Instance().Start(tuning)) return 3410;
         std::atomic<bool> stop{false};
         std::thread snapshots([&]() {
