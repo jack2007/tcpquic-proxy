@@ -297,6 +297,7 @@ nlohmann::json ProxyAuthJsonValue(const std::vector<TqProxyAuthUser>& users) {
 nlohmann::json PeerPublicConfigJsonValue(const TqPeerConfig& peer) {
     return {
         {"id", peer.PeerId},
+        {"client_name", peer.ClientName},
         {"proto_peer", peer.QuicPeer},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},

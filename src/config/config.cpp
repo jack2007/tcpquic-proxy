@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include "acl.h"
+#include "control_protocol.h"
 #include "proxy_auth.h"
 #include "tuning.h"
 
@@ -696,6 +697,11 @@ private:
             const std::string& key = item.key();
             if (key == "id") {
                 if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer.id");
+            } else if (key == "client_name") {
+                if (!ReadString(item.value(), peer.ClientName) ||
+                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
+                    return Error("invalid client_name");
+                }
             } else if (key == "proto_peer") {
                 if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid peer.proto_peer");
             } else if (key == "socks_listen") {
@@ -728,6 +734,11 @@ private:
             const std::string& key = item.key();
             if (key == "peer_id") {
                 if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer_id");
+            } else if (key == "client_name") {
+                if (!ReadString(item.value(), peer.ClientName) ||
+                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
+                    return Error("invalid client_name");
+                }
             } else if (key == "quic_peer") {
                 if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid quic_peer");
             } else if (key == "socks_listen") {
@@ -1063,6 +1074,7 @@ void TqPrintUsage(FILE* out) {
         "  --forward <local=target>    Local port forward, repeatable\n"
         "  --client-config <path>       Legacy router client config JSON\n"
         "  --peer <addr>                Legacy single-peer address\n"
+        "  --client-name <name>         Display name sent to server console\n"
         "  --connections <n>            Connection count (default 1)\n"
         "  --connection-stream-count <n>\n"
         "                              Max bidirectional streams per connection (default 1024)\n"
@@ -1214,6 +1226,18 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 }
             }
             cfg.QuicPeer = value;
+        } else if (GetOptionValue(arg, "--client-name", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--client-name", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            cfg.ClientName = value;
+            if (!TqIsValidClientName(cfg.ClientName)) {
+                err = "invalid value for --client-name";
+                return false;
+            }
         } else if (GetOptionValue(arg, "--forward", value)) {
             if (value == nullptr) {
                 value = NextArg(i, argc, argv, "--forward", err);
@@ -1814,6 +1838,10 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
     for (const auto& peer : router.Peers) {
         if (peer.PeerId.empty()) { err = "peer_id is required"; return false; }
         if (!peerIds.insert(peer.PeerId).second) { err = "duplicate peer_id: " + peer.PeerId; return false; }
+        if (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName)) {
+            err = "invalid client_name for " + peer.PeerId;
+            return false;
+        }
         if (peer.QuicPaths.empty()) {
             if (!IsHostPortList(peer.QuicPeer)) { err = "invalid quic_peer for " + peer.PeerId; return false; }
         } else {

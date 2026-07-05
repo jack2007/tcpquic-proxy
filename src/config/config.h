@@ -33,6 +33,7 @@ struct TqQuicPathConfig {
 
 struct TqPeerConfig {
     std::string PeerId;
+    std::string ClientName;
     std::string QuicPeer;
     std::vector<TqQuicPathConfig> QuicPaths;
     std::string SocksListen;
@@ -68,6 +69,7 @@ struct TqConfig {
     std::string AdminTokenFile;
     uint32_t AdminThreads{2};
     TqRouterConfig Router{};
+    std::string ClientName;
     std::string QuicListen;
     std::string QuicCert;
     std::string QuicKey;

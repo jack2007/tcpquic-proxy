@@ -96,6 +96,7 @@ TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
     std::lock_guard<std::mutex> guard(TunnelStartMutex);
     TqPeerMetrics metrics;
     metrics.PeerId = PeerId;
+    metrics.ClientName = Config.ClientName;
     metrics.QuicPeer = Config.QuicPeer;
     metrics.SocksListen = Config.SocksListen;
     metrics.HttpListen = Config.HttpListen;

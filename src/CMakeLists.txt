@@ -292,6 +292,7 @@ add_executable(tcpquic_tuning_test
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    protocol/control_protocol.cpp
     ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
@@ -728,6 +729,7 @@ add_executable(tcpquic_config_router_test
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    protocol/control_protocol.cpp
     protocol/quic_address.cpp
     runtime/server_metrics.cpp
     ingress/proxy_auth.cpp
@@ -1031,6 +1033,7 @@ set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     config/config.cpp
     config/tuning.cpp
     acl/acl.cpp
+    protocol/control_protocol.cpp
     ingress/proxy_auth.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )

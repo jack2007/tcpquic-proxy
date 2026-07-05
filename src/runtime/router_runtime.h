@@ -12,6 +12,7 @@
 
 struct TqPeerMetrics {
     std::string PeerId;
+    std::string ClientName;
     bool Enabled{true};
     std::string QuicPeer;
     std::string SocksListen;

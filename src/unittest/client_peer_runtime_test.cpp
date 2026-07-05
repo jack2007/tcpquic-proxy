@@ -30,6 +30,7 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     cfg.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
     cfg.QuicConnections = 4;
     cfg.Compress = "off";
+    cfg.ClientName = "edge-primary";
 
     const TqPeerConfig peer = TqMakePrimaryPeerConfig(cfg);
     if (peer.PeerId != "primary") return 10;
@@ -44,6 +45,7 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     if (peer.QuicPaths.size() != 2) return 19;
     if (peer.QuicPaths[0].Name != "cmcc") return 101;
     if (peer.QuicPaths[1].Peer != "59.1.1.10:443") return 102;
+    if (peer.ClientName != "edge-primary") return 106;
     return 0;
 }
 
@@ -62,6 +64,7 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     peer.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
     peer.QuicConnections = 8;
     peer.Compress = "off";
+    peer.ClientName = "agent-a-display";
 
     const TqConfig out = TqMakePeerRuntimeConfig(base, peer);
     if (out.QuicPeer != peer.QuicPeer) return 20;
@@ -77,6 +80,7 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     if (out.QuicPaths.size() != 2) return 103;
     if (out.QuicPaths[0].LocalAddress != "10.10.1.2") return 104;
     if (out.QuicPaths[1].Connections != 1) return 105;
+    if (out.ClientName != "agent-a-display") return 107;
     return 0;
 }
 
@@ -84,6 +88,7 @@ static int TestPeerConfigOverlayUsesBaseDefaults() {
     TqConfig base;
     base.QuicConnections = 3;
     base.Compress = "zstd";
+    base.ClientName = "edge-shared";
 
     TqPeerConfig peer;
     peer.PeerId = "agent-b";
@@ -93,6 +98,11 @@ static int TestPeerConfigOverlayUsesBaseDefaults() {
     const TqConfig out = TqMakePeerRuntimeConfig(base, peer);
     if (out.QuicConnections != base.QuicConnections) return 30;
     if (out.Compress != base.Compress) return 31;
+    if (out.ClientName != "edge-shared") return 32;
+
+    base.ClientName.clear();
+    const TqConfig fallback = TqMakePeerRuntimeConfig(base, peer);
+    if (fallback.ClientName != peer.PeerId) return 33;
     return 0;
 }
 

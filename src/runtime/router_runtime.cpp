@@ -2,6 +2,7 @@
 
 #include "admin_config.h"
 #include "admin_memory.h"
+#include "control_protocol.h"
 #include "relay_metrics.h"
 #include "tunnel_registry.h"
 #include "trace.h"
@@ -24,6 +25,8 @@ constexpr uint32_t kDefaultPeerDrainGraceSeconds = 10;
 constexpr uint32_t kMaxQuicConnections = 128;
 
 struct TqPeerPatch {
+    bool HasClientName{false};
+    std::string ClientName;
     bool HasQuicPeer{false};
     bool HasSocksListen{false};
     bool HasHttpListen{false};
@@ -134,6 +137,7 @@ nlohmann::json QuicPathsJsonValue(const std::vector<TqQuicPathConfig>& paths) {
 nlohmann::json PeerConfigJsonValue(const TqPeerConfig& peer) {
     nlohmann::json body{
         {"peer_id", peer.PeerId},
+        {"client_name", peer.ClientName},
         {"quic_peer", peer.QuicPeer},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},
@@ -153,6 +157,7 @@ nlohmann::json PeerMetricsJsonValue(const TqPeerMetrics& peer) {
         {"peer_id", peer.PeerId},
         {"enabled", peer.Enabled},
         {"quic_peer", peer.QuicPeer},
+        {"client_name", peer.ClientName},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},
         {"port_forwards", PortForwardsJsonValue(peer.PortForwards)},
@@ -374,6 +379,12 @@ public:
                 hasLegacyQuicPeer = true;
                 patch.HasQuicPeer = true;
                 if (!ReadStringField(item.value(), patch.QuicPeer, "invalid quic_peer")) return false;
+            } else if (key == "client_name") {
+                patch.HasClientName = true;
+                if (!ReadStringField(item.value(), patch.ClientName, "invalid client_name") ||
+                    (!patch.ClientName.empty() && !TqIsValidClientName(patch.ClientName))) {
+                    return Error("invalid client_name");
+                }
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
@@ -540,6 +551,11 @@ private:
                 if (hasRecommendedQuicPeer) return Error("conflicting peer field aliases");
                 hasLegacyQuicPeer = true;
                 if (!ReadStringField(item.value(), peer.QuicPeer, "invalid quic_peer")) return false;
+            } else if (key == "client_name") {
+                if (!ReadStringField(item.value(), peer.ClientName, "invalid client_name") ||
+                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
+                    return Error("invalid client_name");
+                }
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
@@ -852,6 +868,7 @@ std::vector<TqPeerConfig>::iterator FindPeerConfig(std::vector<TqPeerConfig>& pe
 }
 
 void ApplyPeerPatch(TqPeerConfig& peer, const TqPeerPatch& patch) {
+    if (patch.HasClientName) peer.ClientName = patch.ClientName;
     if (patch.HasQuicPeer) peer.QuicPeer = patch.QuicPeer;
     if (patch.HasSocksListen) peer.SocksListen = patch.SocksListen;
     if (patch.HasHttpListen) peer.HttpListen = patch.HttpListen;
@@ -1035,6 +1052,7 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
 
         auto& metrics = Metrics[peer.PeerId];
         metrics.PeerId = peer.PeerId;
+        metrics.ClientName = peer.ClientName;
         metrics.Enabled = peer.Enabled;
         metrics.QuicPeer = peer.QuicPeer;
         metrics.SocksListen = peer.SocksListen;
@@ -1102,6 +1120,9 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
                 peer.ActiveStreams = live.ActiveStreams;
                 peer.TotalStreams = live.TotalStreams;
                 peer.Reconnects = live.Reconnects;
+                if (!live.ClientName.empty()) {
+                    peer.ClientName = live.ClientName;
+                }
                 peer.LastError = live.LastError;
                 peer.LastConnectedAt = live.LastConnectedAt;
                 peer.State = live.State;

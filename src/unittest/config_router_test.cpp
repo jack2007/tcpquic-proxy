@@ -101,6 +101,7 @@ int main() {
         if (usage.find("--download-test <sec>") == std::string::npos) return 117;
         if (usage.find("--connection-stream-count <n>") == std::string::npos) return 118;
         if (usage.find("--peer <addr>") == std::string::npos) return 129;
+        if (usage.find("--client-name <name>") == std::string::npos) return 401;
         if (usage.find("--listen <addr>") == std::string::npos) return 130;
         if (usage.find("--reconnect-interval-ms") != std::string::npos) return 131;
         if (usage.find("--keepalive-ms <n>") == std::string::npos) return 154;
@@ -169,6 +170,29 @@ int main() {
         if (!cfg.QuicCert.empty()) return 178;
         if (!cfg.QuicKey.empty()) return 179;
         if (cfg.AdminThreads != 2) return 191;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"agent-b","client_name":"office-a","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"}]})json");
+        const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 402;
+        if (cfg.Router.Peers.size() != 1) return 403;
+        if (cfg.Router.Peers[0].ClientName != "office-a") return 404;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt", "--client-name", "edge-a"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 405;
+        if (cfg.ClientName != "edge-a") return 406;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt", "--client-name", "bad name"};
+        TqConfig cfg;
+        std::string err;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 407;
+        if (err.find("client-name") == std::string::npos) return 408;
     }
     {
         const char* args[] = {

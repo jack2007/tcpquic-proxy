@@ -22,6 +22,7 @@
 inline TqPeerConfig TqMakePrimaryPeerConfig(const TqConfig& cfg) {
     TqPeerConfig peer;
     peer.PeerId = "primary";
+    peer.ClientName = cfg.ClientName.empty() ? peer.PeerId : cfg.ClientName;
     peer.Enabled = true;
     peer.QuicPeer = cfg.QuicPeer;
     peer.QuicPaths = cfg.QuicPaths;
@@ -44,6 +45,9 @@ inline TqConfig TqMakePeerRuntimeConfig(const TqConfig& baseConfig, const TqPeer
     TqConfig cfg = baseConfig;
     cfg.ClientConfigPath.clear();
     cfg.AdminListen.clear();
+    cfg.ClientName = !peer.ClientName.empty()
+        ? peer.ClientName
+        : (!baseConfig.ClientName.empty() ? baseConfig.ClientName : peer.PeerId);
     cfg.QuicPeer = peer.QuicPeer;
     cfg.QuicPaths = peer.QuicPaths;
     cfg.SocksListen = peer.SocksListen;
