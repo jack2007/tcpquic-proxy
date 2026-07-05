@@ -237,7 +237,7 @@ static constexpr char kConsoleHtmlStorage[] =
 
 constexpr std::string_view kConsoleHtml(kConsoleHtmlStorage);
 
-// Same MSVC C2026 limit as kConsoleHtmlStorage above. Keep JS_PART1/2/3 separate;
+// Same MSVC C2026 limit as kConsoleHtmlStorage above. Keep JS_PART1/2/3/4 separate;
 // do NOT collapse into one raw string literal.
 static constexpr char kConsoleJsStorage[] =
     R"JS_PART1(
@@ -733,7 +733,8 @@ static constexpr char kConsoleJsStorage[] =
         throw error;
       }
     }
-
+)JS_PART2"
+    R"JS_PART3(
     async function renderConfig() {
       const saveButton = document.getElementById('config-save');
       const editor = document.getElementById('config-json');
@@ -941,8 +942,8 @@ static constexpr char kConsoleJsStorage[] =
         if (event.key === 'Enter') login();
       };
       document.getElementById('logout').onclick = logout;
-)JS_PART2"
-    R"JS_PART3(      document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
+)JS_PART3"
+    R"JS_PART4(      document.getElementById('refresh-now').onclick = refreshCurrentPageNow;
       document.getElementById('peer-create').onclick = beginCreatePeer;
       document.getElementById('peer-save').onclick = () => runClientAction(savePeer);
       const configSave = document.getElementById('config-save');
@@ -984,7 +985,7 @@ static constexpr char kConsoleJsStorage[] =
       consoleState.refreshTimer = setInterval(refreshCurrentPage, 3000);
     }
 
-    bootConsole();)JS_PART3";
+    bootConsole();)JS_PART4";
 
 constexpr std::string_view kConsoleJs(kConsoleJsStorage);
 
