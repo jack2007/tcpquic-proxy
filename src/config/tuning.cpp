@@ -129,19 +129,19 @@ void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
 
     const uint64_t pendingBytes =
         std::min<uint64_t>(out.RelayDefaultIdealSend, 512ull * 1024 * 1024);
-    out.LinuxRelayPerTunnelPendingBytes = pendingBytes;
+    out.RelayPerTunnelPendingBytes = pendingBytes;
     out.MaxPendingBufferBytesPerRelay = std::max<uint64_t>(
         pendingBytes,
-        out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1u));
-    out.LinuxRelayWorkerByteBudgetPerTick =
+        out.RelayGlobalPendingBytes / std::max<uint32_t>(out.RelayWorkerCount, 1u));
+    out.RelayWorkerByteBudgetPerTick =
         std::min<uint64_t>(pendingBytes, 512ull * 1024 * 1024);
     out.InitialQuicReadAheadBytes =
         std::max<uint64_t>(out.InitialQuicReadAheadBytes, pendingBytes);
-    out.LinuxRelayReadBatchBytes =
-        std::max<uint64_t>(out.LinuxRelayReadBatchBytes, 4ull * 1024 * 1024);
-    out.LinuxRelayQuicRecvBatchBytes =
-        std::max<uint64_t>(out.LinuxRelayQuicRecvBatchBytes, 4ull * 1024 * 1024);
-    out.LinuxRelayMaxIov = std::max<uint32_t>(out.LinuxRelayMaxIov, 32);
+    out.RelayReadBatchBytes =
+        std::max<uint64_t>(out.RelayReadBatchBytes, 4ull * 1024 * 1024);
+    out.RelayQuicRecvBatchBytes =
+        std::max<uint64_t>(out.RelayQuicRecvBatchBytes, 4ull * 1024 * 1024);
+    out.RelayMaxIov = std::max<uint32_t>(out.RelayMaxIov, 32);
 
     const uint64_t tcpBuf = std::min<uint64_t>(pendingBytes / 4, 64ull * 1024 * 1024);
     if (static_cast<uint64_t>(out.TcpSocketBufferBytes) < tcpBuf) {
@@ -149,25 +149,41 @@ void ApplyHighBdpPipelineScaling(TqTuningConfig& out) {
     }
 }
 
+void SyncLinuxRelayLegacyFields(TqTuningConfig& out) {
+    out.LinuxRelayWorkerCount = out.RelayWorkerCount;
+    out.LinuxRelayMaxIov = out.RelayMaxIov;
+    out.LinuxRelayReadChunkSize = out.RelayReadChunkSize;
+    out.LinuxRelayReadBatchBytes = out.RelayReadBatchBytes;
+    out.LinuxRelayQuicRecvBatchBytes = out.RelayQuicRecvBatchBytes;
+    out.LinuxRelayTcpWriteMaxBytes = out.RelayTcpWriteMaxBytes;
+    out.LinuxRelayTcpWriteBurstBytes = out.RelayTcpWriteBurstBytes;
+    out.LinuxRelayGlobalPendingBytes = out.RelayGlobalPendingBytes;
+    out.LinuxRelayPerTunnelPendingBytes = out.RelayPerTunnelPendingBytes;
+    out.LinuxRelayWorkerEventBudget = out.RelayWorkerEventBudget;
+    out.LinuxRelayEventQueueCapacity = out.RelayEventQueueCapacity;
+    out.LinuxRelayWorkerByteBudgetPerTick = out.RelayWorkerByteBudgetPerTick;
+    out.LinuxRelayQuicReceiveCompleteBatchBytes = out.RelayQuicReceiveCompleteBatchBytes;
+}
+
 void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
     }
     if (cfg.TuningOverrideLinuxRelayReadChunkSize > 0) {
-        out.LinuxRelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
+        out.RelayReadChunkSize = cfg.TuningOverrideLinuxRelayReadChunkSize;
     }
     if (cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes > 0) {
-        out.LinuxRelayTcpWriteMaxBytes = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
+        out.RelayTcpWriteMaxBytes = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
     }
     if (cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes > 0) {
-        out.LinuxRelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
+        out.RelayTcpWriteBurstBytes = cfg.TuningOverrideLinuxRelayTcpWriteBurstBytes;
     }
     if (cfg.TuningOverrideLinuxRelayEventQueueCapacity > 0) {
-        out.LinuxRelayEventQueueCapacity =
+        out.RelayEventQueueCapacity =
             TqNormalizeLinuxRelayEventQueueCapacity(cfg.TuningOverrideLinuxRelayEventQueueCapacity);
     }
     if (cfg.TuningOverrideLinuxRelayWorkerCount > 0) {
-        out.LinuxRelayWorkerCount =
+        out.RelayWorkerCount =
             TqNormalizeRelayWorkerCount(cfg.TuningOverrideLinuxRelayWorkerCount);
     }
     if (cfg.TuningOverrideWindowsRelayWorkerCount > 0) {
@@ -184,35 +200,36 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
 
 void TqApplyLinuxRelayDefaults(TqTuningConfig& out, TqTuningMode mode, uint64_t autoBudgetBytes) {
     const uint32_t detectedWorkers = TqDetectRelayWorkers();
-    out.LinuxRelayWorkerCount = detectedWorkers;
+    out.RelayWorkerCount = detectedWorkers;
     out.WindowsRelayWorkerCount = detectedWorkers;
 
     if (mode == TqTuningMode::Lan) {
-        out.LinuxRelayMaxIov = 8;
-        out.LinuxRelayReadChunkSize = 128 * 1024;
-        out.LinuxRelayReadBatchBytes = 256 * 1024;
-        out.LinuxRelayQuicRecvBatchBytes = 256 * 1024;
-        out.LinuxRelayWorkerEventBudget = 1024;
-        out.LinuxRelayEventQueueCapacity = 4096;
-        out.LinuxRelayWorkerByteBudgetPerTick = 16ull * 1024 * 1024;
+        out.RelayMaxIov = 8;
+        out.RelayReadChunkSize = 128 * 1024;
+        out.RelayReadBatchBytes = 256 * 1024;
+        out.RelayQuicRecvBatchBytes = 256 * 1024;
+        out.RelayWorkerEventBudget = 1024;
+        out.RelayEventQueueCapacity = 4096;
+        out.RelayWorkerByteBudgetPerTick = 16ull * 1024 * 1024;
     } else {
-        out.LinuxRelayMaxIov = 16;
-        out.LinuxRelayReadChunkSize = 128 * 1024;
-        out.LinuxRelayReadBatchBytes = 1024 * 1024;
-        out.LinuxRelayQuicRecvBatchBytes = 1024 * 1024;
-        out.LinuxRelayWorkerEventBudget = 4096;
-        out.LinuxRelayEventQueueCapacity = 4096;
-        out.LinuxRelayWorkerByteBudgetPerTick = 64ull * 1024 * 1024;
+        out.RelayMaxIov = 16;
+        out.RelayReadChunkSize = 128 * 1024;
+        out.RelayReadBatchBytes = 1024 * 1024;
+        out.RelayQuicRecvBatchBytes = 1024 * 1024;
+        out.RelayWorkerEventBudget = 4096;
+        out.RelayEventQueueCapacity = 4096;
+        out.RelayWorkerByteBudgetPerTick = 64ull * 1024 * 1024;
     }
 
     const uint64_t relayMemoryBytes =
         ClampU64(autoBudgetBytes, kAutoRelayBudgetMinBytes, kAutoRelayBudgetMaxBytes);
     const uint64_t targetPendingBytes = ComputeTargetPendingPerTunnelBytes(out);
-    out.LinuxRelayGlobalPendingBytes = relayMemoryBytes / 2;
-    out.LinuxRelayPerTunnelPendingBytes = targetPendingBytes;
+    out.RelayGlobalPendingBytes = relayMemoryBytes / 2;
+    out.RelayPerTunnelPendingBytes = targetPendingBytes;
     out.MaxPendingBufferBytesPerRelay = std::max<uint64_t>(
-        out.LinuxRelayPerTunnelPendingBytes,
-        out.LinuxRelayGlobalPendingBytes / std::max<uint32_t>(out.LinuxRelayWorkerCount, 1));
+        out.RelayPerTunnelPendingBytes,
+        out.RelayGlobalPendingBytes / std::max<uint32_t>(out.RelayWorkerCount, 1));
+    SyncLinuxRelayLegacyFields(out);
 }
 
 } // namespace
@@ -362,10 +379,11 @@ void TqComputeTuning(const TqConfig& cfg, TqTuningConfig& out) {
         std::max<uint64_t>(out.InitialQuicReadAheadBytes, TqValidationInitialIdealSendFallbackBytes);
     out.MaxPendingBufferBytesPerRelay =
         std::max<uint64_t>(out.MaxPendingBufferBytesPerRelay, TqValidationRelaySendBufferCapBytes);
-    out.LinuxRelayPerTunnelPendingBytes =
-        std::max<uint64_t>(out.LinuxRelayPerTunnelPendingBytes, TqValidationRelaySendBufferCapBytes);
-    out.LinuxRelayWorkerByteBudgetPerTick =
-        std::max<uint64_t>(out.LinuxRelayWorkerByteBudgetPerTick, TqValidationInitialIdealSendFallbackBytes);
+    out.RelayPerTunnelPendingBytes =
+        std::max<uint64_t>(out.RelayPerTunnelPendingBytes, TqValidationRelaySendBufferCapBytes);
+    out.RelayWorkerByteBudgetPerTick =
+        std::max<uint64_t>(out.RelayWorkerByteBudgetPerTick, TqValidationInitialIdealSendFallbackBytes);
+    SyncLinuxRelayLegacyFields(out);
 }
 
 void TqSetRelayMemoryBudget(uint32_t maxMemoryMb) {

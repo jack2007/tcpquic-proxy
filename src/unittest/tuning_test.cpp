@@ -22,6 +22,23 @@
         } \
     } while (false)
 
+static int RequireRelayLegacyMirror(const TqTuningConfig& tuning) {
+    TQ_TEST_REQUIRE(tuning.LinuxRelayWorkerCount == tuning.RelayWorkerCount);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayMaxIov == tuning.RelayMaxIov);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayReadChunkSize == tuning.RelayReadChunkSize);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayReadBatchBytes == tuning.RelayReadBatchBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayQuicRecvBatchBytes == tuning.RelayQuicRecvBatchBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayTcpWriteMaxBytes == tuning.RelayTcpWriteMaxBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayTcpWriteBurstBytes == tuning.RelayTcpWriteBurstBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayGlobalPendingBytes == tuning.RelayGlobalPendingBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayPerTunnelPendingBytes == tuning.RelayPerTunnelPendingBytes);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayWorkerEventBudget == tuning.RelayWorkerEventBudget);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayEventQueueCapacity == tuning.RelayEventQueueCapacity);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayWorkerByteBudgetPerTick == tuning.RelayWorkerByteBudgetPerTick);
+    TQ_TEST_REQUIRE(tuning.LinuxRelayQuicReceiveCompleteBatchBytes == tuning.RelayQuicReceiveCompleteBatchBytes);
+    return 0;
+}
+
 static bool ParseClientOption(const char* option, const char* value, TqConfig& cfg, std::string& err) {
     const char* args[] = {
         "tcpquic-proxy",
@@ -100,6 +117,7 @@ int main() {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
+        TQ_TEST_REQUIRE(RequireRelayLegacyMirror(cfg.Tuning) == 0);
 
         assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
@@ -123,6 +141,7 @@ int main() {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Lan;
         TqComputeTuning(cfg, cfg.Tuning);
+        TQ_TEST_REQUIRE(RequireRelayLegacyMirror(cfg.Tuning) == 0);
 
         assert(cfg.Tuning.StreamRecvWindow == TqValidationFlowWindowBytes);
         assert(cfg.Tuning.ConnFlowControlWindow == TqValidationFlowWindowBytes);
@@ -149,6 +168,7 @@ int main() {
         cfg.TuningOverrideLinuxRelayReadChunkSize = 256 * 1024;
         cfg.TuningOverrideQuicInitRttMs = 50;
         TqComputeTuning(cfg, cfg.Tuning);
+        TQ_TEST_REQUIRE(RequireRelayLegacyMirror(cfg.Tuning) == 0);
 
         assert(cfg.Tuning.RelayIoSize == 512 * 1024);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 256 * 1024);
@@ -675,6 +695,7 @@ int main() {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Wan;
         TqComputeTuning(cfg, cfg.Tuning);
+        TQ_TEST_REQUIRE(RequireRelayLegacyMirror(cfg.Tuning) == 0);
         const uint32_t autoBudgetMb = TqGetRelayMemoryBudget();
 
         assert(cfg.Tuning.LinuxRelayWorkerCount >= 1);
@@ -704,6 +725,7 @@ int main() {
         TqConfig cfg{};
         cfg.TuningMode = TqTuningMode::Lan;
         TqComputeTuning(cfg, cfg.Tuning);
+        TQ_TEST_REQUIRE(RequireRelayLegacyMirror(cfg.Tuning) == 0);
 
         assert(cfg.Tuning.LinuxRelayMaxIov == 8);
         assert(cfg.Tuning.LinuxRelayReadChunkSize == 128 * 1024);
