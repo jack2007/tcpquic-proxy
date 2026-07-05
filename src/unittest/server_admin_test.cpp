@@ -167,7 +167,7 @@ std::string TqRelayWorkersJson() {
 }
 
 std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
-    return "{\"linux_relay_backend\":\"test\"}";
+    return "{\"relay_backend\":\"test\",\"linux_relay_backend\":\"test\",\"relay_active_relays\":7,\"linux_relay_active_relays\":7,\"relay_errors\":3,\"linux_relay_errors\":3}";
 }
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
@@ -702,6 +702,13 @@ int main() {
     if (relayMetrics.find("HTTP/1.1 200 OK") == std::string::npos) return 149;
     if (relayMetrics.find("\"backend\":\"test\"") == std::string::npos) return 150;
     if (relayMetrics.find("\"active_relays\":7") == std::string::npos) return 151;
+
+    if (relayMetrics.find("\"relay_backend\":\"test\"") == std::string::npos) return 180;
+    if (relayMetrics.find("\"linux_relay_backend\":\"test\"") == std::string::npos) return 181;
+    if (relayMetrics.find("\"relay_active_relays\":7") == std::string::npos) return 182;
+    if (relayMetrics.find("\"linux_relay_active_relays\":7") == std::string::npos) return 183;
+    if (relayMetrics.find("\"relay_errors\":3") == std::string::npos) return 184;
+    if (relayMetrics.find("\"linux_relay_errors\":3") == std::string::npos) return 185;
 
     std::string relayWorkers = TqHandleServerAdmin(Request("GET", "/relay/workers"), metrics, 10);
     if (relayWorkers.find("HTTP/1.1 200 OK") == std::string::npos) return 152;

@@ -626,6 +626,31 @@ std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bo
     return "{}";
 }
 
+static void TqAppendNeutralRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
+    out << ",\"relay_wakeups\":" << metrics.Wakeups;
+    out << ",\"relay_events_processed\":" << metrics.EventsProcessed;
+    out << ",\"relay_pending_events\":" << metrics.PendingEvents;
+    out << ",\"relay_pending_bytes\":" << metrics.PendingBytes;
+    out << ",\"relay_buffer_bytes_in_use\":" << metrics.RelayBufferBytesInUse;
+    out << ",\"relay_active_relays\":" << metrics.ActiveRelays;
+    out << ",\"relay_current_pending_quic_receive_bytes\":" << metrics.CurrentPendingQuicReceiveBytes;
+    out << ",\"relay_outstanding_quic_sends\":" << metrics.OutstandingQuicSends;
+    out << ",\"relay_outstanding_quic_send_bytes\":" << metrics.OutstandingQuicSendBytes;
+    out << ",\"relay_tcp_read_bytes\":" << metrics.TcpReadBytes;
+    out << ",\"relay_tcp_write_bytes\":" << metrics.TcpWriteBytes;
+    out << ",\"relay_deferred_receive_completes\":" << metrics.DeferredReceiveCompletes;
+    out << ",\"relay_quic_receive_view_count\":" << metrics.QuicReceiveViewCount;
+    out << ",\"relay_quic_receive_view_bytes\":" << metrics.QuicReceiveViewBytes;
+    out << ",\"relay_quic_receive_paused_count\":" << metrics.QuicReceivePausedCount;
+    out << ",\"relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
+    out << ",\"relay_errors\":" << metrics.Errors;
+    out << ",\"relay_event_queue_full_errors\":" << metrics.EventQueueFullErrors;
+    out << ",\"relay_event_queue_capacity\":" << metrics.LinuxRelayEventQueueCapacity;
+    out << ",\"relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
+    out << ',';
+    TqAppendJsonString(out, "relay_backend", metrics.Backend);
+}
+
 static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
     out << ",\"linux_relay_wakeups\":" << metrics.Wakeups;
     out << ",\"linux_relay_events_processed\":" << metrics.EventsProcessed;
@@ -902,6 +927,7 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
 std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot& metrics) {
     std::ostringstream out;
     out << "{\"_\":0";
+    TqAppendNeutralRelayMetricsJson(out, metrics);
     TqAppendRelayMetricsJson(out, metrics);
     out << '}';
     auto value = nlohmann::json::parse(out.str());

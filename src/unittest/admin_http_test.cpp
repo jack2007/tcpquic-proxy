@@ -314,6 +314,7 @@ int main() {
         if (js.find("saveServerAcl") == std::string_view::npos) return 442;
         if (js.find("renderRelay") == std::string_view::npos) return 368;
         if (js.find("function platformRelayBackend(data)") == std::string_view::npos) return 432;
+        if (js.find("data.relay_backend") == std::string_view::npos) return 455;
         if (js.find("data.linux_relay_backend") == std::string_view::npos) return 433;
         if (js.find("data.darwin_relay_backend") == std::string_view::npos) return 434;
         if (js.find("data.windows_relay_backend") == std::string_view::npos) return 435;

@@ -68,7 +68,9 @@ int main() {
     Check(std::string(runtimeSnapshot.Backend) == "kqueue", "runtimeSnapshot.Backend == kqueue");
 
     TqRelayMetricsSnapshot metrics{};
-    metrics.Backend = "kqueue";
+    metrics.Backend = "test";
+    metrics.ActiveRelays = 7;
+    metrics.Errors = 3;
     metrics.OutstandingQuicSendBytes = 11;
     metrics.TcpReadBatches = 22;
     metrics.TcpWriteBatches = 33;
@@ -82,7 +84,12 @@ int main() {
     metrics.QuicSendBackpressureEvents = 222;
 
     const std::string json = TqRelayMetricsFieldsJson(metrics);
-    CheckContains(json, "\"linux_relay_backend\":\"kqueue\"");
+    CheckContains(json, "\"relay_backend\":\"test\"");
+    CheckContains(json, "\"linux_relay_backend\":\"test\"");
+    CheckContains(json, "\"relay_active_relays\":7");
+    CheckContains(json, "\"linux_relay_active_relays\":7");
+    CheckContains(json, "\"relay_errors\":3");
+    CheckContains(json, "\"linux_relay_errors\":3");
     CheckContains(json, "\"linux_relay_outstanding_quic_send_bytes\":11");
     CheckContains(json, "\"linux_relay_tcp_read_batches\":22");
     CheckContains(json, "\"linux_relay_tcp_write_batches\":33");

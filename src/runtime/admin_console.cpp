@@ -704,12 +704,12 @@ static constexpr char kConsoleJsStorage[] =
 
     function platformRelayBackend(data) {
       return firstDefined(
+        data.relay_backend,
         data.linux_relay_backend,
         data.darwin_relay_backend,
         data.windows_relay_backend,
         data.backend,
-        data.relay_backend
-      );
+        'unsupported');
     }
 
     function renderRelayCapabilities(capabilities) {
