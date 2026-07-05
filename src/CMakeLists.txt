@@ -303,6 +303,7 @@ set_property(TARGET tcpquic_tuning_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
 add_executable(tcpquic_quic_settings_test
     unittest/quic_settings_test.cpp
+    protocol/control_protocol.cpp
     protocol/quic_address.cpp
     protocol/quic_session.cpp
     config/tuning.cpp
@@ -843,6 +844,7 @@ set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
 add_executable(tcpquic_quic_session_reconnect_test
     unittest/quic_session_reconnect_test.cpp
+    protocol/control_protocol.cpp
     protocol/quic_address.cpp
     protocol/quic_session.cpp
     config/tuning.cpp

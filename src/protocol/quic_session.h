@@ -20,6 +20,7 @@
 // Server-side: assign stable conn_id per accepted QUIC connection (OPEN_OK field).
 uint32_t TqRegisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
+bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName);
 void TqUnregisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);
 MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server);
@@ -41,6 +42,7 @@ struct TqConnectionSnapshot {
 
 struct TqServerConnectionSnapshot {
     std::string ConnectionId;
+    std::string ClientName;
     std::string RemoteAddress;
     std::string State;
     uint64_t ActiveStreams{0};
@@ -62,6 +64,10 @@ void TqServerConnectionStreamFinished(MsQuicConnection* connection);
 void TqServerConnectionStreamFinishedById(uint32_t connectionId);
 
 #if defined(TQ_UNIT_TESTING)
+uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection = nullptr);
+bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
+void TqUnregisterServerConnectionForTest(HQUIC handle);
+
 struct TqCredentialConfigSnapshot {
     QUIC_CREDENTIAL_TYPE Type{};
     QUIC_CREDENTIAL_FLAGS Flags{};

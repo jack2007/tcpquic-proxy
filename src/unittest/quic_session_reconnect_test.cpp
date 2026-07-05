@@ -678,6 +678,43 @@ static int TestScheme2CredentialConfig() {
     return 0;
 }
 
+static int TestServerConnectionSnapshotIncludesClientName() {
+    HQUIC handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x4100));
+
+    const uint32_t id = TqRegisterServerConnectionForTest(handle);
+    if (id == 0) return 1901;
+    if (!TqSetServerConnectionClientNameForTest(handle, "office-a")) {
+        TqUnregisterServerConnectionForTest(handle);
+        return 1902;
+    }
+    if (TqSetServerConnectionClientNameForTest(handle, "bad name")) {
+        TqUnregisterServerConnectionForTest(handle);
+        return 1905;
+    }
+    HQUIC unknownHandle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x4101));
+    if (TqSetServerConnectionClientNameForTest(unknownHandle, "office-b")) {
+        TqUnregisterServerConnectionForTest(handle);
+        return 1906;
+    }
+    auto snapshots = TqSnapshotServerConnections();
+    bool found = false;
+    for (const auto& snapshot : snapshots) {
+        if (snapshot.ConnectionId == "srv-" + std::to_string(id)) {
+            found = true;
+            if (snapshot.ClientName != "office-a") {
+                TqUnregisterServerConnectionForTest(handle);
+                return 1903;
+            }
+        }
+    }
+    if (!found) {
+        TqUnregisterServerConnectionForTest(handle);
+        return 1904;
+    }
+    TqUnregisterServerConnectionForTest(handle);
+    return 0;
+}
+
 int main() {
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
@@ -699,5 +736,6 @@ int main() {
     if (int rc = TestConnectionSnapshotIncludesConfiguredPathMetadata()) return rc;
     if (int rc = TestPickConnectionRoundRobinSkipsUnavailableSlots()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
+    if (int rc = TestServerConnectionSnapshotIncludesClientName()) return rc;
     return 0;
 }

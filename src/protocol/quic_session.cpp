@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "control_protocol.h"
 #include "quic_address.h"
 #include "relay.h"
 #include "trace.h"
@@ -55,7 +56,7 @@ QUIC_CREDENTIAL_FLAGS TqMakeCredentialFlags(bool server) {
 }
 
 std::string TqFormatConnectionAddr(MsQuicConnection* connection, uint32_t param) {
-    if (connection == nullptr || !connection->IsValid()) {
+    if (connection == nullptr || MsQuic == nullptr || !connection->IsValid()) {
         return "?";
     }
     QUIC_ADDR addr{};
@@ -233,6 +234,7 @@ std::mutex g_serverConnIdLock;
 struct TqServerConnectionRecord {
     uint32_t Id{0};
     MsQuicConnection* Connection{nullptr};
+    std::string ClientName;
     std::string RemoteAddress;
     std::string State{"connected"};
     uint64_t ActiveStreams{0};
@@ -263,6 +265,41 @@ void TqSampleConnectionRtt(MsQuicConnection* connection) {
     TqRecordMeasuredRtt(std::max(1u, sampleUs / 1000));
 }
 
+uint32_t TqRegisterServerConnectionByHandle(HQUIC handle, MsQuicConnection* connection) {
+    if (handle == nullptr) {
+        return 0;
+    }
+    const uint32_t id = g_nextServerConnId.fetch_add(1);
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    TqServerConnectionRecord record;
+    record.Id = id;
+    record.Connection = connection;
+    record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
+    g_serverConnIds[handle] = std::move(record);
+    return id;
+}
+
+bool TqSetServerConnectionClientNameByHandle(HQUIC handle, const std::string& clientName) {
+    if (handle == nullptr || !TqIsValidClientName(clientName)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    const auto it = g_serverConnIds.find(handle);
+    if (it == g_serverConnIds.end()) {
+        return false;
+    }
+    it->second.ClientName = clientName;
+    return true;
+}
+
+void TqUnregisterServerConnectionByHandle(HQUIC handle) {
+    if (handle == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    g_serverConnIds.erase(handle);
+}
+
 } // namespace
 
 std::string QuicClientSession::MakeConnectionId(size_t index) {
@@ -291,14 +328,7 @@ uint32_t TqRegisterServerConnection(MsQuicConnection* connection) {
     if (connection == nullptr || connection->Handle == nullptr) {
         return 0;
     }
-    const uint32_t id = g_nextServerConnId.fetch_add(1);
-    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
-    TqServerConnectionRecord record;
-    record.Id = id;
-    record.Connection = connection;
-    record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
-    g_serverConnIds[connection->Handle] = std::move(record);
-    return id;
+    return TqRegisterServerConnectionByHandle(connection->Handle, connection);
 }
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -310,12 +340,32 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     return it == g_serverConnIds.end() ? 0 : it->second.Id;
 }
 
+bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName) {
+    if (connection == nullptr) {
+        return false;
+    }
+    return TqSetServerConnectionClientNameByHandle(connection->Handle, clientName);
+}
+
+#if defined(TQ_UNIT_TESTING)
+uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection) {
+    return TqRegisterServerConnectionByHandle(handle, connection);
+}
+
+bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
+    return TqSetServerConnectionClientNameByHandle(handle, clientName);
+}
+
+void TqUnregisterServerConnectionForTest(HQUIC handle) {
+    TqUnregisterServerConnectionByHandle(handle);
+}
+#endif
+
 void TqUnregisterServerConnection(MsQuicConnection* connection) {
     if (connection == nullptr || connection->Handle == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
-    g_serverConnIds.erase(connection->Handle);
+    TqUnregisterServerConnectionByHandle(connection->Handle);
 }
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
@@ -325,6 +375,7 @@ std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
     for (const auto& item : g_serverConnIds) {
         TqServerConnectionSnapshot snapshot;
         snapshot.ConnectionId = "srv-" + std::to_string(item.second.Id);
+        snapshot.ClientName = item.second.ClientName;
         snapshot.RemoteAddress = item.second.RemoteAddress;
         snapshot.State = item.second.State;
         snapshot.ActiveStreams = item.second.ActiveStreams;
