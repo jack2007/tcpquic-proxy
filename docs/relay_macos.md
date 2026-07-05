@@ -23,7 +23,7 @@ flowchart TD
     C --> D["TqRelayRegisterActive()"]
     D --> E["TqApplyRelayPoolBudget(tuning, activeRelays)"]
     E --> F["TqDarwinRelayRuntime::Start(tuning)"]
-    F --> G["读取 tuning.LinuxRelay* 字段组装 TqDarwinRelayWorkerConfig"]
+    F --> G["读取 tuning.Relay* 平台中性字段组装 TqDarwinRelayWorkerConfig"]
     G --> H["每个 worker: kqueue() + EVFILT_USER wake + thread"]
     H --> I["TqDarwinRelayRuntime::PickWorker()"]
     I --> J["TqDarwinRelayWorker::RegisterRelayWithId()"]
@@ -34,7 +34,7 @@ flowchart TD
     N --> O["TqRelayHandle.Backend = DarwinWorker"]
 ```
 
-当前 Darwin 配置复用 `TqTuningConfig` 内的 `LinuxRelay*` 字段：worker 数、事件预算、read chunk/batch、IOV、TCP write burst、per-tunnel pending bytes 和 QUIC receive complete batch 等都从 Linux 命名字段读取。功能上可用，但配置语义不清晰。
+当前 Darwin relay 读取 `TqTuningConfig` 内的平台中性 `Relay*` 字段：worker 数、事件预算、read chunk/batch、IOV、TCP write burst、per-tunnel pending bytes 和 QUIC receive complete batch 等都从中性字段进入 worker config。旧 `LinuxRelay*` 字段仍作为 legacy mirror 保留，服务旧配置、旧 CLI 和兼容测试，不再是 macOS 用户调优入口。
 
 ### 线程边界
 
@@ -291,13 +291,14 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 2. callback 在 backpressure 暂存后返回 `QUIC_STATUS_PENDING`（buffer 生命周期由 worker 侧结构接管）。
 3. snapshot 细分计数：`EventQueueFullErrors`、`WakeFailures`、`QuicReceiveEnqueueFailures`、`CallbackReceiveBudgetRejects`、`QuicReceiveViewBackpressureQueued`（`SnapshotLocal()` + `TqDarwinRelayRuntime::Snapshot()` 聚合）。
 
-### P2：Darwin metrics 命名仍带 Linux
+### P2：Darwin metrics 命名仍带 Linux — **第一阶段已完成**
 
-现象：`darwin_relay_metrics_test.cpp` 断言 JSON 中存在 `"linux_relay_backend":"kqueue"` 等字段。
+第一阶段已新增 `relay_*` 平台中性 metrics alias，例如 `relay_backend`、`relay_pending_bytes`、`relay_active_relays`、`relay_event_queue_capacity` 等；旧 `linux_relay_*` key 继续输出，作为 admin UI、脚本和兼容测试的 legacy key。
 
-影响：上层 UI 或自动化读取指标时会把 macOS 后端归到 Linux 命名空间，长期维护不直观。
+后续工作不再是新增基础平台中性 alias，而是：
 
-建议：新增 `"relay_backend"`、`"relay_pending_bytes"`、`"relay_workers"` 等平台中性字段；旧字段保持兼容。
+1. 梳理是否还有未覆盖的细粒度指标需要补充 `relay_*` alias。
+2. 在兼容窗口结束后评估旧 `linux_relay_*` key 的清理策略。
 
 ### P3：macOS 验证覆盖需要补齐真实平台组合
 
