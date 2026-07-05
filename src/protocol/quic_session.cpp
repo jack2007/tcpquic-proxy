@@ -1170,7 +1170,7 @@ void QuicClientSession::SendClientHello(MsQuicConnection* connection) {
     if (sendOverride) {
         (void)sendOverride(
             connection,
-            QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+            QUIC_STREAM_OPEN_FLAG_NONE,
             static_cast<QUIC_SEND_FLAGS>(QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN),
             payload);
         return;
@@ -1187,7 +1187,7 @@ void QuicClientSession::SendClientHello(MsQuicConnection* connection) {
 
     auto* stream = new (std::nothrow) MsQuicStream(
         *connection,
-        QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+        QUIC_STREAM_OPEN_FLAG_NONE,
         CleanUpAutoDelete,
         TqClientHelloStreamCallback,
         context);

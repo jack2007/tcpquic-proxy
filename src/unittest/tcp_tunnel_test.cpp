@@ -971,7 +971,7 @@ int TestServerIncomingClientHelloUpdatesConnectionNameOnly() {
         TqUnregisterServerConnectionForTest(rawConn);
         return 355;
     }
-    if (FakeLastShutdownFlags(rawStream) != QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE) {
+    if (FakeLastShutdownFlags(rawStream) != QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL) {
         TqUnregisterServerConnectionForTest(rawConn);
         return 359;
     }

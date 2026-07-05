@@ -56,7 +56,7 @@ server admin-console 需要从观测面扩展到配置面。首要目标是让 s
 
 取舍：
 
-- 优点：API 语义和 server 页面一致，避免把 server ACL 塞进现有跨角色 `/runtime/config` 的 compression/tuning patch 语义里。
+- 优点：API 语义和 server 页面一致，避免把 server ACL 塞进现有跨角色 `/runtime/config` 的 tuning patch 语义里。
 - 优点：后续如果 server 有更多只影响新 tunnel 的字段，可以在同一个 server config patch 下扩展，并沿用同一套配置文件写回流程。
 - 缺点：需要新增 route 白名单、handler 分支、测试和文档。
 - 缺点：必须处理配置文件不存在、不可写、并发写、写盘失败和热更新失败之间的一致性。
@@ -196,7 +196,7 @@ public:
 
 ### 4.5 与现有 `/runtime/config` 的关系
 
-`PATCH /api/v1/runtime/config` 继续用于跨角色运行期安全字段，当前是 compression 和 `tuning.max_memory_mb`。server ACL 不放入该接口，避免 UI 和 API 语义混乱。
+`PATCH /api/v1/runtime/config` 继续用于跨角色运行期安全字段，当前是 `tuning.max_memory_mb`。server ACL 不放入该接口，避免 UI 和 API 语义混乱。server 端不需要配置压缩；压缩是否启用在设计上由 client 端控制。
 
 需要同时修正 server 侧 runtime config 的状态问题：任何支持热更新的字段，都必须写入共享 runtime state，并能被后续 `GET` 读回。首版 ACL 走 `/server/config`，不依赖 `/runtime/config` 完成。
 
@@ -225,7 +225,7 @@ public:
 
 server 模式的 Config 页不再只显示原始 JSON。建议分为两块：
 
-- “Runtime editable”：跳转或内嵌 ACL 编辑入口，后续可扩展 compression/tuning。
+- “Runtime editable”：跳转或内嵌 ACL 编辑入口，后续可扩展 tuning。server 端不展示压缩配置，因为压缩是否启用由 client 端控制。
 - “Restart required”：只读展示 listen、TLS、QUIC、relay、admin 配置。
 
 保存按钮语义要避免误导：
@@ -392,5 +392,5 @@ Admin API 负载模型：
 - 空 `allow_targets` 的语义：本设计选择“拒绝所有普通目标”，因为它是有用的紧急封禁能力；如果希望保持启动配置默认行为，则 PATCH 空 allow 应返回 400。
 - 配置文件写回会重新格式化严格 JSON，并可能改变字段顺序；这是使用 JSON AST 安全更新的取舍。
 - 如果 admin API 未来支持多个 server 字段同时修改，需要继续保持“校验 next config -> 写文件 -> 更新 runtime -> 提交状态”的事务顺序。
-- compression/tuning 的 server runtime patch 目前语义不完整。建议另起设计修复，不和 ACL 首版混在一起。
+- tuning 的 server runtime patch 目前语义不完整。建议另起设计修复，不和 ACL 首版混在一起。server 端压缩配置不在修复范围内，因为压缩是否启用由 client 端控制。
 - 如果未来要展示最近 ACL 拒绝明细，需要在 server dial path 增加审计 ring buffer，不能只依赖当前 `acl_denied` counter。

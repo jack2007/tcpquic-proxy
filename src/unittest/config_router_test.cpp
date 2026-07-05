@@ -51,6 +51,16 @@ static bool ParseRuntimeConfig(const std::string& body, TqConfig& cfg, std::stri
     return Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err);
 }
 
+static const char* ExpectedClientNamePrefix() {
+#if defined(_WIN32)
+    return "win-";
+#elif defined(__APPLE__)
+    return "macos-";
+#else
+    return "linux-";
+#endif
+}
+
 static bool Load(const std::string& body, TqRouterConfig& router, std::string& err) {
     std::string file = WriteTempConfig(body);
     err.clear();
@@ -176,9 +186,29 @@ int main() {
         const char* args[] = {"tcpquic-proxy", "client", "--client-config", file.c_str(), "--ca", "ca.crt"};
         TqConfig cfg;
         std::string err;
-        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 402;
-        if (cfg.Router.Peers.size() != 1) return 403;
-        if (cfg.Router.Peers[0].ClientName != "office-a") return 404;
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 402;
+        if (err.find("client_name") == std::string::npos) return 403;
+    }
+    {
+        std::string file = WriteTempConfig(R"json({
+            "tls":{"ca":"ca.crt"},
+            "client":{"client_name":"office-a"},
+            "peers":[{"id":"agent-b","proto_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11001"}]
+        })json");
+        const char* args[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 404;
+        if (cfg.ClientName != "office-a") return 409;
+        if (cfg.Router.Peers.size() != 1) return 410;
+    }
+    {
+        const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt"};
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 412;
+        if (cfg.ClientName.rfind(ExpectedClientNamePrefix(), 0) != 0) return 413;
+        if (cfg.ClientName.size() <= std::string(ExpectedClientNamePrefix()).size()) return 414;
     }
     {
         const char* args[] = {"tcpquic-proxy", "client", "--peer", "127.0.0.1:14444", "--ca", "ca.crt", "--client-name", "edge-a"};
@@ -901,6 +931,39 @@ int main() {
         if (cfg.ClientConfigPath.empty()) return 337;
         if (cfg.ClientConfigPath.find("tcpquic-proxy-test-bin") == std::string::npos) return 338;
         if (cfg.ClientConfigPath.find("client-config-") == std::string::npos) return 339;
+    }
+    {
+        const std::string file = TempConfigPath("tcpquic-missing-client-runtime-config");
+        std::filesystem::remove(file);
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--config",
+            file.c_str(),
+            "--peer",
+            "127.0.0.1:14444",
+            "--ca",
+            "ca.crt",
+            "--socks-listen",
+            "127.0.0.1:11080"
+        };
+        TqConfig cfg;
+        std::string err;
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) {
+            std::fprintf(stderr, "missing client runtime config parse failed: %s\n", err.c_str());
+            return 361;
+        }
+        if (cfg.ConfigPath != file) return 365;
+        if (!cfg.ClientConfigPath.empty()) return 366;
+        if (!std::filesystem::exists(file)) return 362;
+        nlohmann::json json = nlohmann::json::parse(ReadTextFile(file));
+        if (!json.contains("client")) return 363;
+        if (json["client"].value("client_name", "").rfind(ExpectedClientNamePrefix(), 0) != 0) return 364;
+        if (!json.contains("peers") || json["peers"].size() != 1) return 367;
+        if (json["peers"][0].value("id", "") != "primary") return 368;
+        if (json["peers"][0].value("proto_peer", "") != "127.0.0.1:14444") return 369;
+        if (json["peers"][0].value("socks_listen", "") != "127.0.0.1:11080") return 370;
+        std::filesystem::remove(file);
     }
     {
         const std::string file = WriteTempConfig(R"json({"version":1,"peers":[{"peer_id":"persisted","quic_peer":"127.0.0.1:14444","socks_listen":"127.0.0.1:11080","enabled":false}]})json");

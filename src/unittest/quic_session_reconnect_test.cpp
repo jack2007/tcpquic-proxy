@@ -735,7 +735,7 @@ static int TestClientHelloSentAfterConnected() {
         if (connection != reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5100))) {
             return false;
         }
-        if (openFlags != QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) {
+        if (openFlags != QUIC_STREAM_OPEN_FLAG_NONE) {
             return false;
         }
         if (sendFlags != static_cast<QUIC_SEND_FLAGS>(QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN)) {

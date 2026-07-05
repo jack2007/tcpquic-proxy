@@ -45,7 +45,6 @@ static int TestPrimaryPeerConfigUsesCliFields() {
     if (peer.QuicPaths.size() != 2) return 19;
     if (peer.QuicPaths[0].Name != "cmcc") return 101;
     if (peer.QuicPaths[1].Peer != "59.1.1.10:443") return 102;
-    if (peer.ClientName != "edge-primary") return 106;
     return 0;
 }
 
@@ -53,6 +52,7 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     TqConfig base;
     base.QuicConnections = 2;
     base.Compress = "zstd";
+    base.ClientName = "edge-shared";
 
     TqPeerConfig peer;
     peer.PeerId = "agent-a";
@@ -64,7 +64,6 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     peer.QuicPaths.push_back(TqQuicPathConfig{"ctcc", "10.20.1.2", "59.1.1.10:443", 1});
     peer.QuicConnections = 8;
     peer.Compress = "off";
-    peer.ClientName = "agent-a-display";
 
     const TqConfig out = TqMakePeerRuntimeConfig(base, peer);
     if (out.QuicPeer != peer.QuicPeer) return 20;
@@ -80,7 +79,7 @@ static int TestPeerConfigOverlayUsesPeerOverrides() {
     if (out.QuicPaths.size() != 2) return 103;
     if (out.QuicPaths[0].LocalAddress != "10.10.1.2") return 104;
     if (out.QuicPaths[1].Connections != 1) return 105;
-    if (out.ClientName != "agent-a-display") return 107;
+    if (out.ClientName != "edge-shared") return 107;
     return 0;
 }
 
@@ -102,7 +101,7 @@ static int TestPeerConfigOverlayUsesBaseDefaults() {
 
     base.ClientName.clear();
     const TqConfig fallback = TqMakePeerRuntimeConfig(base, peer);
-    if (fallback.ClientName != peer.PeerId) return 33;
+    if (!fallback.ClientName.empty()) return 33;
     return 0;
 }
 

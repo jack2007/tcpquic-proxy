@@ -297,7 +297,6 @@ nlohmann::json ProxyAuthJsonValue(const std::vector<TqProxyAuthUser>& users) {
 nlohmann::json PeerPublicConfigJsonValue(const TqPeerConfig& peer) {
     return {
         {"id", peer.PeerId},
-        {"client_name", peer.ClientName},
         {"proto_peer", peer.QuicPeer},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},
@@ -364,6 +363,7 @@ std::string TqPeerPublicConfigJson(const TqConfig& cfg, const TqPeerConfig& peer
 std::string TqClientPublicConfigJson(const TqConfig& cfg) {
     nlohmann::json body{
         {"role", "client"},
+        {"client_name", cfg.ClientName},
         {"socks_listen", cfg.SocksListen},
         {"http_listen", cfg.HttpListen},
         {"proto", ClientProtoJsonValue(cfg)},
@@ -403,6 +403,7 @@ bool TqApplyRuntimeConfigPatch(const std::string& body, TqConfig& cfg, std::stri
 std::string TqRuntimeConfigJson(const TqConfig& cfg, bool redact) {
     nlohmann::json body{
         {"role", RoleName(cfg.Mode)},
+        {"client_name", cfg.ClientName},
         {"config_path", cfg.ConfigPath},
         {"client_config_path", cfg.ClientConfigPath},
         {"admin", {{"listen", cfg.AdminListen}, {"token_file", cfg.AdminTokenFile}, {"threads", cfg.AdminThreads}}},

@@ -2386,7 +2386,7 @@ private:
 
         CloseAfterClientHello_ = true;
         if (Stream_ != nullptr) {
-            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
+            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
         }
     }
 

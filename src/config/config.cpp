@@ -91,6 +91,70 @@ bool IsWhitespaceOnly(const std::string& value) {
     return true;
 }
 
+const char* DefaultClientNameOsPrefix() {
+#if defined(_WIN32)
+    return "win";
+#elif defined(__APPLE__)
+    return "macos";
+#else
+    return "linux";
+#endif
+}
+
+bool IsClientNameChar(unsigned char ch) {
+    return (ch >= 'A' && ch <= 'Z') ||
+           (ch >= 'a' && ch <= 'z') ||
+           (ch >= '0' && ch <= '9') ||
+           ch == '.' || ch == '_' || ch == '-' || ch == ':';
+}
+
+std::string ReadHostName() {
+#if defined(_WIN32)
+    char buf[MAX_COMPUTERNAME_LENGTH + 1]{};
+    DWORD size = static_cast<DWORD>(sizeof(buf));
+    if (GetComputerNameA(buf, &size) && size > 0) {
+        return std::string(buf, size);
+    }
+#else
+    char buf[256]{};
+    if (::gethostname(buf, sizeof(buf) - 1) == 0 && buf[0] != '\0') {
+        buf[sizeof(buf) - 1] = '\0';
+        return buf;
+    }
+#endif
+    return "unknown";
+}
+
+std::string SanitizeClientNameHost(std::string host, size_t maxLen) {
+    std::string out;
+    out.reserve(host.size());
+    for (unsigned char ch : host) {
+        out.push_back(IsClientNameChar(ch) ? static_cast<char>(ch) : '-');
+        if (out.size() == maxLen) {
+            break;
+        }
+    }
+    if (out.empty()) {
+        out = "unknown";
+    }
+    if (out.size() > maxLen) {
+        out.resize(maxLen);
+    }
+    return out;
+}
+
+std::string DefaultClientName() {
+    const std::string prefix = DefaultClientNameOsPrefix();
+    const size_t hostMaxLen = TQ_CLIENT_HELLO_MAX_NAME_LEN - prefix.size() - 1;
+    return prefix + "-" + SanitizeClientNameHost(ReadHostName(), hostMaxLen);
+}
+
+void EnsureDefaultClientName(TqConfig& cfg) {
+    if (cfg.Mode == TqMode::Client && cfg.ClientName.empty()) {
+        cfg.ClientName = DefaultClientName();
+    }
+}
+
 const char* NextArg(int& i, int argc, char** argv, const char* flag, std::string& err) {
     if (i + 1 >= argc) {
         err = std::string("missing value for ") + flag;
@@ -656,6 +720,11 @@ private:
                 if (!ParseSpeedTest(item.value(), TqSpeedTestMode::Upload, cfg, speedTestSpecified, "client.upload_test")) return false;
             } else if (key == "handshake_threads") {
                 if (!ReadUint32(item.value(), cfg.HandshakeThreads)) return Error("invalid client.handshake_threads");
+            } else if (key == "client_name") {
+                if (!ReadString(item.value(), cfg.ClientName) ||
+                    (!cfg.ClientName.empty() && !TqIsValidClientName(cfg.ClientName))) {
+                    return Error("invalid client.client_name");
+                }
             } else {
                 return Error("unknown client key: " + key);
             }
@@ -698,10 +767,7 @@ private:
             if (key == "id") {
                 if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer.id");
             } else if (key == "client_name") {
-                if (!ReadString(item.value(), peer.ClientName) ||
-                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
-                    return Error("invalid client_name");
-                }
+                return Error("unknown peer key: client_name");
             } else if (key == "proto_peer") {
                 if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid peer.proto_peer");
             } else if (key == "socks_listen") {
@@ -735,10 +801,7 @@ private:
             if (key == "peer_id") {
                 if (!ReadString(item.value(), peer.PeerId)) return Error("invalid peer_id");
             } else if (key == "client_name") {
-                if (!ReadString(item.value(), peer.ClientName) ||
-                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
-                    return Error("invalid client_name");
-                }
+                return Error("unknown peer key: client_name");
             } else if (key == "quic_peer") {
                 if (!ReadString(item.value(), peer.QuicPeer)) return Error("invalid quic_peer");
             } else if (key == "socks_listen") {
@@ -920,6 +983,79 @@ nlohmann::json StringArrayJson(const std::vector<std::string>& values) {
     return out;
 }
 
+std::string PortForwardTargetText(const TqPortForwardConfig& forward) {
+    const bool ipv6 = forward.TargetHost.find(':') != std::string::npos &&
+        !(forward.TargetHost.size() >= 2 && forward.TargetHost.front() == '[' && forward.TargetHost.back() == ']');
+    std::string host = ipv6 ? "[" + forward.TargetHost + "]" : forward.TargetHost;
+    return host + ":" + std::to_string(forward.TargetPort);
+}
+
+nlohmann::json PortForwardsJson(const std::vector<TqPortForwardConfig>& forwards) {
+    nlohmann::json values = nlohmann::json::array();
+    for (const auto& forward : forwards) {
+        values.push_back({
+            {"listen", forward.Listen},
+            {"target", PortForwardTargetText(forward)},
+        });
+    }
+    return values;
+}
+
+nlohmann::json QuicPathsJson(const std::vector<TqQuicPathConfig>& paths) {
+    nlohmann::json values = nlohmann::json::array();
+    for (const auto& path : paths) {
+        values.push_back({
+            {"name", path.Name},
+            {"local", path.LocalAddress},
+            {"peer", path.Peer},
+            {"connections", path.Connections},
+        });
+    }
+    return values;
+}
+
+nlohmann::json RuntimePeerJson(const TqPeerConfig& peer) {
+    return {
+        {"id", peer.PeerId},
+        {"proto_peer", peer.QuicPeer},
+        {"socks_listen", peer.SocksListen},
+        {"http_listen", peer.HttpListen},
+        {"port_forwards", PortForwardsJson(peer.PortForwards)},
+        {"paths", QuicPathsJson(peer.QuicPaths)},
+        {"proto_connections", peer.QuicConnections},
+        {"compress", peer.Compress},
+        {"enabled", peer.Enabled},
+    };
+}
+
+TqPeerConfig PrimaryPeerFromConfig(const TqConfig& cfg) {
+    TqPeerConfig peer;
+    peer.PeerId = "primary";
+    peer.Enabled = true;
+    peer.QuicPeer = cfg.QuicPeer;
+    peer.QuicPaths = cfg.QuicPaths;
+    peer.SocksListen = cfg.SocksListen;
+    peer.HttpListen = cfg.HttpListen;
+    peer.PortForwards = cfg.PortForwards;
+    peer.QuicConnections = cfg.QuicConnections;
+    peer.Compress = cfg.Compress;
+    return peer;
+}
+
+nlohmann::json RuntimePeersJson(const TqConfig& cfg) {
+    nlohmann::json values = nlohmann::json::array();
+    const std::vector<TqPeerConfig>* peers = &cfg.Router.Peers;
+    std::vector<TqPeerConfig> singlePeer;
+    if (peers->empty() && (!cfg.QuicPeer.empty() || !cfg.QuicPaths.empty())) {
+        singlePeer.push_back(PrimaryPeerFromConfig(cfg));
+        peers = &singlePeer;
+    }
+    for (const auto& peer : *peers) {
+        values.push_back(RuntimePeerJson(peer));
+    }
+    return values;
+}
+
 std::string RuntimeConfigJson(const TqConfig& cfg) {
     nlohmann::json root;
     root["tls"] = nlohmann::json::object();
@@ -972,7 +1108,15 @@ std::string RuntimeConfigJson(const TqConfig& cfg) {
         {"level", TraceLevelName(cfg.TraceLogLevel)},
     };
 
-    if (cfg.Mode == TqMode::Server) {
+    if (cfg.Mode == TqMode::Client) {
+        root["client"] = {
+            {"client_name", cfg.ClientName},
+        };
+        nlohmann::json peers = RuntimePeersJson(cfg);
+        if (!peers.empty()) {
+            root["peers"] = std::move(peers);
+        }
+    } else {
         root["server"] = {
             {"proto_listen", cfg.QuicListen},
             {"allow_targets", StringArrayJson(cfg.AllowTargets)},
@@ -1118,6 +1262,7 @@ void TqPrintUsage(FILE* out) {
 }
 
 void TqFinalizeConfig(TqConfig& cfg) {
+    EnsureDefaultClientName(cfg);
     TqComputeTuning(cfg, cfg.Tuning);
 }
 
@@ -1693,7 +1838,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             return false;
         }
     }
-    if (cfg.Mode == TqMode::Client && !clientConfigSpecified && cfg.ClientConfigPath.empty()) {
+    if (cfg.Mode == TqMode::Client && !configSpecified && !clientConfigSpecified && cfg.ClientConfigPath.empty()) {
         cfg.ClientConfigPath = DefaultRoleConfigPath(argc > 0 ? argv[0] : nullptr, TqMode::Client);
     }
     if (clientConfigSpecified) {
@@ -1774,6 +1919,12 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 return false;
             }
         }
+        if (configSpecified && configFileMissing) {
+            EnsureDefaultClientName(cfg);
+            if (!WriteTextFileAtomically(cfg.ConfigPath, RuntimeConfigJson(cfg), err)) {
+                return false;
+            }
+        }
     } else {
         if (!RequireNonEmpty(cfg.QuicListen, "--listen", err)) {
             return false;
@@ -1838,10 +1989,6 @@ bool TqValidateRouterConfig(const TqRouterConfig& router, std::string& err) {
     for (const auto& peer : router.Peers) {
         if (peer.PeerId.empty()) { err = "peer_id is required"; return false; }
         if (!peerIds.insert(peer.PeerId).second) { err = "duplicate peer_id: " + peer.PeerId; return false; }
-        if (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName)) {
-            err = "invalid client_name for " + peer.PeerId;
-            return false;
-        }
         if (peer.QuicPaths.empty()) {
             if (!IsHostPortList(peer.QuicPeer)) { err = "invalid quic_peer for " + peer.PeerId; return false; }
         } else {

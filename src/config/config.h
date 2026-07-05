@@ -33,7 +33,6 @@ struct TqQuicPathConfig {
 
 struct TqPeerConfig {
     std::string PeerId;
-    std::string ClientName;
     std::string QuicPeer;
     std::vector<TqQuicPathConfig> QuicPaths;
     std::string SocksListen;

@@ -417,9 +417,9 @@ int main() {
         cfg.QuicKeepAliveIntervalMs = 5000;
         cfg.Compress = "off";
         cfg.CompressLevel = 1;
+        cfg.ClientName = "office-a";
         TqPeerConfig peer;
         peer.PeerId = "agent-a";
-        peer.ClientName = "office-a";
         peer.QuicPeer = "127.0.0.1:14444";
         peer.SocksListen = "127.0.0.1:11001";
         peer.QuicConnections = 4;
@@ -429,8 +429,9 @@ int main() {
         nlohmann::json json;
         if (!ParseJson(TqRuntimeConfigJson(cfg, false), json)) return 930;
         if (json["role"] != "client") return 931;
+        if (json["client_name"] != "office-a") return 924;
         if (json["router"]["peers"][0]["id"] != "agent-a") return 932;
-        if (json["router"]["peers"][0]["client_name"] != "office-a") return 925;
+        if (json["router"]["peers"][0].contains("client_name")) return 925;
         if (json["router"]["peers"][0]["proto_peer"] != "127.0.0.1:14444") return 933;
         if (json["router"]["peers"][0]["proto_connections"] != 4) return 934;
         if (json.dump().find("\"token\"") != std::string::npos) return 929;
@@ -463,8 +464,10 @@ int main() {
         cfg.HandshakeThreads = 6;
         cfg.Compress = "zstd";
         cfg.CompressLevel = 3;
+        cfg.ClientName = "edge-public";
         nlohmann::json json;
         if (!ParseJson(TqClientPublicConfigJson(cfg), json)) return 990;
+        if (json["client_name"] != "edge-public") return 988;
         if (json["proxy_auth"][0]["password"] != "***") return 939;
         if (json.dump().find("raw-proxy-password") != std::string::npos) return 952;
         if (json["socks_listen"] != "127.0.0.1:11080") return 991;
@@ -483,13 +486,12 @@ int main() {
         TqConfig cfg;
         TqPeerConfig peer;
         peer.PeerId = "agent-public";
-        peer.ClientName = "public-name";
         peer.QuicPeer = "127.0.0.1:24444";
         peer.QuicConnections = 8;
         nlohmann::json json;
         if (!ParseJson(TqPeerPublicConfigJson(cfg, peer), json)) return 953;
         if (json["id"] != "agent-public") return 954;
-        if (json["client_name"] != "public-name") return 949;
+        if (json.contains("client_name")) return 949;
         if (json["proto_peer"] != "127.0.0.1:24444") return 955;
         if (json["proto_connections"] != 8) return 956;
     }
@@ -939,13 +941,13 @@ int main() {
         const std::string initialSaved = ReadTextFile(path);
         if (initialSaved.find("\"peers\":[]") == std::string::npos) return 353;
 
-        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"persisted-peer\",\"client_name\":\"persisted-name\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"enabled\":false}");
+        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"persisted-peer\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"enabled\":false}");
         std::string createResp = adminRuntime.HandleAdmin(create);
         if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 347;
 
         const std::string saved = ReadTextFile(path);
         if (saved.find("\"peer_id\":\"persisted-peer\"") == std::string::npos) return 348;
-        if (saved.find("\"client_name\":\"persisted-name\"") == std::string::npos) return 354;
+        if (saved.find("\"client_name\"") != std::string::npos) return 354;
         if (saved.find("\"enabled\":false") == std::string::npos) return 349;
 
         TqHttpRequest enable = Request("POST", "/peers/persisted-peer:enable", "");
@@ -955,9 +957,34 @@ int main() {
         if (enabledSaved.find("\"enabled\":true") == std::string::npos) return 351;
     }
     {
+        const std::string path = TempClientConfigPath("tcpquic-admin-persist-runtime-config");
+        std::filesystem::remove(path);
+        TqConfig runtimeConfig;
+        runtimeConfig.Mode = TqMode::Client;
+        runtimeConfig.ConfigPath = path;
+        runtimeConfig.QuicCa = "ca.crt";
+        runtimeConfig.ClientName = "linux-test-host";
+        TqRouterRuntime adminRuntime(nullptr, runtimeConfig);
+        std::string err;
+        if (!adminRuntime.ApplyConfig(TqRouterConfig{}, err)) return 321;
+        const std::string initialSaved = ReadTextFile(path);
+        if (initialSaved.find("\"peers\": []") == std::string::npos) return 322;
+        if (initialSaved.find("\"client_name\": \"linux-test-host\"") == std::string::npos) return 323;
+
+        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"runtime-peer\",\"quic_peer\":\"127.0.0.1:14461\",\"socks_listen\":\"127.0.0.1:11061\",\"enabled\":false}");
+        std::string createResp = adminRuntime.HandleAdmin(create);
+        if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 324;
+
+        const std::string saved = ReadTextFile(path);
+        if (saved.find("\"id\": \"runtime-peer\"") == std::string::npos) return 325;
+        if (saved.find("\"proto_peer\": \"127.0.0.1:14461\"") == std::string::npos) return 326;
+        if (saved.find("\"socks_listen\": \"127.0.0.1:11061\"") == std::string::npos) return 327;
+        if (saved.find("\"enabled\": false") == std::string::npos) return 328;
+    }
+    {
         FakeAdapter adapter;
         TqRouterRuntime adminRuntime(&adapter);
-        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"agent-crud\",\"client_name\":\"crud-name\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"quic_connections\":2,\"compress\":\"auto\",\"enabled\":true}");
+        TqHttpRequest create = Request("POST", "/peers", "{\"peer_id\":\"agent-crud\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11060\",\"quic_connections\":2,\"compress\":\"auto\",\"enabled\":true}");
         std::string createResp = adminRuntime.HandleAdmin(create);
         if (createResp.find("HTTP/1.1 201 Created") == std::string::npos) return 260;
         if (adapter.Started.size() != 1 || adapter.Started[0] != "agent-crud") return 261;
@@ -970,14 +997,14 @@ int main() {
         std::string listResp = adminRuntime.HandleAdmin(list);
         if (listResp.find("HTTP/1.1 200 OK") == std::string::npos) return 263;
         if (listResp.find("\"peer_id\":\"agent-crud\"") == std::string::npos) return 264;
-        if (listResp.find("\"client_name\":\"crud-name\"") == std::string::npos) return 284;
+        if (listResp.find("\"client_name\":\"crud-name\"") != std::string::npos) return 284;
         if (listResp.find("\"state\":\"connecting\"") == std::string::npos) return 265;
 
         TqHttpRequest get = Request("GET", "/peers/agent-crud", "");
         std::string getResp = adminRuntime.HandleAdmin(get);
         if (getResp.find("HTTP/1.1 200 OK") == std::string::npos) return 266;
         if (getResp.find("\"quic_peer\":\"127.0.0.1:14460\"") == std::string::npos) return 267;
-        if (getResp.find("\"client_name\":\"crud-name\"") == std::string::npos) return 285;
+        if (getResp.find("\"client_name\":\"crud-name\"") != std::string::npos) return 285;
 
         TqHttpRequest replace = Request("PUT", "/peers/agent-crud", "{\"peer_id\":\"agent-crud\",\"quic_peer\":\"127.0.0.1:14460\",\"socks_listen\":\"127.0.0.1:11061\",\"quic_connections\":3,\"compress\":\"auto\",\"enabled\":true}");
         std::string replaceResp = adminRuntime.HandleAdmin(replace);
@@ -985,11 +1012,14 @@ int main() {
         if (adapter.Stopped.empty() || adapter.Stopped.back() != "agent-crud") return 269;
         if (adapter.Started.size() != 2 || adapter.LastStartedPeer.SocksListen != "127.0.0.1:11061") return 270;
 
-        TqHttpRequest patch = Request("PATCH", "/peers/agent-crud", "{\"client_name\":\"crud-patched\",\"socks_listen\":\"127.0.0.1:11062\"}");
+        TqHttpRequest rejectedPatch = Request("PATCH", "/peers/agent-crud", "{\"client_name\":\"crud-patched\"}");
+        std::string rejectedPatchResp = adminRuntime.HandleAdmin(rejectedPatch);
+        if (rejectedPatchResp.find("HTTP/1.1 400") == std::string::npos) return 286;
+
+        TqHttpRequest patch = Request("PATCH", "/peers/agent-crud", "{\"socks_listen\":\"127.0.0.1:11062\"}");
         std::string patchResp = adminRuntime.HandleAdmin(patch);
         if (patchResp.find("HTTP/1.1 200 OK") == std::string::npos) return 271;
         if (adapter.Started.size() != 3 || adapter.LastStartedPeer.SocksListen != "127.0.0.1:11062") return 272;
-        if (adapter.LastStartedPeer.ClientName != "crud-patched") return 286;
 
         TqHttpRequest disable = Request("POST", "/peers/agent-crud:disable", "");
         std::string disableResp = adminRuntime.HandleAdmin(disable);

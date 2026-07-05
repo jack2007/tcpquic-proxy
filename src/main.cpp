@@ -19,8 +19,10 @@
 
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -109,6 +111,12 @@ TqAdminHttpServerOptions TqMakeAdminOptions(const TqConfig& cfg) {
 void TqPrintAdminStarted(const TqAdminHttpServer& admin, const TqAdminHttpServerOptions& options) {
     std::fprintf(stderr, "tcpquic-proxy: admin listening on %s\n", admin.ListenAddress().c_str());
     std::fprintf(stderr, "tcpquic-proxy: admin token file %s\n", options.TokenFile.c_str());
+}
+
+std::string TqAbsolutePathString(const std::string& path) {
+    std::error_code ec;
+    const std::filesystem::path absolute = std::filesystem::absolute(path, ec);
+    return ec ? path : absolute.string();
 }
 
 int RunSinglePeerClient(const TqConfig& cfg) {
@@ -211,8 +219,10 @@ bool TqMakeSinglePeerConfigFromRouter(const TqConfig& cfg, TqConfig& out, std::s
 }
 
 int RunClient(const TqConfig& cfg) {
-    if (!cfg.ClientConfigPath.empty()) {
-        std::fprintf(stderr, "tcpquic-proxy: client config file %s\n", cfg.ClientConfigPath.c_str());
+    const std::string configPath = !cfg.ConfigPath.empty() ? cfg.ConfigPath : cfg.ClientConfigPath;
+    if (!configPath.empty()) {
+        const std::string path = TqAbsolutePathString(configPath);
+        std::fprintf(stderr, "tcpquic-proxy: client config file %s\n", path.c_str());
     }
 
     if (cfg.Router.Peers.empty() && !cfg.QuicPeer.empty()) {
@@ -259,6 +269,11 @@ int RunClient(const TqConfig& cfg) {
 }
 
 int RunServer(const TqConfig& cfg) {
+    if (!cfg.ConfigPath.empty()) {
+        const std::string path = TqAbsolutePathString(cfg.ConfigPath);
+        std::fprintf(stderr, "tcpquic-proxy: server config file %s\n", path.c_str());
+    }
+
     TqAcl acl;
     acl.AllowCidrs = cfg.AllowTargets;
     acl.DenyCidrs = cfg.DenyTargets;

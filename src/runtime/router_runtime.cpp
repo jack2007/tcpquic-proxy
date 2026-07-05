@@ -24,9 +24,9 @@ constexpr size_t kMaxPortForwardTargetHostLength = 255;
 constexpr uint32_t kDefaultPeerDrainGraceSeconds = 10;
 constexpr uint32_t kMaxQuicConnections = 128;
 
+bool WriteTextFileAtomically(const std::string& path, const std::string& body, std::string& err);
+
 struct TqPeerPatch {
-    bool HasClientName{false};
-    std::string ClientName;
     bool HasQuicPeer{false};
     bool HasSocksListen{false};
     bool HasHttpListen{false};
@@ -137,7 +137,6 @@ nlohmann::json QuicPathsJsonValue(const std::vector<TqQuicPathConfig>& paths) {
 nlohmann::json PeerConfigJsonValue(const TqPeerConfig& peer) {
     nlohmann::json body{
         {"peer_id", peer.PeerId},
-        {"client_name", peer.ClientName},
         {"quic_peer", peer.QuicPeer},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},
@@ -149,6 +148,21 @@ nlohmann::json PeerConfigJsonValue(const TqPeerConfig& peer) {
     if (peer.QuicConnections != 0) {
         body["quic_connections"] = peer.QuicConnections;
     }
+    return body;
+}
+
+nlohmann::json RuntimePeerConfigJsonValue(const TqPeerConfig& peer) {
+    nlohmann::json body{
+        {"id", peer.PeerId},
+        {"proto_peer", peer.QuicPeer},
+        {"socks_listen", peer.SocksListen},
+        {"http_listen", peer.HttpListen},
+        {"port_forwards", PortForwardsJsonValue(peer.PortForwards)},
+        {"paths", QuicPathsJsonValue(peer.QuicPaths)},
+        {"proto_connections", peer.QuicConnections},
+        {"compress", peer.Compress},
+        {"enabled", peer.Enabled},
+    };
     return body;
 }
 
@@ -191,6 +205,83 @@ std::string RouterConfigJson(const TqRouterConfig& config) {
         body["peers"].push_back(PeerConfigJsonValue(peer));
     }
     return body.dump();
+}
+
+std::string ClientRuntimeConfigJson(const TqConfig& runtimeConfig, const TqRouterConfig& config) {
+    nlohmann::json body;
+    body["tls"] = nlohmann::json::object();
+    if (!runtimeConfig.QuicCa.empty()) {
+        body["tls"]["ca"] = runtimeConfig.QuicCa;
+    }
+    if (!runtimeConfig.QuicCert.empty()) {
+        body["tls"]["cert"] = runtimeConfig.QuicCert;
+    }
+    if (!runtimeConfig.QuicKey.empty()) {
+        body["tls"]["key"] = runtimeConfig.QuicKey;
+    }
+    if (!runtimeConfig.AdminListen.empty() || !runtimeConfig.AdminTokenFile.empty() || runtimeConfig.AdminThreads != 2) {
+        body["admin"] = nlohmann::json::object();
+        if (!runtimeConfig.AdminListen.empty()) {
+            body["admin"]["listen"] = runtimeConfig.AdminListen;
+        }
+        if (!runtimeConfig.AdminTokenFile.empty()) {
+            body["admin"]["token_file"] = runtimeConfig.AdminTokenFile;
+        }
+        body["admin"]["threads"] = runtimeConfig.AdminThreads;
+    }
+    body["client"] = {{"client_name", runtimeConfig.ClientName}};
+    body["proto"] = {
+        {"profile", runtimeConfig.QuicProfile == TqQuicProfile::LowLatency ? "low-latency" : "max-throughput"},
+        {"disable_1rtt_encryption", runtimeConfig.QuicDisable1RttEncryption},
+        {"connection_stream_count", runtimeConfig.QuicConnectionStreamCount},
+        {"keepalive_ms", runtimeConfig.QuicKeepAliveIntervalMs},
+        {"connections", runtimeConfig.QuicConnections},
+    };
+    body["compression"] = {
+        {"mode", runtimeConfig.Compress},
+        {"level", runtimeConfig.CompressLevel},
+    };
+    body["peers"] = nlohmann::json::array();
+    for (const auto& peer : config.Peers) {
+        body["peers"].push_back(RuntimePeerConfigJsonValue(peer));
+    }
+    return body.dump(2) + "\n";
+}
+
+bool ReadRuntimeJsonFile(const std::string& path, nlohmann::json& root) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+    try {
+        root = nlohmann::json::parse(std::string(
+            std::istreambuf_iterator<char>(file),
+            std::istreambuf_iterator<char>()));
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    return root.is_object();
+}
+
+nlohmann::json RuntimePeersJsonValue(const TqRouterConfig& config) {
+    nlohmann::json peers = nlohmann::json::array();
+    for (const auto& peer : config.Peers) {
+        peers.push_back(RuntimePeerConfigJsonValue(peer));
+    }
+    return peers;
+}
+
+bool WriteRuntimeConfigPeers(
+    const std::string& path,
+    const TqConfig& runtimeConfig,
+    const TqRouterConfig& config,
+    std::string& err) {
+    nlohmann::json root;
+    if (ReadRuntimeJsonFile(path, root)) {
+        root["peers"] = RuntimePeersJsonValue(config);
+        return WriteTextFileAtomically(path, root.dump(2) + "\n", err);
+    }
+    return WriteTextFileAtomically(path, ClientRuntimeConfigJson(runtimeConfig, config), err);
 }
 
 bool WriteTextFileAtomically(const std::string& path, const std::string& body, std::string& err) {
@@ -380,11 +471,7 @@ public:
                 patch.HasQuicPeer = true;
                 if (!ReadStringField(item.value(), patch.QuicPeer, "invalid quic_peer")) return false;
             } else if (key == "client_name") {
-                patch.HasClientName = true;
-                if (!ReadStringField(item.value(), patch.ClientName, "invalid client_name") ||
-                    (!patch.ClientName.empty() && !TqIsValidClientName(patch.ClientName))) {
-                    return Error("invalid client_name");
-                }
+                return Error("unknown peer key: client_name");
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
@@ -552,10 +639,7 @@ private:
                 hasLegacyQuicPeer = true;
                 if (!ReadStringField(item.value(), peer.QuicPeer, "invalid quic_peer")) return false;
             } else if (key == "client_name") {
-                if (!ReadStringField(item.value(), peer.ClientName, "invalid client_name") ||
-                    (!peer.ClientName.empty() && !TqIsValidClientName(peer.ClientName))) {
-                    return Error("invalid client_name");
-                }
+                return Error("unknown peer key: client_name");
             } else if (key == "proto_peer") {
                 if (hasLegacyQuicPeer) return Error("conflicting peer field aliases");
                 hasRecommendedQuicPeer = true;
@@ -868,7 +952,6 @@ std::vector<TqPeerConfig>::iterator FindPeerConfig(std::vector<TqPeerConfig>& pe
 }
 
 void ApplyPeerPatch(TqPeerConfig& peer, const TqPeerPatch& patch) {
-    if (patch.HasClientName) peer.ClientName = patch.ClientName;
     if (patch.HasQuicPeer) peer.QuicPeer = patch.QuicPeer;
     if (patch.HasSocksListen) peer.SocksListen = patch.SocksListen;
     if (patch.HasHttpListen) peer.HttpListen = patch.HttpListen;
@@ -1052,7 +1135,7 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
 
         auto& metrics = Metrics[peer.PeerId];
         metrics.PeerId = peer.PeerId;
-        metrics.ClientName = peer.ClientName;
+        metrics.ClientName = RuntimeConfig.ClientName;
         metrics.Enabled = peer.Enabled;
         metrics.QuicPeer = peer.QuicPeer;
         metrics.SocksListen = peer.SocksListen;
@@ -1093,10 +1176,18 @@ bool TqRouterRuntime::ApplyConfigLocked(const TqRouterConfig& config, std::strin
 }
 
 bool TqRouterRuntime::PersistConfigLocked(const TqRouterConfig& config, std::string& err) const {
-    if (RuntimeConfig.Mode != TqMode::Client || RuntimeConfig.ClientConfigPath.empty()) {
+    if (RuntimeConfig.Mode != TqMode::Client) {
         return true;
     }
-    return WriteTextFileAtomically(RuntimeConfig.ClientConfigPath, RouterConfigJson(config), err);
+    if (!RuntimeConfig.ConfigPath.empty() &&
+        !WriteRuntimeConfigPeers(RuntimeConfig.ConfigPath, RuntimeConfig, config, err)) {
+        return false;
+    }
+    if (!RuntimeConfig.ClientConfigPath.empty() &&
+        !WriteTextFileAtomically(RuntimeConfig.ClientConfigPath, RouterConfigJson(config), err)) {
+        return false;
+    }
+    return true;
 }
 
 TqRouterConfig TqRouterRuntime::SnapshotConfig() const {
