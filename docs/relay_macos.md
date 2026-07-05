@@ -186,17 +186,9 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 
 ## 3. 目前代码问题和建议
 
-### P0：Darwin 配置复用 Linux 字段，语义和用户接口不清晰
+### P0：Darwin 配置复用 Linux 字段，语义和用户接口不清晰 — **第一阶段已完成**
 
-现象：`TqDarwinRelayRuntime::Start()` 使用 `tuning.LinuxRelayWorkerCount`、`LinuxRelayWorkerEventBudget`、`LinuxRelayReadChunkSize`、`LinuxRelayTcpWriteMaxBytes`、`LinuxRelayPerTunnelPendingBytes` 等字段组装 Darwin worker config。`darwin_relay_worker.h` 内部有 `TqDarwinRelayWorkerConfig`，但外部配置仍叫 Linux。
-
-影响：macOS 用户调优 relay 时需要配置 `relay.linux.*`；admin/metrics 里也有 `linux_relay_*` 命名承载 Darwin 数据，容易造成误配和误判。
-
-建议：
-
-1. 在 `TqTuningConfig` 中增加平台中性字段，如 `RelayWorkerCount`、`RelayReadChunkSize`、`RelayTcpWriteMaxBytes`。
-2. 兼容保留旧 `LinuxRelay*` 字段，作为 Linux/Darwin 默认来源，文档标注 deprecated。
-3. metrics JSON 增加平台中性 key，同时保留旧 key 一段时间。
+第一阶段已增加 `relay.common.*` / `--relay-*` 平台中性配置入口，并新增 `relay_*` metrics alias；旧 `relay.linux.*`、`--linux-relay-*` 和 `linux_relay_*` key 保留兼容。后续仍可继续清理内部 legacy `LinuxRelay*` 字段命名，但不再要求 macOS 用户通过 Linux 命名调优 Darwin relay。
 
 ### P0：`TqRelayStartQuicReceiveSink()` 只有 Linux 分支
 
