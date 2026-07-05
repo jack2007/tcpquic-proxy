@@ -596,12 +596,47 @@ private:
             const std::string& key = item.key();
             if (key == "io_size") {
                 if (!ReadUint32(item.value(), cfg.TuningOverrideRelayIoSize)) return Error("invalid relay.io_size");
+            } else if (key == "common") {
+                if (!ParseCommonRelayConfig(item.value(), cfg)) return false;
             } else if (key == "linux") {
                 if (!ParseLinuxRelayConfig(item.value(), cfg)) return false;
             } else if (key == "windows") {
                 if (!ParseWindowsRelayConfig(item.value(), cfg)) return false;
             } else {
                 return Error("unknown relay key: " + key);
+            }
+        }
+        return true;
+    }
+
+    bool ParseCommonRelayConfig(const nlohmann::json& object, TqConfig& cfg) {
+        if (!RequireObject(object, "relay.common must be an object")) return false;
+        for (const auto& item : object.items()) {
+            const std::string& key = item.key();
+            if (key == "read_chunk_size") {
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideRelayReadChunkSize)) return Error("invalid relay.common.read_chunk_size");
+            } else if (key == "tcp_write_max_bytes") {
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideRelayTcpWriteMaxBytes)) return Error("invalid relay.common.tcp_write_max_bytes");
+            } else if (key == "tcp_write_burst_bytes") {
+                if (!ReadNonZeroUint32(item.value(), cfg.TuningOverrideRelayTcpWriteBurstBytes)) return Error("invalid relay.common.tcp_write_burst_bytes");
+            } else if (key == "event_queue_capacity") {
+                if (!ReadUint32InRange(
+                        item.value(),
+                        TqLinuxRelayEventQueueCapacityMin,
+                        TqLinuxRelayEventQueueCapacityMax,
+                        cfg.TuningOverrideRelayEventQueueCapacity)) {
+                    return Error("invalid relay.common.event_queue_capacity");
+                }
+            } else if (key == "worker_count") {
+                if (!ReadUint32InRange(
+                        item.value(),
+                        TqRelayWorkerCountMin,
+                        TqRelayWorkerCountMax,
+                        cfg.TuningOverrideRelayWorkerCount)) {
+                    return Error("invalid relay.common.worker_count");
+                }
+            } else {
+                return Error("unknown relay.common key: " + key);
             }
         }
         return true;
@@ -1090,6 +1125,13 @@ std::string RuntimeConfigJson(const TqConfig& cfg) {
 
     nlohmann::json relay = nlohmann::json::object();
     if (cfg.TuningOverrideRelayIoSize != 0) relay["io_size"] = cfg.TuningOverrideRelayIoSize;
+    nlohmann::json commonRelay = nlohmann::json::object();
+    if (cfg.TuningOverrideRelayReadChunkSize != 0) commonRelay["read_chunk_size"] = cfg.TuningOverrideRelayReadChunkSize;
+    if (cfg.TuningOverrideRelayTcpWriteMaxBytes != 0) commonRelay["tcp_write_max_bytes"] = cfg.TuningOverrideRelayTcpWriteMaxBytes;
+    if (cfg.TuningOverrideRelayTcpWriteBurstBytes != 0) commonRelay["tcp_write_burst_bytes"] = cfg.TuningOverrideRelayTcpWriteBurstBytes;
+    if (cfg.TuningOverrideRelayEventQueueCapacity != 0) commonRelay["event_queue_capacity"] = cfg.TuningOverrideRelayEventQueueCapacity;
+    if (cfg.TuningOverrideRelayWorkerCount != 0) commonRelay["worker_count"] = cfg.TuningOverrideRelayWorkerCount;
+    if (!commonRelay.empty()) relay["common"] = std::move(commonRelay);
     nlohmann::json linuxRelay = nlohmann::json::object();
     if (cfg.TuningOverrideLinuxRelayReadChunkSize != 0) linuxRelay["read_chunk_size"] = cfg.TuningOverrideLinuxRelayReadChunkSize;
     if (cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes != 0) linuxRelay["tcp_write_max_bytes"] = cfg.TuningOverrideLinuxRelayTcpWriteMaxBytes;
@@ -1240,16 +1282,26 @@ void TqPrintUsage(FILE* out) {
         "  --tuning <mode>              auto|lan|wan (default wan)\n"
         "  --max-memory-mb <n>          Cap relay pool memory across tunnels\n"
         "  --relay-io-size <bytes>      Override relay IO size\n"
+        "  --relay-read-chunk-size <bytes>\n"
+        "                              Shared Linux/Darwin relay TCP read chunk size\n"
+        "  --relay-tcp-write-max-bytes <bytes>\n"
+        "                              Cap each shared relay TCP sendmsg\n"
+        "  --relay-tcp-write-burst-bytes <bytes>\n"
+        "                              Cap bytes per shared relay TCP write flush\n"
+        "  --relay-event-queue-capacity <events>\n"
+        "                              Shared relay event queue capacity (default 4096, 1024..1048576)\n"
+        "  --relay-worker-count <n>\n"
+        "                              Shared Linux/Darwin relay worker count (default auto-detect, 1..8)\n"
         "  --linux-relay-read-chunk-size <bytes>\n"
-        "                              Linux relay TCP read chunk size\n"
+        "                              Legacy alias for --relay-read-chunk-size\n"
         "  --linux-relay-tcp-write-max-bytes <bytes>\n"
-        "                              Cap each Linux relay TCP sendmsg\n"
+        "                              Legacy alias for --relay-tcp-write-max-bytes\n"
         "  --linux-relay-tcp-write-burst-bytes <bytes>\n"
-        "                              Cap bytes per Linux relay TCP write flush\n"
+        "                              Legacy alias for --relay-tcp-write-burst-bytes\n"
         "  --linux-relay-event-queue-capacity <events>\n"
-        "                              Linux relay event queue capacity (default 4096, 1024..1048576)\n"
+        "                              Legacy alias for --relay-event-queue-capacity\n"
         "  --linux-relay-worker-count <n>\n"
-        "                              Linux relay worker count (default auto-detect, 1..8)\n"
+        "                              Legacy alias for --relay-worker-count\n"
         "  --windows-relay-worker-count <n>\n"
         "                              Windows relay worker count (default auto-detect, 1..8)\n"
         "\n"
@@ -1659,6 +1711,73 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
             }
             if (!ParseUint32(value, cfg.TuningOverrideRelayIoSize)) {
                 err = "invalid value for --relay-io-size";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-read-chunk-size", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-read-chunk-size", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideRelayReadChunkSize) ||
+                cfg.TuningOverrideRelayReadChunkSize == 0) {
+                err = "invalid value for --relay-read-chunk-size";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-tcp-write-max-bytes", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-tcp-write-max-bytes", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideRelayTcpWriteMaxBytes) ||
+                cfg.TuningOverrideRelayTcpWriteMaxBytes == 0) {
+                err = "invalid value for --relay-tcp-write-max-bytes";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-tcp-write-burst-bytes", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-tcp-write-burst-bytes", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32(value, cfg.TuningOverrideRelayTcpWriteBurstBytes) ||
+                cfg.TuningOverrideRelayTcpWriteBurstBytes == 0) {
+                err = "invalid value for --relay-tcp-write-burst-bytes";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-event-queue-capacity", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-event-queue-capacity", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqLinuxRelayEventQueueCapacityMin,
+                    TqLinuxRelayEventQueueCapacityMax,
+                    cfg.TuningOverrideRelayEventQueueCapacity)) {
+                err = "invalid value for --relay-event-queue-capacity";
+                return false;
+            }
+        } else if (GetOptionValue(arg, "--relay-worker-count", value)) {
+            if (value == nullptr) {
+                value = NextArg(i, argc, argv, "--relay-worker-count", err);
+                if (value == nullptr) {
+                    return false;
+                }
+            }
+            if (!ParseUint32InRange(
+                    value,
+                    TqRelayWorkerCountMin,
+                    TqRelayWorkerCountMax,
+                    cfg.TuningOverrideRelayWorkerCount) ||
+                cfg.TuningOverrideRelayWorkerCount == 0) {
+                err = "invalid value for --relay-worker-count";
                 return false;
             }
         } else if (GetOptionValue(arg, "--linux-relay-read-chunk-size", value)) {

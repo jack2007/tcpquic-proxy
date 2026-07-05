@@ -441,6 +441,30 @@ int main() {
         char arg7[] = "key.pem";
         char arg8[] = "--ca";
         char arg9[] = "ca.pem";
+        char arg10[] = "--relay-read-chunk-size";
+        char arg11[] = "262144";
+        char* argv[] = {
+            arg0, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+            arg8, arg9, arg10, arg11};
+        assert(TqParseArgs(12, argv, cfg, err));
+        TqFinalizeConfig(cfg);
+        assert(cfg.Tuning.RelayReadChunkSize == 262144);
+        assert(cfg.Tuning.LinuxRelayReadChunkSize == 262144);
+    }
+
+    {
+        TqConfig cfg{};
+        std::string err;
+        char arg0[] = "tcpquic-proxy";
+        char arg1[] = "client";
+        char arg2[] = "--peer";
+        char arg3[] = "127.0.0.1:4433";
+        char arg4[] = "--cert";
+        char arg5[] = "cert.pem";
+        char arg6[] = "--key";
+        char arg7[] = "key.pem";
+        char arg8[] = "--ca";
+        char arg9[] = "ca.pem";
         char arg10[] = "--linux-relay-tcp-write-max-bytes";
         char arg11[] = "4194304";
         char arg12[] = "--linux-relay-tcp-write-burst-bytes";

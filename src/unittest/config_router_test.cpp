@@ -135,7 +135,8 @@ int main() {
         if (usage.find("--iw <packets>") == std::string::npos) return 160;
         if (usage.find("--initrtt-ms <n>") == std::string::npos) return 161;
         if (usage.find("--relay-io-size <bytes>      Override relay IO size") == std::string::npos) return 145;
-        if (usage.find("Linux relay TCP read chunk size") == std::string::npos) return 146;
+        if (usage.find("--relay-read-chunk-size <bytes>") == std::string::npos) return 146;
+        if (usage.find("--linux-relay-read-chunk-size <bytes>") == std::string::npos) return 192;
         if (usage.find("--max-memory-mb <n>") == std::string::npos) return 149;
         if (usage.find("--forward <local=target>") == std::string::npos) return 187;
         if (usage.find("--admin-token-file <path>") == std::string::npos) return 188;
@@ -1108,7 +1109,7 @@ int main() {
             "compression":{"mode":"off"},
             "proto":{"disable_1rtt_encryption":true,"initrtt_ms":1},
             "tuning":{"mode":"wan"},
-            "relay":{"linux":{"read_chunk_size":262144,"worker_slots":1024}}
+            "relay":{"linux":{"read_chunk_size":131072},"common":{"read_chunk_size":262144,"tcp_write_max_bytes":1048576,"tcp_write_burst_bytes":2097152,"event_queue_capacity":8192,"worker_count":2}}
         })json");
         const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
         TqConfig cfg;
@@ -1120,7 +1121,12 @@ int main() {
         if (cfg.DenyTargets.size() != 1) return 85;
         if (cfg.Compress != "off") return 86;
         if (!cfg.QuicDisable1RttEncryption) return 87;
-        if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 88;
+        if (cfg.Tuning.RelayReadChunkSize != 262144) return 201;
+        if (cfg.Tuning.LinuxRelayReadChunkSize != 262144) return 202;
+        if (cfg.Tuning.RelayTcpWriteMaxBytes != 1048576) return 203;
+        if (cfg.Tuning.RelayTcpWriteBurstBytes != 2097152) return 204;
+        if (cfg.Tuning.RelayEventQueueCapacity != 8192) return 205;
+        if (cfg.Tuning.RelayWorkerCount != 2) return 206;
         if (cfg.Tuning.InitialRttMs != 1) return 90;
         if (!cfg.QuicCa.empty()) return 186;
     }
@@ -1144,6 +1150,8 @@ int main() {
             "127.0.0.1:19092",
             "--admin-threads",
             "3",
+            "--relay-read-chunk-size",
+            "262144",
             "--compress",
             "zstd",
             "--compress-level",
@@ -1170,6 +1178,7 @@ int main() {
         if (root["admin"]["threads"] != 3) return 348;
         if (root["compression"]["mode"] != "zstd") return 349;
         if (root["compression"]["level"] != 2) return 350;
+        if (root["relay"]["common"]["read_chunk_size"] != 262144) return 364;
         if (root["trace"]["interval_sec"] != 7) return 351;
         if (root.contains("peers")) return 352;
         std::filesystem::remove(file);

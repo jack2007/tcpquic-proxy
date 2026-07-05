@@ -186,6 +186,24 @@ void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
         out.RelayWorkerCount =
             TqNormalizeRelayWorkerCount(cfg.TuningOverrideLinuxRelayWorkerCount);
     }
+
+    if (cfg.TuningOverrideRelayReadChunkSize > 0) {
+        out.RelayReadChunkSize = cfg.TuningOverrideRelayReadChunkSize;
+    }
+    if (cfg.TuningOverrideRelayTcpWriteMaxBytes > 0) {
+        out.RelayTcpWriteMaxBytes = cfg.TuningOverrideRelayTcpWriteMaxBytes;
+    }
+    if (cfg.TuningOverrideRelayTcpWriteBurstBytes > 0) {
+        out.RelayTcpWriteBurstBytes = cfg.TuningOverrideRelayTcpWriteBurstBytes;
+    }
+    if (cfg.TuningOverrideRelayEventQueueCapacity > 0) {
+        out.RelayEventQueueCapacity =
+            TqNormalizeLinuxRelayEventQueueCapacity(cfg.TuningOverrideRelayEventQueueCapacity);
+    }
+    if (cfg.TuningOverrideRelayWorkerCount > 0) {
+        out.RelayWorkerCount =
+            TqNormalizeRelayWorkerCount(cfg.TuningOverrideRelayWorkerCount);
+    }
     if (cfg.TuningOverrideWindowsRelayWorkerCount > 0) {
         out.WindowsRelayWorkerCount =
             TqNormalizeRelayWorkerCount(cfg.TuningOverrideWindowsRelayWorkerCount);

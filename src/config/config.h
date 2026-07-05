@@ -89,6 +89,11 @@ struct TqConfig {
     TqTuningMode TuningMode{TqTuningMode::Wan};
     uint32_t MaxMemoryMb{0};
     uint32_t TuningOverrideRelayIoSize{0};
+    uint32_t TuningOverrideRelayReadChunkSize{0};
+    uint32_t TuningOverrideRelayTcpWriteMaxBytes{0};
+    uint32_t TuningOverrideRelayTcpWriteBurstBytes{0};
+    uint32_t TuningOverrideRelayEventQueueCapacity{0};
+    uint32_t TuningOverrideRelayWorkerCount{0};
     uint32_t TuningOverrideLinuxRelayReadChunkSize{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteMaxBytes{0};
     uint32_t TuningOverrideLinuxRelayTcpWriteBurstBytes{0};
