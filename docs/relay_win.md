@@ -188,7 +188,7 @@ QUIC receive 背压：
 
 ## 2. Windows 线程相关锁热点排序
 
-排序依据是当前代码中的生产调用频率、锁粒度、是否跨 relay 共享，以及已有观测指标。需要特别说明：当前 `PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFree` 的生产路径基本由 worker 线程串行访问，虽然结构体里有一些 per-relay mutex 声明或测试辅助锁，但它们不是当前生产数据面主锁。
+排序依据是当前代码中的生产调用频率、锁粒度、是否跨 relay 共享，以及已有观测指标。需要特别说明：`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFree` 等 per-relay 队列由 worker IOCP 线程串行访问，已移除误导性的 per-relay mutex；生产数据面主锁是 worker 级的 `Lock_` 及下表所列控制面锁，单测路径另有 `LastPostedCallbackLock_`。
 
 | 热点级别 | 锁 | 位置 | 保护对象 | 主要路径 | 热点判断 |
 |---|---|---|---|---|---|
