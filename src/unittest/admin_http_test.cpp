@@ -284,6 +284,7 @@ int main() {
         if (html.find("server-acl-deny") == std::string_view::npos) return 438;
         if (html.find("server-acl-save") == std::string_view::npos) return 439;
         if (html.find("<th>total_streams_opened</th>") == std::string_view::npos) return 429;
+        if (html.find("<th>client_name</th>") == std::string_view::npos) return 565;
         if (html.find("remote source") == std::string_view::npos) return 354;
         if (html.find("remote_identity") != std::string_view::npos) return 355;
         if (html.find("first_seen") != std::string_view::npos) return 356;
@@ -299,6 +300,12 @@ int main() {
         if (js.find("lastIndexOf(':')") == std::string_view::npos) return 366;
         if (js.find("peerNameAddressPart(remoteAddress)") == std::string_view::npos) return 427;
         if (js.find("return `peer-${peerNameAddressPart(remoteAddress)}`;") == std::string_view::npos) return 428;
+        if (js.find("function peerNameFromConnection(connection)") == std::string_view::npos) return 566;
+        if (js.find("connection.client_name") == std::string_view::npos) return 567;
+        if (js.find("peerNameFromRemote") == std::string_view::npos) return 568;
+        if (js.find("remote_address_set") == std::string_view::npos) return 569;
+        if (js.find("includes(connection.remote_address)") == std::string_view::npos) return 570;
+        if (js.find("formatRemoteAddressSet") == std::string_view::npos) return 571;
         if (js.find("item.total_streams_opened += Number(connection.total_streams || 0);") == std::string_view::npos) return 430;
         if (js.find("total_streams_opened: row.total_streams") == std::string_view::npos) return 431;
         if (js.find("Array.isArray(config.allow_targets)") == std::string_view::npos) return 367;

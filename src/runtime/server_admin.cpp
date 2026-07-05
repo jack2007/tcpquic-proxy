@@ -59,6 +59,7 @@ std::string RelayMetricsJson() {
 nlohmann::json ServerConnectionJsonValue(const TqServerConnectionSnapshot& connection) {
     return {
         {"connection_id", connection.ConnectionId},
+        {"client_name", connection.ClientName},
         {"remote_address", connection.RemoteAddress},
         {"state", connection.State},
         {"active_streams", connection.ActiveStreams},

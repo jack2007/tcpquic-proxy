@@ -192,20 +192,20 @@ static constexpr char kConsoleHtmlStorage[] =
             <div class="card span-3 metric"><span class="label">Connections</span><span class="value" id="server-overview-connection-count">0</span><span class="note">accepted QUIC connections</span></div>
             <div class="card span-3 metric"><span class="label">Tunnels</span><span class="value" id="server-overview-tunnel-count">0</span><span class="note">server-side active</span></div>
             <div class="card span-3 metric"><span class="label">ACL denied</span><span class="value" id="server-overview-acl-denied">0</span><span class="note">aggregate counter</span></div>
-            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-overview-peers"></tbody></table></div>
+            <div class="card span-12 table-scroll"><h3>Peer 摘要</h3><table><thead><tr><th>peer</th><th>client_name</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-overview-peers"></tbody></table></div>
           </div>
         </section>
 
         <section id="server-peers" class="page">
           <div class="title-row"><div><h2>Peers - server</h2><p class="subtitle">server peer 是只读运行时视图：展示当前有多少远端 peer 与本 server 有连接，以及每个 peer 下的 connection/tunnel 汇总。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-peers-rows"></tbody></table></div>
-          <div class="callout">server 不支持配置 peer，因此这里没有 Create/Edit/Delete。peer 名称由当前 server connection 的 remote_address 聚合得到。</div>
+          <div class="card table-scroll"><table><thead><tr><th>peer</th><th>client_name</th><th>remote_address</th><th>connections</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-peers-rows"></tbody></table></div>
+          <div class="callout">server 不支持配置 peer，因此这里没有 Create/Edit/Delete。peer 名称优先使用 client_name，缺失时回退到 remote_address。</div>
         </section>
 
         <section id="server-connections" class="page">
           <div class="title-row"><div><h2>Connections - server</h2><p class="subtitle">server 端连接不展示 Reconnecting；第一版不区分 connecting 和 connected，列表展示当前 server 已登记/可观测连接。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
-          <div class="callout">当前 TqServerConnectionSnapshot 已有 remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>client_name</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
+          <div class="callout">当前 TqServerConnectionSnapshot 已有 client_name、remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
         </section>
 
         <section id="server-tunnels" class="page">
@@ -552,6 +552,12 @@ static constexpr char kConsoleJsStorage[] =
       return `peer-${peerNameAddressPart(remoteAddress)}`;
     }
 
+    function peerNameFromConnection(connection) {
+      const clientName = String((connection && connection.client_name) || '').trim();
+      if (clientName) return clientName;
+      return peerNameFromRemote(connection ? connection.remote_address : '');
+    }
+
     function peerNameAddressPart(remoteAddress) {
       const value = String(remoteAddress || '').trim();
       return value || 'unknown';
@@ -560,16 +566,22 @@ static constexpr char kConsoleJsStorage[] =
     function groupServerPeers(connections) {
       const groups = new Map();
       for (const connection of connections) {
-        const key = peerNameFromRemote(connection.remote_address);
+        const key = peerNameFromConnection(connection);
         const item = groups.get(key) || {
           peer: key,
-          remote_address: connection.remote_address,
+          client_name: connection.client_name || '',
+          remote_address: '',
+          remote_address_set: [],
           connections: 0,
           active_streams: 0,
           total_streams_opened: 0,
           active_tunnels: 0,
           last_error: ''
         };
+        if (connection.remote_address && !item.remote_address_set.includes(connection.remote_address)) {
+          item.remote_address_set.push(connection.remote_address);
+          item.remote_address = formatRemoteAddressSet(item.remote_address_set);
+        }
         item.connections += 1;
         item.active_streams += Number(connection.active_streams || 0);
         item.total_streams_opened += Number(connection.total_streams || 0);
@@ -578,6 +590,12 @@ static constexpr char kConsoleJsStorage[] =
         groups.set(key, item);
       }
       return Array.from(groups.values());
+    }
+
+    function formatRemoteAddressSet(addresses) {
+      if (!addresses || addresses.length === 0) return '';
+      if (addresses.length === 1) return addresses[0];
+      return `${addresses[0]} (+${addresses.length - 1})`;
     }
 
     async function renderServerOverview() {
@@ -592,21 +610,21 @@ static constexpr char kConsoleJsStorage[] =
       document.getElementById('server-overview-connection-count').textContent = connRows.length;
       document.getElementById('server-overview-tunnel-count').textContent = (tunnels.tunnels || []).length;
       document.getElementById('server-overview-acl-denied').textContent = text(metrics.acl_denied);
-      renderRows(document.getElementById('server-overview-peers'), peerRows, ['peer','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-overview-peers'), peerRows, ['peer','client_name','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerPeers() {
       const data = await api('/server/connections');
-      renderRows(document.getElementById('server-peers-rows'), groupServerPeers(data.connections || []), ['peer','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-peers-rows'), groupServerPeers(data.connections || []), ['peer','client_name','remote_address','connections','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerConnections() {
       const data = await api('/server/connections');
       const rows = (data.connections || []).map(row => Object.assign({
-        peer: peerNameFromRemote(row.remote_address),
+        peer: peerNameFromConnection(row),
         total_streams_opened: row.total_streams
       }, row));
-      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','remote_address','state','active_streams','total_streams_opened','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','client_name','remote_address','state','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerTunnels() {

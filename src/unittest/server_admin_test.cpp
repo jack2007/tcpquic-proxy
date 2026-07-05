@@ -173,6 +173,7 @@ std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
     TqServerConnectionSnapshot connection;
     connection.ConnectionId = "srv-7";
+    connection.ClientName = "office-a";
     connection.RemoteAddress = "127.0.0.1:5000";
     connection.State = "connected";
     connection.ActiveStreams = 1;
@@ -657,9 +658,11 @@ int main() {
     std::string list = TqHandleServerAdmin(Request("GET", "/server/connections"), metrics, 10);
     if (list.find("HTTP/1.1 200 OK") == std::string::npos) return 3;
     if (list.find("\"connection_id\":\"srv-7\"") == std::string::npos) return 4;
+    if (list.find("\"client_name\":\"office-a\"") == std::string::npos) return 25;
 
     std::string get = TqHandleServerAdmin(Request("GET", "/server/connections/srv-7"), metrics, 10);
     if (get.find("\"remote_address\":\"127.0.0.1:5000\"") == std::string::npos) return 5;
+    if (get.find("\"client_name\":\"office-a\"") == std::string::npos) return 26;
 
     std::string abort = TqHandleServerAdmin(Request("POST", "/server/connections/srv-7:abort-tunnels"), metrics, 10);
     if (abort.find("HTTP/1.1 202 Accepted") == std::string::npos) return 6;
