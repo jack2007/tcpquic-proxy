@@ -1320,6 +1320,8 @@ bool TqDarwinRelayWorker::UnregisterCompletionStateOperation(
     if (testingWorker != nullptr) {
         testingWorker->CompletionStateLockedCount.fetch_add(1, std::memory_order_relaxed);
     }
+#else
+    (void)testingWorker;
 #endif
     std::lock_guard<std::mutex> completionLock(state->Mutex);
     const auto it = state->FallbackSendOperations.find(operation);
