@@ -1,4 +1,5 @@
 #include "quic_session.h"
+#include "control_protocol.h"
 #include "quic_address.h"
 
 #include <atomic>
@@ -715,6 +716,82 @@ static int TestServerConnectionSnapshotIncludesClientName() {
     return 0;
 }
 
+static int TestClientHelloSentAfterConnected() {
+    TqConfig cfg;
+    cfg.ClientName = "office-a";
+    cfg.QuicPeer = "127.0.0.1:443";
+
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1, cfg);
+
+    int helloSends = 0;
+    TqClientHello decoded{};
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.SendClientHelloOverride = [&](
+        MsQuicConnection* connection,
+        QUIC_STREAM_OPEN_FLAGS openFlags,
+        QUIC_SEND_FLAGS sendFlags,
+        const std::vector<uint8_t>& payload) {
+        if (connection != reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5100))) {
+            return false;
+        }
+        if (openFlags != QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) {
+            return false;
+        }
+        if (sendFlags != static_cast<QUIC_SEND_FLAGS>(QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN)) {
+            return false;
+        }
+        ++helloSends;
+        return TqDecodeClientHello(payload.data(), payload.size(), decoded);
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    session.SendClientHelloForTest(reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5100)));
+    if (helloSends != 1) return 1910;
+    if (decoded.ClientName != "office-a") return 1911;
+
+    TqConfig emptyCfg = cfg;
+    emptyCfg.ClientName.clear();
+    QuicClientSession emptySession;
+    emptySession.MarkReconnectStartedForTest(1, emptyCfg);
+    int emptySends = 0;
+    QuicClientSession::ReconnectTestHooks emptyHooks;
+    emptyHooks.SendClientHelloOverride = [&](
+        MsQuicConnection*,
+        QUIC_STREAM_OPEN_FLAGS,
+        QUIC_SEND_FLAGS,
+        const std::vector<uint8_t>&) {
+        ++emptySends;
+        return true;
+    };
+    emptySession.SetReconnectTestHooks(std::move(emptyHooks));
+    emptySession.SendClientHelloForTest(reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5101)));
+    if (emptySends != 0) return 1912;
+
+    TqConfig invalidCfg = cfg;
+    invalidCfg.ClientName = "bad name";
+    QuicClientSession invalidSession;
+    invalidSession.MarkReconnectStartedForTest(1, invalidCfg);
+    int invalidSends = 0;
+    QuicClientSession::ReconnectTestHooks invalidHooks;
+    invalidHooks.SendClientHelloOverride = [&](
+        MsQuicConnection*,
+        QUIC_STREAM_OPEN_FLAGS,
+        QUIC_SEND_FLAGS,
+        const std::vector<uint8_t>&) {
+        ++invalidSends;
+        return true;
+    };
+    invalidSession.SetReconnectTestHooks(std::move(invalidHooks));
+    invalidSession.SendClientHelloForTest(reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x5102)));
+    if (invalidSends != 0) return 1913;
+
+    session.Stop();
+    emptySession.Stop();
+    invalidSession.Stop();
+    return 0;
+}
+
 int main() {
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
@@ -737,5 +814,6 @@ int main() {
     if (int rc = TestPickConnectionRoundRobinSkipsUnavailableSlots()) return rc;
     if (int rc = TestScheme2CredentialConfig()) return rc;
     if (int rc = TestServerConnectionSnapshotIncludesClientName()) return rc;
+    if (int rc = TestClientHelloSentAfterConnected()) return rc;
     return 0;
 }

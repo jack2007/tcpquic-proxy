@@ -115,12 +115,18 @@ public:
         std::function<void(size_t index)> BeforePublishSlot;
         std::function<QUIC_STATUS(size_t index)> ConnectionStartOverride;
         std::function<void(size_t index, uint64_t generation)> ContextDeleted;
+        std::function<bool(
+            MsQuicConnection* connection,
+            QUIC_STREAM_OPEN_FLAGS openFlags,
+            QUIC_SEND_FLAGS sendFlags,
+            const std::vector<uint8_t>& payload)> SendClientHelloOverride;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
     void MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg);
     void MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection);
     void MarkSlotDisconnectedForTest(size_t index);
+    void SendClientHelloForTest(MsQuicConnection* connection);
     MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
     void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
@@ -201,6 +207,7 @@ private:
     static MsQuicConnection* PickableConnectionLocked(const ConnectionSlot& slot);
     static uint32_t ConnectedCountLocked(const ClientSharedState& state);
     static void NotifyConnectionStateChanged(ConnectionStateNotification notification);
+    void SendClientHello(MsQuicConnection* connection);
     static ConnectionStateNotification OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static ConnectionStateNotification OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);

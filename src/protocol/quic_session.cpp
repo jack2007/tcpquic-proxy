@@ -520,6 +520,25 @@ static bool TqConnectionStartAccepted(QUIC_STATUS status) {
     return QUIC_SUCCEEDED(status) || status == QUIC_STATUS_PENDING;
 }
 
+struct TqClientHelloStreamContext {
+    std::vector<uint8_t> Payload;
+    QUIC_BUFFER Buffer{};
+};
+
+static QUIC_STATUS QUIC_API TqClientHelloStreamCallback(
+    MsQuicStream*,
+    void* context,
+    QUIC_STREAM_EVENT* event) noexcept {
+    auto* hello = static_cast<TqClientHelloStreamContext*>(context);
+    if (hello == nullptr) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+        delete hello;
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
 QuicClientSession::~QuicClientSession() {
     Stop();
 }
@@ -1074,6 +1093,10 @@ void QuicClientSession::RestartSlotAfterShutdownCompleteForTest(size_t index, ui
     RestartSlotAfterShutdownComplete(State, index, generation);
 }
 
+void QuicClientSession::SendClientHelloForTest(MsQuicConnection* connection) {
+    SendClientHello(connection);
+}
+
 bool QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS status) {
     return TqConnectionStartAccepted(status);
 }
@@ -1114,6 +1137,74 @@ void QuicClientSession::AbortAllTunnels() {
 void QuicClientSession::NotifyConnectionStateChanged(ConnectionStateNotification notification) {
     if (notification.Handler) {
         notification.Handler(notification.ConnectedCount);
+    }
+}
+
+void QuicClientSession::SendClientHello(MsQuicConnection* connection) {
+    if (connection == nullptr) {
+        return;
+    }
+
+    TqClientHello hello{};
+#if defined(TQ_UNIT_TESTING)
+    std::function<bool(
+        MsQuicConnection*,
+        QUIC_STREAM_OPEN_FLAGS,
+        QUIC_SEND_FLAGS,
+        const std::vector<uint8_t>&)> sendOverride;
+#endif
+    {
+        std::scoped_lock guard(ConfigLock, State->Lock);
+        hello.ClientName = Config.ClientName;
+#if defined(TQ_UNIT_TESTING)
+        sendOverride = State->TestHooks.SendClientHelloOverride;
+#endif
+    }
+
+    std::vector<uint8_t> payload;
+    if (!TqEncodeClientHello(hello, payload)) {
+        return;
+    }
+
+#if defined(TQ_UNIT_TESTING)
+    if (sendOverride) {
+        (void)sendOverride(
+            connection,
+            QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+            static_cast<QUIC_SEND_FLAGS>(QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN),
+            payload);
+        return;
+    }
+#endif
+
+    auto* context = new (std::nothrow) TqClientHelloStreamContext();
+    if (context == nullptr) {
+        return;
+    }
+    context->Payload = std::move(payload);
+    context->Buffer.Length = static_cast<uint32_t>(context->Payload.size());
+    context->Buffer.Buffer = context->Payload.data();
+
+    auto* stream = new (std::nothrow) MsQuicStream(
+        *connection,
+        QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+        CleanUpAutoDelete,
+        TqClientHelloStreamCallback,
+        context);
+    if (stream == nullptr || !stream->IsValid()) {
+        delete stream;
+        delete context;
+        return;
+    }
+
+    const QUIC_STATUS status = stream->Send(
+        &context->Buffer,
+        1,
+        static_cast<QUIC_SEND_FLAGS>(QUIC_SEND_FLAG_START | QUIC_SEND_FLAG_FIN),
+        nullptr);
+    if (QUIC_FAILED(status)) {
+        delete stream;
+        delete context;
     }
 }
 
@@ -1598,6 +1689,13 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_CONNECTED:
         TqClientDebugLog("event-connected", slotIndex, connection);
         TqSampleConnectionRtt(connection);
+        if (slotContext->Gate) {
+            QuicClientSession* session = QuicClientSession::AcquireLiveSession(slotContext->Gate);
+            if (session != nullptr) {
+                session->SendClientHello(connection);
+                QuicClientSession::ReleaseLiveSession(slotContext->Gate);
+            }
+        }
         {
             char line[256];
             std::snprintf(
