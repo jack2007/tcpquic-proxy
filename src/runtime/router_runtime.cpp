@@ -159,10 +159,12 @@ nlohmann::json RuntimePeerConfigJsonValue(const TqPeerConfig& peer) {
         {"http_listen", peer.HttpListen},
         {"port_forwards", PortForwardsJsonValue(peer.PortForwards)},
         {"paths", QuicPathsJsonValue(peer.QuicPaths)},
-        {"proto_connections", peer.QuicConnections},
         {"compress", peer.Compress},
         {"enabled", peer.Enabled},
     };
+    if (peer.QuicConnections != 0) {
+        body["proto_connections"] = peer.QuicConnections;
+    }
     return body;
 }
 

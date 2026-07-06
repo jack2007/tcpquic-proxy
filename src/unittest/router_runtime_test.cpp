@@ -980,6 +980,7 @@ int main() {
         if (saved.find("\"proto_peer\": \"127.0.0.1:14461\"") == std::string::npos) return 326;
         if (saved.find("\"socks_listen\": \"127.0.0.1:11061\"") == std::string::npos) return 327;
         if (saved.find("\"enabled\": false") == std::string::npos) return 328;
+        if (saved.find("\"proto_connections\"") != std::string::npos) return 329;
     }
     {
         FakeAdapter adapter;
