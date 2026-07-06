@@ -1545,6 +1545,8 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
     bool downloadPumpsJoined = false;
     TqSpeedFinish finish{};
     TqSpeedResult result{};
+    const auto resultTimeout = std::chrono::seconds(
+        std::max<int64_t>(15, static_cast<int64_t>(cfg.SpeedTestDurationSec) + 15));
 
     for (uint16_t i = 0; i < parallel; ++i) {
         std::string connectErr;
@@ -1629,8 +1631,6 @@ bool TqRunIngressClientSpeedTest(MsQuicConnection& controlConn, const TqConfig& 
         goto cleanup;
     }
 
-    const auto resultTimeout = std::chrono::seconds(
-        std::max<int64_t>(15, static_cast<int64_t>(cfg.SpeedTestDurationSec) + 15));
     if (!control.WaitForResult(resultTimeout, result)) {
         std::fprintf(stderr, "tcpquic-proxy: %s\n", control.FailureMessage().c_str());
         goto cleanup;

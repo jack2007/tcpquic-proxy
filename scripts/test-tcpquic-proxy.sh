@@ -415,6 +415,14 @@ wait_tcp 127.0.0.1 15001 "target HTTP server"
 
 HEALTHY_PEER_HTTP_PORT=8080
 HEALTHY_PEER_SOCKS_PORT=1080
+HEALTHY_PEER_QUIC_PORT=$(python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)
 DOWN_PEER_HTTP_PORT=8082
 DOWN_PEER_SOCKS_PORT=11882
 DOWN_PEER_QUIC_PORT=$(python3 <<'PY'
@@ -426,11 +434,11 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
 PY
 )
 
-read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin")
+read -r SERVER_PID SERVER_STDIN_FD < <(start_server "$HEALTHY_PEER_QUIC_PORT" "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin")
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
 
 cat > "$TMP_DIR/client-config.json" <<EOF
-{"version":1,"peers":[{"peer_id":"healthy","client_name":"${CLIENT_NAME}-healthy","quic_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","client_name":"${CLIENT_NAME}-down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","compress":"off"}]}
+{"version":1,"client":{"client_name":"${CLIENT_NAME}"},"peers":[{"peer_id":"healthy","quic_peer":"127.0.0.1:${HEALTHY_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${HEALTHY_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${HEALTHY_PEER_HTTP_PORT}","compress":"off"},{"peer_id":"down","quic_peer":"127.0.0.1:${DOWN_PEER_QUIC_PORT}","socks_listen":"127.0.0.1:${DOWN_PEER_SOCKS_PORT}","http_listen":"127.0.0.1:${DOWN_PEER_HTTP_PORT}","compress":"off"}]}
 EOF
 
 CLIENT_PID=$(start_configured_client "$TMP_DIR/client-config.json" "$TMP_DIR/proxy-client.log")
@@ -492,7 +500,7 @@ wait_tcp 127.0.0.1 "$FORWARD_TARGET_PORT" "forward echo target"
 kill "$CLIENT_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true
 CLIENT_PID=""
-CLIENT_PID=$(start_client_with_forward 4433 "$FORWARD_HTTP_PORT" "$FORWARD_SOCKS_PORT" "$FORWARD_LISTEN_PORT" "$FORWARD_TARGET_PORT" off "$TMP_DIR/proxy-client-forward.log")
+CLIENT_PID=$(start_client_with_forward "$HEALTHY_PEER_QUIC_PORT" "$FORWARD_HTTP_PORT" "$FORWARD_SOCKS_PORT" "$FORWARD_LISTEN_PORT" "$FORWARD_TARGET_PORT" off "$TMP_DIR/proxy-client-forward.log")
 wait_tcp 127.0.0.1 "$FORWARD_LISTEN_PORT" "port forward listener"
 
 python3 - "$FORWARD_LISTEN_PORT" <<'PY'
@@ -566,9 +574,17 @@ SERVER_PID=""
 eval "exec ${SERVER_STDIN_FD}>&-"
 SERVER_STDIN_FD=""
 
-read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" zstd "$TMP_DIR/proxy-server-zstd.log" "$TMP_DIR/server-zstd.stdin")
+ZSTD_PEER_QUIC_PORT=$(python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)
+read -r SERVER_PID SERVER_STDIN_FD < <(start_server "$ZSTD_PEER_QUIC_PORT" "127.0.0.0/8" zstd "$TMP_DIR/proxy-server-zstd.log" "$TMP_DIR/server-zstd.stdin")
 wait_log "$TMP_DIR/proxy-server-zstd.log" "QUIC server listening" "zstd server"
-CLIENT_PID=$(start_client 4433 8080 1080 zstd "$TMP_DIR/proxy-client-zstd.log")
+CLIENT_PID=$(start_client "$ZSTD_PEER_QUIC_PORT" 8080 1080 zstd "$TMP_DIR/proxy-client-zstd.log")
 wait_tcp 127.0.0.1 8080 "zstd HTTP listener"
 
 curl -fsS \
@@ -591,9 +607,17 @@ SERVER_PID=""
 eval "exec ${SERVER_STDIN_FD}>&-"
 SERVER_STDIN_FD=""
 
-read -r SERVER_PID SERVER_STDIN_FD < <(start_server 4433 "127.0.0.0/8" off "$TMP_DIR/proxy-server-pool.log" "$TMP_DIR/server-pool.stdin")
+POOL_PEER_QUIC_PORT=$(python3 <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+    s.bind(("127.0.0.1", 0))
+    print(s.getsockname()[1])
+PY
+)
+read -r SERVER_PID SERVER_STDIN_FD < <(start_server "$POOL_PEER_QUIC_PORT" "127.0.0.0/8" off "$TMP_DIR/proxy-server-pool.log" "$TMP_DIR/server-pool.stdin")
 wait_log "$TMP_DIR/proxy-server-pool.log" "QUIC server listening" "pool server"
-CLIENT_PID=$(start_client 4433 8080 1080 off "$TMP_DIR/proxy-client-pool.log" 4)
+CLIENT_PID=$(start_client "$POOL_PEER_QUIC_PORT" 8080 1080 off "$TMP_DIR/proxy-client-pool.log" 4)
 wait_tcp 127.0.0.1 8080 "pool HTTP listener"
 
 curl -fsS \
