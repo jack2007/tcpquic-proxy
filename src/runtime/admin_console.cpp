@@ -79,10 +79,11 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     .state{display:inline-flex;align-items:center;gap:6px;padding:3px 7px;border-radius:999px;border:1px solid var(--tq-line);font-size:12px;background:#fff}
     .state.ok{color:var(--tq-green);border-color:#b7e1c1;background:#f1fbf4}.state.warn{color:var(--tq-amber);border-color:#f6d49d;background:#fff8eb}.state.err{color:var(--tq-red);border-color:#f2b8b1;background:#fff6f5}
     .peer-form-panel{display:grid;gap:12px}
-    .peer-create-footer{display:flex;justify-content:flex-end}
+    .hidden{display:none!important}
     .split{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:12px;align-items:start}
     .drawer{background:var(--tq-panel-soft);border:1px solid var(--tq-line);border-radius:8px;padding:14px;display:grid;gap:12px;min-width:0}
     .form{display:grid;grid-template-columns:1fr 1fr;gap:10px}.field{display:grid;gap:4px}.field.full{grid-column:1/-1}.field label{color:var(--tq-muted);font-size:12px}
+    .peer-form-grid{grid-template-columns:repeat(3,minmax(180px,1fr));align-items:start}
     .diagnostics-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px;align-items:stretch}
     .diagnostics-control-card{display:grid;grid-template-rows:auto auto 1fr auto}
     .diagnostics-control-form{display:grid;gap:11px;align-content:start}
@@ -110,6 +111,8 @@ constexpr std::string_view kConsoleAdminCss = R"CSS(
     .confirm{border:1px solid #f0b4ad;background:#fff7f6;border-radius:8px;padding:12px;display:grid;gap:8px;font-size:13px;line-height:1.45}
     .json-preview{background:#f8fafb;color:var(--tq-text);border:1px solid var(--tq-line);border-radius:8px;padding:12px;overflow:auto;font-size:12px;line-height:1.5;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;max-height:280px}
     @media(max-width:1180px){.split{grid-template-columns:1fr}.span-3,.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}}
+    @media(max-width:1100px){.peer-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:640px){.peer-form-grid{grid-template-columns:1fr}}
     @media(max-width:720px){.diagnostics-layout{grid-template-columns:1fr}.diagnostics-allocator-column{grid-template-rows:auto auto}}
     @media(max-width:940px){.shell{grid-template-columns:1fr}.sidebar{position:sticky;top:0;z-index:2}.nav{grid-template-columns:repeat(3,minmax(0,1fr))}.nav button{grid-template-columns:1fr;gap:4px;justify-items:start}.topbar{align-items:flex-start;flex-direction:column}.content{padding:14px}}
   )CSS";
@@ -168,9 +171,8 @@ static constexpr char kConsoleHtmlStorage[] =
 
         <section id="client-peers" class="page">
           <div class="title-row"><div><h2>Peers - client</h2><p class="subtitle">client peer 是配置资源，支持 Create、Edit、Delete；Create/Edit 同一套字段，peer endpoint 支持 quic_peer 地址列表或 paths 两种表达。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>socks_listen</th><th>http_listen</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-peers-rows"></tbody></table></div>
-          <section class="peer-form-panel"><aside class="drawer"><h3>Create/Edit Peer</h3><div class="form"><div class="field full"><label>peer_id</label><input id="peer-id" value=""></div><div class="field full"><label>peers address - quic_peer 模式</label><input id="peer-quic-peer" value=""></div><div class="field full"><label>paths 模式</label><textarea id="peer-paths" style="min-height:96px">[]</textarea></div><div class="field"><label>socks_listen</label><input id="peer-socks-listen" value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input id="peer-http-listen" value="127.0.0.1:8080"></div><div class="field full"><label>port_forwards</label><textarea id="peer-port-forwards" style="min-height:72px">[]</textarea></div><div class="field"><label>enabled</label><select id="peer-enabled"><option>true</option><option>false</option></select></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn" id="peer-cancel">Cancel</button><button class="btn" id="peer-json-advanced">JSON advanced</button><button class="btn primary" id="peer-save">Create / Save</button></div><div class="confirm"><strong>Delete peer</strong><span>只做 Delete 确认，不在此提供连接控制操作。</span><button class="btn danger" id="peer-delete">Delete</button></div></aside></section>
-          <div class="peer-create-footer"><button class="btn primary" id="peer-create">Create Peer</button></div>
+          <div class="card table-scroll"><table><thead><tr><th>peer_id</th><th>state</th><th>enabled</th><th>quic_peer</th><th>socks_listen</th><th>http_listen</th><th>connection_count</th><th>connected_connections</th><th>active_streams</th><th>total_streams</th><th>reconnects</th><th>last_error</th><th>actions</th></tr></thead><tbody id="client-peers-rows"></tbody><tfoot><tr><td colspan="12"></td><td><button class="btn primary" id="peer-create">Create Peer</button></td></tr></tfoot></table></div>
+          <section class="peer-form-panel hidden" id="peer-form-panel"><aside class="drawer"><h3>Create/Edit Peer</h3><div class="form peer-form-grid"><div class="field"><label>peer_id</label><input id="peer-id" value=""></div><div class="field"><label>peers address - quic_peer 模式</label><input id="peer-quic-peer" value=""></div><div class="field"><label>connections</label><input id="peer-connections" type="number" min="1" max="128" value="1"></div><div class="field"><label>socks_listen</label><input id="peer-socks-listen" value="127.0.0.1:1080"></div><div class="field"><label>http_listen</label><input id="peer-http-listen" value="127.0.0.1:8080"></div><div class="field"><label>enabled</label><select id="peer-enabled"><option>true</option><option>false</option></select></div><div class="field"><label>paths 模式</label><textarea id="peer-paths" style="min-height:88px">[]</textarea></div><div class="field"><label>port_forwards</label><textarea id="peer-port-forwards" style="min-height:88px">[]</textarea></div></div><div class="callout">提交时二选一：填写 quic_peer 地址列表，或填写 paths 数组；若 paths 非空，使用 paths 作为连接路径配置。</div><div class="actions"><button class="btn" id="peer-cancel">Cancel</button><button class="btn primary" id="peer-save">Create / Save</button></div></aside></section>
         </section>
 
         <section id="client-connections" class="page">
@@ -400,8 +402,18 @@ static constexpr char kConsoleJsStorage[] =
       document.getElementById('peer-paths').value = JSON.stringify(peer.paths || [], null, 2);
       document.getElementById('peer-socks-listen').value = peer.socks_listen || '127.0.0.1:1080';
       document.getElementById('peer-http-listen').value = peer.http_listen || '127.0.0.1:8080';
+      document.getElementById('peer-connections').value = String(peer.proto_connections || peer.quic_connections || 1);
       document.getElementById('peer-port-forwards').value = JSON.stringify(peer.port_forwards || [], null, 2);
       document.getElementById('peer-enabled').value = peer.enabled === false ? 'false' : 'true';
+    }
+
+    function showPeerForm() {
+      document.getElementById('peer-form-panel').classList.remove('hidden');
+    }
+
+    function hidePeerForm() {
+      setPeerForm();
+      document.getElementById('peer-form-panel').classList.add('hidden');
     }
 
     function peerFormPayload() {
@@ -412,6 +424,7 @@ static constexpr char kConsoleJsStorage[] =
         quic_peer: document.getElementById('peer-quic-peer').value.trim(),
         socks_listen: document.getElementById('peer-socks-listen').value.trim(),
         http_listen: document.getElementById('peer-http-listen').value.trim(),
+        proto_connections: Number(document.getElementById('peer-connections').value || 1),
         enabled: document.getElementById('peer-enabled').value === 'true'
       };
       if (pathsText) payload.paths = JSON.parse(pathsText);
@@ -421,6 +434,7 @@ static constexpr char kConsoleJsStorage[] =
 
     function beginCreatePeer() {
       setPeerForm();
+      showPeerForm();
       consoleState.peerMode = 'create';
     }
 
@@ -483,7 +497,10 @@ static constexpr char kConsoleJsStorage[] =
       tbody.querySelectorAll('[data-edit-peer]').forEach(button => {
         button.onclick = () => {
           const peer = (consoleState.clientPeers || []).find(item => item.peer_id === button.dataset.editPeer);
-          if (peer) setPeerForm(peer);
+          if (peer) {
+            setPeerForm(peer);
+            showPeerForm();
+          }
         };
       });
       tbody.querySelectorAll('[data-delete-peer]').forEach(button => {
@@ -956,12 +973,7 @@ static constexpr char kConsoleJsStorage[] =
       if (serverAclSave) serverAclSave.onclick = () => runClientAction(saveServerAcl);
       const allocatorDump = document.getElementById('allocator-dump');
       if (allocatorDump) allocatorDump.onclick = () => runClientAction(runAllocatorDump);
-      document.getElementById('peer-delete').onclick = () => {
-        const peerId = document.getElementById('peer-id').value.trim();
-        if (peerId) runClientAction(() => deletePeer(peerId));
-      };
-      document.getElementById('peer-cancel').onclick = () => setPeerForm();
-      document.getElementById('peer-json-advanced').onclick = () => setPeerForm(peerFormPayload());
+      document.getElementById('peer-cancel').onclick = () => hidePeerForm();
       document.getElementById('pause-refresh').onclick = () => {
         consoleState.paused = !consoleState.paused;
         document.getElementById('pause-refresh').textContent = consoleState.paused ? 'Resume refresh' : 'Pause refresh';
