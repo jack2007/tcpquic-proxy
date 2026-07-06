@@ -30,6 +30,34 @@ bool TqLinuxRelayWorkerEnqueueCancelledRegisterForTest(
 int main() {
     {
         TqLinuxRelayWorker worker(TqLinuxRelayWorkerConfig{});
+        const uint64_t wake = worker.EncodeEpollWakeForTest();
+        const uint64_t relayThirty = worker.EncodeEpollRelayForTest(30);
+        if (!worker.IsEpollWakeForTest(wake)) return 131;
+        if (worker.IsEpollWakeForTest(relayThirty)) return 132;
+
+        uint64_t decoded = 0;
+        if (!worker.DecodeEpollRelayForTest(relayThirty, decoded)) return 133;
+        if (decoded != 30) return 134;
+        if (worker.DecodeEpollRelayForTest(wake, decoded)) return 135;
+        if (worker.DecodeEpollRelayForTest(0, decoded)) return 136;
+    }
+
+    {
+        TqLinuxRelayWorker worker(TqLinuxRelayWorkerConfig{});
+
+        worker.SetNextRelayIdForTest(0);
+        if (worker.AllocateRelayIdForTest() != 1) return 137;
+
+        worker.SetNextRelayIdForTest(1ull << 63);
+        if (worker.AllocateRelayIdForTest() != 1) return 138;
+
+        worker.SetNextRelayIdForTest((1ull << 63) - 1);
+        if (worker.AllocateRelayIdForTest() != ((1ull << 63) - 1)) return 139;
+        if (worker.AllocateRelayIdForTest() != 1) return 140;
+    }
+
+    {
+        TqLinuxRelayWorker worker(TqLinuxRelayWorkerConfig{});
         assert(worker.StartForTest());
 
         for (uint64_t i = 0; i < 1000; ++i) {

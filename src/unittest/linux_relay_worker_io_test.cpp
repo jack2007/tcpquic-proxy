@@ -217,6 +217,84 @@ int main() {
 
     {
         TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            return 3101;
+        }
+
+        int relayFds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, relayFds) != 0) {
+            worker.Stop();
+            return 3102;
+        }
+
+        const int wakeFd = worker.WakeFdForTest();
+        if (wakeFd <= 0) {
+            worker.Stop();
+            ::close(relayFds[0]);
+            ::close(relayFds[1]);
+            return 3103;
+        }
+        worker.SetNextRelayIdForTest(static_cast<uint64_t>(wakeFd));
+
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = relayFds[0];
+        registration.Stream = nullptr;
+        registration.Handle = nullptr;
+        registration.EnableQuicSends = false;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(relayFds[0]);
+            ::close(relayFds[1]);
+            return 3104;
+        }
+        if (registered.RelayId != static_cast<uint64_t>(wakeFd)) {
+            worker.Stop();
+            ::close(relayFds[1]);
+            return 3105;
+        }
+
+        const uint64_t encodedRelay = worker.EncodeEpollRelayForTest(registered.RelayId);
+        if (worker.IsEpollWakeForTest(encodedRelay)) {
+            worker.Stop();
+            ::close(relayFds[1]);
+            return 3106;
+        }
+
+        ::shutdown(relayFds[1], SHUT_RDWR);
+        ::close(relayFds[1]);
+        relayFds[1] = -1;
+
+        if (!worker.DispatchEncodedEpollEventForTest(
+                encodedRelay,
+                EPOLLIN | EPOLLRDHUP | EPOLLHUP)) {
+            worker.Stop();
+            return 3107;
+        }
+
+        TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
+        bool sawTcpReadClosed = false;
+        bool sawTcpReadDisarmed = false;
+        for (const auto& relay : snapshot.ActiveRelayStates) {
+            if (relay.RelayId == registered.RelayId) {
+                sawTcpReadClosed = relay.TcpReadClosed;
+                sawTcpReadDisarmed = !relay.TcpReadArmed;
+            }
+        }
+        if (!sawTcpReadClosed || !sawTcpReadDisarmed) {
+            std::fprintf(stderr, "expected encoded relay event to close TCP read, relay=%llu\n",
+                static_cast<unsigned long long>(registered.RelayId));
+            worker.Stop();
+            return 3108;
+        }
+
+        worker.Stop();
+    }
+
+    {
+        TqLinuxRelayWorkerConfig config{};
         config.EventQueueCapacity = 1024;
         TqLinuxRelayWorker worker(config);
         if (!worker.Start()) {
@@ -469,10 +547,28 @@ int main() {
         worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLRDHUP);
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        if (snapshot.TcpReadClosedRelays != 1) {
+        if (snapshot.TcpReadClosedRelays != 1 || snapshot.TcpReadArmedRelays != 0) {
             std::fprintf(stderr,
-                "expected EPOLLRDHUP-only event to drain TCP EOF, read_closed=%llu\n",
-                static_cast<unsigned long long>(snapshot.TcpReadClosedRelays));
+                "expected EPOLLRDHUP-only event to drain TCP EOF and disarm read, "
+                "read_closed=%llu read_armed=%llu\n",
+                static_cast<unsigned long long>(snapshot.TcpReadClosedRelays),
+                static_cast<unsigned long long>(snapshot.TcpReadArmedRelays));
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+
+        if (!worker.ArmTcpReadableForTest(registered.RelayId, true)) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
+        const TqLinuxRelayWorkerSnapshot rearmed = worker.Snapshot();
+        if (rearmed.TcpReadClosedRelays != 1 || rearmed.TcpReadArmedRelays != 0) {
+            std::fprintf(stderr,
+                "expected closed TCP read to reject rearm, read_closed=%llu read_armed=%llu\n",
+                static_cast<unsigned long long>(rearmed.TcpReadClosedRelays),
+                static_cast<unsigned long long>(rearmed.TcpReadArmedRelays));
             worker.Stop();
             ::close(fds[1]);
             return 1;
