@@ -1050,17 +1050,20 @@ nlohmann::json QuicPathsJson(const std::vector<TqQuicPathConfig>& paths) {
 }
 
 nlohmann::json RuntimePeerJson(const TqPeerConfig& peer) {
-    return {
+    nlohmann::json value = {
         {"id", peer.PeerId},
         {"proto_peer", peer.QuicPeer},
         {"socks_listen", peer.SocksListen},
         {"http_listen", peer.HttpListen},
         {"port_forwards", PortForwardsJson(peer.PortForwards)},
         {"paths", QuicPathsJson(peer.QuicPaths)},
-        {"proto_connections", peer.QuicConnections},
         {"compress", peer.Compress},
         {"enabled", peer.Enabled},
     };
+    if (peer.QuicConnections != 0) {
+        value["proto_connections"] = peer.QuicConnections;
+    }
+    return value;
 }
 
 TqPeerConfig PrimaryPeerFromConfig(const TqConfig& cfg) {
@@ -1206,7 +1209,10 @@ bool WriteTextFileAtomically(const std::string& path, const std::string& body, s
     return true;
 }
 
-bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& err) {
+bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& err, bool* legacyRouterConfig) {
+    if (legacyRouterConfig != nullptr) {
+        *legacyRouterConfig = false;
+    }
     std::ifstream file(path);
     if (!file) {
         err = "failed to open config: " + path;
@@ -1224,7 +1230,9 @@ bool LoadRuntimeConfigFile(const std::string& path, TqConfig& cfg, std::string& 
         JsonParser routerParser(body, routerErr);
         if (routerParser.ParseRouter(router)) {
             cfg.Router = std::move(router);
-            cfg.ClientConfigPath = path;
+            if (legacyRouterConfig != nullptr) {
+                *legacyRouterConfig = true;
+            }
             err.clear();
             return true;
         }
@@ -1348,6 +1356,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
 
     bool configSpecified = false;
     bool configFileMissing = false;
+    bool legacyRouterConfigLoadedFromConfig = false;
     for (int i = 2; i < argc; ++i) {
         const char* arg = argv[i];
         const char* value = nullptr;
@@ -1368,7 +1377,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
         cfg.ConfigPath = value;
         if (!std::filesystem::exists(cfg.ConfigPath)) {
             configFileMissing = true;
-        } else if (!LoadRuntimeConfigFile(cfg.ConfigPath, cfg, err)) {
+        } else if (!LoadRuntimeConfigFile(cfg.ConfigPath, cfg, err, &legacyRouterConfigLoadedFromConfig)) {
             return false;
         }
     }
@@ -2038,7 +2047,7 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 return false;
             }
         }
-        if (configSpecified && configFileMissing) {
+        if (configSpecified && (configFileMissing || legacyRouterConfigLoadedFromConfig)) {
             EnsureDefaultClientName(cfg);
             if (!WriteTextFileAtomically(cfg.ConfigPath, RuntimeConfigJson(cfg), err)) {
                 return false;

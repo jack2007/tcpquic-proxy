@@ -983,6 +983,17 @@ int main() {
         }
         if (cfg.Router.Peers.size() != 1) return 341;
         if (cfg.Router.Peers[0].PeerId != "persisted") return 342;
+        if (!cfg.ClientConfigPath.empty()) return 347;
+        if (cfg.ClientName.rfind(ExpectedClientNamePrefix(), 0) != 0) return 343;
+        if (cfg.ClientName.size() <= std::string(ExpectedClientNamePrefix()).size()) return 344;
+        nlohmann::json upgraded = nlohmann::json::parse(ReadTextFile(file));
+        if (!upgraded.contains("client")) return 345;
+        if (upgraded["client"].value("client_name", "").rfind(ExpectedClientNamePrefix(), 0) != 0) return 346;
+        if (upgraded["peers"][0].contains("proto_connections")) return 348;
+        TqConfig reparsed;
+        std::string reparseErr;
+        const char* reparseArgs[] = {"tcpquic-proxy", "client", "--config", file.c_str()};
+        if (!Parse((int)(sizeof(reparseArgs) / sizeof(reparseArgs[0])), const_cast<char**>(reparseArgs), reparsed, reparseErr)) return 349;
     }
     {
         const char* args[] = {
