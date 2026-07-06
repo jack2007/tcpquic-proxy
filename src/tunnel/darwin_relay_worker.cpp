@@ -1690,6 +1690,10 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             if (!SubmitTcpBatchToQuic(relay, std::move(sendViews), false)) {
                 return false;
             }
+            if (relay->Closing || relay->Binding == nullptr ||
+                !relay->Binding->Active.load(std::memory_order_acquire)) {
+                return true;
+            }
             bool shouldPause = Config.MaxInFlightQuicSends != 0 &&
                 relay->InFlightQuicSends >= Config.MaxInFlightQuicSends;
             if (shouldPause) {
@@ -1760,8 +1764,11 @@ bool TqDarwinRelayWorker::SubmitTcpBatchToQuic(
         return false;
     }
     AssertWorkerThreadForRelayState();
+    if (relay->Binding != nullptr && !relay->Binding->Active.load(std::memory_order_acquire)) {
+        return true;
+    }
     if (relay->Closing) {
-        return false;
+        return true;
     }
     if (fin) {
         relay->QuicSendFinSubmitted = true;
@@ -1822,13 +1829,19 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     info.Fin = raw->Fin;
     info.Submitting = true;
     AssertWorkerThreadForRelayState();
-    if (relay->Closing || relay->Stream == nullptr) {
-        Errors.fetch_add(1, std::memory_order_relaxed);
+    if (relay->Closing) {
+        return true;
+    }
+    if (relay->Stream == nullptr) {
         return false;
     }
     stream = relay->Stream;
-    info.BindingOwner = relay->Binding;
-    raw->BindingOwner = relay->Binding;
+    std::shared_ptr<StreamBinding> binding = relay->Binding;
+    if (binding == nullptr || !binding->Active.load(std::memory_order_acquire)) {
+        return true;
+    }
+    info.BindingOwner = binding;
+    raw->BindingOwner = binding;
     raw->CompletionRelayId = info.RelayId;
     raw->CompletionTotalBytes = info.TotalBytes;
     raw->CompletionFin = info.Fin;
@@ -1844,6 +1857,24 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         RegisterKnownSendOperationLocal(raw, info);
     } else {
         RegisterKnownSendOperation(raw, info);
+    }
+    if (!binding->Active.load(std::memory_order_acquire) || relay->Closing || relay->Stream != stream) {
+        KnownSendOperationInfo removedInfo{};
+        if (workerThread) {
+            (void)UnregisterKnownSendOperationLocal(raw, &removedInfo);
+        } else {
+            (void)UnregisterKnownSendOperation(raw, &removedInfo);
+        }
+        if (relay->SubmittingQuicSends > 0) {
+            --relay->SubmittingQuicSends;
+        }
+        if (relay->InFlightQuicSends > 0) {
+            --relay->InFlightQuicSends;
+        }
+        relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= removedInfo.TotalBytes
+            ? relay->InFlightQuicSendBytes - removedInfo.TotalBytes
+            : 0;
+        return true;
     }
     const QUIC_STATUS status = TqDarwinRelayStreamSend(
         stream,

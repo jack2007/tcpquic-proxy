@@ -80,6 +80,37 @@ struct FlushOnlyCompressor final : ITqCompressor {
     std::atomic<uint64_t> FlushCalls{0};
 };
 
+struct ShutdownDuringCompressCompressor final : ITqCompressor {
+    explicit ShutdownDuringCompressCompressor(MsQuicStream* stream) : Stream(stream) {}
+
+    bool Compress(const uint8_t*, size_t inLen, std::vector<uint8_t>& out, bool) override {
+        InputBytes.fetch_add(inLen, std::memory_order_relaxed);
+        if (!ShutdownDispatched.exchange(true, std::memory_order_acq_rel)) {
+            if (Stream != nullptr && Stream->Context != nullptr) {
+                QUIC_STREAM_EVENT shutdown{};
+                shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+                CallbackOk.store(
+                    Stream->Callback(Stream, Stream->Context, &shutdown) == QUIC_STATUS_SUCCESS,
+                    std::memory_order_release);
+            }
+        }
+        out.push_back(0x51);
+        return true;
+    }
+
+    bool Flush(std::vector<uint8_t>& out) override {
+        out.push_back(0x5a);
+        return true;
+    }
+
+    void Reset() override {}
+
+    MsQuicStream* Stream{nullptr};
+    std::atomic<bool> ShutdownDispatched{false};
+    std::atomic<bool> CallbackOk{false};
+    std::atomic<uint64_t> InputBytes{0};
+};
+
 struct ZstdTestDecompressor final : ITqDecompressor {
     ZstdTestDecompressor() {
         Context = ZSTD_createDCtx();
@@ -2064,6 +2095,52 @@ void StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void StreamShutdownDuringTcpBatchBlocksQuicSend() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 16;
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxBufferedQuicSendBytes = 64 * 1024;
+    TqDarwinRelayWorker worker(config);
+    worker.SetStreamSendForTest(FakeStreamSend);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    ShutdownDuringCompressCompressor compressor(stream);
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Handle = &handle;
+    registration.Compressor = &compressor;
+    registration.CompressAlgo = TqCompressAlgo::Zstd;
+    registration.EnableQuicSends = true;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+
+    const char payload[] = "shutdown-during-batch";
+    CHECK(write(fds[0], payload, sizeof(payload) - 1) == static_cast<ssize_t>(sizeof(payload) - 1));
+    CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(compressor.ShutdownDispatched.load(std::memory_order_acquire));
+    CHECK(compressor.CallbackOk.load(std::memory_order_acquire));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.Snapshot().ActiveRelays == 0);
+
+    worker.Stop();
+    worker.SetStreamSendForTest(nullptr);
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
 void ShutdownCallbackQueuesCloseUntilWorkerDrain() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
@@ -3738,6 +3815,7 @@ int main() {
     StopThenLateCompletionDoesNotUseDanglingWorker();
     StopThenLateTcpEventIgnoresRetiredRelay();
     StreamShutdownStopsRelayAndPreventsFurtherTcpToQuicSends();
+    StreamShutdownDuringTcpBatchBlocksQuicSend();
     ShutdownCallbackQueuesCloseUntilWorkerDrain();
     PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain();
     ReceiveCallbackAfterShutdownDoesNotTakeMsQuicBufferOwnership();
