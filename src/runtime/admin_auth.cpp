@@ -132,7 +132,6 @@ std::string TqTokenJson(const std::string& token, const std::string& listen) {
         {"token_type", "Bearer"},
         {"token", token},
         {"listen", listen},
-        {"pid", TqCurrentPid()},
         {"created_at_unix", TqUnixNow()},
     }.dump(2) + "\n";
 }

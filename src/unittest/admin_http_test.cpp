@@ -434,6 +434,7 @@ int main() {
         const auto tokenJson = nlohmann::json::parse(body);
         if (tokenJson["token"] != auth.Token()) return 88;
         if (tokenJson["listen"] != "127.0.0.1:19091") return 89;
+        if (tokenJson.contains("pid")) return 94;
 #if !defined(_WIN32)
         const auto perms = std::filesystem::status(tokenFile).permissions();
         if ((perms & std::filesystem::perms::group_read) != std::filesystem::perms::none) return 90;
