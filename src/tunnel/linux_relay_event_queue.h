@@ -48,6 +48,7 @@ enum class TqLinuxRelayEventType {
     FlushTcpWritableForTest,
     RelayIndexesConsistentForTest,
     DispatchTcpEventsForTest,
+    DispatchEncodedEpollEventForTest,
 };
 
 struct TqLinuxRelayEvent {

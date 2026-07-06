@@ -130,6 +130,29 @@ TqLinuxRelayStreamSendForTest g_linuxRelayStreamSendForTest = nullptr;
 #endif
 
 constexpr uint32_t kLinuxRelayControlEnqueueRetries = 8;
+constexpr uint64_t kLinuxRelayEpollTagMask = 1ull << 63;
+constexpr uint64_t kLinuxRelayEpollWake = kLinuxRelayEpollTagMask;
+constexpr uint64_t kLinuxRelayEpollRelayMask = ~kLinuxRelayEpollTagMask;
+
+constexpr uint64_t EncodeLinuxRelayEpollWake() {
+    return kLinuxRelayEpollWake;
+}
+
+constexpr uint64_t EncodeLinuxRelayEpollRelay(uint64_t relayId) {
+    return relayId & kLinuxRelayEpollRelayMask;
+}
+
+constexpr bool IsLinuxRelayEpollWake(uint64_t value) {
+    return value == kLinuxRelayEpollWake;
+}
+
+constexpr bool DecodeLinuxRelayEpollRelay(uint64_t value, uint64_t& relayId) {
+    if ((value & kLinuxRelayEpollTagMask) != 0) {
+        return false;
+    }
+    relayId = value;
+    return relayId != 0;
+}
 
 bool TqRelayDebugEnabled() {
     static const bool enabled = []() {
@@ -341,6 +364,43 @@ std::string GetSocketNameString(int fd, bool peer, int* errNo = nullptr) {
 void TqLinuxRelaySetStreamSendForTest(TqLinuxRelayStreamSendForTest sendFn) {
     g_linuxRelayStreamSendForTest = sendFn;
 }
+
+uint64_t TqLinuxRelayWorker::EncodeEpollWakeForTest() const {
+    return EncodeLinuxRelayEpollWake();
+}
+
+uint64_t TqLinuxRelayWorker::EncodeEpollRelayForTest(uint64_t relayId) const {
+    return EncodeLinuxRelayEpollRelay(relayId);
+}
+
+bool TqLinuxRelayWorker::IsEpollWakeForTest(uint64_t value) const {
+    return IsLinuxRelayEpollWake(value);
+}
+
+bool TqLinuxRelayWorker::DecodeEpollRelayForTest(uint64_t value, uint64_t& relayId) const {
+    return DecodeLinuxRelayEpollRelay(value, relayId);
+}
+
+void TqLinuxRelayWorker::SetNextRelayIdForTest(uint64_t nextRelayId) {
+    NextRelayId = nextRelayId;
+}
+
+uint64_t TqLinuxRelayWorker::AllocateRelayIdForTest() {
+    return AllocateRelayId();
+}
+
+int TqLinuxRelayWorker::WakeFdForTest() const {
+    return WakeFd;
+}
+
+bool TqLinuxRelayWorker::ArmTcpReadableForTest(uint64_t relayId, bool enabled) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr) {
+        return false;
+    }
+    ArmTcpReadable(relay.get(), enabled);
+    return true;
+}
 #endif
 
 struct TqLinuxRelayWorker::StreamRelayBinding {
@@ -434,7 +494,7 @@ bool TqLinuxRelayWorker::Start() {
     }
     epoll_event event{};
     event.events = EPOLLIN;
-    event.data.fd = WakeFd;
+    event.data.u64 = EncodeLinuxRelayEpollWake();
     if (::epoll_ctl(EpollFd, EPOLL_CTL_ADD, WakeFd, &event) != 0) {
         ::close(EpollFd);
         ::close(WakeFd);
@@ -467,7 +527,7 @@ bool TqLinuxRelayWorker::StartForTest() {
     }
     epoll_event event{};
     event.events = EPOLLIN;
-    event.data.fd = WakeFd;
+    event.data.u64 = EncodeLinuxRelayEpollWake();
     if (::epoll_ctl(EpollFd, EPOLL_CTL_ADD, WakeFd, &event) != 0) {
         ::close(EpollFd);
         ::close(WakeFd);
@@ -1170,6 +1230,15 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             CompleteDispatchTcpEventsForTestCommand(command, result);
             break;
         }
+        case TqLinuxRelayEventType::DispatchEncodedEpollEventForTest: {
+            auto* command =
+                static_cast<DispatchEncodedEpollEventForTestCommand*>(event.Control);
+            const bool result =
+                command != nullptr &&
+                DispatchEncodedEpollEventForTestLocal(command->EpollData, command->Events);
+            CompleteDispatchEncodedEpollEventForTestCommand(command, result);
+            break;
+        }
         default:
             break;
         }
@@ -1319,6 +1388,20 @@ void TqLinuxRelayWorker::CompleteDispatchTcpEventsForTestCommand(
     command->Cv.notify_one();
 }
 
+void TqLinuxRelayWorker::CompleteDispatchEncodedEpollEventForTestCommand(
+    DispatchEncodedEpollEventForTestCommand* command,
+    bool result) {
+    if (command == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        command->Result = result;
+        command->Done = true;
+    }
+    command->Cv.notify_one();
+}
+
 bool TqLinuxRelayWorker::WaitRegisterCommand(RegisterRelayCommand& command) const {
     return WaitForCommandDone(
         command,
@@ -1439,8 +1522,8 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
     epoll_event event{};
     event.events = EPOLLIN | EPOLLRDHUP | EPOLLERR;
 
-    relay->Id = NextRelayId++;
-    event.data.u64 = relay->Id;
+    relay->Id = AllocateRelayId();
+    event.data.u64 = EncodeLinuxRelayEpollRelay(relay->Id);
     Relays.push_back(relay);
     RelaysById.emplace(relay->Id, relay);
     result.Ok = true;
@@ -1749,6 +1832,10 @@ std::vector<uint8_t> TqLinuxRelayWorker::TakeCapturedQuicBytesForTestLocal(int t
 
 void TqLinuxRelayWorker::DrainTcpReadable(RelayState* relay) {
     if (relay == nullptr || relay->Closing) {
+        return;
+    }
+    if (relay->TcpReadClosed) {
+        ArmTcpReadable(relay, false);
         return;
     }
     if (ShouldPauseTcpReadForQuicBacklog(relay)) {
@@ -2228,6 +2315,7 @@ void TqLinuxRelayWorker::RetryPendingQuicSends(RelayState* relay) {
         }
     }
     if (relay->PendingQuicSendRetries.empty() &&
+        !relay->TcpReadClosed &&
         ShouldResumeTcpReadForQuicBacklog(relay)) {
         SetTcpReadBackpressure(relay, false, "quic_send_retry_drained");
         ArmTcpReadable(relay, true);
@@ -3088,6 +3176,48 @@ bool TqLinuxRelayWorker::DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_
     return true;
 }
 
+bool TqLinuxRelayWorker::DispatchEncodedEpollEventForTest(
+    uint64_t epollData,
+    uint32_t events) {
+    if (IsWorkerThread()) {
+        return DispatchEncodedEpollEventForTestLocal(epollData, events);
+    }
+
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    for (;;) {
+        if (!Running.load() || std::this_thread::get_id() == WorkerThreadId) {
+            return DispatchEncodedEpollEventForTestLocal(epollData, events);
+        }
+
+        DispatchEncodedEpollEventForTestCommand command{};
+        command.EpollData = epollData;
+        command.Events = events;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::DispatchEncodedEpollEventForTest;
+        event.Control = &command;
+        if (!Enqueue(std::move(event))) {
+            controlGuard.unlock();
+            Wake();
+            std::this_thread::yield();
+            controlGuard.lock();
+            continue;
+        }
+
+        std::unique_lock<std::mutex> lock(command.Mutex);
+        command.Cv.wait(lock, [&command]() {
+            return command.Done;
+        });
+        return command.Result;
+    }
+}
+
+bool TqLinuxRelayWorker::DispatchEncodedEpollEventForTestLocal(
+    uint64_t epollData,
+    uint32_t events) {
+    return DispatchEncodedEpollEvent(epollData, events);
+}
+
 bool TqLinuxRelayWorker::EnqueueQuicReceive(
     RelayState* relay,
     const uint8_t* data,
@@ -3260,6 +3390,9 @@ void TqLinuxRelayWorker::FlushTcpWrites(RelayState* relay) {
 }
 
 void TqLinuxRelayWorker::ArmTcpReadable(RelayState* relay, bool enabled) {
+    if (relay != nullptr && enabled && relay->TcpReadClosed) {
+        enabled = false;
+    }
     if (relay == nullptr || relay->TcpFd < 0 || EpollFd < 0 || relay->TcpReadArmed == enabled) {
         return;
     }
@@ -3290,8 +3423,15 @@ void TqLinuxRelayWorker::UpdateTcpInterest(RelayState* relay) {
     if (relay->TcpWriteArmed) {
         event.events |= EPOLLOUT;
     }
-    event.data.u64 = relay->Id;
+    event.data.u64 = EncodeLinuxRelayEpollRelay(relay->Id);
     (void)::epoll_ctl(EpollFd, EPOLL_CTL_MOD, relay->TcpFd, &event);
+}
+
+uint64_t TqLinuxRelayWorker::AllocateRelayId() {
+    if (NextRelayId == 0 || (NextRelayId & kLinuxRelayEpollTagMask) != 0) {
+        NextRelayId = 1;
+    }
+    return NextRelayId++;
 }
 
 void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
@@ -3715,6 +3855,27 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     return snapshot;
 }
 
+void TqLinuxRelayWorker::DrainWakeFd() {
+    uint64_t value = 0;
+    while (::read(WakeFd, &value, sizeof(value)) > 0) {
+    }
+}
+
+bool TqLinuxRelayWorker::DispatchEncodedEpollEvent(uint64_t epollData, uint32_t events) {
+    if (IsLinuxRelayEpollWake(epollData)) {
+        DrainWakeFd();
+        DrainEvents(Config.EventBudget);
+        return true;
+    }
+
+    uint64_t relayId = 0;
+    if (DecodeLinuxRelayEpollRelay(epollData, relayId)) {
+        ProcessTcpEvents(relayId, events);
+        return true;
+    }
+    return false;
+}
+
 void TqLinuxRelayWorker::Run() {
     epoll_event events[16]{};
     while (Running.load()) {
@@ -3726,14 +3887,7 @@ void TqLinuxRelayWorker::Run() {
             continue;
         }
         for (int i = 0; i < count; ++i) {
-            if (events[i].data.fd == WakeFd) {
-                uint64_t value = 0;
-                while (::read(WakeFd, &value, sizeof(value)) > 0) {
-                }
-                DrainEvents(Config.EventBudget);
-            } else {
-                ProcessTcpEvents(events[i].data.u64, events[i].events);
-            }
+            DispatchEncodedEpollEvent(events[i].data.u64, events[i].events);
         }
     }
 }

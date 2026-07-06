@@ -300,8 +300,17 @@ public:
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
     bool FlushTcpWritableForTest(int tcpFd);
     bool DispatchTcpEventsForTest(uint64_t relayId, uint32_t events);
+    bool DispatchEncodedEpollEventForTest(uint64_t epollData, uint32_t events);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
 #if defined(TQ_UNIT_TESTING)
+    uint64_t EncodeEpollWakeForTest() const;
+    uint64_t EncodeEpollRelayForTest(uint64_t relayId) const;
+    bool IsEpollWakeForTest(uint64_t value) const;
+    bool DecodeEpollRelayForTest(uint64_t value, uint64_t& relayId) const;
+    void SetNextRelayIdForTest(uint64_t nextRelayId);
+    uint64_t AllocateRelayIdForTest();
+    int WakeFdForTest() const;
+    bool ArmTcpReadableForTest(uint64_t relayId, bool enabled);
     bool RelayIndexesConsistentForTest() const;
 #endif
 
@@ -402,6 +411,15 @@ private:
         bool Done{false};
     };
 
+    struct DispatchEncodedEpollEventForTestCommand {
+        uint64_t EpollData{0};
+        uint32_t Events{0};
+        bool Result{false};
+        std::mutex Mutex;
+        std::condition_variable Cv;
+        bool Done{false};
+    };
+
     struct ControlState {
         bool Running{false};
         bool IsWorkerThread{false};
@@ -423,6 +441,7 @@ private:
         bool fin);
     bool FlushTcpWritableForTestLocal(int tcpFd);
     bool DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_t events);
+    bool DispatchEncodedEpollEventForTestLocal(uint64_t epollData, uint32_t events);
     void CompleteRegisterCommand(
         RegisterRelayCommand* command,
         TqLinuxRelayRegistrationResult result);
@@ -442,6 +461,9 @@ private:
         bool result);
     void CompleteDispatchTcpEventsForTestCommand(
         DispatchTcpEventsForTestCommand* command,
+        bool result);
+    void CompleteDispatchEncodedEpollEventForTestCommand(
+        DispatchEncodedEpollEventForTestCommand* command,
         bool result);
     bool WaitRegisterCommand(RegisterRelayCommand& command) const;
     bool WaitUnregisterCommand(UnregisterRelayCommand& command) const;
@@ -536,7 +558,10 @@ private:
     void FlushTcpWrites(RelayState* relay);
     void UpdateTcpInterest(RelayState* relay);
     void ArmTcpWritable(RelayState* relay, bool enabled);
+    uint64_t AllocateRelayId();
     void ProcessTcpEvents(uint64_t relayId, uint32_t events);
+    void DrainWakeFd();
+    bool DispatchEncodedEpollEvent(uint64_t epollData, uint32_t events);
     QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
     QUIC_STATUS OnStreamEventWithBinding(
         MsQuicStream* stream,
