@@ -244,17 +244,17 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 2. worker 线程内的 kqueue event 继续使用 `FindRelayLocal()`，由 worker map 所有权保证无锁访问。
 3. ~~known send map 拆成 worker-only 正常路径和 detached completion fallback 两套结构~~ **已完成**（见 `docs/superpowers/plans/2026-07-04-darwin-send-completion-lock.md`）。
 
-### P1：`UnregisterRelay()` 非 worker 线程直接执行 local unregister
+### P1：运行态控制事件队列满时只有重试，缺少细分观测
 
-现象：注释说明 eventized unregister 可能因 worker 正在 `FlushTcpWrites()` 而无法 drain control event，所以非 worker 线程直接调用 `UnregisterRelayLocal()`。
+现象：`UnregisterRelay()` 和 `Snapshot()` 在 worker 运行态已经通过 worker event 边界执行；队列满时会 wake/retry，而不是从非 worker 线程直接执行 local cleanup 或 snapshot。但重试次数、队列满次数、wake 失败次数仍没有作为独立指标暴露。
 
-影响：这是为避免 deadlock 的保守处理，但也意味着 stop/unregister 会跨线程直接移除 kqueue filter、修改 `Relays`、retire relay，并与 worker 正在执行的数据面函数并发。当前依靠 `RelayMutex`、`RelayState::Mutex` 和 pending object shared ownership 维持安全，复杂度较高。
+影响：生产环境如果出现控制事件队列持续满、wake 失败或 worker drain 延迟，只能从整体 `Errors`、pending events 或外部延迟间接判断，难以区分 snapshot/register/unregister 控制面拥塞和数据面 receive/send 事件拥塞。
 
 建议：
 
-1. 保留当前行为前，给 unregister 并发场景增加 TSAN/macOS stress 测试。
-2. 中期方案：worker 的长时间 `FlushTcpWrites()` 应按 burst 让出并 drain control event，让 unregister 可重新事件化。
-3. 若继续 direct unregister，文档化锁顺序：`RelayMutex` -> `RelayState::Mutex`，禁止反向持锁。
+1. 增加控制事件重试指标：`ControlEventQueueFull`、`SnapshotRetryCount`、`UnregisterRetryCount`、`WakeFailures`。
+2. 在 admin metrics 中区分数据事件队列满和控制事件队列满。
+3. 增加 macOS stress/TSAN 测试：满队列下 snapshot/unregister 与 TCP write burst、late callback、stop 并发。
 
 ### P2：QUIC->TCP 写路径查找 pending receive 的复杂度偏高
 
@@ -266,7 +266,7 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 
 1. 给 `TqDarwinPendingQuicReceive` 增加 `PendingTcpWriteRefs` 或 `PendingTcpWriteBytes` 计数。
 2. 创建 write 时递增，write 完成/丢弃时递减；归零后直接 `ReceiveComplete()`。
-3. 这样也能降低 `RelayState::Mutex` 下的遍历时间。
+3. 这样也能降低 worker 线程内 pending 队列遍历时间，并减少 receive completion 延迟。
 
 ### P2：`DeferredReceiveCompleteBatchBytes` 配置未在 Darwin 路径体现
 
