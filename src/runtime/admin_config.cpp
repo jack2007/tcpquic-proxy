@@ -324,8 +324,8 @@ nlohmann::json TlsJsonValue(const TqConfig& cfg, bool redact) {
     };
 }
 
-nlohmann::json QuicJsonValue(const TqConfig& cfg) {
-    return {
+nlohmann::json QuicJsonValue(const TqConfig& cfg, bool serverConfig = false) {
+    nlohmann::json quic{
         {"listen", cfg.QuicListen},
         {"proto_peer", cfg.QuicPeer},
         {"paths", QuicPathsJsonValue(cfg.QuicPaths, false)},
@@ -333,8 +333,13 @@ nlohmann::json QuicJsonValue(const TqConfig& cfg) {
         {"connection_stream_count", cfg.QuicConnectionStreamCount},
         {"keep_alive_interval_ms", cfg.QuicKeepAliveIntervalMs},
         {"profile", QuicProfileName(cfg.QuicProfile)},
-        {"disable_1rtt_encryption", cfg.QuicDisable1RttEncryption},
     };
+    if (serverConfig || cfg.Mode == TqMode::Server) {
+        quic["encryption_policy"] = "client-choice";
+    } else {
+        quic["disable_1rtt_encryption"] = cfg.QuicDisable1RttEncryption;
+    }
+    return quic;
 }
 
 nlohmann::json ClientProtoJsonValue(const TqConfig& cfg) {
@@ -432,7 +437,7 @@ std::string TqServerRuntimeConfigJson(
         {"resolved_listens", resolvedListens},
         {"allow_targets", cfg.AllowTargets},
         {"deny_targets", cfg.DenyTargets},
-        {"quic", QuicJsonValue(cfg)},
+        {"quic", QuicJsonValue(cfg, true)},
         {"tls", TlsJsonValue(cfg, redact)},
         {"tuning_mode", TuningModeName(cfg.TuningMode)},
     };

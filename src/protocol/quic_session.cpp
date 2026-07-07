@@ -230,6 +230,36 @@ bool TqSetDisable1RttEncryption(MsQuicConnection* connection, const char* role) 
     return true;
 }
 
+enum class TqServerNewConnectionDisable1RttResult {
+    Disabled,
+    PeerDidNotOffer,
+    Error,
+};
+
+TqServerNewConnectionDisable1RttResult TqClassifyServerNewConnectionDisable1RttStatus(
+    QUIC_STATUS status) {
+    if (QUIC_SUCCEEDED(status)) {
+        return TqServerNewConnectionDisable1RttResult::Disabled;
+    }
+    if (status == QUIC_STATUS_INVALID_STATE) {
+        return TqServerNewConnectionDisable1RttResult::PeerDidNotOffer;
+    }
+    return TqServerNewConnectionDisable1RttResult::Error;
+}
+
+const char* TqEncryptionStateFromServerNewConnectionDisable1RttResult(
+    TqServerNewConnectionDisable1RttResult result) {
+    return result == TqServerNewConnectionDisable1RttResult::Disabled ? "disabled" : "enabled";
+}
+
+QUIC_STATUS TqTryDisable1RttEncryptionForServerNewConnection(MsQuicConnection* connection) {
+    const uint8_t value = TRUE;
+    return connection->SetParam(
+        QUIC_PARAM_CONN_DISABLE_1RTT_ENCRYPTION,
+        sizeof(value),
+        &value);
+}
+
 std::mutex g_serverConnIdLock;
 struct TqServerConnectionRecord {
     uint32_t Id{0};
@@ -240,9 +270,15 @@ struct TqServerConnectionRecord {
     uint64_t ActiveStreams{0};
     uint64_t TotalStreams{0};
     std::string LastError;
+    std::string Encryption{"enabled"};
 };
 std::unordered_map<HQUIC, TqServerConnectionRecord> g_serverConnIds;
 std::atomic<uint32_t> g_nextServerConnId{1};
+
+struct TqServerConnectionContext {
+    QuicServerSession* Session{nullptr};
+    std::string Encryption{"enabled"};
+};
 
 std::mutex g_clientTraceConnLock;
 std::unordered_map<HQUIC, uint32_t> g_clientTraceConnIds;
@@ -265,7 +301,10 @@ void TqSampleConnectionRtt(MsQuicConnection* connection) {
     TqRecordMeasuredRtt(std::max(1u, sampleUs / 1000));
 }
 
-uint32_t TqRegisterServerConnectionByHandle(HQUIC handle, MsQuicConnection* connection) {
+uint32_t TqRegisterServerConnectionByHandle(
+    HQUIC handle,
+    MsQuicConnection* connection,
+    const std::string& encryption) {
     if (handle == nullptr) {
         return 0;
     }
@@ -275,6 +314,7 @@ uint32_t TqRegisterServerConnectionByHandle(HQUIC handle, MsQuicConnection* conn
     record.Id = id;
     record.Connection = connection;
     record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
+    record.Encryption = encryption == "disabled" ? "disabled" : "enabled";
     g_serverConnIds[handle] = std::move(record);
     return id;
 }
@@ -324,11 +364,11 @@ bool QuicClientSession::ParseConnectionId(const std::string& connectionId, size_
     return true;
 }
 
-uint32_t TqRegisterServerConnection(MsQuicConnection* connection) {
+uint32_t TqRegisterServerConnection(MsQuicConnection* connection, const std::string& encryption) {
     if (connection == nullptr || connection->Handle == nullptr) {
         return 0;
     }
-    return TqRegisterServerConnectionByHandle(connection->Handle, connection);
+    return TqRegisterServerConnectionByHandle(connection->Handle, connection, encryption);
 }
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -348,8 +388,11 @@ bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::st
 }
 
 #if defined(TQ_UNIT_TESTING)
-uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection) {
-    return TqRegisterServerConnectionByHandle(handle, connection);
+uint32_t TqRegisterServerConnectionForTest(
+    HQUIC handle,
+    MsQuicConnection* connection,
+    const std::string& encryption) {
+    return TqRegisterServerConnectionByHandle(handle, connection, encryption);
 }
 
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
@@ -358,6 +401,18 @@ bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& cli
 
 void TqUnregisterServerConnectionForTest(HQUIC handle) {
     TqUnregisterServerConnectionByHandle(handle);
+}
+
+const char* TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS status) {
+    switch (TqClassifyServerNewConnectionDisable1RttStatus(status)) {
+    case TqServerNewConnectionDisable1RttResult::Disabled:
+        return "disabled";
+    case TqServerNewConnectionDisable1RttResult::PeerDidNotOffer:
+        return "enabled";
+    case TqServerNewConnectionDisable1RttResult::Error:
+        return "error";
+    }
+    return "error";
 }
 #endif
 
@@ -382,6 +437,7 @@ std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
         snapshot.TotalStreams = item.second.TotalStreams;
         snapshot.ActiveTunnels = TqCountConnectionTunnels(item.second.Connection);
         snapshot.LastError = item.second.LastError;
+        snapshot.Encryption = item.second.Encryption;
         snapshots.push_back(std::move(snapshot));
     }
     std::sort(snapshots.begin(), snapshots.end(), [](const auto& a, const auto& b) {
@@ -1957,7 +2013,6 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         return QUIC_STATUS_SUCCESS;
     }
 
-    bool disable1RttEncryption = false;
     {
         std::lock_guard<std::mutex> guard(session->Lock);
         const QUIC_ADDR* localAddress =
@@ -1967,34 +2022,53 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
             !TqServerListenAllowsLocalAddress(session->AllowedListens, localAddress)) {
             return QUIC_STATUS_INVALID_STATE;
         }
-        disable1RttEncryption = session->Config.QuicDisable1RttEncryption;
     }
 
     TqTraceQuicIncoming();
+
+    auto* serverContext = new (std::nothrow) TqServerConnectionContext();
+    if (serverContext == nullptr) {
+        return QUIC_STATUS_OUT_OF_MEMORY;
+    }
+    serverContext->Session = session;
 
     auto* connection = new (std::nothrow) MsQuicConnection(
         event->NEW_CONNECTION.Connection,
         CleanUpAutoDelete,
         QuicServerSession::ConnectionCallback,
-        session);
+        serverContext);
     if (connection == nullptr) {
+        delete serverContext;
         return QUIC_STATUS_OUT_OF_MEMORY;
     }
 
-    if (disable1RttEncryption &&
-        !TqSetDisable1RttEncryption(connection, "server")) {
+    const QUIC_STATUS disableStatus =
+        TqTryDisable1RttEncryptionForServerNewConnection(connection);
+    const auto disableResult =
+        TqClassifyServerNewConnectionDisable1RttStatus(disableStatus);
+    serverContext->Encryption =
+        TqEncryptionStateFromServerNewConnectionDisable1RttResult(disableResult);
+    if (disableResult == TqServerNewConnectionDisable1RttResult::Error) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: failed to negotiate server QUIC encryption mode, 0x%x\n",
+            disableStatus);
         connection->Handle = nullptr;
+        delete serverContext;
         delete connection;
-        return QUIC_STATUS_INVALID_STATE;
+        return disableStatus;
     }
 
     {
         std::lock_guard<std::mutex> guard(session->Lock);
-        if (session->Stopping || !session->Configuration ||
-            QUIC_FAILED(connection->SetConfiguration(*session->Configuration))) {
+        QUIC_STATUS configStatus = QUIC_STATUS_INVALID_STATE;
+        if (!session->Stopping && session->Configuration) {
+            configStatus = connection->SetConfiguration(*session->Configuration);
+        }
+        if (session->Stopping || !session->Configuration || QUIC_FAILED(configStatus)) {
             connection->Handle = nullptr;
+            delete serverContext;
             delete connection;
-            return QUIC_STATUS_INVALID_STATE;
+            return QUIC_FAILED(configStatus) ? configStatus : QUIC_STATUS_INVALID_STATE;
         }
     }
 
@@ -2013,7 +2087,8 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
     MsQuicConnection* connection,
     void* context,
     QUIC_CONNECTION_EVENT* event) noexcept {
-    auto* session = static_cast<QuicServerSession*>(context);
+    auto* serverContext = static_cast<TqServerConnectionContext*>(context);
+    QuicServerSession* session = serverContext != nullptr ? serverContext->Session : nullptr;
     if (session == nullptr) {
         return QUIC_STATUS_SUCCESS;
     }
@@ -2061,17 +2136,22 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         TqSampleConnectionRtt(connection);
         connection->SendResumptionTicket(QUIC_SEND_RESUMPTION_FLAG_FINAL);
         {
-            const uint32_t connId = TqRegisterServerConnection(connection);
+            const std::string encryption =
+                serverContext != nullptr && !serverContext->Encryption.empty()
+                    ? serverContext->Encryption
+                    : "enabled";
+            const uint32_t connId = TqRegisterServerConnection(connection, encryption);
             char line[256];
             std::snprintf(
                 line,
                 sizeof(line),
-                "tcpquic-proxy: QUIC server connection accepted from=%s conn=%u",
+                "tcpquic-proxy: QUIC server connection accepted from=%s conn=%u encryption=%s",
                 TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS).c_str(),
-                connId);
+                connId,
+                encryption.c_str());
             std::fprintf(stderr, "%s\n", line);
             TqTraceLogLine(line);
-            TqTraceQuicConnected(connection, connId, "server", 0);
+            TqTraceQuicConnected(connection, connId, "server", 0, encryption.c_str());
         }
         break;
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
@@ -2130,6 +2210,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
             TqTraceQuicDisconnected(connection, connId, "server");
         }
         TqUnregisterServerConnection(connection);
+        delete serverContext;
         break;
     default:
         break;

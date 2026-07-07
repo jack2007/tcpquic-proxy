@@ -551,8 +551,16 @@ private:
                 if (profile == "max-throughput") cfg.QuicProfile = TqQuicProfile::MaxThroughput;
                 else if (profile == "low-latency") cfg.QuicProfile = TqQuicProfile::LowLatency;
                 else return Error("invalid proto.profile");
+            } else if (key == "encryption_policy") {
+                std::string policy;
+                if (!ReadString(item.value(), policy) || policy != "client-choice") return Error("invalid proto.encryption_policy");
+                if (cfg.Mode != TqMode::Server) return Error("proto.encryption_policy is server-only");
             } else if (key == "disable_1rtt_encryption") {
-                if (!ReadBool(item.value(), cfg.QuicDisable1RttEncryption)) return Error("invalid proto.disable_1rtt_encryption");
+                bool disable1RttEncryption = false;
+                if (!ReadBool(item.value(), disable1RttEncryption)) return Error("invalid proto.disable_1rtt_encryption");
+                if (cfg.Mode != TqMode::Server) {
+                    cfg.QuicDisable1RttEncryption = disable1RttEncryption;
+                }
             } else if (key == "connections") {
                 if (!ReadUint32(item.value(), cfg.QuicConnections) || cfg.QuicConnections > 128) return Error("invalid proto.connections");
                 if (cfg.QuicConnections == 0) cfg.QuicConnections = 1;
@@ -1108,17 +1116,20 @@ std::string RuntimeConfigJson(const TqConfig& cfg) {
         root["admin"]["threads"] = cfg.AdminThreads;
     }
 
-    root["proto"] = {
+    nlohmann::json proto{
         {"profile", QuicProfileName(cfg.QuicProfile)},
-        {"disable_1rtt_encryption", cfg.QuicDisable1RttEncryption},
         {"connection_stream_count", cfg.QuicConnectionStreamCount},
         {"keepalive_ms", cfg.QuicKeepAliveIntervalMs},
     };
     if (cfg.Mode == TqMode::Client) {
-        root["proto"]["connections"] = cfg.QuicConnections;
+        proto["disable_1rtt_encryption"] = cfg.QuicDisable1RttEncryption;
+        proto["connections"] = cfg.QuicConnections;
+    } else {
+        proto["encryption_policy"] = "client-choice";
     }
-    if (cfg.TuningOverrideQuicIw != 0) root["proto"]["iw"] = cfg.TuningOverrideQuicIw;
-    if (cfg.TuningOverrideQuicInitRttMs != 0) root["proto"]["initrtt_ms"] = cfg.TuningOverrideQuicInitRttMs;
+    if (cfg.TuningOverrideQuicIw != 0) proto["iw"] = cfg.TuningOverrideQuicIw;
+    if (cfg.TuningOverrideQuicInitRttMs != 0) proto["initrtt_ms"] = cfg.TuningOverrideQuicInitRttMs;
+    root["proto"] = std::move(proto);
 
     root["compression"] = {
         {"mode", cfg.Compress},
@@ -1636,6 +1647,10 @@ bool TqParseArgs(int argc, char** argv, TqConfig& cfg, std::string& err) {
                 return false;
             }
         } else if (std::strcmp(arg, "--enable-encrypt") == 0) {
+            if (cfg.Mode == TqMode::Server) {
+                err = "--enable-encrypt is client-only";
+                return false;
+            }
             cfg.QuicDisable1RttEncryption = false;
         } else if (GetOptionValue(arg, "--handshake-threads", value)) {
             if (value == nullptr) {

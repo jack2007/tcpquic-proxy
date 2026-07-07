@@ -66,6 +66,7 @@ nlohmann::json ServerConnectionJsonValue(const TqServerConnectionSnapshot& conne
         {"total_streams", connection.TotalStreams},
         {"active_tunnels", connection.ActiveTunnels},
         {"last_error", connection.LastError},
+        {"encryption", connection.Encryption},
     };
 }
 

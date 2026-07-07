@@ -1594,7 +1594,8 @@ void TqTraceQuicConnected(
     MsQuicConnection* connection,
     uint32_t connId,
     const char* role,
-    uint32_t slot) {
+    uint32_t slot,
+    const char* encryption) {
     if (!TqTraceEnabled()) {
         return;
     }
@@ -1619,13 +1620,16 @@ void TqTraceQuicConnected(
     const bool haveStats = CollectQuicStats(connection, stats);
     const auto lines = haveStats ? TqFormatTraceQuicStatsLines(stats) : std::vector<std::string>{};
 
+    const bool hasEncryption = encryption != nullptr && encryption[0] != '\0';
     LogInfo(
-        "event=quic_connected role=%s conn=%u slot=%u local=%s peer=%s %s",
+        "event=quic_connected role=%s conn=%u slot=%u local=%s peer=%s%s%s %s",
         role,
         connId,
         slot,
         localAddr.c_str(),
         peerAddr.c_str(),
+        hasEncryption ? " encryption=" : "",
+        hasEncryption ? encryption : "",
         TqTraceGlobalSnapshot().c_str());
     if (!lines.empty()) {
         LogInfoMultiline("  quic_metrics:", lines);

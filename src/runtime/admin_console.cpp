@@ -206,7 +206,7 @@ static constexpr char kConsoleHtmlStorage[] =
 
         <section id="server-connections" class="page">
           <div class="title-row"><div><h2>Connections - server</h2><p class="subtitle">server 端连接不展示 Reconnecting；第一版不区分 connecting 和 connected，列表展示当前 server 已登记/可观测连接。</p></div></div>
-          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>client_name</th><th>remote_address</th><th>state</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
+          <div class="card table-scroll"><table><thead><tr><th>connection_id</th><th>peer</th><th>client_name</th><th>remote_address</th><th>state</th><th>encryption</th><th>active_streams</th><th>total_streams_opened</th><th>active_tunnels</th><th>last_error</th></tr></thead><tbody id="server-connections-rows"></tbody></table></div>
           <div class="callout">当前 TqServerConnectionSnapshot 已有 client_name、remote_address、state、active/total streams、active_tunnels、last_error；页面不展示未返回的时间或字节字段。</div>
         </section>
 
@@ -365,6 +365,16 @@ static constexpr char kConsoleJsStorage[] =
     function formatCell(column, value) {
       if (column === 'state' || column === 'status') {
         return `<span class="state ${statusClass(value)}">${escapeHtml(value)}</span>`;
+      }
+      if (column === 'encryption') {
+        const normalized = String(value || '').toLowerCase();
+        if (normalized === 'disabled') {
+          return '<span class="state err">disabled (insecure)</span>';
+        }
+        if (normalized === 'enabled') {
+          return '<span class="state ok">enabled</span>';
+        }
+        return escapeHtml(value);
       }
       return escapeHtml(value);
     }
@@ -641,7 +651,7 @@ static constexpr char kConsoleJsStorage[] =
         peer: peerNameFromConnection(row),
         total_streams_opened: row.total_streams
       }, row));
-      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','client_name','remote_address','state','active_streams','total_streams_opened','active_tunnels','last_error']);
+      renderRows(document.getElementById('server-connections-rows'), rows, ['connection_id','peer','client_name','remote_address','state','encryption','active_streams','total_streams_opened','active_tunnels','last_error']);
     }
 
     async function renderServerTunnels() {

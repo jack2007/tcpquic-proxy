@@ -4,8 +4,16 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <functional>
 #include <thread>
+
+static int TestServerNewConnectionDisable1RttStatusClassification() {
+    if (std::strcmp(TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS_SUCCESS), "disabled") != 0) return 601;
+    if (std::strcmp(TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS_INVALID_STATE), "enabled") != 0) return 602;
+    if (std::strcmp(TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS_OUT_OF_MEMORY), "error") != 0) return 603;
+    return 0;
+}
 
 static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
     QuicClientSession session;
@@ -793,6 +801,7 @@ static int TestClientHelloSentAfterConnected() {
 }
 
 int main() {
+    if (int rc = TestServerNewConnectionDisable1RttStatusClassification()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;

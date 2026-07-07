@@ -86,7 +86,10 @@ uint32_t QuicClientSession::ConnectedConnectionCount() const {
     return 0;
 }
 
-uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection) {
+uint32_t TqRegisterServerConnectionForTest(
+    HQUIC handle,
+    MsQuicConnection* connection,
+    const std::string& encryption) {
     if (handle == nullptr) {
         return 0;
     }
@@ -94,6 +97,7 @@ uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* conne
     const uint32_t id = g_next_test_server_connection_id++;
     TqServerConnectionSnapshot snapshot{};
     snapshot.ConnectionId = "srv-" + std::to_string(id);
+    snapshot.Encryption = encryption == "disabled" ? "disabled" : "enabled";
     g_test_server_connections[handle] = std::move(snapshot);
     if (connection != nullptr) {
         g_test_server_connection_handles[connection] = handle;

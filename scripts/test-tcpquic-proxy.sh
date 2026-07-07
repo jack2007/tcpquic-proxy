@@ -11,7 +11,9 @@ CLIENT_NAME="${CLIENT_NAME:-tcpquic-test}"
 
 SERVER_PID=""
 CLIENT_PID=""
+ENCRYPT_CLIENT_PID=""
 HTTP_PID=""
+HOLD_PID=""
 ECHO_PID=""
 NEG_SERVER_PID=""
 NEG_CLIENT_PID=""
@@ -41,12 +43,12 @@ fi
 cleanup() {
     local status=$?
     set +e
-    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
+    for pid in "$HOLD_PID" "$CLIENT_PID" "$ENCRYPT_CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
         if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
             kill "$pid" 2>/dev/null
         fi
     done
-    for pid in "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
+    for pid in "$HOLD_PID" "$CLIENT_PID" "$ENCRYPT_CLIENT_PID" "$SERVER_PID" "$HTTP_PID" "$ECHO_PID" "$NEG_CLIENT_PID" "$NEG_SERVER_PID"; do
         if [ -n "${pid:-}" ]; then
             wait "$pid" 2>/dev/null
         fi
@@ -125,6 +127,19 @@ wait_for_closed_port() {
     return 0
 }
 
+wait_for_file() {
+    local file=$1
+    local name=$2
+    local deadline=$((SECONDS + 15))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if [ -s "$file" ]; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    fail_with_logs "timed out waiting for $name"
+}
+
 pick_free_tcp_port() {
   python3 - <<'PY'
 import socket
@@ -147,6 +162,39 @@ wait_log() {
         sleep 0.2
     done
     fail_with_logs "timed out waiting for $name"
+}
+
+read_admin_token() {
+    local token_file=$1
+    python3 - "$token_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as f:
+    print(json.load(f)["token"])
+PY
+}
+
+wait_server_connection_encryption() {
+    local admin_port=$1
+    local admin_token=$2
+    local expected=$3
+    local output_file=$4
+    local curl_log=$5
+    local deadline=$((SECONDS + 15))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if curl -fsS \
+            -H "Authorization: Bearer ${admin_token}" \
+            "http://127.0.0.1:${admin_port}/api/v1/server/connections" \
+            -o "$output_file" \
+            >"$curl_log" 2>&1 &&
+            grep -q "\"encryption\":\"${expected}\"" "$output_file"; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    fail_with_logs "expected ${expected} encryption in server connections"
 }
 
 build_if_missing() {
@@ -272,12 +320,61 @@ with socket.create_connection((proxy_host, proxy_port), timeout=15) as s:
 PY
 }
 
+hold_http_connect_tunnel() {
+    local proxy_port=$1
+    local target_port=$2
+    local ready_file=$3
+    local log_file=$4
+
+    python3 - "$proxy_port" "$target_port" "$ready_file" >"$log_file" 2>&1 <<'PY' &
+import pathlib
+import socket
+import sys
+import time
+
+proxy_port = int(sys.argv[1])
+target_port = int(sys.argv[2])
+ready_file = pathlib.Path(sys.argv[3])
+
+request = (
+    f"CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
+    f"Host: 127.0.0.1:{target_port}\r\n"
+    "\r\n"
+).encode("ascii")
+
+with socket.create_connection(("127.0.0.1", proxy_port), timeout=15) as s:
+    s.sendall(request)
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = s.recv(256)
+        if not chunk:
+            raise SystemExit("CONNECT closed before response")
+        data += chunk
+    status = data.split(b"\r\n", 1)[0]
+    if b" 200 " not in status:
+        raise SystemExit(f"CONNECT failed: {status!r}")
+    ready_file.write_text("ready\n", encoding="utf-8")
+    time.sleep(20)
+PY
+    echo "$!"
+}
+
 start_server() {
     local listen_port=$1
     local allow_targets=$2
     local compress_mode=$3
     local log_file=$4
     local stdin_fifo=$5
+    local admin_listen=${6:-}
+    local admin_token_file=${7:-}
+    local admin_args=()
+
+    if [ -n "$admin_listen" ]; then
+        admin_args+=(--admin-listen "$admin_listen")
+    fi
+    if [ -n "$admin_token_file" ]; then
+        admin_args+=(--admin-token-file "$admin_token_file")
+    fi
 
     mkfifo "$stdin_fifo"
     eval "exec {fd}<>\"$stdin_fifo\""
@@ -288,6 +385,7 @@ start_server() {
         --key "$TMP_DIR/server.key" \
         --ca "$TMP_DIR/ca.crt" \
         --compress "$compress_mode" \
+        "${admin_args[@]}" \
         >"$log_file" 2>&1 <"$stdin_fifo" &
     echo "$! $fd"
 }
@@ -299,17 +397,22 @@ start_client() {
     local compress_mode=$4
     local log_file=$5
     local quic_connections=${6:-1}
+    local encryption_mode=${7:-default}
+    local encryption_args=()
+
+    if [ "$encryption_mode" = "enabled" ]; then
+        encryption_args+=(--enable-encrypt)
+    fi
 
     "$BIN" client \
         --peer "127.0.0.1:${quic_port}" \
         --http-listen "127.0.0.1:${http_port}" \
         --socks-listen "127.0.0.1:${socks_port}" \
-        --cert "$TMP_DIR/client.crt" \
-        --key "$TMP_DIR/client.key" \
         --ca "$TMP_DIR/ca.crt" \
         --client-name "$CLIENT_NAME" \
         --connections "$quic_connections" \
         --compress "$compress_mode" \
+        "${encryption_args[@]}" \
         >"$log_file" 2>&1 &
     echo "$!"
 }
@@ -328,8 +431,6 @@ start_client_with_forward() {
         --http-listen "127.0.0.1:${http_port}" \
         --socks-listen "127.0.0.1:${socks_port}" \
         --forward "127.0.0.1:${forward_port}=127.0.0.1:${target_port}" \
-        --cert "$TMP_DIR/client.crt" \
-        --key "$TMP_DIR/client.key" \
         --ca "$TMP_DIR/ca.crt" \
         --client-name "$CLIENT_NAME" \
         --compress "$compress_mode" \
@@ -343,8 +444,6 @@ start_configured_client() {
 
     "$BIN" client \
         --client-config "$config_file" \
-        --cert "$TMP_DIR/client.crt" \
-        --key "$TMP_DIR/client.key" \
         --ca "$TMP_DIR/ca.crt" \
         --compress off \
         >"$log_file" 2>&1 &
@@ -433,8 +532,10 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     print(s.getsockname()[1])
 PY
 )
+SERVER_ADMIN_PORT=$(pick_free_tcp_port)
+SERVER_ADMIN_TOKEN_FILE="$TMP_DIR/server-admin-token.json"
 
-read -r SERVER_PID SERVER_STDIN_FD < <(start_server "$HEALTHY_PEER_QUIC_PORT" "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin")
+read -r SERVER_PID SERVER_STDIN_FD < <(start_server "$HEALTHY_PEER_QUIC_PORT" "127.0.0.0/8" off "$TMP_DIR/proxy-server.log" "$TMP_DIR/server.stdin" "127.0.0.1:${SERVER_ADMIN_PORT}" "$SERVER_ADMIN_TOKEN_FILE")
 wait_log "$TMP_DIR/proxy-server.log" "QUIC server listening" "tcpquic-proxy server"
 
 cat > "$TMP_DIR/client-config.json" <<EOF
@@ -471,6 +572,43 @@ curl -fsS \
     fail_with_logs "SOCKS5 curl failed"
 grep -q "tcpquic-proxy smoke test" "$TMP_DIR/socks5.out" ||
     fail_with_logs "SOCKS5 response did not contain expected body"
+
+SERVER_ADMIN_TOKEN="$(read_admin_token "$SERVER_ADMIN_TOKEN_FILE")"
+HOLD_PID=$(hold_http_connect_tunnel "$HEALTHY_PEER_HTTP_PORT" 15001 "$TMP_DIR/hold-disabled.ready" "$TMP_DIR/hold-disabled.log")
+wait_for_file "$TMP_DIR/hold-disabled.ready" "disabled encryption hold tunnel"
+wait_server_connection_encryption \
+    "$SERVER_ADMIN_PORT" \
+    "$SERVER_ADMIN_TOKEN" \
+    disabled \
+    "$TMP_DIR/server-connections-disabled.json" \
+    "$TMP_DIR/curl-server-connections-disabled.log"
+kill "$HOLD_PID" 2>/dev/null || true
+wait "$HOLD_PID" 2>/dev/null || true
+HOLD_PID=""
+
+ENCRYPT_HTTP_PORT=$(pick_free_tcp_port)
+ENCRYPT_SOCKS_PORT=$(pick_free_tcp_port)
+ENCRYPT_CLIENT_PID=$(start_client "$HEALTHY_PEER_QUIC_PORT" "$ENCRYPT_HTTP_PORT" "$ENCRYPT_SOCKS_PORT" off "$TMP_DIR/proxy-client-encrypted.log" 1 enabled)
+wait_for_open_port 127.0.0.1 "$ENCRYPT_HTTP_PORT"
+wait_for_open_port 127.0.0.1 "$ENCRYPT_SOCKS_PORT"
+HOLD_PID=$(hold_http_connect_tunnel "$ENCRYPT_HTTP_PORT" 15001 "$TMP_DIR/hold-enabled.ready" "$TMP_DIR/hold-enabled.log")
+wait_for_file "$TMP_DIR/hold-enabled.ready" "enabled encryption hold tunnel"
+wait_server_connection_encryption \
+    "$SERVER_ADMIN_PORT" \
+    "$SERVER_ADMIN_TOKEN" \
+    enabled \
+    "$TMP_DIR/server-connections-enabled.json" \
+    "$TMP_DIR/curl-server-connections-enabled.log"
+kill "$HOLD_PID" 2>/dev/null || true
+wait "$HOLD_PID" 2>/dev/null || true
+HOLD_PID=""
+kill "$ENCRYPT_CLIENT_PID" 2>/dev/null || true
+wait "$ENCRYPT_CLIENT_PID" 2>/dev/null || true
+ENCRYPT_CLIENT_PID=""
+
+if grep -q "failed to disable QUIC 1-RTT encryption on server connection" "$TMP_DIR/proxy-server.log"; then
+    fail_with_logs "server logged old disable-1RTT error for client-choice"
+fi
 
 FORWARD_TARGET_PORT=$(pick_free_tcp_port)
 FORWARD_LISTEN_PORT=$(pick_free_tcp_port)

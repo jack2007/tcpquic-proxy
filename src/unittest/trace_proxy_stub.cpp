@@ -99,7 +99,7 @@ void TqTraceQuicIncoming() {
 void TqTraceLogLine(const char*) {
 }
 
-void TqTraceQuicConnected(MsQuicConnection*, uint32_t, const char*, uint32_t) {
+void TqTraceQuicConnected(MsQuicConnection*, uint32_t, const char*, uint32_t, const char*) {
 }
 
 void TqTraceQuicShutdownTransport(MsQuicConnection*, uint32_t, const char*, uint32_t, uint64_t) {

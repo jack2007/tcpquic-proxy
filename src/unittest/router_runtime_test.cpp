@@ -502,6 +502,8 @@ int main() {
         if (!ParseJson(TqServerRuntimeConfigJson(cfg, resolvedListens, false), json)) return 957;
         if (json["role"] != "server") return 958;
         if (json["resolved_listens"] != resolvedListens) return 959;
+        if (json["quic"].value("encryption_policy", "") != "client-choice") return 964;
+        if (json["quic"].contains("disable_1rtt_encryption")) return 965;
     }
     {
         TqConfig cfg;
@@ -533,6 +535,8 @@ int main() {
         std::string runtimeConfig = runtime.HandleAdmin(Request("GET", "/runtime/config", ""));
         if (runtimeConfig.find("HTTP/1.1 200") == std::string::npos) return 983;
         if (runtimeConfig.find("\"proto_peer\":\"127.0.0.1:14460\"") == std::string::npos) return 984;
+        if (runtimeConfig.find("\"disable_1rtt_encryption\"") == std::string::npos) return 966;
+        if (runtimeConfig.find("\"encryption_policy\"") != std::string::npos) return 967;
 
         std::string patchRuntime = runtime.HandleAdmin(Request(
             "PATCH",

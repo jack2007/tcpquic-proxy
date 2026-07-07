@@ -18,7 +18,9 @@
 #include <vector>
 
 // Server-side: assign stable conn_id per accepted QUIC connection (OPEN_OK field).
-uint32_t TqRegisterServerConnection(MsQuicConnection* connection);
+uint32_t TqRegisterServerConnection(
+    MsQuicConnection* connection,
+    const std::string& encryption = "enabled");
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
 bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName);
 void TqUnregisterServerConnection(MsQuicConnection* connection);
@@ -49,6 +51,7 @@ struct TqServerConnectionSnapshot {
     uint64_t TotalStreams{0};
     uint64_t ActiveTunnels{0};
     std::string LastError;
+    std::string Encryption;
 };
 
 struct TqClientPickedConnection {
@@ -64,7 +67,10 @@ void TqServerConnectionStreamFinished(MsQuicConnection* connection);
 void TqServerConnectionStreamFinishedById(uint32_t connectionId);
 
 #if defined(TQ_UNIT_TESTING)
-uint32_t TqRegisterServerConnectionForTest(HQUIC handle, MsQuicConnection* connection = nullptr);
+uint32_t TqRegisterServerConnectionForTest(
+    HQUIC handle,
+    MsQuicConnection* connection = nullptr,
+    const std::string& encryption = "enabled");
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
 void TqUnregisterServerConnectionForTest(HQUIC handle);
 
@@ -76,6 +82,7 @@ struct TqCredentialConfigSnapshot {
 };
 
 TqCredentialConfigSnapshot TqBuildCredentialConfigSnapshotForTest(const TqConfig& cfg, bool server);
+const char* TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS status);
 #endif
 
 class QuicClientSession {

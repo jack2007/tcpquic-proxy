@@ -93,7 +93,8 @@ void TqTraceQuicConnected(
     MsQuicConnection* connection,
     uint32_t connId,
     const char* role,
-    uint32_t slot);
+    uint32_t slot,
+    const char* encryption = "");
 void TqTraceQuicShutdownTransport(
     MsQuicConnection* connection,
     uint32_t connId,

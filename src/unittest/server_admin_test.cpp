@@ -179,6 +179,7 @@ std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
     connection.ActiveStreams = 1;
     connection.TotalStreams = 3;
     connection.ActiveTunnels = 2;
+    connection.Encryption = "disabled";
     return {connection};
 }
 
@@ -659,10 +660,12 @@ int main() {
     if (list.find("HTTP/1.1 200 OK") == std::string::npos) return 3;
     if (list.find("\"connection_id\":\"srv-7\"") == std::string::npos) return 4;
     if (list.find("\"client_name\":\"office-a\"") == std::string::npos) return 25;
+    if (list.find("\"encryption\":\"disabled\"") == std::string::npos) return 773;
 
     std::string get = TqHandleServerAdmin(Request("GET", "/server/connections/srv-7"), metrics, 10);
     if (get.find("\"remote_address\":\"127.0.0.1:5000\"") == std::string::npos) return 5;
     if (get.find("\"client_name\":\"office-a\"") == std::string::npos) return 26;
+    if (get.find("\"encryption\":\"disabled\"") == std::string::npos) return 774;
 
     std::string abort = TqHandleServerAdmin(Request("POST", "/server/connections/srv-7:abort-tunnels"), metrics, 10);
     if (abort.find("HTTP/1.1 202 Accepted") == std::string::npos) return 6;

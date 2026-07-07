@@ -311,6 +311,7 @@ int main() {
         if (html.find("server-acl-save") == std::string_view::npos) return 439;
         if (html.find("<th>total_streams_opened</th>") == std::string_view::npos) return 429;
         if (html.find("<th>client_name</th>") == std::string_view::npos) return 565;
+        if (html.find("<th>encryption</th>") == std::string_view::npos) return 572;
         if (html.find("remote source") == std::string_view::npos) return 354;
         if (html.find("remote_identity") != std::string_view::npos) return 355;
         if (html.find("first_seen") != std::string_view::npos) return 356;
@@ -328,6 +329,9 @@ int main() {
         if (js.find("return `peer-${peerNameAddressPart(remoteAddress)}`;") == std::string_view::npos) return 428;
         if (js.find("function peerNameFromConnection(connection)") == std::string_view::npos) return 566;
         if (js.find("connection.client_name") == std::string_view::npos) return 567;
+        if (js.find("['connection_id','peer','client_name','remote_address','state','encryption','active_streams','total_streams_opened','active_tunnels','last_error']") == std::string_view::npos) return 573;
+        if (js.find("if (column === 'encryption')") == std::string_view::npos) return 574;
+        if (js.find("disabled (insecure)") == std::string_view::npos) return 575;
         if (js.find("peerNameFromRemote") == std::string_view::npos) return 568;
         if (js.find("remote_address_set") == std::string_view::npos) return 569;
         if (js.find("includes(connection.remote_address)") == std::string_view::npos) return 570;

@@ -1142,6 +1142,45 @@ int main() {
         if (!cfg.QuicCa.empty()) return 186;
     }
     {
+        const std::string file = TempConfigPath("tcpquic-server-encryption-policy-config");
+        std::filesystem::remove(file);
+        TqConfig cfg;
+        std::string err;
+        const char* args[] = {
+            "tcpquic-proxy",
+            "server",
+            "--config",
+            file.c_str(),
+            "--listen",
+            "0.0.0.0:4433",
+            "--cert",
+            "server.crt",
+            "--key",
+            "server.key"};
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 146;
+        const auto root = nlohmann::json::parse(ReadTextFile(file));
+        if (root["proto"].value("encryption_policy", "") != "client-choice") return 147;
+        if (root["proto"].contains("disable_1rtt_encryption")) return 148;
+        TqConfig reparsed;
+        std::string reparseErr;
+        const char* reparseArgs[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
+        if (!Parse((int)(sizeof(reparseArgs) / sizeof(reparseArgs[0])), const_cast<char**>(reparseArgs), reparsed, reparseErr)) return 371;
+        std::filesystem::remove(file);
+    }
+    {
+        const std::string file = WriteTempConfig(R"json({
+            "tls":{"cert":"server.crt","key":"server.key"},
+            "server":{"proto_listen":"0.0.0.0:4433"},
+            "proto":{"disable_1rtt_encryption":false}
+        })json");
+        TqConfig cfg;
+        std::string err;
+        const char* args[] = {"tcpquic-proxy", "server", "--config", file.c_str()};
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 149;
+        if (!cfg.QuicDisable1RttEncryption) return 150;
+        std::filesystem::remove(file);
+    }
+    {
         const std::string file = TempConfigPath("tcpquic-missing-server-runtime-config");
         std::filesystem::remove(file);
         const char* args[] = {
@@ -1261,11 +1300,38 @@ int main() {
         if (cfg.AllowTargets[0] != "0.0.0.0/0") return 153;
     }
     {
-        const char* args[] = {"tcpquic-proxy", "server", "--listen", "0.0.0.0:4433", "--allow-targets", "127.0.0.1/32", "--enable-encrypt", "--cert", "a.crt", "--key", "a.key", "--ca", "ca.crt"};
         TqConfig cfg;
         std::string err;
-        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 142;
-        if (cfg.QuicDisable1RttEncryption) return 143;
+        const char* args[] = {
+            "tcpquic-proxy",
+            "server",
+            "--listen",
+            "0.0.0.0:4433",
+            "--allow-targets",
+            "127.0.0.1/32",
+            "--enable-encrypt",
+            "--cert",
+            "a.crt",
+            "--key",
+            "a.key"};
+        if (Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 142;
+        if (err.find("--enable-encrypt is client-only") == std::string::npos) return 143;
+    }
+    {
+        TqConfig cfg;
+        std::string err;
+        const char* args[] = {
+            "tcpquic-proxy",
+            "client",
+            "--peer",
+            "127.0.0.1:14444",
+            "--socks-listen",
+            "127.0.0.1:11080",
+            "--enable-encrypt",
+            "--ca",
+            "ca.crt"};
+        if (!Parse((int)(sizeof(args) / sizeof(args[0])), const_cast<char**>(args), cfg, err)) return 144;
+        if (cfg.QuicDisable1RttEncryption) return 145;
     }
     {
         const char* removed[][2] = {
