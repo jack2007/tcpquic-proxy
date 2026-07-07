@@ -1026,6 +1026,7 @@ public:
             metadata.PeerId = PeerId;
             metadata.ConnectionId = ConnectionId;
         } else if (Role == TqTunnelRole::ServerOpen) {
+            metadata.PeerId = TqLookupServerConnectionPeerId(QuicConn);
             const uint32_t serverConnId = TqLookupServerConnectionId(QuicConn);
             if (serverConnId != 0) {
                 metadata.ConnectionId = "srv-" + std::to_string(serverConnId);

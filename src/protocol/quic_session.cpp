@@ -332,6 +332,13 @@ bool TqSetServerConnectionClientNameByHandle(HQUIC handle, const std::string& cl
     return true;
 }
 
+std::string TqServerPeerIdFromConnectionRecord(const TqServerConnectionRecord& record) {
+    if (!record.ClientName.empty()) {
+        return record.ClientName;
+    }
+    return "peer-" + (record.RemoteAddress.empty() ? std::string("unknown") : record.RemoteAddress);
+}
+
 void TqUnregisterServerConnectionByHandle(HQUIC handle) {
     if (handle == nullptr) {
         return;
@@ -378,6 +385,15 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     const auto it = g_serverConnIds.find(connection->Handle);
     return it == g_serverConnIds.end() ? 0 : it->second.Id;
+}
+
+std::string TqLookupServerConnectionPeerId(MsQuicConnection* connection) {
+    if (connection == nullptr || connection->Handle == nullptr) {
+        return {};
+    }
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    const auto it = g_serverConnIds.find(connection->Handle);
+    return it == g_serverConnIds.end() ? std::string() : TqServerPeerIdFromConnectionRecord(it->second);
 }
 
 bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName) {

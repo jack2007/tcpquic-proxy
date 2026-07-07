@@ -22,6 +22,7 @@ uint32_t TqRegisterServerConnection(
     MsQuicConnection* connection,
     const std::string& encryption = "enabled");
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection);
+std::string TqLookupServerConnectionPeerId(MsQuicConnection* connection);
 bool TqSetServerConnectionClientName(MsQuicConnection* connection, const std::string& clientName);
 void TqUnregisterServerConnection(MsQuicConnection* connection);
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection);

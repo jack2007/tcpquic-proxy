@@ -61,6 +61,25 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     return static_cast<uint32_t>(std::strtoul(id.c_str() + std::strlen(kPrefix), nullptr, 10));
 }
 
+std::string TqLookupServerConnectionPeerId(MsQuicConnection* connection) {
+    if (connection == nullptr) {
+        return {};
+    }
+    std::lock_guard<std::mutex> guard(g_test_server_connection_lock);
+    const auto handleIt = g_test_server_connection_handles.find(connection);
+    if (handleIt == g_test_server_connection_handles.end()) {
+        return {};
+    }
+    const auto it = g_test_server_connections.find(handleIt->second);
+    if (it == g_test_server_connections.end()) {
+        return {};
+    }
+    if (!it->second.ClientName.empty()) {
+        return it->second.ClientName;
+    }
+    return "peer-" + (it->second.RemoteAddress.empty() ? std::string("unknown") : it->second.RemoteAddress);
+}
+
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
     (void)connection;
     return 0;
@@ -984,6 +1003,109 @@ int TestServerIncomingClientHelloUpdatesConnectionNameOnly() {
     if (!DispatchFakeShutdownComplete(rawStream)) return 356;
     if (!completed) return 357;
     if (aclDenied) return 358;
+    return 0;
+}
+
+int TestServerIncomingOpenTunnelSnapshotIncludesPeerId() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 360;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    LoopbackListener listener;
+    if (!listener.Start()) return 361;
+
+    auto rawConn = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7110));
+    MsQuicConnection conn(rawConn, CleanUpManual, MsQuicConnection::NoOpCallback);
+    const uint32_t serverConnId = TqRegisterServerConnectionForTest(rawConn, &conn);
+    if (serverConnId == 0) return 362;
+    if (!TqSetServerConnectionClientNameForTest(rawConn, "office-a")) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 363;
+    }
+
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7111));
+    TqHandleServerIncomingStream(&conn, rawStream, acl, cfg, nullptr);
+
+    const std::vector<uint8_t> openBytes =
+        BuildOpenRequestBytes("127.0.0.1", listener.Port());
+    if (openBytes.empty()) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 364;
+    }
+
+    QUIC_BUFFER firstBuffer{
+        static_cast<uint32_t>(4),
+        const_cast<uint8_t*>(openBytes.data()),
+    };
+    QUIC_STREAM_EVENT firstEvent{};
+    firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    firstEvent.RECEIVE.BufferCount = 1;
+    firstEvent.RECEIVE.Buffers = &firstBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, firstEvent)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 365;
+    }
+
+    QUIC_BUFFER secondBuffer{
+        static_cast<uint32_t>(openBytes.size() - 4),
+        const_cast<uint8_t*>(openBytes.data() + 4),
+    };
+    QUIC_STREAM_EVENT secondEvent{};
+    secondEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    secondEvent.RECEIVE.BufferCount = 1;
+    secondEvent.RECEIVE.Buffers = &secondBuffer;
+    if (!DispatchFakeStreamEvent(rawStream, secondEvent)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 366;
+    }
+
+    std::vector<uint8_t> responseBytes;
+    QUIC_SEND_FLAGS responseFlags = QUIC_SEND_FLAG_NONE;
+    if (!WaitForFakeSend(rawStream, responseBytes, responseFlags, 2000)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 367;
+    }
+
+    MsQuicStream* wrappedStream = LookupFakeMsQuicStream(rawStream);
+    TqTunnelContext* tunnelContext = LookupFakeTunnelContext(rawStream);
+    if (wrappedStream == nullptr || tunnelContext == nullptr) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 371;
+    }
+    if (!DispatchFakeSendComplete(rawStream)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 372;
+    }
+
+    auto tunnels = TqSnapshotTunnels();
+    auto it = std::find_if(tunnels.begin(), tunnels.end(), [&](const TqTunnelSnapshot& tunnel) {
+        return tunnel.ConnectionId == "srv-" + std::to_string(serverConnId);
+    });
+    if (it == tunnels.end()) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 368;
+    }
+    if (it->Role != "server") {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 369;
+    }
+    if (it->PeerId != "office-a") {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 370;
+    }
+
+    if (!ReapPreparedFakeTunnel(wrappedStream, tunnelContext)) {
+        TqUnregisterServerConnectionForTest(rawConn);
+        return 373;
+    }
+    TqUnregisterServerConnectionForTest(rawConn);
+    if (!DispatchFakeShutdownComplete(rawStream)) return 374;
     return 0;
 }
 
@@ -1914,6 +2036,7 @@ int main() {
     if (int rc = TestDetectsMsQuicFakeFinReceive()) return rc;
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingClientHelloUpdatesConnectionNameOnly()) return rc;
+    if (int rc = TestServerIncomingOpenTunnelSnapshotIncludesPeerId()) return rc;
     if (int rc = TestServerIncomingLoopbackDeniedWithoutAuthorizer()) return rc;
     if (int rc = TestServerIncomingLoopbackAllowedByEphemeralAuthorizer()) return rc;
 #if defined(__linux__)
