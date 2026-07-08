@@ -8,12 +8,14 @@
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| 主程序 | `build/bin/Release/tcpquic-proxy` | client / server 代理二进制（**静态链入 msquic + quictls + zstd + c-ares + spdlog + mimalloc**） |
+| 主程序 | `build/bin/Release/raypx2` | client / server 代理二进制；CMake 目标名仍为 `tcpquic-proxy` |
 | msquic 静态库（中间产物） | `build/msquic/bin/Release/libmsquic.a` | 单体归档库，已链入主程序，部署无需拷贝 |
 | 单元测试 | `build/bin/Release/tcpquic_*_test` | 各模块单元测试可执行文件 |
+| OpenSSL 辅助程序 | `build/bin/Release/openssl` | 从 vendored quictls 构建并复制，用于证书/诊断辅助场景 |
+| Crashpad handler（可选） | `build/bin/Release/crashpad_handler` | `TCPQUIC_ENABLE_CRASHPAD=AUTO/ON` 且本地 Crashpad 已构建时生成 |
 | 压测工具（可选） | `build/msquic/bin/Release/secnetperf` | msquic 自带性能工具（需 `-DQUIC_BUILD_PERF=ON`） |
 
-默认构建下 `tcpquic-proxy` **不依赖** `libmsquic.so`；`ldd` 仅显示 `libnuma`、`libstdc++`、`libc` 等系统库。主程序体积约 6–7 MB（aarch64 Release），高于动态链入时的 ~2 MB，但部署只需单个可执行文件。
+默认构建下 `raypx2` **不依赖** `libmsquic.so`；`ldd` 仅显示 `libnuma`、`libstdc++`、`libc` 等系统库。未启用 Crashpad 时部署只需单个可执行文件；启用 Crashpad 时需同时部署 `crashpad_handler`。
 
 若显式开启 `TCPQUIC_MSQUIC_SHARED=ON`，则会额外生成 `libmsquic.so*`，主程序通过 `$ORIGIN` RPATH 加载。
 
@@ -47,12 +49,14 @@ sudo apt install git cmake build-essential perl
 
 | 组件 | 子模块路径 | 用途 | 当前 pin（示例） |
 |------|-----------|------|------------------|
-| [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 协议栈 | `9f8380759` |
+| [msquic](https://github.com/microsoft/msquic) | `third_party/msquic` | QUIC 协议栈 | `13c87cdb` |
 | [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS（msquic 嵌套子模块，**首次构建从源码编译**） | `ff36838b` |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `5233c58e` |
 | [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `8671ca4d` |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `c93e50f3` |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `9d159bb4` |
+| [nlohmann/json](https://github.com/nlohmann/json) | `third_party/json` | JSON 配置、Admin API、测试工具 | `c363dc3e` |
+| [Crashpad](https://chromium.googlesource.com/crashpad/crashpad) | `third_party/crashpad` | 可选 crash dump 支持 | `efdc820b` |
 
 ### mimalloc（third_party，默认静态启用）
 
@@ -71,7 +75,7 @@ sudo apt install git cmake build-essential perl
 
 - `libnuma`、`libstdc++`、`libgcc_s`、`libc`、`libm`（系统 glibc 环境）
 
-msquic（含 quictls）、zstd、c-ares、spdlog、mimalloc 均已静态编入 `tcpquic-proxy`。**默认部署只需拷贝单个可执行文件**，无需 `libmsquic.so`。
+msquic（含 quictls）、zstd、c-ares、spdlog、nlohmann/json、mimalloc 均已静态或 header-only 集成到 `raypx2`。**默认部署只需拷贝主程序**，无需 `libmsquic.so`；启用 Crashpad 时还需同目录拷贝 `crashpad_handler`。
 
 若使用 `-DTCPQUIC_MSQUIC_SHARED=ON` 构建，则需同时部署 `libmsquic.so*`（或通过 RPATH 指向 `build/msquic/bin/Release/`）。
 
@@ -104,7 +108,7 @@ cd tcpquic-proxy
 git submodule update --init --recursive
 ```
 
-此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib、mimalloc 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
+此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib、nlohmann/json、mimalloc、Crashpad 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
 
 验证子模块：
 
@@ -112,7 +116,7 @@ git submodule update --init --recursive
 git submodule status
 ```
 
-应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib`、`third_party/mimalloc` 等均为已检出 commit，而非 `-` 前缀的空目录。
+应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc`、`third_party/crashpad` 等均为已检出 commit，而非 `-` 前缀的空目录。
 
 ### Step 3：选择构建目录
 
@@ -145,13 +149,15 @@ cmake -S . -B build \
 
 配置阶段 CMake 会依次：
 
-1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib`、`third_party/mimalloc` 是否存在；
+1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc` 是否存在；
 2. 设置 `QUIC_TLS_LIB=quictls`，`QUIC_BUILD_SHARED=OFF`（可通过 `TCPQUIC_MSQUIC_SHARED=ON` 改回动态库）；
 3. `add_subdirectory(third_party/msquic)` → 构建单体 `libmsquic.a`（含 quictls）；
 4. `add_subdirectory(third_party/zstd/build/cmake)` → 构建 libzstd；
 5. `add_subdirectory(third_party/spdlog)` → 构建 spdlog 静态库；
 6. 定义 `cpp_httplib` header-only INTERFACE target；
-7. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 与单元测试目标。
+7. `add_subdirectory(third_party/json)` → 定义 `nlohmann_json::nlohmann_json`；
+8. 可选检测已构建的 Crashpad client/util/base/handler；
+9. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 构建目标、输出 `raypx2`，并定义单元测试目标。
 
 ### Step 5：编译主程序
 
@@ -164,39 +170,22 @@ cmake --build build --target tcpquic-proxy -j$(nproc)
 ### Step 6：验证产物
 
 ```bash
-ls -la build/bin/Release/tcpquic-proxy
-build/bin/Release/tcpquic-proxy --help
-ldd build/bin/Release/tcpquic-proxy
+ls -la build/bin/Release/raypx2
+build/bin/Release/raypx2 --help
+ldd build/bin/Release/raypx2
 ```
 
 期望：
 
 - 可执行文件存在且可运行；
 - `ldd` **不出现** `libmsquic.so`（仅系统库如 `libnuma`）；
-- 可选：确认 `build/msquic/bin/Release/libmsquic.a` 已生成。
+- 可选：确认 `build/msquic/bin/Release/libmsquic.a`、`build/bin/Release/openssl` 已生成；启用 Crashpad 时确认 `build/bin/Release/crashpad_handler` 已生成。
 
 ### Step 7（可选）：编译单元测试
 
 ```bash
-cmake --build build --target \
-  tcpquic_acl_test \
-  tcpquic_admin_http_test \
-  tcpquic_compress_test \
-  tcpquic_config_router_test \
-  tcpquic_control_test \
-  tcpquic_http_connect_test \
-  tcpquic_relay_buffer_test \
-  tcpquic_linux_relay_worker_io_test \
-  tcpquic_linux_relay_worker_queue_test \
-  tcpquic_relay_backend_selection_test \
-  tcpquic_router_runtime_test \
-  tcpquic_socks5_test \
-  tcpquic_thread_pool_test \
-  tcpquic_tuning_test \
-  tcpquic_tunnel_reaper_test \
-  tcpquic_tunnel_test \
-  tcpquic_production_linkage_guard_test \
-  -j$(nproc)
+cmake --build build --target help | grep '^... tcpquic_'
+cmake --build build --target all -j$(nproc)
 ```
 
 运行全部测试：
@@ -224,11 +213,13 @@ CMakeLists.txt (根)
 ├── third_party/zstd/build/cmake → libzstd (static)
 ├── third_party/spdlog/          → spdlog (static)
 ├── third_party/cpp-httplib/     → cpp_httplib (header-only INTERFACE)
+├── third_party/json/            → nlohmann_json::nlohmann_json (header-only)
+├── third_party/crashpad/        → 可选 Crashpad client/util/base/handler（预构建检测）
 ├── third_party/mimalloc/        → mimalloc-static（默认启用）
 └── src/CMakeLists.txt
-    ├── tcpquic-proxy            → 主程序
+    ├── tcpquic-proxy            → 主程序目标，输出文件名 raypx2
     ├── tcpquic_*_test           → 单元测试
-    └── tcpquic_tcp_sink_bench   → Linux 压测辅助工具
+    └── tcpquic_tcp_sink_bench   → POSIX 压测辅助工具
 ```
 
 **输出目录规则**（根 `CMakeLists.txt` 定义）：
@@ -253,6 +244,8 @@ CMakeLists.txt (根)
 | `SPDLOG_BUILD_SHARED` | `OFF` | spdlog 静态库 |
 | `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc；ASAN 构建会自动关闭 |
 | `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch |
+| `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | Crashpad crash dump：`AUTO` / `ON` / `OFF` |
+| `TCPQUIC_PREFER_STATIC_OPENSSL_HELPER` | `ON` | 非 Windows 下构建 vendored `openssl` helper 时优先尝试静态系统库 |
 
 ### 5.2 用户可覆盖的常用选项
 
@@ -287,7 +280,7 @@ cmake --build build --target secnetperf -j$(nproc)
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --target tcpquic-proxy -j$(nproc)
-# 产物：build/bin/Debug/tcpquic-proxy
+# 产物：build/bin/Debug/raypx2
 ```
 
 ### 6.2 AddressSanitizer（内存调试）
@@ -310,7 +303,7 @@ cmake --build build-asan --target tcpquic-proxy tcpquic_tunnel_test -j$(nproc)
 
 ```bash
 export LD_LIBRARY_PATH="$PWD/build-asan/msquic/bin/Release:${LD_LIBRARY_PATH}"
-build-asan/bin/Release/tcpquic-proxy --help
+build-asan/bin/Release/raypx2 --help
 ```
 
 ### 6.3 增量重建
@@ -350,7 +343,7 @@ cmake -S . -B build-x64 -A x64
 cmake --build build-x64 --config Release --target tcpquic-proxy
 ```
 
-产物：`build-x64\bin\Release\tcpquic-proxy.exe`。默认静态 msquic 构建不需要同目录 `msquic.dll`；仅 `-DTCPQUIC_MSQUIC_SHARED=ON` 时需要部署动态库。
+产物：`build-x64\bin\Release\raypx2.exe`。默认静态 msquic 构建不需要同目录 `msquic.dll`；仅 `-DTCPQUIC_MSQUIC_SHARED=ON` 时需要部署动态库。
 
 验证：
 
@@ -366,21 +359,29 @@ cmake --build build-x64 --config Release --target tcpquic-proxy
 
 ```text
 deploy/
-└── tcpquic-proxy              # 来自 build/bin/Release/
+└── raypx2                     # 来自 build/bin/Release/
 ```
 
 **动态库模式**（`-DTCPQUIC_MSQUIC_SHARED=ON`）额外需要：
 
 ```text
 deploy/
-├── tcpquic-proxy
+├── raypx2
 └── libmsquic.so*              # 来自 build/msquic/bin/Release/
+```
+
+**Crashpad 启用时**（`TCPQUIC_ENABLE_CRASHPAD=AUTO` 检测成功或显式 `ON`）还需同目录部署：
+
+```text
+deploy/
+├── raypx2
+└── crashpad_handler           # Windows 为 crashpad_handler.exe
 ```
 
 通过 [wdtq](https://github.com/) 等工具启动时，可指定：
 
 ```bash
-export TCPQUIC_PROXY_BIN=/path/to/build/bin/Release/tcpquic-proxy
+export TCPQUIC_PROXY_BIN=/path/to/build/bin/Release/raypx2
 ```
 
 ---
@@ -419,5 +420,5 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target tcpquic-proxy -j$(nproc)
 
 # 产物路径
-./build/bin/Release/tcpquic-proxy --help
+./build/bin/Release/raypx2 --help
 ```
