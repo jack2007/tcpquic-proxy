@@ -109,13 +109,20 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
         NAMES base libbase
         PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/third_party/mini_chromium/mini_chromium/base"
         NO_DEFAULT_PATH)
+    if(APPLE)
+        find_library(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY
+            NAMES mig_output libmig_output
+            PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/util"
+            NO_DEFAULT_PATH)
+    endif()
 
     if(EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" AND
        EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" AND
        EXISTS "${TCPQUIC_CRASHPAD_HANDLER}" AND
        TCPQUIC_CRASHPAD_CLIENT_LIBRARY AND
        TCPQUIC_CRASHPAD_UTIL_LIBRARY AND
-       TCPQUIC_CRASHPAD_BASE_LIBRARY)
+       TCPQUIC_CRASHPAD_BASE_LIBRARY AND
+       (NOT APPLE OR TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY))
         set(TCPQUIC_HAS_CRASHPAD ON)
         add_library(tcpquic_crashpad_client INTERFACE)
         target_include_directories(tcpquic_crashpad_client INTERFACE
@@ -125,11 +132,18 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
             "${TCPQUIC_CRASHPAD_CLIENT_LIBRARY}"
             "${TCPQUIC_CRASHPAD_UTIL_LIBRARY}"
             "${TCPQUIC_CRASHPAD_BASE_LIBRARY}")
+        if(APPLE)
+            target_link_libraries(tcpquic_crashpad_client INTERFACE
+                "${TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY}")
+        endif()
         if(WIN32)
             target_link_libraries(tcpquic_crashpad_client INTERFACE user32 version winhttp)
         elseif(APPLE)
             target_link_libraries(tcpquic_crashpad_client INTERFACE
+                "-framework ApplicationServices"
                 "-framework CoreFoundation"
+                "-framework CoreGraphics"
+                "-framework CoreText"
                 "-framework Foundation"
                 "-framework IOKit"
                 bsm)
