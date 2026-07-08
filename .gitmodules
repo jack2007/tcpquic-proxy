@@ -19,3 +19,6 @@
 [submodule "third_party/json"]
 	path = third_party/json
 	url = https://github.com/nlohmann/json
+[submodule "third_party/crashpad"]
+	path = third_party/crashpad
+	url = https://github.com/chromium/crashpad

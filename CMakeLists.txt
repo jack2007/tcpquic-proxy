@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 project(tcpquic-proxy C CXX)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+    message(STATUS "No build type selected; defaulting to RelWithDebInfo")
+endif()
+
 set(MSQUIC_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/msquic" CACHE PATH "msquic source tree")
 
 if(NOT EXISTS "${MSQUIC_SOURCE_DIR}/CMakeLists.txt")
@@ -55,6 +61,92 @@ if(TCPQUIC_MSQUIC_DISABLE_XDP)
 endif()
 
 option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers" ON)
+
+set(TCPQUIC_ENABLE_CRASHPAD AUTO CACHE STRING "Enable Crashpad crash dumps: AUTO, ON, or OFF")
+set_property(CACHE TCPQUIC_ENABLE_CRASHPAD PROPERTY STRINGS AUTO ON OFF)
+set(TCPQUIC_CRASHPAD_SOURCE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/crashpad"
+    CACHE PATH "Crashpad source tree")
+if(NOT EXISTS "${TCPQUIC_CRASHPAD_SOURCE_DIR}/client/crashpad_client.h" AND
+   EXISTS "${TCPQUIC_CRASHPAD_SOURCE_DIR}/crashpad/client/crashpad_client.h")
+    set(TCPQUIC_CRASHPAD_SOURCE_DIR
+        "${TCPQUIC_CRASHPAD_SOURCE_DIR}/crashpad"
+        CACHE PATH "Crashpad source tree" FORCE)
+endif()
+set(TCPQUIC_CRASHPAD_BUILD_DIR
+    "${TCPQUIC_CRASHPAD_SOURCE_DIR}/out/Default"
+    CACHE PATH "Crashpad GN/Ninja build output directory")
+
+set(TCPQUIC_HAS_CRASHPAD OFF)
+string(TOUPPER "${TCPQUIC_ENABLE_CRASHPAD}" TCPQUIC_ENABLE_CRASHPAD_MODE)
+if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "TCPQUIC_ENABLE_CRASHPAD must be AUTO, ON, or OFF")
+endif()
+
+if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
+    set(TCPQUIC_CRASHPAD_CLIENT_HEADER "${TCPQUIC_CRASHPAD_SOURCE_DIR}/client/crashpad_client.h")
+    set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR
+        "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/mini_chromium/mini_chromium")
+    set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER
+        "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR}/base/files/file_path.h")
+    if(WIN32)
+        set(TCPQUIC_CRASHPAD_HANDLER_NAME crashpad_handler.exe)
+    else()
+        set(TCPQUIC_CRASHPAD_HANDLER_NAME crashpad_handler)
+    endif()
+    set(TCPQUIC_CRASHPAD_HANDLER
+        "${TCPQUIC_CRASHPAD_BUILD_DIR}/${TCPQUIC_CRASHPAD_HANDLER_NAME}")
+
+    find_library(TCPQUIC_CRASHPAD_CLIENT_LIBRARY
+        NAMES client libclient
+        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/client"
+        NO_DEFAULT_PATH)
+    find_library(TCPQUIC_CRASHPAD_UTIL_LIBRARY
+        NAMES util libutil
+        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/util"
+        NO_DEFAULT_PATH)
+    find_library(TCPQUIC_CRASHPAD_BASE_LIBRARY
+        NAMES base libbase
+        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/third_party/mini_chromium/mini_chromium/base"
+        NO_DEFAULT_PATH)
+
+    if(EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" AND
+       EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" AND
+       EXISTS "${TCPQUIC_CRASHPAD_HANDLER}" AND
+       TCPQUIC_CRASHPAD_CLIENT_LIBRARY AND
+       TCPQUIC_CRASHPAD_UTIL_LIBRARY AND
+       TCPQUIC_CRASHPAD_BASE_LIBRARY)
+        set(TCPQUIC_HAS_CRASHPAD ON)
+        add_library(tcpquic_crashpad_client INTERFACE)
+        target_include_directories(tcpquic_crashpad_client INTERFACE
+            "${TCPQUIC_CRASHPAD_SOURCE_DIR}"
+            "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR}")
+        target_link_libraries(tcpquic_crashpad_client INTERFACE
+            "${TCPQUIC_CRASHPAD_CLIENT_LIBRARY}"
+            "${TCPQUIC_CRASHPAD_UTIL_LIBRARY}"
+            "${TCPQUIC_CRASHPAD_BASE_LIBRARY}")
+        if(WIN32)
+            target_link_libraries(tcpquic_crashpad_client INTERFACE user32 version winhttp)
+        elseif(APPLE)
+            target_link_libraries(tcpquic_crashpad_client INTERFACE
+                "-framework CoreFoundation"
+                "-framework Foundation"
+                "-framework IOKit"
+                bsm)
+        else()
+            target_link_libraries(tcpquic_crashpad_client INTERFACE dl)
+        endif()
+        message(STATUS "Crashpad enabled: ${TCPQUIC_CRASHPAD_BUILD_DIR}")
+    elseif(TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON")
+        message(FATAL_ERROR
+            "TCPQUIC_ENABLE_CRASHPAD=ON but Crashpad was not found. "
+            "Expected source at '${TCPQUIC_CRASHPAD_SOURCE_DIR}', build output at "
+            "'${TCPQUIC_CRASHPAD_BUILD_DIR}', and handler '${TCPQUIC_CRASHPAD_HANDLER}'.")
+    else()
+        message(STATUS "Crashpad not found; crash dump handler disabled")
+    endif()
+endif()
+
 set(TCPQUIC_ADDRESS_SANITIZER_ENABLED OFF)
 set(TCPQUIC_SANITIZER_FLAGS
     "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} ${CMAKE_SHARED_LINKER_FLAGS}")

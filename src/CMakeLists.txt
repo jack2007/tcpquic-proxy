@@ -145,6 +145,7 @@ set(TCPQUIC_PROXY_SOURCES
     runtime/speed_test.cpp
     runtime/shutdown.cpp
     runtime/trace.cpp
+    platform/crash_dump.cpp
     platform/exe_path.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
@@ -208,6 +209,17 @@ endif()
 tcpquic_target_include_dirs(tcpquic-proxy)
 tcpquic_link_quic_address_deps(tcpquic-proxy)
 target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib nlohmann_json::nlohmann_json)
+if(TCPQUIC_HAS_CRASHPAD)
+    target_link_libraries(tcpquic-proxy PRIVATE tcpquic_crashpad_client)
+    target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_CRASHPAD=1)
+    add_custom_command(TARGET tcpquic-proxy POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${TCPQUIC_CRASHPAD_HANDLER}"
+            "$<TARGET_FILE_DIR:tcpquic-proxy>"
+        COMMENT "Copy crashpad_handler next to tcpquic-proxy")
+else()
+    target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_CRASHPAD=0)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     target_link_libraries(tcpquic-proxy PRIVATE Threads::Threads)
 endif()

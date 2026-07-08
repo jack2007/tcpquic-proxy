@@ -9,12 +9,24 @@ int main() {
     buffer << cmake.rdbuf();
     const std::string text = buffer.str();
 
+    std::ifstream rootCmake("CMakeLists.txt");
+    if (!rootCmake) return 18;
+    std::ostringstream rootCmakeBuffer;
+    rootCmakeBuffer << rootCmake.rdbuf();
+    const std::string rootCmakeText = rootCmakeBuffer.str();
+    if (rootCmakeText.find("CMAKE_BUILD_TYPE RelWithDebInfo") == std::string::npos) {
+        return 19;
+    }
+
     const size_t proxySources = text.find("set(TCPQUIC_PROXY_SOURCES");
     const size_t proxyTarget = text.find("add_tcpquic_executable(tcpquic-proxy");
     if (proxySources == std::string::npos || proxyTarget == std::string::npos) return 2;
     if (text.find("set_target_properties(tcpquic-proxy PROPERTIES OUTPUT_NAME raypx2)") ==
         std::string::npos) {
         return 13;
+    }
+    if (text.find("platform/crash_dump.cpp") == std::string::npos) {
+        return 14;
     }
 
     const std::string productionBlock = text.substr(proxySources, proxyTarget - proxySources);
@@ -37,6 +49,22 @@ int main() {
     if (workerText.find("EnqueueEvent(") != std::string::npos) return 10;
     if (workerText.find("DrainEvents(") != std::string::npos) return 11;
     if (workerText.find("ProcessRelayTask(") != std::string::npos) return 12;
+
+    std::ifstream crashDump("src/platform/crash_dump.h");
+    if (!crashDump) return 15;
+    std::ostringstream crashDumpBuffer;
+    crashDumpBuffer << crashDump.rdbuf();
+    const std::string crashDumpText = crashDumpBuffer.str();
+    if (crashDumpText.find("MiniDumpWriteDump") != std::string::npos) return 16;
+    if (crashDumpText.find("dbghelp") != std::string::npos) return 17;
+
+    std::ifstream crashDumpImpl("src/platform/crash_dump.cpp");
+    if (!crashDumpImpl) return 20;
+    std::ostringstream crashDumpImplBuffer;
+    crashDumpImplBuffer << crashDumpImpl.rdbuf();
+    const std::string crashDumpImplText = crashDumpImplBuffer.str();
+    if (crashDumpImplText.find("MiniDumpWriteDump") != std::string::npos) return 21;
+    if (crashDumpImplText.find("dbghelp") != std::string::npos) return 22;
 
     return 0;
 }
