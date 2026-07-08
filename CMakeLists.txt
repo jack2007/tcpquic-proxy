@@ -64,7 +64,9 @@ option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers
 
 set(TCPQUIC_ENABLE_CRASHPAD AUTO CACHE STRING "Enable Crashpad crash dumps: AUTO, ON, or OFF")
 set_property(CACHE TCPQUIC_ENABLE_CRASHPAD PROPERTY STRINGS AUTO ON OFF)
-option(TCPQUIC_CRASHPAD_BOOTSTRAP "Automatically sync and build Crashpad when required" ON)
+option(TCPQUIC_CRASHPAD_AUTO_BUILD
+    "Build vendored Crashpad with GN/Ninja when required artifacts are missing"
+    ON)
 set(TCPQUIC_CRASHPAD_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/crashpad"
     CACHE PATH "Crashpad source tree")
@@ -98,53 +100,109 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
     set(TCPQUIC_CRASHPAD_HANDLER
         "${TCPQUIC_CRASHPAD_BUILD_DIR}/${TCPQUIC_CRASHPAD_HANDLER_NAME}")
 
-    if(TCPQUIC_CRASHPAD_BOOTSTRAP AND
-       EXISTS "${TCPQUIC_CRASHPAD_SOURCE_DIR}/DEPS" AND
-       (TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON" OR
-        NOT EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" OR
-        NOT EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" OR
-        NOT EXISTS "${TCPQUIC_CRASHPAD_HANDLER}"))
-        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_crashpad.cmake")
-        tcpquic_bootstrap_crashpad(
-            "${TCPQUIC_CRASHPAD_SOURCE_DIR}"
-            "${TCPQUIC_CRASHPAD_BUILD_DIR}"
-            TCPQUIC_CRASHPAD_SOURCE_DIR
-            TCPQUIC_CRASHPAD_BUILD_DIR)
-        set(TCPQUIC_CRASHPAD_CLIENT_HEADER "${TCPQUIC_CRASHPAD_SOURCE_DIR}/client/crashpad_client.h")
-        set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR
-            "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/mini_chromium/mini_chromium")
-        set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER
-            "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR}/base/files/file_path.h")
-        set(TCPQUIC_CRASHPAD_HANDLER
-            "${TCPQUIC_CRASHPAD_BUILD_DIR}/${TCPQUIC_CRASHPAD_HANDLER_NAME}")
-    endif()
-
-    find_library(TCPQUIC_CRASHPAD_CLIENT_LIBRARY
-        NAMES client libclient
-        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/client"
-        NO_DEFAULT_PATH)
-    find_library(TCPQUIC_CRASHPAD_UTIL_LIBRARY
-        NAMES util libutil
-        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/util"
-        NO_DEFAULT_PATH)
-    find_library(TCPQUIC_CRASHPAD_BASE_LIBRARY
-        NAMES base libbase
-        PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/third_party/mini_chromium/mini_chromium/base"
-        NO_DEFAULT_PATH)
-    if(APPLE)
-        find_library(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY
-            NAMES mig_output libmig_output
+    function(tcpquic_find_crashpad_artifacts)
+        unset(TCPQUIC_CRASHPAD_CLIENT_LIBRARY CACHE)
+        unset(TCPQUIC_CRASHPAD_UTIL_LIBRARY CACHE)
+        unset(TCPQUIC_CRASHPAD_BASE_LIBRARY CACHE)
+        unset(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY CACHE)
+        find_library(TCPQUIC_CRASHPAD_CLIENT_LIBRARY
+            NAMES client libclient
+            PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/client"
+            NO_DEFAULT_PATH)
+        find_library(TCPQUIC_CRASHPAD_UTIL_LIBRARY
+            NAMES util libutil
             PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/util"
             NO_DEFAULT_PATH)
+        find_library(TCPQUIC_CRASHPAD_BASE_LIBRARY
+            NAMES base libbase
+            PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/third_party/mini_chromium/mini_chromium/base"
+            NO_DEFAULT_PATH)
+        if(APPLE)
+            find_library(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY
+                NAMES mig_output libmig_output
+                PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/util"
+                NO_DEFAULT_PATH)
+        endif()
+    endfunction()
+
+    function(tcpquic_crashpad_artifacts_ready out_var)
+        if(EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" AND
+           EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" AND
+           EXISTS "${TCPQUIC_CRASHPAD_HANDLER}" AND
+           TCPQUIC_CRASHPAD_CLIENT_LIBRARY AND
+           TCPQUIC_CRASHPAD_UTIL_LIBRARY AND
+           TCPQUIC_CRASHPAD_BASE_LIBRARY AND
+           (NOT APPLE OR TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY))
+            set(${out_var} ON PARENT_SCOPE)
+        else()
+            set(${out_var} OFF PARENT_SCOPE)
+        endif()
+    endfunction()
+
+    tcpquic_find_crashpad_artifacts()
+    tcpquic_crashpad_artifacts_ready(TCPQUIC_CRASHPAD_READY)
+
+    if(NOT TCPQUIC_CRASHPAD_READY AND TCPQUIC_CRASHPAD_AUTO_BUILD)
+        find_program(TCPQUIC_GN_EXECUTABLE gn)
+        find_program(TCPQUIC_NINJA_EXECUTABLE ninja)
+        set(TCPQUIC_CRASHPAD_LSS_DIR
+            "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/lss/lss")
+        set(TCPQUIC_CRASHPAD_ZLIB_DIR
+            "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/zlib/zlib")
+        set(TCPQUIC_CRASHPAD_VENDOR_READY ON)
+        if(NOT EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" OR
+           NOT EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" OR
+           NOT EXISTS "${TCPQUIC_CRASHPAD_ZLIB_DIR}/zlib.h")
+            set(TCPQUIC_CRASHPAD_VENDOR_READY OFF)
+        endif()
+        if(UNIX AND NOT APPLE AND
+           NOT EXISTS "${TCPQUIC_CRASHPAD_LSS_DIR}/linux_syscall_support.h")
+            set(TCPQUIC_CRASHPAD_VENDOR_READY OFF)
+        endif()
+
+        if(TCPQUIC_GN_EXECUTABLE AND TCPQUIC_NINJA_EXECUTABLE AND
+           TCPQUIC_CRASHPAD_VENDOR_READY)
+            set(TCPQUIC_CRASHPAD_GN_ARGS
+                "is_debug=false crashpad_http_transport_impl=\"socket\"")
+            set(TCPQUIC_CRASHPAD_BUILD_TARGETS
+                crashpad_handler
+                client:client
+                util:util
+                third_party/mini_chromium:base)
+            if(APPLE)
+                list(APPEND TCPQUIC_CRASHPAD_BUILD_TARGETS util:mig_output)
+            endif()
+            message(STATUS "Building vendored Crashpad: ${TCPQUIC_CRASHPAD_BUILD_DIR}")
+            execute_process(
+                COMMAND "${TCPQUIC_GN_EXECUTABLE}" gen "${TCPQUIC_CRASHPAD_BUILD_DIR}"
+                    "--root=${TCPQUIC_CRASHPAD_SOURCE_DIR}"
+                    "--args=${TCPQUIC_CRASHPAD_GN_ARGS}"
+                RESULT_VARIABLE TCPQUIC_CRASHPAD_GN_RESULT)
+            if(NOT TCPQUIC_CRASHPAD_GN_RESULT EQUAL 0)
+                if(TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON")
+                    message(FATAL_ERROR "Crashpad GN generation failed")
+                endif()
+            else()
+                execute_process(
+                    COMMAND "${TCPQUIC_NINJA_EXECUTABLE}" -C "${TCPQUIC_CRASHPAD_BUILD_DIR}"
+                        ${TCPQUIC_CRASHPAD_BUILD_TARGETS}
+                    RESULT_VARIABLE TCPQUIC_CRASHPAD_NINJA_RESULT)
+                if(NOT TCPQUIC_CRASHPAD_NINJA_RESULT EQUAL 0)
+                    if(TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON")
+                        message(FATAL_ERROR "Crashpad Ninja build failed")
+                    endif()
+                endif()
+            endif()
+            tcpquic_find_crashpad_artifacts()
+            tcpquic_crashpad_artifacts_ready(TCPQUIC_CRASHPAD_READY)
+        elseif(TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON")
+            message(FATAL_ERROR
+                "Crashpad auto-build requires gn, ninja, vendored Crashpad DEPS, "
+                "and mini_chromium. Ensure submodules are initialized from the project fork.")
+        endif()
     endif()
 
-    if(EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" AND
-       EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" AND
-       EXISTS "${TCPQUIC_CRASHPAD_HANDLER}" AND
-       TCPQUIC_CRASHPAD_CLIENT_LIBRARY AND
-       TCPQUIC_CRASHPAD_UTIL_LIBRARY AND
-       TCPQUIC_CRASHPAD_BASE_LIBRARY AND
-       (NOT APPLE OR TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY))
+    if(TCPQUIC_CRASHPAD_READY)
         set(TCPQUIC_HAS_CRASHPAD ON)
         add_library(tcpquic_crashpad_client INTERFACE)
         target_include_directories(tcpquic_crashpad_client INTERFACE
