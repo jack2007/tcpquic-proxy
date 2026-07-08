@@ -64,6 +64,7 @@ option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers
 
 set(TCPQUIC_ENABLE_CRASHPAD AUTO CACHE STRING "Enable Crashpad crash dumps: AUTO, ON, or OFF")
 set_property(CACHE TCPQUIC_ENABLE_CRASHPAD PROPERTY STRINGS AUTO ON OFF)
+option(TCPQUIC_CRASHPAD_BOOTSTRAP "Automatically sync and build Crashpad when required" ON)
 set(TCPQUIC_CRASHPAD_SOURCE_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/crashpad"
     CACHE PATH "Crashpad source tree")
@@ -96,6 +97,27 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
     endif()
     set(TCPQUIC_CRASHPAD_HANDLER
         "${TCPQUIC_CRASHPAD_BUILD_DIR}/${TCPQUIC_CRASHPAD_HANDLER_NAME}")
+
+    if(TCPQUIC_CRASHPAD_BOOTSTRAP AND
+       EXISTS "${TCPQUIC_CRASHPAD_SOURCE_DIR}/DEPS" AND
+       (TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "ON" OR
+        NOT EXISTS "${TCPQUIC_CRASHPAD_CLIENT_HEADER}" OR
+        NOT EXISTS "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER}" OR
+        NOT EXISTS "${TCPQUIC_CRASHPAD_HANDLER}"))
+        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/bootstrap_crashpad.cmake")
+        tcpquic_bootstrap_crashpad(
+            "${TCPQUIC_CRASHPAD_SOURCE_DIR}"
+            "${TCPQUIC_CRASHPAD_BUILD_DIR}"
+            TCPQUIC_CRASHPAD_SOURCE_DIR
+            TCPQUIC_CRASHPAD_BUILD_DIR)
+        set(TCPQUIC_CRASHPAD_CLIENT_HEADER "${TCPQUIC_CRASHPAD_SOURCE_DIR}/client/crashpad_client.h")
+        set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR
+            "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/mini_chromium/mini_chromium")
+        set(TCPQUIC_CRASHPAD_MINI_CHROMIUM_HEADER
+            "${TCPQUIC_CRASHPAD_MINI_CHROMIUM_DIR}/base/files/file_path.h")
+        set(TCPQUIC_CRASHPAD_HANDLER
+            "${TCPQUIC_CRASHPAD_BUILD_DIR}/${TCPQUIC_CRASHPAD_HANDLER_NAME}")
+    endif()
 
     find_library(TCPQUIC_CRASHPAD_CLIENT_LIBRARY
         NAMES client libclient
