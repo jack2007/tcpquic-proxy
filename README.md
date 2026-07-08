@@ -44,11 +44,11 @@
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） |
 | [nlohmann/json](https://github.com/nlohmann/json) | `third_party/json` | JSON 配置、Admin API、测试工具 |
 | [mimalloc](https://github.com/microsoft/mimalloc) | `third_party/mimalloc` | relay buffer 显式 allocator（默认静态启用） |
-| [Crashpad](https://chromium.googlesource.com/crashpad/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；依赖源码随项目 fork vendored，缺少产物时由 CMake 调用 GN/Ninja 本地构建 |
+| [Crashpad](https://github.com/jack2007/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；依赖源码随项目 fork vendored，缺少产物时由 CMake 调用本机已有 GN/Ninja 本地构建 |
 
 当前子模块状态：msquic `13c87cdb`、quictls `ff36838b`、zstd `5233c58e`、c-ares `c93e50f3`、spdlog `8671ca4d`、cpp-httplib `9d159bb4`、nlohmann/json `c363dc3e`、mimalloc `30b2d9d8`、crashpad `df2c143e`。
 
-**不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 也会由 CMake 一并构建。
+**不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 也会由 CMake 一并构建。Crashpad 使用 `jack2007/crashpad` fork 中已提交的 `third_party/*` DEPS 源码，主仓库不会在配置阶段联网执行 `gclient sync` 或拉取 `depot_tools`。
 
 ### 构建工具
 
@@ -91,8 +91,8 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 | `QUIC_USE_SYSTEM_LIBCRYPTO` | `OFF`（强制） | 固定使用 vendored quictls crypto，不使用系统 `libcrypto` |
 | `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc，项目 allocator、zstd、c-ares 走显式 hook |
 | `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch：`AUTO` / `ON` / `OFF` |
-| `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | 可选 Crashpad：`AUTO` / `ON` / `OFF`；`ON` 要求 Crashpad 可检测或可由本地 GN/Ninja 构建 |
-| `TCPQUIC_CRASHPAD_AUTO_BUILD` | `ON` | 缺少 Crashpad 产物时自动用 vendored 源码本地构建；不执行网络下载 |
+| `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | 可选 Crashpad：`AUTO` / `ON` / `OFF`；`ON` 要求 fork 子模块包含 vendored DEPS，并可检测或可由本机已有 GN/Ninja 构建 |
+| `TCPQUIC_CRASHPAD_AUTO_BUILD` | `ON` | 缺少 Crashpad 产物时自动用 vendored 源码本地构建；不会执行 `gclient sync` 或下载 `depot_tools` |
 | `TCPQUIC_PREFER_STATIC_OPENSSL_HELPER` | `ON` | 构建并复制 vendored `openssl` 辅助程序时优先尝试静态链接 |
 
 本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。

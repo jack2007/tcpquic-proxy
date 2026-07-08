@@ -58,7 +58,7 @@ sudo apt install git cmake build-essential perl
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `c93e50f3` |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `9d159bb4` |
 | [nlohmann/json](https://github.com/nlohmann/json) | `third_party/json` | JSON 配置、Admin API、测试工具 | `c363dc3e` |
-| [Crashpad](https://chromium.googlesource.com/crashpad/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；项目 fork 已 vendored `lss`、`mini_chromium`、`zlib`、`googletest` 等 DEPS 源码 | `df2c143e` |
+| [Crashpad](https://github.com/jack2007/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；项目 fork 已 vendored `lss`、`mini_chromium`、`zlib`、`googletest` 等 DEPS 源码 | `df2c143e` |
 
 ### mimalloc（third_party，默认静态启用）
 
@@ -69,7 +69,7 @@ sudo apt install git cmake build-essential perl
 - 关闭：`-DTCPQUIC_USE_MIMALLOC=OFF` → 项目 allocator 回退 glibc `malloc`，MsQuic `AUTO` 也随之关闭。
 - 部署：无需附带 `libmimalloc.so`
 
-**不需要** 的系统包：`libzstd-dev`、`libssl-dev`、`libmsquic-dev` 等。
+**不需要** 的系统包：`libzstd-dev`、`libssl-dev`、`libmsquic-dev` 等。Crashpad 的 `third_party/lss/lss`、`third_party/mini_chromium/mini_chromium`、`third_party/zlib/zlib`、`third_party/googletest/googletest` 来自 `jack2007/crashpad` fork 的普通源码提交；主仓库 CMake 不执行 `gclient sync`，也不下载 `depot_tools`。
 
 ### 2.3 运行时依赖
 
@@ -158,7 +158,7 @@ cmake -S . -B build \
 5. `add_subdirectory(third_party/spdlog)` → 构建 spdlog 静态库；
 6. 定义 `cpp_httplib` header-only INTERFACE target；
 7. `add_subdirectory(third_party/json)` → 定义 `nlohmann_json::nlohmann_json`；
-8. 可选检测 Crashpad client/util/base/handler；若缺失且 `TCPQUIC_CRASHPAD_AUTO_BUILD=ON`，使用本地 `gn`/`ninja` 从 vendored 源码构建；
+8. 可选检查 Crashpad client/util/base/handler；若缺失且 `TCPQUIC_CRASHPAD_AUTO_BUILD=ON`，使用 fork vendored DEPS 和本机已有 `gn`/`ninja` 本地构建；
 9. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 构建目标、输出 `raypx2`，并定义单元测试目标。
 
 ### Step 5：编译主程序
@@ -216,7 +216,7 @@ CMakeLists.txt (根)
 ├── third_party/spdlog/          → spdlog (static)
 ├── third_party/cpp-httplib/     → cpp_httplib (header-only INTERFACE)
 ├── third_party/json/            → nlohmann_json::nlohmann_json (header-only)
-├── third_party/crashpad/        → 可选 Crashpad client/util/base/handler（检测或本地 GN/Ninja 构建）
+├── third_party/crashpad/        → 可选 Crashpad client/util/base/handler（fork vendored DEPS + 本地 GN/Ninja）
 ├── third_party/mimalloc/        → mimalloc-static（默认启用）
 └── src/CMakeLists.txt
     ├── tcpquic-proxy            → 主程序目标，输出文件名 raypx2
@@ -247,7 +247,7 @@ CMakeLists.txt (根)
 | `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc；ASAN 构建会自动关闭 |
 | `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch |
 | `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | Crashpad crash dump：`AUTO` / `ON` / `OFF` |
-| `TCPQUIC_CRASHPAD_AUTO_BUILD` | `ON` | 缺少 Crashpad 产物时自动用 vendored 源码本地构建；不执行网络下载 |
+| `TCPQUIC_CRASHPAD_AUTO_BUILD` | `ON` | 缺少 Crashpad 产物时自动用 vendored 源码和本机已有 `gn`/`ninja` 本地构建；不会联网执行 `gclient sync` 或下载 `depot_tools` |
 | `TCPQUIC_PREFER_STATIC_OPENSSL_HELPER` | `ON` | 非 Windows 下构建 vendored `openssl` helper 时优先尝试静态系统库 |
 
 ### 5.2 用户可覆盖的常用选项
