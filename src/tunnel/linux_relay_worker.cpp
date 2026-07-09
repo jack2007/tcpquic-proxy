@@ -452,6 +452,8 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     uint64_t TcpWriteEagainCount{0};
     uint64_t EpollOutEvents{0};
     StreamRelayBinding* StreamBinding{nullptr};
+    MsQuicStream* RetiringStream{nullptr};
+    StreamRelayBinding* RetiringStreamBinding{nullptr};
 
     RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
         : TcpFd(registration.TcpFd),
@@ -825,6 +827,22 @@ void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
     relay->Handle->Stop.store(true, std::memory_order_release);
 }
 
+bool TqLinuxRelayWorker::CanAbortCallbackStream(
+    uint64_t relayId,
+    StreamRelayBinding* binding,
+    MsQuicStream* stream) const {
+    if (stream == nullptr || stream->Handle == nullptr ||
+        binding == nullptr || binding->Worker != this ||
+        binding->Closing.load(std::memory_order_acquire)) {
+        return false;
+    }
+    RelayState* relay = binding->Relay.load(std::memory_order_acquire);
+    if (relay == nullptr || relay->Id != relayId || relay->Stream != stream) {
+        return false;
+    }
+    return HasAbortableStream(relay);
+}
+
 void TqLinuxRelayWorker::DetachRelayStreamBinding(
     RelayState* relay,
     MsQuicStream* stream,
@@ -856,6 +874,42 @@ void TqLinuxRelayWorker::DetachRelayStreamBinding(
     RetiredStreamBindings.emplace_back(binding);
 }
 
+void TqLinuxRelayWorker::BeginStreamShutdownCompleteDetach(RelayState* relay) {
+    if (relay == nullptr) {
+        return;
+    }
+    MsQuicStream* stream = relay->Stream;
+    StreamRelayBinding* binding = relay->StreamBinding;
+    if (binding != nullptr) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+        binding->Handle.store(nullptr, std::memory_order_release);
+    }
+    relay->Stream = nullptr;
+    relay->StreamBinding = nullptr;
+    if (relay->OutstandingQuicSends == 0) {
+        DetachRelayStreamBinding(relay, stream, binding);
+        return;
+    }
+    relay->RetiringStream = stream;
+    relay->RetiringStreamBinding = binding;
+}
+
+void TqLinuxRelayWorker::CompletePendingStreamDetach(RelayState* relay) {
+    if (relay == nullptr) {
+        return;
+    }
+    MsQuicStream* stream = relay->RetiringStream != nullptr
+        ? relay->RetiringStream
+        : relay->Stream;
+    StreamRelayBinding* binding = relay->RetiringStreamBinding != nullptr
+        ? relay->RetiringStreamBinding
+        : relay->StreamBinding;
+    relay->RetiringStream = nullptr;
+    relay->RetiringStreamBinding = nullptr;
+    DetachRelayStreamBinding(relay, stream, binding);
+}
+
 void TqLinuxRelayWorker::AbortRelayAndRelease(
     RelayState* relay,
     const char* trigger,
@@ -884,7 +938,7 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
         binding->Handle.store(nullptr, std::memory_order_release);
     }
     if (relay->OutstandingQuicSends == 0) {
-        DetachRelayStreamBinding(relay, relay->Stream, binding);
+        CompletePendingStreamDetach(relay);
     }
     relay->PendingTcpWrites.clear();
     relay->PendingQuicSendRetries.clear();
@@ -2369,7 +2423,7 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
     delete operation;
     if (relay != nullptr && relay->Closing) {
         if (relay->OutstandingQuicSends == 0) {
-            DetachRelayStreamBinding(relay.get(), relay->Stream, relay->StreamBinding);
+            CompletePendingStreamDetach(relay.get());
         }
         return;
     }
@@ -2424,7 +2478,7 @@ void TqLinuxRelayWorker::AbortRelayFromCallback(
     uint64_t relayId,
     StreamRelayBinding* binding,
     MsQuicStream* stream) {
-    if (stream != nullptr && stream->Handle != nullptr) {
+    if (CanAbortCallbackStream(relayId, binding, stream)) {
         (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
     }
     TqLinuxRelayEvent shutdown{};
@@ -2514,10 +2568,8 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
             false);
     }
 #endif
-    auto* binding = relay->StreamBinding;
-    MsQuicStream* stream = relay->Stream;
-    DetachRelayStreamBinding(relay.get(), stream, binding);
     const bool hasPending = HasPendingAfterStreamShutdown(relay.get());
+    BeginStreamShutdownCompleteDetach(relay.get());
     if (hasPending) {
         FatalRelayResets.fetch_add(1);
         LogLinuxRelayError(
@@ -3995,7 +4047,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 static_cast<uint32_t>(event->RECEIVE.Flags),
                 true);
             FakeFinReceiveCount.fetch_add(1);
-            if (stream != nullptr && stream->Handle != nullptr) {
+            if (CanAbortCallbackStream(relayId, binding, stream)) {
                 (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
             }
             TqLinuxRelayEvent shutdown{};

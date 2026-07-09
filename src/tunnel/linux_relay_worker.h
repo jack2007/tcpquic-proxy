@@ -489,10 +489,16 @@ private:
         bool fin);
     void SetRelayStop(RelayState* relay, const char* trigger);
     void AbortRelayAndRelease(RelayState* relay, const char* trigger, bool abortStream);
+    bool CanAbortCallbackStream(
+        uint64_t relayId,
+        StreamRelayBinding* binding,
+        MsQuicStream* stream) const;
     void DetachRelayStreamBinding(
         RelayState* relay,
         MsQuicStream* stream,
         StreamRelayBinding* binding);
+    void BeginStreamShutdownCompleteDetach(RelayState* relay);
+    void CompletePendingStreamDetach(RelayState* relay);
     bool HasAbortableStream(RelayState* relay) const;
     bool HasPendingAfterStreamShutdown(RelayState* relay) const;
     void CompleteAndDiscardQuicReceive(TqPendingQuicReceive& view);

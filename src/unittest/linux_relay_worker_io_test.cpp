@@ -3559,6 +3559,117 @@ int main() {
 
         TqLinuxRelayWorkerConfig config{};
         config.EventBudget = 128;
+        config.ReadChunkSize = 1024;
+        config.ReadBatchBytes = 4096;
+        config.MaxIov = 4;
+        config.MaxPendingBufferBytes = 64 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 4121;
+        }
+
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 4122;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x3456));
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = true;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4123;
+        }
+
+        const char payload[] = "pending-send-before-shutdown-complete";
+        if (::write(fds[1], payload, sizeof(payload)) != static_cast<ssize_t>(sizeof(payload))) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4124;
+        }
+        if (!worker.DispatchEncodedEpollEventForTest(
+                worker.EncodeEpollRelayForTest(registered.RelayId),
+                EPOLLIN)) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4125;
+        }
+
+        TqLinuxRelayWorkerSnapshot beforeShutdown = worker.Snapshot();
+        if (beforeShutdown.OutstandingQuicSends == 0) {
+            std::fprintf(stderr, "expected outstanding QUIC send before shutdown complete\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4126;
+        }
+
+        QUIC_STREAM_EVENT shutdownEvent{};
+        shutdownEvent.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &shutdownEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4127;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+
+        TqLinuxRelayActiveSnapshot relayState{};
+        const TqLinuxRelayWorkerSnapshot afterShutdown = worker.Snapshot();
+        if (!FindActiveRelayState(afterShutdown, registered.RelayId, &relayState) ||
+            !relayState.StreamDetached ||
+            afterShutdown.OutstandingQuicSends == 0) {
+            std::fprintf(stderr,
+                "expected stream detached with outstanding send preserved after shutdown complete\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4128;
+        }
+
+        CompleteFakeSends(worker, fakeStream);
+        (void)worker.DrainForTest(config.EventBudget);
+
+        const TqLinuxRelayWorkerSnapshot afterSendComplete = worker.Snapshot();
+        if (afterSendComplete.OutstandingQuicSends != 0) {
+            std::fprintf(stderr,
+                "shutdown-complete detach must preserve send complete cleanup, outstanding=%llu\n",
+                static_cast<unsigned long long>(afterSendComplete.OutstandingQuicSends));
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4129;
+        }
+
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        ResetFakeStreamShutdownCalls();
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
         config.ReadChunkSize = 4096;
         config.ReadBatchBytes = 64 * 1024;
         config.MaxIov = 8;
