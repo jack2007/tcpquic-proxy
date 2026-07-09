@@ -104,6 +104,7 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
         unset(TCPQUIC_CRASHPAD_CLIENT_LIBRARY CACHE)
         unset(TCPQUIC_CRASHPAD_UTIL_LIBRARY CACHE)
         unset(TCPQUIC_CRASHPAD_BASE_LIBRARY CACHE)
+        unset(TCPQUIC_CRASHPAD_COMPAT_LIBRARY CACHE)
         unset(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY CACHE)
         find_library(TCPQUIC_CRASHPAD_CLIENT_LIBRARY
             NAMES client libclient
@@ -117,6 +118,12 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
             NAMES base libbase
             PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/third_party/mini_chromium/mini_chromium/base"
             NO_DEFAULT_PATH)
+        if(UNIX AND NOT APPLE)
+            find_library(TCPQUIC_CRASHPAD_COMPAT_LIBRARY
+                NAMES compat libcompat
+                PATHS "${TCPQUIC_CRASHPAD_BUILD_DIR}/obj/compat"
+                NO_DEFAULT_PATH)
+        endif()
         if(APPLE)
             find_library(TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY
                 NAMES mig_output libmig_output
@@ -132,6 +139,7 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
            TCPQUIC_CRASHPAD_CLIENT_LIBRARY AND
            TCPQUIC_CRASHPAD_UTIL_LIBRARY AND
            TCPQUIC_CRASHPAD_BASE_LIBRARY AND
+           (NOT UNIX OR APPLE OR TCPQUIC_CRASHPAD_COMPAT_LIBRARY) AND
            (NOT APPLE OR TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY))
             set(${out_var} ON PARENT_SCOPE)
         else()
@@ -144,7 +152,7 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
 
     if(NOT TCPQUIC_CRASHPAD_READY AND TCPQUIC_CRASHPAD_AUTO_BUILD)
         find_program(TCPQUIC_GN_EXECUTABLE gn)
-        find_program(TCPQUIC_NINJA_EXECUTABLE ninja)
+        find_program(TCPQUIC_NINJA_EXECUTABLE NAMES ninja ninja-build)
         set(TCPQUIC_CRASHPAD_LSS_DIR
             "${TCPQUIC_CRASHPAD_SOURCE_DIR}/third_party/lss/lss")
         set(TCPQUIC_CRASHPAD_ZLIB_DIR
@@ -212,6 +220,10 @@ if(NOT TCPQUIC_ENABLE_CRASHPAD_MODE STREQUAL "OFF")
             "${TCPQUIC_CRASHPAD_CLIENT_LIBRARY}"
             "${TCPQUIC_CRASHPAD_UTIL_LIBRARY}"
             "${TCPQUIC_CRASHPAD_BASE_LIBRARY}")
+        if(UNIX AND NOT APPLE)
+            target_link_libraries(tcpquic_crashpad_client INTERFACE
+                "${TCPQUIC_CRASHPAD_COMPAT_LIBRARY}")
+        endif()
         if(APPLE)
             target_link_libraries(tcpquic_crashpad_client INTERFACE
                 "${TCPQUIC_CRASHPAD_MIG_OUTPUT_LIBRARY}")
