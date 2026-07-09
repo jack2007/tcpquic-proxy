@@ -39,8 +39,23 @@ QUIC_STATUS QUIC_API FakeStreamSend(
 void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t) {
 }
 
+std::mutex g_FakeStreamShutdownMutex;
+uint64_t g_FakeStreamShutdownCalls = 0;
+
 QUIC_STATUS QUIC_API FakeStreamShutdown(HQUIC, QUIC_STREAM_SHUTDOWN_FLAGS, QUIC_UINT62) {
+    std::lock_guard<std::mutex> guard(g_FakeStreamShutdownMutex);
+    ++g_FakeStreamShutdownCalls;
     return QUIC_STATUS_SUCCESS;
+}
+
+void ResetFakeStreamShutdownCalls() {
+    std::lock_guard<std::mutex> guard(g_FakeStreamShutdownMutex);
+    g_FakeStreamShutdownCalls = 0;
+}
+
+uint64_t ReadFakeStreamShutdownCalls() {
+    std::lock_guard<std::mutex> guard(g_FakeStreamShutdownMutex);
+    return g_FakeStreamShutdownCalls;
 }
 
 QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
@@ -74,6 +89,21 @@ void CompleteFakeSends(TqLinuxRelayWorker& worker, MsQuicStream* stream) {
             (void)worker.DispatchStreamEventForTest(stream, &complete);
         }
     }
+}
+
+bool FindActiveRelayState(
+    const TqLinuxRelayWorkerSnapshot& snapshot,
+    uint64_t relayId,
+    TqLinuxRelayActiveSnapshot* out) {
+    for (const auto& relay : snapshot.ActiveRelayStates) {
+        if (relay.RelayId == relayId) {
+            if (out != nullptr) {
+                *out = relay;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MakeTcpLoopbackPair(int out[2]) {
@@ -3520,6 +3550,302 @@ int main() {
         }
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        ResetFakeStreamShutdownCalls();
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 4101;
+        }
+
+        int fds[2]{-1, -1};
+        if (!MakeTcpLoopbackPair(fds)) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 4102;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x1234));
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4103;
+        }
+
+        QUIC_STREAM_EVENT shutdownEvent{};
+        shutdownEvent.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(worker.DispatchStreamEventForTest(fakeStream, &shutdownEvent))) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4104;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+
+        TqLinuxRelayActiveSnapshot relayState{};
+        const TqLinuxRelayWorkerSnapshot afterShutdown = worker.Snapshot();
+        if (!FindActiveRelayState(afterShutdown, registered.RelayId, &relayState) ||
+            !relayState.StreamDetached) {
+            std::fprintf(stderr, "expected stream detached after shutdown complete\n");
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4105;
+        }
+
+        linger rst{};
+        rst.l_onoff = 1;
+        rst.l_linger = 0;
+        (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+        ::close(fds[1]);
+        fds[1] = -1;
+
+        const uint64_t beforeShutdownCalls = ReadFakeStreamShutdownCalls();
+        if (!worker.DispatchEncodedEpollEventForTest(
+                worker.EncodeEpollRelayForTest(registered.RelayId),
+                EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4106;
+        }
+
+        const TqLinuxRelayWorkerSnapshot afterLateError = worker.Snapshot();
+        if (ReadFakeStreamShutdownCalls() != beforeShutdownCalls) {
+            std::fprintf(stderr, "late TCP error after shutdown complete must not abort stream\n");
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4107;
+        }
+        if (afterLateError.LateTcpErrorAfterStreamShutdown == 0) {
+            std::fprintf(stderr, "expected late TCP error after stream shutdown metric\n");
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4108;
+        }
+
+        worker.Stop();
+        if (fds[1] >= 0) {
+            ::close(fds[1]);
+        }
+        MsQuic = nullptr;
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        ResetFakeStreamShutdownCalls();
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        config.ReadChunkSize = 4096;
+        config.ReadBatchBytes = 64 * 1024;
+        config.MaxIov = 8;
+        config.MaxPendingBufferBytes = 256 * 1024;
+
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 4109;
+        }
+
+        int fds[2]{-1, -1};
+        if (!MakeTcpLoopbackPair(fds)) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 4110;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x2345));
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4111;
+        }
+
+        QUIC_STREAM_EVENT finEvent{};
+        finEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        finEvent.RECEIVE.BufferCount = 0;
+        finEvent.RECEIVE.Buffers = nullptr;
+        finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4112;
+        }
+        (void)worker.DrainForTest(config.EventBudget);
+
+        TqLinuxRelayActiveSnapshot relayState{};
+        const TqLinuxRelayWorkerSnapshot afterFin = worker.Snapshot();
+        if (!FindActiveRelayState(afterFin, registered.RelayId, &relayState) ||
+            !relayState.TcpWriteClosed ||
+            relayState.Closing ||
+            relayState.StreamDetached) {
+            std::fprintf(stderr,
+                "expected active relay with tcp write closed before late error, found=%d tcp_write_closed=%d closing=%d detached=%d\n",
+                FindActiveRelayState(afterFin, registered.RelayId, nullptr) ? 1 : 0,
+                relayState.TcpWriteClosed ? 1 : 0,
+                relayState.Closing ? 1 : 0,
+                relayState.StreamDetached ? 1 : 0);
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4113;
+        }
+
+        linger rst{};
+        rst.l_onoff = 1;
+        rst.l_linger = 0;
+        (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+        ::close(fds[1]);
+        fds[1] = -1;
+
+        const uint64_t beforeShutdownCalls = ReadFakeStreamShutdownCalls();
+        if (!worker.DispatchEncodedEpollEventForTest(
+                worker.EncodeEpollRelayForTest(registered.RelayId),
+                EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4114;
+        }
+
+        if (ReadFakeStreamShutdownCalls() != beforeShutdownCalls) {
+            std::fprintf(stderr, "late TCP error after tcp_write_shutdown_complete must not abort stream\n");
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4115;
+        }
+
+        worker.Stop();
+        if (fds[1] >= 0) {
+            ::close(fds[1]);
+        }
+        MsQuic = nullptr;
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        ResetFakeStreamShutdownCalls();
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 128;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 4116;
+        }
+
+        int fds[2]{-1, -1};
+        if (!MakeTcpLoopbackPair(fds)) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 4117;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x5678));
+
+        TqRelayHandle handle{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = fakeStream;
+        registration.Handle = &handle;
+        registration.EnableQuicSends = false;
+        const TqLinuxRelayRegistrationResult registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) {
+            worker.Stop();
+            ::close(fds[1]);
+            MsQuic = nullptr;
+            return 4118;
+        }
+
+        linger rst{};
+        rst.l_onoff = 1;
+        rst.l_linger = 0;
+        (void)::setsockopt(fds[1], SOL_SOCKET, SO_LINGER, &rst, sizeof(rst));
+        ::close(fds[1]);
+        fds[1] = -1;
+
+        if (!worker.DispatchEncodedEpollEventForTest(
+                worker.EncodeEpollRelayForTest(registered.RelayId),
+                EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4119;
+        }
+
+        if (ReadFakeStreamShutdownCalls() != 1) {
+            std::fprintf(stderr, "active stream hard TCP error must abort stream exactly once\n");
+            worker.Stop();
+            if (fds[1] >= 0) {
+                ::close(fds[1]);
+            }
+            MsQuic = nullptr;
+            return 4120;
+        }
+
+        worker.Stop();
+        if (fds[1] >= 0) {
+            ::close(fds[1]);
+        }
+        MsQuic = nullptr;
     }
 
     {
