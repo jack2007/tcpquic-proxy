@@ -683,6 +683,7 @@ private:
     std::atomic<uint64_t> QuicReceiveTcpBufferAcquireAllocFailures{0};
     std::atomic<uint64_t> TcpWriteHardErrors{0};
     std::atomic<uint64_t> LastTcpWriteErrno{0};
+    std::atomic<uint64_t> LateTcpErrorAfterStreamShutdown{0};
     std::atomic<uint64_t> TcpReadHardErrors{0};
     std::atomic<uint64_t> LastTcpReadErrno{0};
     std::atomic<uint64_t> FatalRelayResets{0};

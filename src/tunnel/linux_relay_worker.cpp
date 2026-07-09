@@ -3470,6 +3470,9 @@ void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
             relay->TcpFd,
             socketError);
         if (socketError != 0) {
+            if (relay->StreamShutdownComplete) {
+                LateTcpErrorAfterStreamShutdown.fetch_add(1);
+            }
             relay->LastTcpWriteErrno = static_cast<uint64_t>(socketError);
             LastTcpWriteErrno.store(static_cast<uint64_t>(socketError));
             RecordError(RelayErrorKind::TcpWriteHard);
@@ -3734,6 +3737,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
         QuicReceiveTcpBufferAcquireAllocFailures.load();
     snapshot.TcpWriteHardErrors = TcpWriteHardErrors.load();
     snapshot.LastTcpWriteErrno = LastTcpWriteErrno.load();
+    snapshot.LateTcpErrorAfterStreamShutdown = LateTcpErrorAfterStreamShutdown.load();
     snapshot.TcpReadHardErrors = TcpReadHardErrors.load();
     snapshot.LastTcpReadErrno = LastTcpReadErrno.load();
     snapshot.FatalRelayResets = FatalRelayResets.load();
@@ -4341,6 +4345,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
         total.TcpWriteHardErrors += snapshot.TcpWriteHardErrors;
         total.LastTcpWriteErrno =
             snapshot.LastTcpWriteErrno != 0 ? snapshot.LastTcpWriteErrno : total.LastTcpWriteErrno;
+        total.LateTcpErrorAfterStreamShutdown += snapshot.LateTcpErrorAfterStreamShutdown;
         total.LastQuicSendStatus =
             snapshot.LastQuicSendStatus != 0 ? snapshot.LastQuicSendStatus : total.LastQuicSendStatus;
     }
