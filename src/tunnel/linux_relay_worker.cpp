@@ -428,6 +428,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool Closing{false};
     bool TcpReadClosed{false};
     bool TcpWriteClosed{false};
+    bool StreamShutdownComplete{false};
     bool QuicSendFinSubmitted{false};
     bool QuicSendFinCompleted{false};
     uint64_t OutstandingQuicSends{0};
@@ -863,6 +864,7 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
         return;
     }
     const bool alreadyClosing = relay->Closing;
+    const bool abortQuicStream = !alreadyClosing && abortStream && HasAbortableStream(relay);
     SetRelayStop(relay, trigger);
     relay->Closing = true;
     if (EpollFd >= 0 && relay->TcpFd >= 0) {
@@ -873,7 +875,7 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
         relay->TcpFd = -1;
     }
     auto* binding = relay->StreamBinding;
-    if (!alreadyClosing && abortStream && relay->Stream != nullptr && relay->Stream->Handle != nullptr) {
+    if (abortQuicStream) {
         (void)relay->Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
     }
     if (binding != nullptr) {
@@ -2080,6 +2082,23 @@ bool TqLinuxRelayWorker::HasPendingAfterStreamShutdown(RelayState* relay) const 
            relay->QuicSendFinSubmitted != relay->QuicSendFinCompleted;
 }
 
+bool TqLinuxRelayWorker::HasAbortableStream(RelayState* relay) const {
+    if (relay == nullptr ||
+        relay->Closing ||
+        relay->StreamShutdownComplete ||
+        relay->TcpWriteClosed ||
+        relay->Stream == nullptr) {
+        return false;
+    }
+    auto* binding = relay->StreamBinding;
+    if (binding == nullptr ||
+        binding->Closing.load(std::memory_order_acquire) ||
+        binding->Relay.load(std::memory_order_acquire) != relay) {
+        return false;
+    }
+    return relay->Stream->Handle != nullptr;
+}
+
 void TqLinuxRelayWorker::CompleteAndDiscardQuicReceive(TqPendingQuicReceive& view) {
     const uint64_t remaining = view.TotalLength >= view.CompletedLength
         ? view.TotalLength - view.CompletedLength
@@ -2463,6 +2482,7 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
     if (relay == nullptr || relay->Closing) {
         return;
     }
+    relay->StreamShutdownComplete = true;
     TraceRelayStreamEvent(
         relay.get(),
         "shutdown_complete",
@@ -2494,6 +2514,9 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
             false);
     }
 #endif
+    auto* binding = relay->StreamBinding;
+    MsQuicStream* stream = relay->Stream;
+    DetachRelayStreamBinding(relay.get(), stream, binding);
     const bool hasPending = HasPendingAfterStreamShutdown(relay.get());
     if (hasPending) {
         FatalRelayResets.fetch_add(1);
@@ -2510,7 +2533,6 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
             relay->OutstandingQuicSendBytes);
         AbortRelayAndRelease(relay.get(), "stream_shutdown_complete_with_pending", false);
     } else {
-        DetachRelayStreamBinding(relay.get(), relay->Stream, relay->StreamBinding);
         MaybeStopFullyClosedRelay(relay.get(), "stream_shutdown_complete");
     }
 }

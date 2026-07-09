@@ -257,6 +257,7 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t QuicReceiveTcpBufferAcquireAllocFailures{0};
     uint64_t TcpWriteHardErrors{0};
     uint64_t LastTcpWriteErrno{0};
+    uint64_t LateTcpErrorAfterStreamShutdown{0};
     uint64_t TcpReadHardErrors{0};
     uint64_t LastTcpReadErrno{0};
     uint64_t FatalRelayResets{0};
@@ -492,6 +493,7 @@ private:
         RelayState* relay,
         MsQuicStream* stream,
         StreamRelayBinding* binding);
+    bool HasAbortableStream(RelayState* relay) const;
     bool HasPendingAfterStreamShutdown(RelayState* relay) const;
     void CompleteAndDiscardQuicReceive(TqPendingQuicReceive& view);
     void FailRelayFatal(RelayState* relay, const char* trigger, bool abortStream);
