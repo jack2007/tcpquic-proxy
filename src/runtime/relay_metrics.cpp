@@ -330,6 +330,8 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpWriteBurstStops = snapshot.TcpWriteBurstStops;
     metrics.ReadDisabledCount = snapshot.ReadDisabledCount;
     metrics.LinuxRelayFakeFinReceiveCount = snapshot.FakeFinReceiveCount;
+    metrics.LinuxRelayLateTcpErrorAfterStreamShutdown =
+        snapshot.LateTcpErrorAfterStreamShutdown;
     metrics.LinuxRelayStreamLookupScanCount = snapshot.StreamLookupScanCount;
     metrics.CompressedTcpBytes = snapshot.CompressedTcpBytes;
     metrics.DecompressedTcpBytes = snapshot.DecompressedTcpBytes;
@@ -744,6 +746,8 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
     out << ",\"linux_relay_read_disabled_count\":" << metrics.ReadDisabledCount;
     out << ",\"linux_relay_fake_fin_receive_count\":"
         << metrics.LinuxRelayFakeFinReceiveCount;
+    out << ",\"linux_relay_late_tcp_error_after_stream_shutdown\":"
+        << metrics.LinuxRelayLateTcpErrorAfterStreamShutdown;
     out << ",\"linux_relay_stream_lookup_scan_count\":"
         << metrics.LinuxRelayStreamLookupScanCount;
     out << ',';

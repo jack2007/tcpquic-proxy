@@ -76,6 +76,7 @@ struct TqRelayMetricsSnapshot {
     uint64_t TcpWriteBurstStops{0};
     uint64_t ReadDisabledCount{0};
     uint64_t LinuxRelayFakeFinReceiveCount{0};
+    uint64_t LinuxRelayLateTcpErrorAfterStreamShutdown{0};
     uint64_t LinuxRelayStreamLookupScanCount{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};

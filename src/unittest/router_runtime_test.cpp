@@ -1546,6 +1546,7 @@ int main() {
         if (bodyText.find("\"linux_relay_tcp_write_bytes\"") == std::string::npos) return 100;
         if (bodyText.find("\"linux_relay_read_disabled_count\"") == std::string::npos) return 101;
         if (bodyText.find("\"linux_relay_fake_fin_receive_count\":") == std::string::npos) return 372;
+        if (bodyText.find("\"linux_relay_late_tcp_error_after_stream_shutdown\":") == std::string::npos) return 374;
         if (bodyText.find("\"linux_relay_stream_lookup_scan_count\":") == std::string::npos) return 373;
 #if defined(__linux__)
         if (bodyText.find("\"linux_relay_backend\":\"epoll\"") == std::string::npos) return 235;
