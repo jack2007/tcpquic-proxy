@@ -114,6 +114,51 @@ std::string TqReadTextFile(const std::filesystem::path& path) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+bool TqContainsCjk(std::string_view text) {
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char ch = static_cast<unsigned char>(text[i]);
+        uint32_t codepoint = 0;
+        size_t width = 0;
+        if (ch < 0x80) {
+            codepoint = ch;
+            width = 1;
+        } else if ((ch & 0xe0) == 0xc0 && i + 1 < text.size()) {
+            codepoint = ((ch & 0x1f) << 6) |
+                (static_cast<unsigned char>(text[i + 1]) & 0x3f);
+            width = 2;
+        } else if ((ch & 0xf0) == 0xe0 && i + 2 < text.size()) {
+            codepoint = ((ch & 0x0f) << 12) |
+                ((static_cast<unsigned char>(text[i + 1]) & 0x3f) << 6) |
+                (static_cast<unsigned char>(text[i + 2]) & 0x3f);
+            width = 3;
+        } else if ((ch & 0xf8) == 0xf0 && i + 3 < text.size()) {
+            codepoint = ((ch & 0x07) << 18) |
+                ((static_cast<unsigned char>(text[i + 1]) & 0x3f) << 12) |
+                ((static_cast<unsigned char>(text[i + 2]) & 0x3f) << 6) |
+                (static_cast<unsigned char>(text[i + 3]) & 0x3f);
+            width = 4;
+        } else {
+            ++i;
+            continue;
+        }
+        if ((codepoint >= 0x3400 && codepoint <= 0x9fff) ||
+            (codepoint >= 0xf900 && codepoint <= 0xfaff)) {
+            return true;
+        }
+        i += width;
+    }
+    return false;
+}
+
+std::string_view TqHtmlSection(std::string_view html, std::string_view id) {
+    const std::string needle = "<section id=\"" + std::string(id) + "\"";
+    const size_t start = html.find(needle);
+    if (start == std::string_view::npos) return {};
+    const size_t end = html.find("</section>", start);
+    if (end == std::string_view::npos) return html.substr(start);
+    return html.substr(start, end + std::string_view("</section>").size() - start);
+}
+
 std::filesystem::path TqSecureTokenFile(const std::string& name) {
     static unsigned counter = 0;
     std::filesystem::path dir = std::filesystem::temp_directory_path() /
@@ -174,8 +219,92 @@ int main() {
         if (html.find("Create/Edit Peer") == std::string_view::npos) return 303;
         if (html.find("remote_identity") != std::string_view::npos) return 304;
         if (html.find("transferred_bytes") != std::string_view::npos) return 305;
+        if (html.find("id=\"language-select\"") == std::string_view::npos) return 644;
+        if (html.find("data-i18n=\"action.refreshNow\"") == std::string_view::npos) return 645;
+        if (html.find("data-i18n=\"login.title\"") == std::string_view::npos) return 646;
+        if (html.find("data-i18n=\"config.rulesTitle\"") == std::string_view::npos) return 647;
+        if (html.find("class=\"login-layout\"") == std::string_view::npos) return 562;
+        if (html.find("<h3 data-i18n=\"login.title\">Sign in</h3>") == std::string_view::npos) return 563;
+        if (html.find("Use the admin token from the token JSON file.") == std::string_view::npos) return 564;
+        if (html.find("<h3>边界</h3>") != std::string_view::npos) return 565;
+        if (html.find("静态资源无需认证") != std::string_view::npos) return 572;
+        if (html.find("用户名") != std::string_view::npos) return 566;
+        if (html.find("Overview summarizes peer, connection, tunnel, and stream activity for the client runtime.") == std::string_view::npos) return 573;
+        if (html.find("configured peers and current peer state") == std::string_view::npos) return 574;
+        if (html.find("active tunnel sessions") == std::string_view::npos) return 575;
+        if (html.find("enabled peers from /api/v1/peers") != std::string_view::npos) return 576;
+        if (html.find("from /api/v1/tunnels") != std::string_view::npos) return 577;
+        if (html.find("id=\"client-overview-peers\"") != std::string_view::npos) return 579;
+        if (html.find("<div class=\"grid overview-grid\">") == std::string_view::npos) return 580;
+        if (html.find("card span-6 metric overview-metric") == std::string_view::npos) return 581;
+        if (html.find("Overview summarizes peer, connection, tunnel, and ACL activity for the server runtime.") == std::string_view::npos) return 585;
+        if (html.find("remote peers with active server-side state") == std::string_view::npos) return 586;
+        if (html.find("id=\"server-overview-peers\"") != std::string_view::npos) return 587;
+        const std::string_view clientPeersSection = TqHtmlSection(html, "client-peers");
+        const std::string_view clientConnectionsSection = TqHtmlSection(html, "client-connections");
+        const std::string_view clientTunnelsSection = TqHtmlSection(html, "client-tunnels");
+        const std::string_view serverPeersSection = TqHtmlSection(html, "server-peers");
+        const std::string_view serverConnectionsSection = TqHtmlSection(html, "server-connections");
+        const std::string_view serverTunnelsSection = TqHtmlSection(html, "server-tunnels");
+        const std::string_view serverAclSection = TqHtmlSection(html, "server-acl");
+        const std::string_view relaySection = TqHtmlSection(html, "relay");
+        const std::string_view configSection = TqHtmlSection(html, "config");
+        const std::string_view diagnosticsSection = TqHtmlSection(html, "diagnostics");
+        if (TqContainsCjk(clientPeersSection)) return 590;
+        if (TqContainsCjk(clientConnectionsSection)) return 591;
+        if (TqContainsCjk(clientTunnelsSection)) return 592;
+        if (TqContainsCjk(serverPeersSection)) return 593;
+        if (TqContainsCjk(serverConnectionsSection)) return 594;
+        if (TqContainsCjk(serverTunnelsSection)) return 595;
+        if (TqContainsCjk(serverAclSection)) return 617;
+        if (TqContainsCjk(relaySection)) return 596;
+        if (TqContainsCjk(configSection)) return 618;
+        if (TqContainsCjk(diagnosticsSection)) return 619;
+        if (clientConnectionsSection.find("/api/v1") != std::string_view::npos) return 597;
+        if (clientTunnelsSection.find("/api/v1") != std::string_view::npos) return 598;
+        if (serverConnectionsSection.find("/api/v1") != std::string_view::npos) return 599;
+        if (serverTunnelsSection.find("/api/v1") != std::string_view::npos) return 600;
+        if (serverAclSection.find("/api/v1") != std::string_view::npos) return 620;
+        if (relaySection.find("/api/v1") != std::string_view::npos) return 601;
+        if (configSection.find("/api/v1") != std::string_view::npos) return 621;
+        if (diagnosticsSection.find("/api/v1") != std::string_view::npos) return 622;
+        if (html.find("Client peers are configurable entries that can be created, edited, or deleted.") == std::string_view::npos) return 602;
+        if (html.find("quic_peer addresses") == std::string_view::npos) return 603;
+        if (html.find("Path settings") == std::string_view::npos) return 604;
+        if (html.find("Provide either quic_peer addresses or a paths array.") == std::string_view::npos) return 605;
+        if (html.find("Server peers are read-only runtime groups built from current server connections.") == std::string_view::npos) return 606;
+        if (html.find("Relay shows the active relay backend, worker totals, pending bytes, and platform capabilities.") == std::string_view::npos) return 607;
+        if (html.find("Edit allow_targets and deny_targets, then save to apply new ACL rules to subsequent tunnels.") == std::string_view::npos) return 623;
+        if (html.find("Rule summary") == std::string_view::npos) return 624;
+        if (html.find("Status") == std::string_view::npos) return 625;
+        if (html.find("One CIDR per line, or paste a comma-separated list.") == std::string_view::npos) return 626;
+        if (html.find("Edit the client router configuration here. Runtime patch updates only safe live fields, while startup-level settings still require a restart.") == std::string_view::npos) return 627;
+        if (html.find("Submission rules") == std::string_view::npos) return 628;
+        if (html.find("Router JSON can be validated and submitted from this page.") == std::string_view::npos) return 629;
+        if (html.find("Runtime patch updates only compression and tuning fields that are safe to change live.") == std::string_view::npos) return 630;
+        if (html.find("<div class=\"config-layout\"><div class=\"card\"><textarea id=\"config-json\">{}</textarea></div><aside class=\"drawer\">") == std::string_view::npos) return 640;
+        if (html.find("Diagnostics controls trace and diag_stats updates, while allocator dump remains a separate operations action.") == std::string_view::npos) return 631;
+        if (html.find("Diagnostics controls") == std::string_view::npos) return 632;
+        if (html.find("The form reflects the current diagnostics configuration and refreshes after each save.") == std::string_view::npos) return 633;
+        if (html.find("write trace logs") == std::string_view::npos) return 634;
+        if (html.find("periodic stderr statistics") == std::string_view::npos) return 635;
+        if (html.find("Run explicitly") == std::string_view::npos) return 636;
+        if (html.find("Write allocator statistics to the log and refresh the summary below.") == std::string_view::npos) return 637;
+        if (html.find("Allocator result") == std::string_view::npos) return 638;
+        if (html.find("Waiting for allocator dump") == std::string_view::npos) return 639;
+        if (html.find("Server mode does not configure peers here, so Create/Edit/Delete actions are not available.") != std::string_view::npos) return 608;
+        if (html.find("The current connection snapshot includes remote address, state, stream counters, active tunnel count, and the last error.") != std::string_view::npos) return 609;
         if (css.find(".sidebar") == std::string_view::npos) return 306;
         if (js.find("sessionStorage") == std::string_view::npos) return 307;
+        if (js.find("const translations = {") == std::string_view::npos) return 648;
+        if (js.find("zh: {") == std::string_view::npos) return 649;
+        if (js.find("en: {") == std::string_view::npos) return 650;
+        if (js.find("localStorage.getItem('tcpquic.admin.lang')") == std::string_view::npos) return 651;
+        if (js.find("localStorage.setItem('tcpquic.admin.lang', lang);") == std::string_view::npos) return 652;
+        if (js.find("function applyI18n()") == std::string_view::npos) return 653;
+        if (js.find("document.querySelectorAll('[data-i18n]'") == std::string_view::npos) return 654;
+        if (js.find("document.documentElement.lang = consoleState.lang;") == std::string_view::npos) return 655;
+        if (js.find("function tr(key)") == std::string_view::npos) return 656;
         if (css.find(".span-4") == std::string_view::npos) return 308;
         if (css.find(".span-8") == std::string_view::npos) return 309;
         if (css.find("--pico-font-family") == std::string_view::npos) return 509;
@@ -200,6 +329,15 @@ int main() {
         if (!TqCssRuleHasDeclaration(css, ".allocator-result-panel", "background:var(--tq-panel)")) return 561;
         if (!TqCssRuleHasDeclaration(css, ".diagnostics-save-row .btn.primary", "width:100%")) return 547;
         if (!TqCssRuleHasDeclaration(css, ".diagnostics-save-row .btn.primary", "min-width:132px")) return 548;
+        if (!TqCssRuleHasDeclaration(css, ".login-layout", "display:grid")) return 567;
+        if (!TqCssRuleHasDeclaration(css, ".login-layout", "justify-content:center")) return 568;
+        if (!TqCssRuleHasDeclaration(css, ".login-card", "max-width:420px")) return 569;
+        if (!TqCssRuleHasDeclaration(css, ".config-layout", "display:grid")) return 641;
+        if (!TqCssRuleHasDeclaration(css, ".config-layout", "grid-template-columns:1fr")) return 642;
+        if (!TqCssRuleHasDeclaration(css, "#config-json", "min-height:420px")) return 643;
+        if (!TqCssRuleHasDeclaration(css, ".overview-grid", "grid-template-columns:repeat(2,minmax(0,1fr))")) return 582;
+        if (!TqCssRuleHasDeclaration(css, ".overview-grid .span-6", "grid-column:span 1")) return 588;
+        if (!TqCssRuleHasDeclaration(css, ".overview-metric", "min-height:150px")) return 583;
         if (html.find("data-theme=\"light\"") == std::string_view::npos) return 514;
         if (html.find("<aside class=\"sidebar\">") == std::string_view::npos) return 515;
         if (html.find("<main class=\"main\">") == std::string_view::npos) return 516;
@@ -208,7 +346,7 @@ int main() {
         if (js.find("No rows returned") == std::string_view::npos) return 519;
         if (js.find("function renderRows(tbody, rows, columns, emptyColspan = columns.length)") == std::string_view::npos) return 520;
         if (js.find("renderRows(tbody, rows, ['peer_id','state','enabled','quic_peer','socks_listen','http_listen','connection_count','connected_connections','active_streams','total_streams','reconnects','last_error'], 13);") == std::string_view::npos) return 521;
-        if (js.find("renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','path','local','peer','active_tunnels','last_error'], 13);") == std::string_view::npos) return 522;
+        if (js.find("renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','encryption','path','local','peer','active_tunnels','last_error'], 14);") == std::string_view::npos) return 522;
         if (js.find("if (!tbody || rows.length === 0) return;") == std::string_view::npos) return 523;
         if (js.find("username === 'raypx2'") == std::string_view::npos) return 310;
         if (js.find("sessionStorage.setItem('tcpquic_admin_token'") == std::string_view::npos) return 311;
@@ -216,7 +354,11 @@ int main() {
         if (js.find("if (!consoleState.token && pageId !== 'login') return 'login';") == std::string_view::npos) return 525;
         if (js.find("const knownPage = authenticatedPage(pageId);") == std::string_view::npos) return 526;
         if (js.find("sessionStorage.removeItem('tcpquic.admin.page');") == std::string_view::npos) return 527;
-        if (js.find("const navPages = consoleState.token ? pageDefs[consoleState.role] : pageDefs[consoleState.role].filter(([id]) => id === 'login');") == std::string_view::npos) return 528;
+        if (js.find("Username must be raypx2.") == std::string_view::npos) return 570;
+        if (js.find("'login.usernameError': '用户名必须是 raypx2。'") == std::string_view::npos) return 571;
+        if (js.find("const navPages = pageDefs[consoleState.role].filter(([id]) => consoleState.token ? id !== 'login' : id === 'login');") == std::string_view::npos) return 528;
+        if (js.find("renderRows(document.getElementById('client-overview-peers')") != std::string_view::npos) return 584;
+        if (js.find("renderRows(document.getElementById('server-overview-peers')") != std::string_view::npos) return 589;
         if (js.find("renderNav();\n      showPage('login');") == std::string_view::npos) return 529;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
         if (js.find("api('/admin'") == std::string_view::npos) return 313;
@@ -224,7 +366,7 @@ int main() {
         if (js.find("JSON.stringify") == std::string_view::npos) return 315;
         if (js.find("typeof data.error === 'string'") == std::string_view::npos) return 316;
         if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
-        if (js.find("catch (error) {\n        healthPill.innerHTML = '<span class=\"dot warn\"></span><strong>health</strong> degraded';\n        refreshPill.innerHTML = `<strong>refresh</strong> ${escapeHtml(error.message)}`;") == std::string_view::npos) return 318;
+        if (js.find("catch (error) {\n        setHealth(tr('status.degraded'), 'warn');\n        setRefresh(error.message);") == std::string_view::npos) return 318;
         if (js.find("button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));") == std::string_view::npos) return 319;
         if (js.find("peerMode: 'create'") == std::string_view::npos) return 321;
         if (js.find("function beginCreatePeer()") == std::string_view::npos) return 322;
@@ -238,9 +380,9 @@ int main() {
         if (TqCssRuleHasDeclaration(css, ".peer-form-grid .field.wide", "grid-column:span 2")) return 330;
         if (css.find("@media(max-width:1100px){.peer-form-grid{grid-template-columns:repeat(2,minmax(0,1fr))}") == std::string_view::npos) return 331;
         if (html.find("<div class=\"form peer-form-grid\">") == std::string_view::npos) return 332;
-        if (html.find("<div class=\"field\"><label>peer_id</label><input id=\"peer-id\" value=\"\"></div><div class=\"field\"><label>peers address - quic_peer 模式</label><input id=\"peer-quic-peer\" value=\"\"></div><div class=\"field\"><label>connections</label><input id=\"peer-connections\" type=\"number\" min=\"1\" max=\"128\" value=\"1\"></div>") == std::string_view::npos) return 333;
+        if (html.find("<div class=\"field\"><label>peer_id</label><input id=\"peer-id\" value=\"\"></div><div class=\"field\"><label>quic_peer addresses</label><input id=\"peer-quic-peer\" value=\"\"></div><div class=\"field\"><label>connections</label><input id=\"peer-connections\" type=\"number\" min=\"1\" max=\"128\" value=\"1\"></div>") == std::string_view::npos) return 333;
         if (html.find("<div class=\"field\"><label>socks_listen</label><input id=\"peer-socks-listen\" value=\"127.0.0.1:1080\"></div><div class=\"field\"><label>http_listen</label><input id=\"peer-http-listen\" value=\"127.0.0.1:8080\"></div><div class=\"field\"><label>enabled</label><select id=\"peer-enabled\"><option>true</option><option>false</option></select></div>") == std::string_view::npos) return 373;
-        if (html.find("<div class=\"field\"><label>paths 模式</label><textarea id=\"peer-paths\" style=\"min-height:88px\">[]</textarea></div><div class=\"field\"><label>port_forwards</label><textarea id=\"peer-port-forwards\" style=\"min-height:88px\">[]</textarea></div>") == std::string_view::npos) return 374;
+        if (html.find("<div class=\"field\"><label>Path settings</label><textarea id=\"peer-paths\" style=\"min-height:88px\">[]</textarea></div><div class=\"field\"><label>port_forwards</label><textarea id=\"peer-port-forwards\" style=\"min-height:88px\">[]</textarea></div>") == std::string_view::npos) return 374;
         if (html.find("peer-json-advanced") != std::string_view::npos) return 375;
         if (html.find("JSON advanced") != std::string_view::npos) return 376;
         if (js.find("peer-json-advanced") != std::string_view::npos) return 377;
@@ -282,6 +424,7 @@ int main() {
         if (html.find("id=\"client-connections-peer\"") != std::string_view::npos) return 420;
         if (html.find("<th>actions</th>") == std::string_view::npos) return 421;
         if (html.find("id=\"client-connection-detail\"") == std::string_view::npos) return 422;
+        if (html.find("<th>connection_id</th><th>peer_id</th><th>slot_index</th><th>generation</th><th>connected</th><th>retry_scheduled</th><th>state</th><th>encryption</th><th>path</th><th>local</th><th>peer</th><th>active_tunnels</th><th>last_error</th><th>actions</th>") == std::string_view::npos) return 610;
         if (js.find("async function loadAllClientConnections()") == std::string_view::npos) return 423;
         if (js.find("renderClientConnectionDetail") == std::string_view::npos) return 424;
         if (js.find("setRole('client');") != std::string_view::npos) return 425;
@@ -290,8 +433,8 @@ int main() {
         if (html.find("client-peers") == std::string_view::npos) return 335;
         if (html.find("client-connections") == std::string_view::npos) return 336;
         if (html.find("client-tunnels") == std::string_view::npos) return 337;
-        if (html.find("peers address - quic_peer") == std::string_view::npos) return 338;
-        if (html.find("paths 模式") == std::string_view::npos) return 339;
+        if (html.find("quic_peer addresses") == std::string_view::npos) return 338;
+        if (html.find("Path settings") == std::string_view::npos) return 339;
         if (html.find("127.0.0.1:1080") == std::string_view::npos) return 340;
         if (html.find("127.0.0.1:8080") == std::string_view::npos) return 341;
         if (html.find("connected_at") != std::string_view::npos) return 342;
@@ -300,6 +443,7 @@ int main() {
         if (js.find("renderClientOverview") == std::string_view::npos) return 345;
         if (js.find("renderClientPeers") == std::string_view::npos) return 346;
         if (js.find("renderClientConnections") == std::string_view::npos) return 347;
+        if (js.find("renderRows(tbody, rows, ['connection_id','peer_id','slot_index','generation','connected','retry_scheduled','state','encryption','path','local','peer','active_tunnels','last_error'], 14);") == std::string_view::npos) return 611;
         if (js.find("renderClientTunnels") == std::string_view::npos) return 348;
         if (html.find("server-overview") == std::string_view::npos) return 349;
         if (html.find("server-peers") == std::string_view::npos) return 350;
@@ -315,7 +459,10 @@ int main() {
         if (html.find("peer 名称优先使用 client_name") != std::string_view::npos) return 577;
         if (html.find("TqServerConnectionSnapshot 已有 client_name") != std::string_view::npos) return 578;
         if (html.find("<th>encryption</th>") == std::string_view::npos) return 572;
-        if (html.find("remote source") == std::string_view::npos) return 354;
+        if (html.find("Remote source details are not reported here") == std::string_view::npos) return 354;
+        if (js.find("disabled (insecure)") != std::string_view::npos) return 612;
+        if (js.find("return '<span class=\"state err\">disabled</span>';") == std::string_view::npos) return 613;
+        if (js.find("return '<span class=\"state ok\">enabled</span>';") == std::string_view::npos) return 614;
         if (html.find("remote_identity") != std::string_view::npos) return 355;
         if (html.find("first_seen") != std::string_view::npos) return 356;
         if (html.find("last_seen") != std::string_view::npos) return 357;
@@ -336,7 +483,9 @@ int main() {
         if (js.find("['connection_id','peer','client_name','remote_address','state','encryption','active_streams','total_streams_opened','active_tunnels','last_error']") != std::string_view::npos) return 573;
         if (js.find("['connection_id','peer','remote_address','state','encryption','active_streams','total_streams_opened','active_tunnels','last_error']") == std::string_view::npos) return 580;
         if (js.find("if (column === 'encryption')") == std::string_view::npos) return 574;
-        if (js.find("disabled (insecure)") == std::string_view::npos) return 575;
+        if (js.find("disabled (insecure)") != std::string_view::npos) return 575;
+        if (js.find("return '<span class=\"state err\">disabled</span>';") == std::string_view::npos) return 615;
+        if (js.find("return '<span class=\"state ok\">enabled</span>';") == std::string_view::npos) return 616;
         if (js.find("peerNameFromRemote") == std::string_view::npos) return 568;
         if (js.find("remote_address_set") == std::string_view::npos) return 569;
         if (js.find("includes(connection.remote_address)") == std::string_view::npos) return 570;
