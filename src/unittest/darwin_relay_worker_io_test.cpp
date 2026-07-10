@@ -5083,7 +5083,6 @@ int main() {
     TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard();
     ManagedStaleSendCompletionEnvelopeDoesNotClaimTwice();
     LateReceiveAfterInactiveBindingUsesFailSafeSink();
-    return 0;
     LeaseHeldDeferredReceiveDoesNotDiscard();
     ManagedRouterDispatchesShutdownComplete();
     ManagedTerminalCallbackReturnsBeforeEventDrained();

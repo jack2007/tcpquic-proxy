@@ -2642,7 +2642,7 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
         return result;
     };
 
-    if (binding == nullptr || stream == nullptr) {
+    if (binding == nullptr) {
         return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
     }
     auto receive = BuildPendingQuicReceive(
@@ -2694,7 +2694,7 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
             binding->CallbackPendingQuicReceives.push_back(receive);
         }
         binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
-        PauseMsQuicReceiveFromCallback(stream);
+        PauseMsQuicReceiveFromCallback(receive->ReceiveCompleteStream);
         (void)Wake();
         return TqDarwinQuicReceiveEnqueueResult::EventQueueFull;
     }
@@ -3181,6 +3181,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             }
             if (receive->CompletedLength >= receive->TotalLength &&
                 receive->PendingCompleteBytes > 0) {
+                // Bookkeeping-only complete when TryAcquireApi fails without an
+                // installed stream wrapper (precommit discard); not a MsQuic call.
                 if (!receive->TryClaimCompletionDispatch()) {
                     return;
                 }
