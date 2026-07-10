@@ -275,6 +275,7 @@ public:
     bool TestMarkTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestCompleteTcpRecvInFlightForRetirement(uint64_t relayId);
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
+    bool TestReleaseQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestMarkTcpSendInFlightForTest(uint64_t relayId);
     bool TestRecordIocpCompletionErrorForTest(uint64_t relayId, bool tcpSend, DWORD error);
     bool TestHandleTcpPostFailureForTest(uint64_t relayId, int error);
@@ -534,7 +535,9 @@ private:
     void ActiveFlushBatchedDeferredReceiveCompletion(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqStreamLifetime>& streamOwner);
-    void ActiveCompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
+    void ActiveCompleteRemainingReceiveOwnership(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsPendingQuicReceive& view);
     void DiscardRemainingReceiveOwnership(
         const std::shared_ptr<RelayContext>& relay,
         TqWindowsPendingQuicReceive& view);

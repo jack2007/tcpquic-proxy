@@ -360,5 +360,29 @@ int main() {
         if (target->Calls != 1) return 71;
     }
 
+    {
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started, target);
+        unsigned sendCleanups = 0;
+        void* sendKey = owner->RegisterSendCompletion(nullptr, [&] { ++sendCleanups; });
+        if (sendKey == nullptr) return 72;
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)owner->DispatchForTest(&terminal);
+        if (owner->GetPhase() != TqStreamLifetime::Phase::TerminalPublished) return 73;
+        QUIC_STREAM_EVENT complete{};
+        complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        complete.SEND_COMPLETE.ClientContext = sendKey;
+        (void)owner->DispatchForTest(&complete);
+        if (sendCleanups != 1 || target->Calls != 2) return 74;
+        (void)owner->DispatchForTest(&complete);
+        if (sendCleanups != 1) return 75;
+        if (owner->InjectSendCompletionForTest(
+                sendKey, nullptr, [] {})) {
+            return 76;
+        }
+    }
+
     return 0;
 }

@@ -422,6 +422,35 @@ bool TqStreamLifetime::CancelSendCompletion(void* clientContext) noexcept {
     return true;
 }
 
+#if defined(TQ_UNIT_TESTING)
+bool TqStreamLifetime::InjectSendCompletionForTest(
+    void* clientContext,
+    void* deliveredContext,
+    std::function<void()> completionCleanup) noexcept {
+    if (clientContext == nullptr) {
+        return false;
+    }
+    RouteSnapshot route{};
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        if ((Phase_ != Phase::Starting && Phase_ != Phase::Started) || !Target_) {
+            return false;
+        }
+        route.TargetOwner = Target_;
+        route.Generation = RouteGeneration_;
+    }
+    std::lock_guard<std::mutex> guard(g_sendCompletionLock);
+    g_sendCompletions.erase(clientContext);
+    return g_sendCompletions.emplace(
+        clientContext,
+        SendCompletionRetention{
+            shared_from_this(),
+            std::move(route),
+            deliveredContext,
+            std::move(completionCleanup)}).second;
+}
+#endif
+
 QUIC_STATUS TqStreamLifetime::RequestShutdown(
     ShutdownIntent intent,
     uint64_t errorCode) noexcept {

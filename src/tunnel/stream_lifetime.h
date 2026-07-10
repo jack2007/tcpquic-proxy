@@ -156,6 +156,12 @@ public:
         void* deliveredContext,
         std::function<void()> completionCleanup = {}) noexcept;
     bool CancelSendCompletion(void* clientContext) noexcept;
+#if defined(TQ_UNIT_TESTING)
+    bool InjectSendCompletionForTest(
+        void* clientContext,
+        void* deliveredContext,
+        std::function<void()> completionCleanup = {}) noexcept;
+#endif
     QUIC_STATUS RequestShutdown(ShutdownIntent intent, uint64_t errorCode = 0) noexcept;
 
     bool PublishTarget(
