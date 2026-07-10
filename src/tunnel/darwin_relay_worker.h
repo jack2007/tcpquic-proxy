@@ -8,6 +8,7 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_buffer.h"
+#include "stream_lifetime.h"
 #include "tuning.h"
 
 #include <atomic>
@@ -28,6 +29,9 @@ struct QUIC_STREAM_EVENT;
 struct TqDarwinRelayRegistration {
     TqSocketHandle TcpFd{TqInvalidSocket};
     MsQuicStream* Stream{nullptr};
+    // 新路径使用公共 manual-cleanup owner；非空时 worker 只发布 router
+    // target，不改写已经启动 wrapper 的 Callback/Context。
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
     TqRelayHandle* Handle{nullptr};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
@@ -37,6 +41,7 @@ struct TqDarwinRelayRegistration {
 
 struct TqDarwinRelayRegistrationResult {
     bool Ok{false};
+    bool TcpFdConsumed{false};
     uint64_t RelayId{0};
 };
 
@@ -184,6 +189,10 @@ struct TqDarwinRelayWorkerConfig {
     uint32_t MaxInFlightQuicSends{0};
     uint64_t MaxBufferedQuicSendBytes{0};
     size_t EventQueueCapacity{4096};
+#if defined(TCPQUIC_TESTING)
+    bool FailPrepareForTest{false};
+    bool FailCommitForTest{false};
+#endif
 };
 
 struct TqDarwinRelayWorkerSnapshot {
@@ -408,6 +417,15 @@ private:
     bool SetQuicReceiveEnabled(const std::shared_ptr<RelayState>& relay, bool enabled);
     void MaybePauseQuicReceive(const std::shared_ptr<RelayState>& relay);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayState>& relay);
+    QUIC_STATUS OnStreamEventWithBinding(
+        MsQuicStream* stream,
+        QUIC_STREAM_EVENT* event,
+        StreamBinding* binding) noexcept;
+    void ActivateManagedBinding(const std::shared_ptr<RelayState>& relay, StreamBinding* binding);
+    void FailManagedBinding(RelayState* relay, StreamBinding* binding);
+    void RequestRelayShutdown(
+        const std::shared_ptr<RelayState>& relay,
+        TqStreamLifetime::ShutdownIntent intent);
     void RetireRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
     void CloseRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
     void PurgeRetiredRelaysIfSafe();
@@ -445,7 +463,10 @@ private:
     static void ClearRetiredStreamCallbackIfSafe(StreamBinding* binding);
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
 
+    struct CallbackEndpoint;
+
     TqDarwinRelayWorkerConfig Config;
+    std::shared_ptr<CallbackEndpoint> StreamCallbackEndpoint;
     int KqueueFd{-1};
     std::atomic<bool> Running{false};
     mutable TqDarwinRelayEventQueue EventQueue;

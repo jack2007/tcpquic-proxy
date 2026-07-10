@@ -88,6 +88,10 @@ bool TqRelayStartImpl(
     handle->LinuxRelayId = registered.RelayId;
     return true;
 #elif defined(__APPLE__)
+    if (streamOwner == nullptr) {
+        TqRelayUnregisterActive();
+        return false;
+    }
     if (!TqDarwinRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
@@ -102,6 +106,7 @@ bool TqRelayStartImpl(
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = tcpFd;
     registration.Stream = stream;
+    registration.StreamOwner = std::move(streamOwner);
     registration.Handle = handle;
     registration.Compressor = compressor;
     registration.Decompressor = decompressor;
@@ -109,6 +114,9 @@ bool TqRelayStartImpl(
     registration.EnableQuicSends = true;
 
     const auto registered = worker->RegisterRelayWithId(registration);
+    if (tcpFdConsumed != nullptr) {
+        *tcpFdConsumed = registered.TcpFdConsumed;
+    }
     if (!registered.Ok) {
         TqRelayUnregisterActive();
         return false;

@@ -595,6 +595,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         unittest/darwin_relay_worker_queue_test.cpp
         unittest/trace_proxy_stub.cpp
         tunnel/darwin_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         ${TCPQUIC_PLATFORM_SOURCES}
@@ -610,6 +611,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         unittest/darwin_relay_worker_io_test.cpp
         unittest/trace_proxy_stub.cpp
         tunnel/darwin_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         ${TCPQUIC_PLATFORM_SOURCES}
