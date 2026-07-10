@@ -180,8 +180,21 @@ struct TqWindowsRelayRegistration {
 #if defined(TQ_UNIT_TESTING)
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
+    void (*AfterPublishHookForTest)(TqWindowsRelayWorker* worker, uint64_t relayId){nullptr};
 #endif
 };
+
+#if defined(TQ_UNIT_TESTING)
+struct TqWindowsTerminalOperationSnapshotForTest {
+    bool Pending{false};
+    uint64_t RelayId{0};
+    uint64_t Generation{0};
+    uint64_t ConnectionErrorCode{0};
+    uint32_t ConnectionCloseStatus{0};
+    bool HasBindingOwner{false};
+    bool HasRelayOwner{false};
+};
+#endif
 
 struct TqWindowsRelayRegistrationResult {
     bool Ok{false};
@@ -281,6 +294,15 @@ public:
     void SetMaintenanceBudgetForTest(size_t budget);
     bool TestScheduleMaintenanceForTest(uint64_t relayId);
     void TestDrainMaintenanceForTest();
+    bool TestGetTerminalOperationSnapshotForTest(
+        TqWindowsTerminalOperationSnapshotForTest* out) const;
+    bool TestGetBindingTerminalSealForTest(
+        uint64_t relayId,
+        bool* closing,
+        bool* relayHintNull) const;
+    bool TestBindingHasRelayHintForTest(uint64_t relayId) const;
+    bool TestDrainSingleTerminalShutdownForTest();
+    bool TestHasCommittedActiveRelayForTest() const;
 #endif
 
 #if defined(TQ_UNIT_TESTING)
@@ -311,6 +333,7 @@ private:
     struct CallbackEndpoint;
     struct RegisterRelayCommand;
     struct SnapshotCommand;
+    struct TerminalCleanupRecord;
 
     void Run();
     void PostStop();
@@ -341,6 +364,16 @@ private:
     void FailManagedBinding(
         const std::shared_ptr<RelayContext>& relay,
         WindowsStreamRelayBinding* binding);
+    void SealBindingAtTerminal(
+        const std::shared_ptr<RelayContext>& relay,
+        WindowsStreamRelayBinding* binding);
+    bool PostTerminalShutdownComplete(
+        const std::shared_ptr<WindowsStreamRelayBinding>& binding,
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t connectionErrorCode,
+        uint32_t connectionCloseStatus);
+    void ProcessTerminalShutdownComplete(
+        const TerminalCleanupRecord& record);
     bool QueuePrecommitQuicReceive(
         const std::shared_ptr<RelayContext>& relay,
         WindowsStreamRelayBinding* binding,
@@ -606,6 +639,9 @@ private:
     std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
+    std::atomic<uint32_t> TerminalOperationPendingCount_{0};
+    mutable std::mutex PendingTerminalCleanupLock_;
+    std::shared_ptr<TerminalCleanupRecord> PendingTerminalCleanupForTest_;
     std::atomic<DWORD> LastCallbackPostWin32Error_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};

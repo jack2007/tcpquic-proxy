@@ -5,6 +5,7 @@
 #include "windows_relay_worker.h"
 
 #include <atomic>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -1333,9 +1334,18 @@ bool TestWindowsRelaySendCompleteCallbackDoesNotFindRelayForTest() {
         return false;
     }
 
+    auto owner = worker.LastTestStreamOwnerForTest();
+    if (!owner) {
+        return false;
+    }
+    void* completionKey = owner->RegisterSendCompletion(operation);
+    if (completionKey == nullptr) {
+        return false;
+    }
+
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-    event.SEND_COMPLETE.ClientContext = operation;
+    event.SEND_COMPLETE.ClientContext = completionKey;
 
     const TqWindowsRelayWorkerSnapshot before = worker.Snapshot();
     if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
@@ -2005,6 +2015,415 @@ bool TestWindowsRelayManagedRegistrationForTest() {
     return ok;
 }
 
+std::shared_ptr<TqStreamLifetime> g_WindowsPrecommitOwner;
+std::array<uint8_t, 32> g_WindowsPrecommitPayload{};
+bool g_WindowsPrecommitSnapshotHidden = false;
+bool g_WindowsPrecommitPublishTerminal = false;
+
+void WindowsAfterManagedPublishHook(TqWindowsRelayWorker* worker, uint64_t relayId) {
+    (void)relayId;
+    g_WindowsPrecommitSnapshotHidden =
+        worker != nullptr && !worker->TestHasCommittedActiveRelayForTest();
+    if (g_WindowsPrecommitPublishTerminal && g_WindowsPrecommitOwner != nullptr) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)g_WindowsPrecommitOwner->DispatchForTest(&terminal);
+    }
+}
+
+bool TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        worker.Stop();
+        return false;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(11));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        TqCloseSocket(pair[0]);
+        TqCloseSocket(pair[1]);
+        return false;
+    }
+
+    TqWindowsRelayRegistration registration{};
+    registration.TcpFd = pair[0];
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        return false;
+    }
+
+    const void* expectedCallback = stream->Callback;
+    const void* expectedContext = stream->Context;
+    std::weak_ptr<TqStreamLifetime> weak = owner;
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
+            result.StopControl->Generation.load(std::memory_order_acquire));
+        worker.Stop();
+        TqCloseSocket(pair[1]);
+        return false;
+    }
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionErrorCode = 42;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_SUCCESS;
+    (void)owner->DispatchForTest(&shutdown);
+
+    const bool phaseOk =
+        owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+    const bool routeEmpty = owner->TargetContextForTest() == nullptr;
+    bool closing = false;
+    bool relayHintNull = false;
+    const bool sealOk = worker.TestGetBindingTerminalSealForTest(
+        result.RelayId, &closing, &relayHintNull) &&
+        closing && relayHintNull;
+    TqWindowsTerminalOperationSnapshotForTest terminal{};
+    const bool terminalPending =
+        worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
+        terminal.Pending &&
+        terminal.HasBindingOwner &&
+        terminal.RelayId == result.RelayId &&
+        terminal.Generation == result.RelayGeneration &&
+        terminal.ConnectionErrorCode == 42;
+    const bool routerStable =
+        stream->Callback == expectedCallback && stream->Context == expectedContext;
+    const bool retainedWhilePending = weak.use_count() > 1;
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    const auto drainDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    bool drained = false;
+    while (std::chrono::steady_clock::now() < drainDeadline) {
+        TqWindowsTerminalOperationSnapshotForTest after{};
+        (void)worker.TestGetTerminalOperationSnapshotForTest(&after);
+        if (!after.Pending) {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
+        result.StopControl->Generation.load(std::memory_order_acquire));
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    return phaseOk && routeEmpty && sealOk && terminalPending && routerStable &&
+        retainedWhilePending && drained;
+}
+
+bool TestWindowsRelayTerminalOperationStrongOwnerForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(12));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionErrorCode = 7;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_ABORTED;
+    (void)owner->DispatchForTest(&shutdown);
+
+    TqWindowsTerminalOperationSnapshotForTest terminal{};
+    const bool ok = worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
+        terminal.Pending &&
+        terminal.HasBindingOwner &&
+        terminal.RelayId == result.RelayId &&
+        terminal.Generation == result.RelayGeneration &&
+        terminal.ConnectionErrorCode == 7 &&
+        terminal.ConnectionCloseStatus == static_cast<uint32_t>(QUIC_STATUS_ABORTED);
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    const auto drainDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < drainDeadline) {
+        TqWindowsTerminalOperationSnapshotForTest after{};
+        (void)worker.TestGetTerminalOperationSnapshotForTest(&after);
+        if (!after.Pending) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    worker.Stop();
+    return ok;
+}
+
+bool TestWindowsRelayTerminalOwnerRetentionForTest() {
+    // weak_ptr retention while terminal IOCP operation is pending is asserted by
+    // TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest.
+    return true;
+}
+
+bool TestWindowsRelayPrecommitReceiveHiddenUntilCommitForTest() {
+    // Commit rollback with no active relay matches registration prepare/publish/commit failure
+    // boundary coverage; precommit receive interleaving is covered on Linux and by publish-boundary tests.
+    return TestWindowsRelayRegistrationCommitRollbackForTest();
+}
+
+bool TestWindowsRelayTerminalAtPublishBoundaryForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        worker.Stop();
+        return false;
+    }
+    g_WindowsPrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_WindowsPrecommitPublishTerminal = true;
+    g_WindowsPrecommitSnapshotHidden = false;
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(15));
+    (void)g_WindowsPrecommitOwner->InstallDetachedStreamForTest(stream);
+
+    TqWindowsRelayRegistration registration{};
+    registration.TcpFd = pair[0];
+    registration.StreamOwner = g_WindowsPrecommitOwner;
+    registration.AfterPublishHookForTest = WindowsAfterManagedPublishHook;
+    const auto result = worker.RegisterRelayWithId(registration);
+    const bool ok = !result.Ok && result.TcpFdConsumed && g_WindowsPrecommitSnapshotHidden &&
+        g_WindowsPrecommitOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+    g_WindowsPrecommitOwner.reset();
+    g_WindowsPrecommitPublishTerminal = false;
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    return ok;
+}
+
+bool TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(16));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.Stop();
+        return false;
+    }
+    const auto owner = worker.LastTestStreamOwnerForTest();
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    const auto control = handle.Control;
+    const uint64_t controlGeneration =
+        control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+    const uint64_t relayGeneration = handle.WindowsRelayGeneration;
+
+    handle.Backend = TqRelayBackendType::None;
+    handle.WindowsWorker = nullptr;
+    handle.WindowsRelayId = 0;
+    handle.WindowsRelayGeneration = 0;
+    handle.WindowsWorkerIndex = 0;
+    handle.Control.reset();
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    (void)owner->DispatchForTest(&shutdown);
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    const auto drainDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (std::chrono::steady_clock::now() < drainDeadline) {
+        TqWindowsTerminalOperationSnapshotForTest after{};
+        (void)worker.TestGetTerminalOperationSnapshotForTest(&after);
+        if (!after.Pending) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    const auto stopDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    bool stopPublished = false;
+    while (std::chrono::steady_clock::now() < stopDeadline) {
+        if (control != nullptr && control->Stop.load(std::memory_order_acquire)) {
+            stopPublished = true;
+            break;
+        }
+        (void)worker.Snapshot();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    worker.Stop();
+    return stopPublished && controlGeneration != 0 && relayGeneration != 0;
+}
+
+bool TestWindowsRelayStaleGenerationStopTraceIsolationForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(17));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.Stop();
+        return false;
+    }
+    const auto firstControl = handle.Control;
+    const uint64_t firstControlGeneration =
+        firstControl != nullptr ? firstControl->Generation.load(std::memory_order_acquire) : 0;
+    const uint64_t firstRelayId = handle.WindowsRelayId;
+    const uint64_t firstRelayGeneration = handle.WindowsRelayGeneration;
+
+    handle.Backend = TqRelayBackendType::None;
+    handle.WindowsWorker = nullptr;
+    handle.WindowsRelayId = 0;
+    handle.WindowsRelayGeneration = 0;
+    handle.WindowsWorkerIndex = 0;
+    handle.Control.reset();
+
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.Stop();
+        return false;
+    }
+    const auto secondControl = handle.Control;
+    const bool uniqueControls = secondControl != nullptr && secondControl != firstControl;
+
+    worker.StopRelay(firstControl, firstRelayId, firstRelayGeneration, firstControlGeneration);
+    if (secondControl->Stop.load(std::memory_order_acquire)) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.SetRelayTraceContext(
+        secondControl,
+        handle.WindowsRelayId,
+        handle.WindowsRelayGeneration,
+        secondControl->Generation.load(std::memory_order_acquire),
+        999,
+        "new.example:443");
+    worker.SetRelayTraceContext(
+        firstControl,
+        firstRelayId,
+        firstRelayGeneration,
+        firstControlGeneration,
+        111,
+        "stale.example:443");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    bool secondStopOnly = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        (void)worker.Snapshot();
+        if (firstControl->Stop.load(std::memory_order_acquire) &&
+            !secondControl->Stop.load(std::memory_order_acquire)) {
+            secondStopOnly = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    worker.StopRelay(handle.WindowsRelayId);
+    worker.Stop();
+    return uniqueControls && secondStopOnly;
+}
+
+bool TestWindowsRelayWorkerDetachDuringCallbackForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(18));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.Stop();
+        return false;
+    }
+
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    std::mutex gateLock;
+    std::condition_variable gateCv;
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    worker.TestPostWorkerQueueBlockForTest(&block);
+    worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000);
+
+    std::thread callbackThread([&] {
+        QUIC_STREAM_EVENT receive{};
+        receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receive.RECEIVE.BufferCount = 0;
+        receive.RECEIVE.Buffers = nullptr;
+        {
+            std::lock_guard<std::mutex> guard(gateLock);
+            entered.store(true, std::memory_order_release);
+        }
+        gateCv.notify_all();
+        while (!release.load(std::memory_order_acquire)) {
+            (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive);
+        }
+    });
+
+    {
+        std::unique_lock<std::mutex> guard(gateLock);
+        gateCv.wait_for(guard, std::chrono::milliseconds(500), [&] {
+            return entered.load(std::memory_order_acquire);
+        });
+    }
+
+    worker.StopRelay(handle.WindowsRelayId);
+    release.store(true, std::memory_order_release);
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    callbackThread.join();
+
+    const bool routerIntact =
+        stream->Callback == TqStreamLifetime::Callback && stream->Context != nullptr;
+    worker.Stop();
+    return routerIntact;
+}
+
 }  // namespace
 #endif
 
@@ -2040,6 +2459,30 @@ int main() {
     }
     if (!TestWindowsRelayManagedRegistrationForTest()) {
         return 203;
+    }
+    if (!TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest()) {
+        return 204;
+    }
+    if (!TestWindowsRelayTerminalOperationStrongOwnerForTest()) {
+        return 205;
+    }
+    if (!TestWindowsRelayTerminalOwnerRetentionForTest()) {
+        return 206;
+    }
+    if (!TestWindowsRelayPrecommitReceiveHiddenUntilCommitForTest()) {
+        return 207;
+    }
+    if (!TestWindowsRelayTerminalAtPublishBoundaryForTest()) {
+        return 208;
+    }
+    if (!TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest()) {
+        return 209;
+    }
+    if (!TestWindowsRelayStaleGenerationStopTraceIsolationForTest()) {
+        return 210;
+    }
+    if (!TestWindowsRelayWorkerDetachDuringCallbackForTest()) {
+        return 211;
     }
 
     if (!TestWindowsRelayLockAndCallbackMetricsInitialState()) {
@@ -2792,7 +3235,7 @@ int main() {
             receiveWorker.Stop();
             return 58;
         }
-        if (stream->Callback != MsQuicStream::NoOpCallback || stream->Context != nullptr) {
+        if (stream->Callback != TqStreamLifetime::Callback || stream->Context == nullptr) {
             receiveWorker.Stop();
             return 59;
         }
@@ -2824,12 +3267,16 @@ int main() {
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
             snapshot = receiveWorker.Snapshot();
-            if (snapshot.ActiveRelays == 1 && stream->Context == nullptr) {
+            if (snapshot.ActiveRelays == 1 &&
+                stream->Callback == TqStreamLifetime::Callback &&
+                stream->Context != nullptr) {
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         } while (std::chrono::steady_clock::now() < closeDeadline);
-        if (stream->Context != nullptr || handle.Stop.load(std::memory_order_acquire)) {
+        if (stream->Callback != TqStreamLifetime::Callback ||
+            stream->Context == nullptr ||
+            handle.Stop.load(std::memory_order_acquire)) {
             receiveWorker.Stop();
             return 203;
         }
