@@ -36,6 +36,13 @@ struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 struct TqWindowsQuicSendOperation;
 
+// TCP close mode (GracefulDrain/AbortReset) is separate from QUIC stream disposition.
+enum class TqWindowsStreamCloseDisposition : uint8_t {
+    ActiveShutdown,
+    ActiveAbort,
+    TerminalLogicalDetach,
+};
+
 enum class TqWindowsIocpOperationType : uint32_t {
     TcpRecv,
     TcpSend,
@@ -51,6 +58,7 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicIdealSendBuffer,
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
+    QuicPeerSendShutdown,
     QuicShutdownComplete,
     TerminalShutdownSinkDrain,
 #if defined(TQ_UNIT_TESTING)
@@ -309,6 +317,10 @@ public:
         uint64_t relayId,
         bool* closing,
         bool* relayHintNull) const;
+    bool TestGetRelayStreamTerminalStateForTest(
+        uint64_t relayId,
+        bool* streamShutdownComplete,
+        bool* streamDetached) const;
     bool TestBindingHasRelayHintForTest(uint64_t relayId) const;
     bool TestDrainSingleTerminalShutdownForTest();
     bool TestHasCommittedActiveRelayForTest() const;
@@ -426,6 +438,7 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         const char* reason,
         uint64_t errorCode);
+    void ProcessQuicPeerSendShutdown(const std::shared_ptr<RelayContext>& relay);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void ProcessQuicShutdownComplete(
         const std::shared_ptr<RelayContext>& relay,
@@ -556,9 +569,22 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         TqWindowsQuicSendOperation* operation);
     void RetryPendingQuicSends(const std::shared_ptr<RelayContext>& relay);
+    void BeginTcpCancellation(
+        const std::shared_ptr<RelayContext>& relay,
+        TqRelayCloseMode mode);
+    void ApplyTerminalLogicalDetach(const std::shared_ptr<RelayContext>& relay);
+    void RequestActiveStreamShutdown(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsStreamCloseDisposition disposition,
+        TqStreamLifetime::ShutdownIntent intent);
+    bool ValidateTerminalShutdownOperation(
+        const std::shared_ptr<RelayContext>& relay,
+        uint64_t generation,
+        uint64_t controlGeneration) const;
     void CloseRelay(
         const std::shared_ptr<RelayContext>& relay,
         TqRelayCloseMode mode,
+        TqWindowsStreamCloseDisposition disposition,
         const char* reason = nullptr,
         bool traceState = true);
     void MarkRelayCloseReason(const std::shared_ptr<RelayContext>& relay, const char* reason);

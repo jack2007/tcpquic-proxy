@@ -2637,6 +2637,111 @@ bool TestWindowsRelayTerminalIocpPostFailureFallbackForTest() {
     return drained;
 }
 
+bool TestWindowsRelayTerminalBeforePeerAbortOrderingForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(20));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    terminal.SHUTDOWN_COMPLETE.ConnectionErrorCode = 31;
+    (void)owner->DispatchForTest(&terminal);
+
+    QUIC_STREAM_EVENT peerAbort{};
+    peerAbort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+    peerAbort.PEER_SEND_ABORTED.ErrorCode = 9;
+    (void)owner->DispatchForTest(&peerAbort);
+
+    const bool phaseOk =
+        owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    const bool drained = WaitForTerminalOperationDrainForTest(worker, 2000);
+    const bool phaseAfterDrain =
+        owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+
+    worker.Stop();
+    return phaseOk && drained && phaseAfterDrain;
+}
+
+bool TestWindowsRelayPeerAbortBeforeTerminalOrderingForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(21));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT peerAbort{};
+    peerAbort.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+    peerAbort.PEER_RECEIVE_ABORTED.ErrorCode = 11;
+    (void)owner->DispatchForTest(&peerAbort);
+
+    const auto peerDeadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    bool peerDidNotTerminalDetach = false;
+    do {
+        bool streamTerminal = false;
+        bool streamDetached = false;
+        if (worker.TestGetRelayStreamTerminalStateForTest(
+                result.RelayId, &streamTerminal, &streamDetached)) {
+            peerDidNotTerminalDetach = !streamTerminal && !streamDetached;
+            if (peerDidNotTerminalDetach) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < peerDeadline);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    terminal.SHUTDOWN_COMPLETE.ConnectionErrorCode = 32;
+    (void)owner->DispatchForTest(&terminal);
+
+    const bool drained = WaitForTerminalOperationDrainForTest(worker, 2000);
+    const bool phaseOk =
+        owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+
+    worker.Stop();
+    return peerDidNotTerminalDetach && phaseOk && drained;
+}
+
 bool TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest() {
     TqWindowsRelayWorker worker;
     if (!StartRelayWorkerForTest(worker)) {
@@ -2938,6 +3043,12 @@ int main() {
     }
     if (!TestWindowsRelayTerminalIocpPostFailureFallbackForTest()) {
         return 217;
+    }
+    if (!TestWindowsRelayTerminalBeforePeerAbortOrderingForTest()) {
+        return 218;
+    }
+    if (!TestWindowsRelayPeerAbortBeforeTerminalOrderingForTest()) {
+        return 219;
     }
     if (!TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest()) {
         return 209;
