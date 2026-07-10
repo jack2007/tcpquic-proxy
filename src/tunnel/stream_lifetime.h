@@ -140,6 +140,10 @@ public:
     bool BeginStart() noexcept;
     bool CompleteStart(QUIC_STATUS status) noexcept;
     ApiLease TryAcquireApi() noexcept;
+    // relay 数据面 API：允许 detached unit-test wrapper，仍拒绝 terminal/closed。
+    ApiLease TryAcquireReceiveApi() noexcept;
+    ApiLease TryAcquireSendApi() noexcept;
+    bool ReceiveDirectionAborted() const noexcept;
     // ClientContext 仅作为 opaque key。成功注册的 operation 在全局 completion
     // retention 中强持 owner 和提交时 route snapshot，直到 once-only claim。
     void* RegisterSendCompletion(

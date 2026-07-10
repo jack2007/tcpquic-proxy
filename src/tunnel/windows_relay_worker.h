@@ -527,11 +527,18 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         TqWindowsPendingQuicReceive& view,
         uint64_t bytes);
-    void FlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
-    void FlushBatchedDeferredReceiveCompletion(
+    void ReleasePendingReceiveAccounting(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsPendingQuicReceive& view);
+    void ActiveFlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
+    void ActiveFlushBatchedDeferredReceiveCompletion(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqStreamLifetime>& streamOwner);
-    void CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
+    void ActiveCompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
+    void DiscardRemainingReceiveOwnership(
+        const std::shared_ptr<RelayContext>& relay,
+        TqWindowsPendingQuicReceive& view);
+    void DiscardAllPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
     void CompleteQuicSendAccounting(
         const std::shared_ptr<RelayContext>& relay,
         const TqWindowsQuicSendOperation& operation);
@@ -541,8 +548,6 @@ private:
     bool CompletePendingQuicReceive(
         const std::shared_ptr<RelayContext>& relay,
         const std::shared_ptr<TqWindowsPendingQuicReceive>& view);
-    void CompleteAllPendingQuicReceives(const std::shared_ptr<RelayContext>& relay);
-    void FinalizeQuicSendAccountingOnClose(const std::shared_ptr<RelayContext>& relay);
     void SetQuicReceiveEnabled(const std::shared_ptr<RelayContext>& relay, bool enabled);
     void MaybeResumeQuicReceive(const std::shared_ptr<RelayContext>& relay);
     void PruneRetiredCallbacks(bool keepNewest);

@@ -260,6 +260,24 @@ TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireApi() noexcept {
     return ApiLease(shared_from_this());
 }
 
+TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireReceiveApi() noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    if (Stream_ == nullptr ||
+        (Phase_ != Phase::Starting && Phase_ != Phase::Started)) {
+        return {};
+    }
+    return ApiLease(shared_from_this());
+}
+
+TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireSendApi() noexcept {
+    return TryAcquireReceiveApi();
+}
+
+bool TqStreamLifetime::ReceiveDirectionAborted() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return SubmittedReceiveAbort_;
+}
+
 void* TqStreamLifetime::RegisterSendCompletion(
     void* deliveredContext,
     std::function<void()> completionCleanup) noexcept {
