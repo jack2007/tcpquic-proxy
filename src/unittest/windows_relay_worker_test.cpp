@@ -2671,20 +2671,72 @@ bool TestWindowsRelayTerminalBeforePeerAbortOrderingForTest() {
     terminal.SHUTDOWN_COMPLETE.ConnectionErrorCode = 31;
     (void)owner->DispatchForTest(&terminal);
 
+    const bool phaseOk =
+        owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+    bool closing = false;
+    bool relayHintNull = false;
+    const bool sealOk = worker.TestGetBindingTerminalSealForTest(
+        result.RelayId, &closing, &relayHintNull) &&
+        closing && relayHintNull &&
+        !worker.TestBindingHasRelayHintForTest(result.RelayId);
+    bool streamTerminalBeforePeerAbort = false;
+    bool streamDetachedBeforePeerAbort = false;
+    const bool terminalStateBeforePeerAbort =
+        worker.TestGetRelayStreamTerminalStateForTest(
+            result.RelayId,
+            &streamTerminalBeforePeerAbort,
+            &streamDetachedBeforePeerAbort);
+
     QUIC_STREAM_EVENT peerAbort{};
     peerAbort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
     peerAbort.PEER_SEND_ABORTED.ErrorCode = 9;
     (void)owner->DispatchForTest(&peerAbort);
 
-    const bool phaseOk =
+    const bool phaseAfterPeerAbort =
         owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
+    bool closingAfterPeerAbort = false;
+    bool relayHintNullAfterPeerAbort = false;
+    const bool sealStillOk = worker.TestGetBindingTerminalSealForTest(
+        result.RelayId,
+        &closingAfterPeerAbort,
+        &relayHintNullAfterPeerAbort) &&
+        closingAfterPeerAbort && relayHintNullAfterPeerAbort &&
+        !worker.TestBindingHasRelayHintForTest(result.RelayId);
+    bool streamTerminalAfterPeerAbort = false;
+    bool streamDetachedAfterPeerAbort = false;
+    const bool terminalStateAfterPeerAbort =
+        worker.TestGetRelayStreamTerminalStateForTest(
+            result.RelayId,
+            &streamTerminalAfterPeerAbort,
+            &streamDetachedAfterPeerAbort);
+    const bool workerNotDetachedBeforeDrain =
+        terminalStateBeforePeerAbort &&
+        !streamTerminalBeforePeerAbort && !streamDetachedBeforePeerAbort;
+    const bool peerAbortDidNotFlipTerminal =
+        terminalStateBeforePeerAbort && terminalStateAfterPeerAbort &&
+        streamTerminalAfterPeerAbort == streamTerminalBeforePeerAbort &&
+        streamDetachedAfterPeerAbort == streamDetachedBeforePeerAbort;
+
+    const bool terminalDrainOk = worker.TestDrainSingleTerminalShutdownForTest();
+    bool streamTerminalAfterWorker = false;
+    bool streamDetachedAfterWorker = false;
+    const bool terminalObservedOnWorker =
+        terminalDrainOk ||
+        (worker.TestGetRelayStreamTerminalStateForTest(
+             result.RelayId,
+             &streamTerminalAfterWorker,
+             &streamDetachedAfterWorker) &&
+         streamTerminalAfterWorker && streamDetachedAfterWorker);
+
     worker.TestReleaseWorkerQueueBlockForTest(block);
     const bool drained = WaitForTerminalOperationDrainForTest(worker, 2000);
     const bool phaseAfterDrain =
         owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
 
     worker.Stop();
-    return phaseOk && drained && phaseAfterDrain;
+    return phaseOk && sealOk && workerNotDetachedBeforeDrain &&
+           phaseAfterPeerAbort && sealStillOk && peerAbortDidNotFlipTerminal &&
+           terminalObservedOnWorker && drained && phaseAfterDrain;
 }
 
 bool TestWindowsRelayPeerSendShutdownDrainDoesNotTerminalDetachForTest() {
@@ -4073,6 +4125,8 @@ int main() {
         const TqWindowsRelayWorkerSnapshot before = receiveWorker.Snapshot();
         if (!receiveWorker.TestArmRelayClosingForLateDiscard(relayId)) {
             receiveWorker.Stop();
+            // Exit codes 218-220 are reused here for late-discard failures; Task 4
+            // stream-lifetime tests use the same codes for different scenarios.
             return 218;
         }
         uint8_t data[] = {'l', 'a', 't', 'e'};

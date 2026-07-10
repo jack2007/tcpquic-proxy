@@ -439,7 +439,6 @@ private:
         TqWindowsIocpOperationType abortType,
         uint64_t errorCode);
     void ProcessQuicPeerSendShutdown(const std::shared_ptr<RelayContext>& relay);
-    void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);
     void ProcessQuicShutdownComplete(
         const std::shared_ptr<RelayContext>& relay,
         uint64_t errorCode,

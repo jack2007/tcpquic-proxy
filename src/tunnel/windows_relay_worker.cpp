@@ -2870,6 +2870,11 @@ bool TqWindowsRelayWorker::TestDrainPostedCallbackOperationsForTest(size_t expec
                     op->RelayId, TqWindowsIocpOperationType::QuicPeerReceiveAborted, op->Value);
             }
             break;
+        case TqWindowsIocpOperationType::QuicPeerSendShutdown:
+            if (relay) {
+                ProcessQuicPeerSendShutdown(relay);
+            }
+            break;
         case TqWindowsIocpOperationType::QuicShutdownComplete:
             DispatchQuicShutdownComplete(*op, resolvedCallbackById ? relay : nullptr);
             break;
@@ -3756,20 +3761,6 @@ void TqWindowsRelayWorker::ProcessQuicPeerSendShutdown(
 }
 
 void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
-    uint64_t relayId,
-    uint64_t errorCode,
-    uint32_t status) {
-    (void)errorCode;
-    (void)status;
-    auto relay = FindRelayById(relayId);
-    if (!relay) {
-        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
-}
-
-void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
     const std::shared_ptr<RelayContext>& relay,
     uint64_t errorCode,
     uint32_t status) {
@@ -3783,27 +3774,23 @@ void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
     (void)errorCode;
     (void)status;
     TqTraceRelayStreamShutdown("windows", BuildRelayTraceState(relay));
-    ApplyTerminalLogicalDetach(relay);
-    if (!HasPendingAfterStreamShutdown(relay)) {
+    const bool pendingAfterShutdown = HasPendingAfterStreamShutdown(relay);
+    if (!pendingAfterShutdown) {
         LateTeardownDowngradedCount_.fetch_add(1, std::memory_order_relaxed);
         GracefulRelayDrains_.fetch_add(1, std::memory_order_relaxed);
-        CloseRelay(
-            relay,
-            TqRelayCloseMode::GracefulDrain,
-            TqWindowsStreamCloseDisposition::TerminalLogicalDetach,
-            "stream_shutdown_complete");
-        return;
+    } else {
+        relay->CloseAfterDrained.store(true, std::memory_order_release);
     }
-    relay->CloseAfterDrained.store(true, std::memory_order_release);
-    if (!relay->Closing.load(std::memory_order_acquire)) {
-        relay->Closing.store(true, std::memory_order_release);
-        BeginTcpCancellation(relay, TqRelayCloseMode::GracefulDrain);
-        CompleteAllPendingQuicReceives(relay);
-        FinalizeQuicSendAccountingOnClose(relay);
+    CloseRelay(
+        relay,
+        TqRelayCloseMode::GracefulDrain,
+        TqWindowsStreamCloseDisposition::TerminalLogicalDetach,
+        "stream_shutdown_complete",
+        !pendingAfterShutdown);
+    if (pendingAfterShutdown) {
+        (void)CloseRelayIfDrained(relay);
+        TryRetireRelay(relay, false);
     }
-    ScheduleRelayMaintenance(relay);
-    (void)CloseRelayIfDrained(relay);
-    TryRetireRelay(relay, false);
 }
 
 void TqWindowsRelayWorker::TryRetireRelay(
