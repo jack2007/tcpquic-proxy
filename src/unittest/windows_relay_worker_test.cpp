@@ -2291,13 +2291,14 @@ bool TestWindowsRelayTerminalOwnerRetentionForTest() {
     }
     worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
         result.StopControl->Generation.load(std::memory_order_acquire));
-    (void)WaitForTerminalOperationDrainForTest(worker, 2000);
+    const bool relaysDrained = WaitForTerminalOperationDrainForTest(worker, 2000);
     worker.Stop();
     TqCloseSocket(pair[1]);
     const bool ownerDestroyed =
         weak.expired() &&
         TqStreamLifetime::TestDetachedOwnerDestroyCountForTest() == 1;
-    return phaseOk && terminalPending && retainedWhilePending && ownerDestroyed;
+    return phaseOk && terminalPending && retainedWhilePending && relaysDrained &&
+        ownerDestroyed;
 }
 
 bool WindowsSocketDescriptorConsumedForTest(TqSocketHandle socket) {
