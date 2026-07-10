@@ -120,6 +120,8 @@ public:
     bool InstallDetachedStreamForTest(MsQuicStream* stream) noexcept;
     void* TargetContextForTest() const noexcept;
     static void SetFailNextRegisterSendCompletionForTest(bool fail) noexcept;
+    static void ResetTestDetachedOwnerDestroyCountForTest() noexcept;
+    static uint64_t TestDetachedOwnerDestroyCountForTest() noexcept;
 #endif
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;

@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <spdlog/spdlog.h>
 
 #include <windows.h>
@@ -1800,8 +1801,10 @@ void TqWindowsRelayWorker::FailManagedBinding(
         binding->PrecommitPendingBytes = 0;
     }
     while (!pending.empty()) {
-        if (pending.front() != nullptr) {
-            CompleteRemainingReceiveOwnership(*pending.front());
+        if (auto view = pending.front()) {
+            view->Drained = true;
+            view->CompletedLength = view->TotalLength;
+            view->PendingCompleteBytes = 0;
         }
         pending.pop_front();
     }
@@ -2338,6 +2341,40 @@ bool TqWindowsRelayWorker::TestHasCommittedActiveRelayForTest() const {
         }
     }
     return false;
+}
+
+bool TqWindowsRelayWorker::TestTerminalCleanupHasStreamPointerForTest() const {
+    using Record = TerminalCleanupRecord;
+    auto isStreamPointer = [](auto Record::* member) -> bool {
+        using MemberType = std::decay_t<decltype(std::declval<Record>().*member)>;
+        return std::is_same_v<MemberType, MsQuicStream*> ||
+            std::is_same_v<MemberType, MsQuicStream* const>;
+    };
+    return !(isStreamPointer(&Record::Binding) ||
+             isStreamPointer(&Record::Relay) ||
+             isStreamPointer(&Record::StreamOwner) ||
+             isStreamPointer(&Record::StopControl) ||
+             isStreamPointer(&Record::RelayId) ||
+             isStreamPointer(&Record::Generation) ||
+             isStreamPointer(&Record::ControlGeneration) ||
+             isStreamPointer(&Record::ConnectionErrorCode) ||
+             isStreamPointer(&Record::ConnectionCloseStatus));
+}
+
+QUIC_STATUS TqWindowsRelayWorker::TestLastPrecommitReceiveStatusForTest() const {
+    std::lock_guard<std::mutex> guard(Lock_);
+    for (const auto& entry : Relays_) {
+        const auto& relay = entry.second;
+        if (!relay || !relay->ManagedBinding) {
+            continue;
+        }
+        auto& binding = *relay->ManagedBinding;
+        std::lock_guard<std::mutex> precommitGuard(binding.PrecommitLock);
+        if (!binding.PrecommitReceives.empty()) {
+            return QUIC_STATUS_PENDING;
+        }
+    }
+    return QUIC_STATUS_SUCCESS;
 }
 
 bool TqWindowsRelayWorker::TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength) {
@@ -4915,7 +4952,7 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
                 fin,
                 precommitHandled) &&
             precommitHandled) {
-            return QUIC_STATUS_SUCCESS;
+            return QUIC_STATUS_PENDING;
         }
         if (ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes)) {
             return QUIC_STATUS_SUCCESS;

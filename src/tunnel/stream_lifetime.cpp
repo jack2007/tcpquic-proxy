@@ -30,6 +30,7 @@ std::atomic<uint64_t> g_nextSendNonce{1};
 std::atomic<uint64_t> g_sendCompletionPreSubmitRollbacks{0};
 std::atomic<uint64_t> g_sendCompletionUnknownClaims{0};
 std::atomic<uint64_t> g_sendCompletionDuplicateClaims{0};
+std::atomic<uint64_t> g_detachedOwnerDestroyCount{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextRegisterSendCompletion{false};
 #endif
@@ -77,7 +78,9 @@ TqStreamLifetime::~TqStreamLifetime() noexcept {
             g_claimedSendCompletions.erase(key);
         }
     }
-    if (!detachedStreamForTest) {
+    if (detachedStreamForTest) {
+        g_detachedOwnerDestroyCount.fetch_add(1, std::memory_order_relaxed);
+    } else {
         delete stream;
     }
 }
@@ -182,6 +185,14 @@ void* TqStreamLifetime::TargetContextForTest() const noexcept {
 void TqStreamLifetime::SetFailNextRegisterSendCompletionForTest(bool fail) noexcept {
     g_failNextRegisterSendCompletion.store(fail, std::memory_order_release);
 }
+
+void TqStreamLifetime::ResetTestDetachedOwnerDestroyCountForTest() noexcept {
+    g_detachedOwnerDestroyCount.store(0, std::memory_order_relaxed);
+}
+
+uint64_t TqStreamLifetime::TestDetachedOwnerDestroyCountForTest() noexcept {
+    return g_detachedOwnerDestroyCount.load(std::memory_order_relaxed);
+}
 #endif
 
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
@@ -232,6 +243,7 @@ bool TqStreamLifetime::CompleteStart(QUIC_STATUS status) noexcept {
 TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireApi() noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     if (Stream_ == nullptr ||
+        DetachedStreamForTest_ ||
         (Phase_ != Phase::Starting && Phase_ != Phase::Started)) {
         return {};
     }
@@ -441,7 +453,15 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
             static_cast<uint32_t>(flags) |
             static_cast<uint32_t>(QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE));
     }
-    const QUIC_STATUS status = stream->Shutdown(errorCode, flags);
+    QUIC_STATUS status = QUIC_STATUS_SUCCESS;
+    bool detachedStreamForTest = false;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        detachedStreamForTest = DetachedStreamForTest_;
+    }
+    if (!detachedStreamForTest) {
+        status = stream->Shutdown(errorCode, flags);
+    }
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         if (sendRequest != 0 && ReservedSendShutdown_ == sendRequest) {

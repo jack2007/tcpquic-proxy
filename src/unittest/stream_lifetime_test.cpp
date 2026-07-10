@@ -292,6 +292,45 @@ int main() {
         if (owner->GetPhase() != TqStreamLifetime::Phase::StartFailed) return 22;
         if (target->Calls != 1) return 23;
         if (owner->PublishTarget(owner->RouteGeneration(), target)) return 24;
+        if (owner->TryAcquireApi()) return 50;
+    }
+
+    {
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::CreatedNotStarted, target);
+        if (!owner->BeginStart()) return 51;
+        QUIC_STREAM_EVENT earlyStart{};
+        earlyStart.Type = QUIC_STREAM_EVENT_START_COMPLETE;
+        earlyStart.START_COMPLETE.Status = QUIC_STATUS_SUCCESS;
+        if (QUIC_FAILED(owner->DispatchForTest(&earlyStart))) return 52;
+        if (owner->GetPhase() != TqStreamLifetime::Phase::Started) return 53;
+        if (target->Calls != 1) return 54;
+    }
+
+    {
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Starting, target);
+        unsigned sendCleanups = 0;
+        void* sendKey = owner->RegisterSendCompletion(
+            reinterpret_cast<void*>(static_cast<uintptr_t>(99)),
+            [&] { ++sendCleanups; });
+        if (sendKey == nullptr) return 55;
+        QUIC_STREAM_EVENT failedStart{};
+        failedStart.Type = QUIC_STREAM_EVENT_START_COMPLETE;
+        failedStart.START_COMPLETE.Status = QUIC_STATUS_INTERNAL_ERROR;
+        if (QUIC_FAILED(owner->DispatchForTest(&failedStart))) return 56;
+        if (owner->GetPhase() != TqStreamLifetime::Phase::StartFailed) return 57;
+        if (sendCleanups != 0) return 58;
+        if (owner->PublishTarget(owner->RouteGeneration(), target)) return 59;
+        if (owner->TryAcquireApi()) return 60;
+        QUIC_STREAM_EVENT canceledSend{};
+        canceledSend.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        canceledSend.SEND_COMPLETE.ClientContext = sendKey;
+        canceledSend.SEND_COMPLETE.Canceled = TRUE;
+        if (QUIC_FAILED(owner->DispatchForTest(&canceledSend))) return 61;
+        if (sendCleanups != 1) return 62;
     }
 
     return 0;

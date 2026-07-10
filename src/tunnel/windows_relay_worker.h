@@ -303,6 +303,8 @@ public:
     bool TestBindingHasRelayHintForTest(uint64_t relayId) const;
     bool TestDrainSingleTerminalShutdownForTest();
     bool TestHasCommittedActiveRelayForTest() const;
+    bool TestTerminalCleanupHasStreamPointerForTest() const;
+    QUIC_STATUS TestLastPrecommitReceiveStatusForTest() const;
 #endif
 
 #if defined(TQ_UNIT_TESTING)
