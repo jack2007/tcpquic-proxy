@@ -220,6 +220,8 @@ public:
         const TqWindowsRelayRegistration& registration);
 
 #if defined(TQ_UNIT_TESTING)
+    // Task 3/5 deferrals: precommit receive globals, weak-sink retirement assertions,
+    // and FailManagedBinding precommit-discard helper consolidation.
     bool RegisterRelayForTest(const TqWindowsRelayRegistration& registration);
     bool RegisterRelayForTest(
         MsQuicStream* stream,
@@ -336,6 +338,12 @@ private:
     struct RegisterRelayCommand;
     struct SnapshotCommand;
     struct TerminalCleanupRecord;
+    template<typename Record, auto Member>
+    struct TerminalCleanupRecordMemberIsMsQuicStreamPointer : std::false_type {};
+    template<typename Record, MsQuicStream* Record::*Member>
+    struct TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, Member>
+        : std::true_type {};
+    static constexpr int TerminalCleanupRecordNoStreamPointerCheck();
 
     void Run();
     void PostStop();
@@ -376,6 +384,9 @@ private:
         uint32_t connectionCloseStatus);
     void ProcessTerminalShutdownComplete(
         const TerminalCleanupRecord& record);
+    void DispatchQuicShutdownComplete(
+        IoOperation& op,
+        const std::shared_ptr<RelayContext>& relay);
     bool QueuePrecommitQuicReceive(
         const std::shared_ptr<RelayContext>& relay,
         WindowsStreamRelayBinding* binding,

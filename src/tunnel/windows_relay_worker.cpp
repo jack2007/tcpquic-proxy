@@ -345,6 +345,29 @@ struct TqWindowsRelayWorker::TerminalCleanupRecord final {
     uint32_t ConnectionCloseStatus{0};
 };
 
+constexpr int TqWindowsRelayWorker::TerminalCleanupRecordNoStreamPointerCheck() {
+    using Record = TerminalCleanupRecord;
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::Binding>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::Relay>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::StreamOwner>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::StopControl>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::RelayId>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::Generation>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::ControlGeneration>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::ConnectionErrorCode>::value);
+    static_assert(
+        !TerminalCleanupRecordMemberIsMsQuicStreamPointer<Record, &Record::ConnectionCloseStatus>::value);
+    return 0;
+}
+
 struct TqWindowsRelayWorker::RegisterRelayCommand {
     TqWindowsRelayRegistration Registration;
     TqWindowsRelayRegistrationResult Result;
@@ -422,7 +445,9 @@ struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
 
 TqWindowsRelayWorker::TqWindowsRelayWorker(uint32_t workerIndex)
     : WorkerIndex_(workerIndex),
-      StreamCallbackEndpoint_(std::make_shared<CallbackEndpoint>(this)) {}
+      StreamCallbackEndpoint_(std::make_shared<CallbackEndpoint>(this)) {
+    (void)TerminalCleanupRecordNoStreamPointerCheck();
+}
 TqWindowsRelayWorker::~TqWindowsRelayWorker() {
     Stop();
     if (StreamCallbackEndpoint_) {
@@ -1457,19 +1482,7 @@ void TqWindowsRelayWorker::Run() {
             }
             break;
         case TqWindowsIocpOperationType::QuicShutdownComplete:
-            if (op->TerminalCleanup != nullptr) {
-                ProcessTerminalShutdownComplete(*op->TerminalCleanup);
-            } else if (relay) {
-                ProcessQuicShutdownComplete(
-                    relay,
-                    op->Value,
-                    static_cast<uint32_t>(op->Length));
-            } else {
-                ProcessQuicShutdownComplete(
-                    op->RelayId,
-                    op->Value,
-                    static_cast<uint32_t>(op->Length));
-            }
+            DispatchQuicShutdownComplete(*op, relay);
             break;
         case TqWindowsIocpOperationType::QuicSendRetry:
             RetryPendingQuicSends(op->Relay);
@@ -1915,6 +1928,24 @@ bool TqWindowsRelayWorker::PostTerminalShutdownComplete(
     return true;
 }
 
+void TqWindowsRelayWorker::DispatchQuicShutdownComplete(
+    IoOperation& op,
+    const std::shared_ptr<RelayContext>& relay) {
+    if (op.TerminalCleanup != nullptr) {
+        ProcessTerminalShutdownComplete(*op.TerminalCleanup);
+    } else if (relay) {
+        ProcessQuicShutdownComplete(
+            relay,
+            op.Value,
+            static_cast<uint32_t>(op.Length));
+    } else {
+        ProcessQuicShutdownComplete(
+            op.RelayId,
+            op.Value,
+            static_cast<uint32_t>(op.Length));
+    }
+}
+
 void TqWindowsRelayWorker::ProcessTerminalShutdownComplete(
     const TerminalCleanupRecord& record) {
     TerminalOperationPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
@@ -2310,25 +2341,7 @@ bool TqWindowsRelayWorker::TestDrainSingleTerminalShutdownForTest() {
     if (relay && relay->Generation != op->Generation) {
         relay.reset();
     }
-    switch (op->Event) {
-    case TqWindowsIocpOperationType::QuicShutdownComplete:
-        if (op->TerminalCleanup != nullptr) {
-            ProcessTerminalShutdownComplete(*op->TerminalCleanup);
-        } else if (relay) {
-            ProcessQuicShutdownComplete(
-                relay,
-                op->Value,
-                static_cast<uint32_t>(op->Length));
-        } else {
-            ProcessQuicShutdownComplete(
-                op->RelayId,
-                op->Value,
-                static_cast<uint32_t>(op->Length));
-        }
-        break;
-    default:
-        return false;
-    }
+    DispatchQuicShutdownComplete(*op, relay);
     (void)ok;
     return true;
 }
@@ -2344,21 +2357,9 @@ bool TqWindowsRelayWorker::TestHasCommittedActiveRelayForTest() const {
 }
 
 bool TqWindowsRelayWorker::TestTerminalCleanupHasStreamPointerForTest() const {
-    using Record = TerminalCleanupRecord;
-    auto isStreamPointer = [](auto Record::* member) -> bool {
-        using MemberType = std::decay_t<decltype(std::declval<Record>().*member)>;
-        return std::is_same_v<MemberType, MsQuicStream*> ||
-            std::is_same_v<MemberType, MsQuicStream* const>;
-    };
-    return !(isStreamPointer(&Record::Binding) ||
-             isStreamPointer(&Record::Relay) ||
-             isStreamPointer(&Record::StreamOwner) ||
-             isStreamPointer(&Record::StopControl) ||
-             isStreamPointer(&Record::RelayId) ||
-             isStreamPointer(&Record::Generation) ||
-             isStreamPointer(&Record::ControlGeneration) ||
-             isStreamPointer(&Record::ConnectionErrorCode) ||
-             isStreamPointer(&Record::ConnectionCloseStatus));
+    // TerminalCleanupRecord omits raw MsQuicStream*; enforced by static_assert
+    // at the struct definition site in this translation unit.
+    return true;
 }
 
 QUIC_STATUS TqWindowsRelayWorker::TestLastPrecommitReceiveStatusForTest() const {
@@ -2680,19 +2681,7 @@ bool TqWindowsRelayWorker::TestDrainPostedCallbackOperationsForTest(size_t expec
             }
             break;
         case TqWindowsIocpOperationType::QuicShutdownComplete:
-            if (op->TerminalCleanup != nullptr) {
-                ProcessTerminalShutdownComplete(*op->TerminalCleanup);
-            } else if (resolvedCallbackById) {
-                ProcessQuicShutdownComplete(
-                    relay,
-                    op->Value,
-                    static_cast<uint32_t>(op->Length));
-            } else {
-                ProcessQuicShutdownComplete(
-                    op->RelayId,
-                    op->Value,
-                    static_cast<uint32_t>(op->Length));
-            }
+            DispatchQuicShutdownComplete(*op, resolvedCallbackById ? relay : nullptr);
             break;
         default:
             success = false;

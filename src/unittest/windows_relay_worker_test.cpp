@@ -2144,7 +2144,8 @@ bool TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest() {
     bool relayHintNull = false;
     const bool sealOk = worker.TestGetBindingTerminalSealForTest(
         result.RelayId, &closing, &relayHintNull) &&
-        closing && relayHintNull;
+        closing && relayHintNull &&
+        !worker.TestBindingHasRelayHintForTest(result.RelayId);
     TqWindowsTerminalOperationSnapshotForTest terminal{};
     const bool terminalPending =
         worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
@@ -2207,8 +2208,8 @@ bool TestWindowsRelayTerminalOperationStrongOwnerForTest() {
     (void)owner->DispatchForTest(&shutdown);
 
     TqWindowsTerminalOperationSnapshotForTest terminal{};
-    const bool ok = worker.TestTerminalCleanupHasStreamPointerForTest() &&
-        worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
+    // TerminalCleanupRecord has no MsQuicStream* member (static_assert in worker TU).
+    const bool ok = worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
         terminal.Pending &&
         terminal.HasBindingOwner &&
         terminal.RelayId == result.RelayId &&
