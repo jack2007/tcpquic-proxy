@@ -237,3 +237,116 @@ rtk git diff --check
 3. Darwin metrics JSON 字段仍为 `linux_relay_*` 命名，建议中性/darwin 别名。
 4. L2–L4 性能/压力与 k6 baseline、worker-stop 恢复（需远端环境）。
 5. Legacy/`TCPQUIC_TESTING` 无 owner 路径的 Callback/Context 清理可再收敛。
+## 2026-07-11 已提交代码评审记录
+
+**评审范围：** Darwin stream lifetime 实现提交 `d7c3954..656cbcf`。
+本轮评审发现 6 个 P1 阻断问题和 3 个 P2 一般问题，修复并完成对应回归前
+不建议进入发布分支。
+
+### P1 阻断问题
+
+#### 1. 正常 terminal 路径未唤醒 tunnel reaper
+
+- `SealManagedBindingTerminal()` 只修改 binding 状态；随后 `ClearPublicHandle()` 只清空
+  `Backend`/worker/id，没有设置 `RelayHandle.Stop` 或共享 `StopControl`。
+- `TqTunnelRelayStopped()` 只检查上述两个 Stop 标志。因此正常 terminal event
+  成功入队后，`TqTunnelContext` 不会被 reaper 回收，`TqRelayUnregisterActive()`
+  也不会执行。
+- 影响：tunnel context、compressor/decompressor 及 active-relay 计数持续泄漏；
+  queue-full fallback 反而会设置 Stop，现有测试没有覆盖这一差异。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:1153`、
+  `src/tunnel/darwin_relay_worker.cpp:3459`、`src/tunnel/tcp_tunnel.cpp:1975`。
+
+#### 2. terminal 与 send 注册竞争可永久泄漏 completion retention
+
+- `TrySubmitQuicSendOperation()` 先取得 API lease 并调用 `RegisterSendCompletion()`，
+  之后才检查 binding 是否仍 active。
+- terminal 若发生在 completion key 注册之后、active 检查之前，代码会直接
+  返回，却没有调用 `CancelSendCompletion()`。此时 Send 未提交，不会再收到
+  `SEND_COMPLETE`。
+- 影响：全局 completion registry 永久强持 owner 和 route target，同时保存已析构
+  operation 的 delivered context。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:2162-2184`。
+
+#### 3. router target 在 callback 所需字段尚未初始化时已发布
+
+- `PublishTarget()` 先于 `relay->Id`、`binding->RelayId` 和 `binding->Relay` 赋值执行。
+- 该窗口内到达的 RECEIVE 可构造出 `RelayId == 0`、`StreamOwner == nullptr`
+  的 pending record，后续可通过裸 `ReceiveCompleteStream` 调用 stream API，失去
+  owner lease 的 terminal 线性化保护。
+- 现有 `AfterPublishHookForTest` 在 map 和 identity 初始化之后才执行，没有覆盖
+  真实的 publish 早期窗口。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:2643-2648`、
+  `src/tunnel/darwin_relay_worker.cpp:3607-3627`。
+
+#### 4. `binding->Relay` 存在同一 `weak_ptr` 对象上的并发读写
+
+- terminal callback 在 `SealManagedBindingTerminal()` 中对 `binding->Relay` 执行
+  `reset()`；worker 和其他 callback 同时在多处调用同一对象的 `lock()`。
+- C++17 只保证不同 shared/weak pointer 实例共享控制块时的线程安全，
+  不保证同一 `weak_ptr` 实例并发 `reset()`/`lock()`。
+- 影响：未定义行为，可表现为引用计数损坏、UAF 或随机崩溃。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:2798`、
+  `src/tunnel/darwin_relay_worker.cpp:3469`。
+
+#### 5. RECEIVE 分配失败被伪装成真正 terminal
+
+- `QueueDeferredQuicReceive()` 返回 `AllocationFailed` 时，callback 投递
+  `QuicShutdownComplete`，后续使用 `TerminalLogicalDetach`。
+- 此时 owner 并未收到真正 `SHUTDOWN_COMPLETE`，也没有请求 active shutdown。
+- 影响：relay 被逻辑拆除，但 router/terminal retention 仍等待一个未被主动
+  触发的真正终态。该路径应使用 `ActiveShutdown`/shutdown sink，不得伪造
+  terminal event。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:4154-4165`。
+
+#### 6. callback fallback 仍访问裸 `TqRelayHandle*`
+
+- fallback 先设置共享 `StopControl`，然后又读取并写入
+  `relay->PublicHandle`。
+- reaper 可在观察到 Stop 后并发执行 unregister；retire 不等待当前 callback，
+  tunnel context 可在 callback 的裸指针写入前被释放。
+- 影响：`PublicHandle` 字段的数据竞争和 UAF。当前所谓 handle-reuse
+  测试使用两个同时存活的栈对象，没有释放并复用同一存储。
+- 修复应完成计划中的 shared control + generation 模型，cb/late event 不再访问
+  `TqRelayHandle*`。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:1153-1167`、
+  `src/tunnel/darwin_relay_worker.cpp:3472-3484`。
+
+### P2 一般问题
+
+#### 7. commit 最后阶段没有再次校验 terminal/generation
+
+- 唯一 owner terminal 校验发生在注册 kqueue filter 之前。
+- terminal 若在该检查之后、commit/激活之前到达，代码仍会发布 public
+  handle、设置 `Committed=true`、激活 binding 并向调用者返回成功。
+- 应在 commit 线性化点重新校验 owner phase、route generation 和 binding activation，
+  失败时执行 publish 后 rollback/active shutdown。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:3638-3687`。
+
+#### 8. 生产 Stop purge 可触发 worker-thread 断言
+
+- worker 线程退出并清空 `WorkerThreadId` 后，Stop 调用
+  `PurgeQueuedEventsForStop()`。
+- purge 仍会调用 `ProcessPeerSendShutdown()` 和
+  `ProcessSendShutdownComplete()`，而这两个函数要求当前线程是 worker。
+- `StartForTest()` 把测试线程标记为 worker，会掩盖真实生产时序。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:972-980`、
+  `src/tunnel/darwin_relay_worker.cpp:3494-3531`。
+
+#### 9. Task 6 的方向和 `CANCEL_ON_LOSS` 语义仍不完整
+
+- `PEER_SEND_ABORTED` 被映射为 local `AbortSend`，`PEER_RECEIVE_ABORTED`
+  被映射为 local `AbortReceive`，与事件表示的对端方向相反；随后又将
+  两类事件统一 Close/AbortBoth，没有保留 half-close 方向状态。
+- `CANCEL_ON_LOSS` 分支直接返回，没有填写稳定的应用错误码。
+- 代码位置：`src/tunnel/darwin_relay_worker.cpp:3973-3975`、
+  `src/tunnel/darwin_relay_worker.cpp:4040-4055`。
+
+### 评审验证记录
+
+- `rtk git diff --check d7c3954^..656cbcf`：通过。
+- Linux aarch64 环境下 `tcpquic_stream_lifetime_test` 构建并运行通过。
+- 当前评审环境不是 macOS，未独立复现 Darwin focused tests、Darwin ASan、
+  k6 和 worker-stop 系统矩阵。
+- 计划中 Darwin 性能/压力、k6/L2–L4 及完整 worker-stop 恢复门禁仍未完成；
+  在上述 P1 问题修复前，不满足 feature system-test release gate。
