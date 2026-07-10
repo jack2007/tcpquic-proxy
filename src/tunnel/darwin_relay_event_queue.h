@@ -50,6 +50,8 @@ enum class TqDarwinRelayEventType {
     QuicSendComplete,
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
+    QuicPeerSendShutdown,
+    QuicSendShutdownComplete,
     QuicShutdownComplete,
     QuicIdealSendBuffer,
     RegisterRelay,

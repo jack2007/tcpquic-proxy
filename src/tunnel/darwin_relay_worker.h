@@ -234,6 +234,9 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t CallbackReceiveBudgetRejects{0};
     uint64_t QuicReceiveEnqueueFailures{0};
     uint64_t QuicReceiveViewBackpressureQueued{0};
+    uint64_t TerminalRetainedOwnerCount{0};
+    uint64_t TerminalRetainedOldestAgeMs{0};
+    uint64_t StopRemaining{0};
 };
 
 enum class TqDarwinQuicReceiveEnqueueResult : uint8_t {
@@ -304,6 +307,13 @@ public:
     bool BindingTerminalForTest(uint64_t relayId);
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
+    uint64_t RetiredRelayCountForTest();
+    std::shared_ptr<void> RetiredRelayOwnerForTest(uint64_t relayId);
+    std::shared_ptr<void> ActiveRelayOwnerForTest(uint64_t relayId);
+    bool EnqueueRelayCloseEventForTest(
+        const std::shared_ptr<void>& relayOwner,
+        TqDarwinRelayEventType type,
+        uint64_t relayId);
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
     uint32_t BindingCallbackRefsForTest(uint64_t relayId);
 #endif
@@ -461,6 +471,11 @@ private:
     void HandoffTerminalCloseToShutdownSink(
         const std::shared_ptr<RelayState>& relay,
         StreamBinding* binding);
+    void HandoffActiveShutdownFromCallback(
+        const std::shared_ptr<RelayState>& relay,
+        StreamBinding* binding);
+    void ProcessPeerSendShutdown(const std::shared_ptr<RelayState>& relay);
+    void ProcessSendShutdownComplete(const std::shared_ptr<RelayState>& relay);
     void RequestRelayShutdown(
         const std::shared_ptr<RelayState>& relay,
         TqStreamLifetime::ShutdownIntent intent);

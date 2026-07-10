@@ -447,6 +447,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.QuicReceiveResumedCount = snapshot.QuicReceiveResumedCount;
     metrics.Errors = snapshot.Errors;
     metrics.QuicSendBackpressureEvents = snapshot.QuicSendBackpressureEvents;
+    metrics.LinuxRelayTerminalRetainedOwnerCount = snapshot.TerminalRetainedOwnerCount;
+    metrics.LinuxRelayTerminalRetainedOldestAgeMs = snapshot.TerminalRetainedOldestAgeMs;
+    metrics.LinuxRelayStopRemaining = snapshot.StopRemaining;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     uint64_t tcpReadBytes = 0;

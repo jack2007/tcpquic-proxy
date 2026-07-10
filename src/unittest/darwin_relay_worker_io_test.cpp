@@ -4323,6 +4323,170 @@ void ManagedPeerAbortUsesActiveShutdownWithoutTerminal() {
     harness.StopAndClosePeer();
 }
 
+void ManagedPeerAbortBeforeTerminalOnlyTerminalDetaches() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
+
+    QUIC_STREAM_EVENT abort{};
+    abort.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+    abort.PEER_RECEIVE_ABORTED.ErrorCode = 1;
+    CHECK(harness.DispatchViaRouter(abort) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
+    CHECK(!weakOwner.expired());
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    harness.StopAndClosePeer();
+    CHECK(weakOwner.expired());
+}
+
+void ManagedTerminalBeforePeerAbortIgnoresActiveShutdown() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    const uint64_t retiredAfterTerminal = harness.Worker.RetiredRelayCountForTest();
+
+    QUIC_STREAM_EVENT abort{};
+    abort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+    abort.PEER_SEND_ABORTED.ErrorCode = 1;
+    CHECK(harness.DispatchViaRouter(abort) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.PendingEventsForTest() == 0);
+    CHECK(harness.Worker.RetiredRelayCountForTest() == retiredAfterTerminal);
+    harness.StopAndClosePeer();
+}
+
+void ManagedDuplicateTerminalEventIsIdempotent() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    const uint64_t retiredBindingsBefore = harness.Worker.RetiredStreamBindingCountForTest();
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    auto relayOwner = harness.Worker.ActiveRelayOwnerForTest(harness.Result.RelayId);
+    CHECK(relayOwner != nullptr);
+    CHECK(harness.Worker.EnqueueRelayCloseEventForTest(
+        relayOwner,
+        TqDarwinRelayEventType::QuicShutdownComplete,
+        harness.Result.RelayId));
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    CHECK(harness.Worker.RetiredStreamBindingCountForTest() == retiredBindingsBefore);
+    harness.StopAndClosePeer();
+}
+
+void ManagedQueuedPeerAbortBeforeTerminalPreservesOwnerUntilTerminal() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
+
+    QUIC_STREAM_EVENT abort{};
+    abort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+    abort.PEER_SEND_ABORTED.ErrorCode = 1;
+    CHECK(harness.DispatchViaRouter(abort) == QUIC_STATUS_SUCCESS);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!weakOwner.expired());
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
+
+    CHECK(harness.Worker.DrainOneEventForTest());
+    harness.StopAndClosePeer();
+    CHECK(weakOwner.expired());
+}
+
+void ManagedNonTerminalHalfCloseEventsDoNotPublishTerminal() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+
+    QUIC_STREAM_EVENT sendShutdown{};
+    sendShutdown.Type = QUIC_STREAM_EVENT_SEND_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(sendShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::Started);
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+
+    QUIC_STREAM_EVENT cancelOnLoss{};
+    cancelOnLoss.Type = QUIC_STREAM_EVENT_CANCEL_ON_LOSS;
+    CHECK(harness.DispatchViaRouter(cancelOnLoss) == QUIC_STATUS_SUCCESS);
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+
+    QUIC_STREAM_EVENT canceledSend{};
+    canceledSend.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    canceledSend.SEND_COMPLETE.Canceled = true;
+    canceledSend.SEND_COMPLETE.ClientContext = nullptr;
+    CHECK(harness.DispatchViaRouter(canceledSend) == QUIC_STATUS_SUCCESS);
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    harness.StopAndClosePeer();
+}
+
+void ManagedStopRetentionMetricsSurfaceTerminalRetainedOwners() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    const auto activeSnapshot = harness.Worker.Snapshot();
+    CHECK(activeSnapshot.TerminalRetainedOwnerCount >= 1);
+    CHECK(activeSnapshot.StopRemaining >= 1);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    const auto pendingSnapshot = harness.Worker.Snapshot();
+    CHECK(pendingSnapshot.StopRemaining >= 1);
+    CHECK(pendingSnapshot.TerminalRetainedOwnerCount <= activeSnapshot.TerminalRetainedOwnerCount);
+
+    CHECK(harness.Worker.DrainOneEventForTest());
+    harness.StopAndClosePeer();
+}
+
+void ManagedStopPurgeProcessesPeerAbortBeforeTerminal() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+
+    QUIC_STREAM_EVENT abort{};
+    abort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+    abort.PEER_SEND_ABORTED.ErrorCode = 1;
+    CHECK(harness.DispatchViaRouter(abort) == QUIC_STATUS_SUCCESS);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+
+    harness.Worker.Stop();
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    harness.Owner.reset();
+    ::close(harness.Fds[0]);
+    harness.Fds[0] = TqInvalidSocket;
+}
+
 void ManagedTerminalWithTcpErrorClosesOnce() {
     ManagedRelayHarness harness;
     CHECK(harness.OpenSocketPair());
@@ -4442,7 +4606,8 @@ void ManagedInFlightSendCompletesAfterRetireWithoutRelayStream() {
     complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     complete.SEND_COMPLETE.ClientContext = sendContext;
     CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, binding.get(), &complete) == QUIC_STATUS_SUCCESS);
-    if (worker.KnownSendOperationCountForTest() != 0) {
+    if (worker.KnownSendOperationCountForTest() != 0 &&
+        worker.PendingEventsForTest() > 0) {
         CHECK(worker.DrainOneEventForTest());
     }
     CHECK(worker.KnownSendOperationCountForTest() == 0);
@@ -5099,6 +5264,13 @@ int main() {
     ManagedTunnelOwnerReleaseRetainsBinding();
     ManagedCloseRetirePurgePreservesStreamCallback();
     ManagedPeerAbortUsesActiveShutdownWithoutTerminal();
+    ManagedPeerAbortBeforeTerminalOnlyTerminalDetaches();
+    ManagedTerminalBeforePeerAbortIgnoresActiveShutdown();
+    ManagedDuplicateTerminalEventIsIdempotent();
+    ManagedQueuedPeerAbortBeforeTerminalPreservesOwnerUntilTerminal();
+    ManagedNonTerminalHalfCloseEventsDoNotPublishTerminal();
+    ManagedStopRetentionMetricsSurfaceTerminalRetainedOwners();
+    ManagedStopPurgeProcessesPeerAbortBeforeTerminal();
     ManagedTerminalWithTcpErrorClosesOnce();
     ManagedTerminalBeforeTcpErrorClosesOnce();
     ManagedTcpErrorBeforeTerminalClosesOnce();

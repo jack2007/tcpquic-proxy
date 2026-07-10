@@ -82,6 +82,9 @@ int main() {
     metrics.QuicReceiveViewBytes = 99;
     metrics.DeferredReceiveCompletes = 111;
     metrics.QuicSendBackpressureEvents = 222;
+    metrics.LinuxRelayTerminalRetainedOwnerCount = 3;
+    metrics.LinuxRelayTerminalRetainedOldestAgeMs = 42;
+    metrics.LinuxRelayStopRemaining = 5;
 
     const std::string json = TqRelayMetricsFieldsJson(metrics);
     CheckContains(json, "\"relay_backend\":\"test\"");
@@ -101,6 +104,9 @@ int main() {
     CheckContains(json, "\"linux_relay_quic_receive_view_bytes\":99");
     CheckContains(json, "\"linux_relay_deferred_receive_completes\":111");
     CheckContains(json, "\"linux_relay_quic_send_backpressure_events\":222");
+    CheckContains(json, "\"linux_relay_terminal_retained_owner_count\":3");
+    CheckContains(json, "\"linux_relay_terminal_retained_oldest_age_ms\":42");
+    CheckContains(json, "\"linux_relay_stop_remaining\":5");
     EventizedSnapshotCountsActiveRelay();
     return 0;
 }
