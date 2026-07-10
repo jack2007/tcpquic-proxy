@@ -433,10 +433,10 @@ private:
         uint64_t relayId,
         uint64_t generation,
         uintptr_t operationValue);
-    void ProcessQuicPeerAborted(uint64_t relayId, const char* reason, uint64_t errorCode);
+    void ProcessQuicPeerAborted(uint64_t relayId, TqWindowsIocpOperationType abortType, uint64_t errorCode);
     void ProcessQuicPeerAborted(
         const std::shared_ptr<RelayContext>& relay,
-        const char* reason,
+        TqWindowsIocpOperationType abortType,
         uint64_t errorCode);
     void ProcessQuicPeerSendShutdown(const std::shared_ptr<RelayContext>& relay);
     void ProcessQuicShutdownComplete(uint64_t relayId, uint64_t errorCode, uint32_t status);

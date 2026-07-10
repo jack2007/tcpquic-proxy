@@ -193,6 +193,16 @@ void TqStreamLifetime::ResetTestDetachedOwnerDestroyCountForTest() noexcept {
 uint64_t TqStreamLifetime::TestDetachedOwnerDestroyCountForTest() noexcept {
     return g_detachedOwnerDestroyCount.load(std::memory_order_relaxed);
 }
+
+bool TqStreamLifetime::SendDirectionCompleteForTest() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return SendDirectionComplete_;
+}
+
+uint64_t TqStreamLifetime::CancelOnLossErrorCodeForTest() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return CancelOnLossErrorCode_;
+}
 #endif
 
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
@@ -714,6 +724,32 @@ QUIC_STATUS TqStreamLifetime::Dispatch(
         return status;
     } else if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         snapshot = PublishTerminalAndTakeTarget();
+    } else if (event->Type == QUIC_STREAM_EVENT_SEND_SHUTDOWN_COMPLETE) {
+        {
+            std::lock_guard<std::mutex> guard(ControlMutex_);
+            SendDirectionComplete_ = true;
+            if (event->SEND_SHUTDOWN_COMPLETE.Graceful) {
+                if (SubmittedSendShutdown_ < 1) {
+                    SubmittedSendShutdown_ = 1;
+                }
+            } else if (SubmittedSendShutdown_ < 2) {
+                SubmittedSendShutdown_ = 2;
+            }
+        }
+        std::lock_guard<std::mutex> controlGuard(ControlMutex_);
+        snapshot.TargetOwner = Target_;
+        snapshot.Generation = RouteGeneration_;
+    } else if (event->Type == QUIC_STREAM_EVENT_CANCEL_ON_LOSS) {
+        constexpr uint64_t kCancelOnLossStableErrorCode = 0x54515043ULL;
+        event->CANCEL_ON_LOSS.ErrorCode = kCancelOnLossStableErrorCode;
+        {
+            std::lock_guard<std::mutex> guard(ControlMutex_);
+            CancelOnLossErrorCode_ = kCancelOnLossStableErrorCode;
+        }
+        (void)RequestShutdown(ShutdownIntent::AbortBoth);
+        std::lock_guard<std::mutex> controlGuard(ControlMutex_);
+        snapshot.TargetOwner = Target_;
+        snapshot.Generation = RouteGeneration_;
     } else {
         if (event->Type == QUIC_STREAM_EVENT_START_COMPLETE) {
             if (QUIC_SUCCEEDED(event->START_COMPLETE.Status)) {

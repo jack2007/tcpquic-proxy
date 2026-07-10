@@ -2687,6 +2687,54 @@ bool TestWindowsRelayTerminalBeforePeerAbortOrderingForTest() {
     return phaseOk && drained && phaseAfterDrain;
 }
 
+bool TestWindowsRelayPeerSendShutdownDrainDoesNotTerminalDetachForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(22));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    (void)owner->DispatchForTest(&peerShutdown);
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    bool didNotTerminalDetach = false;
+    do {
+        bool streamTerminal = false;
+        bool streamDetached = false;
+        if (worker.TestGetRelayStreamTerminalStateForTest(
+                result.RelayId, &streamTerminal, &streamDetached)) {
+            didNotTerminalDetach =
+                !streamTerminal && !streamDetached &&
+                owner->GetPhase() != TqStreamLifetime::Phase::TerminalPublished &&
+                owner != nullptr;
+            if (didNotTerminalDetach) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    worker.Stop();
+    return didNotTerminalDetach;
+}
+
 bool TestWindowsRelayPeerAbortBeforeTerminalOrderingForTest() {
     TqWindowsRelayWorker worker;
     if (!StartRelayWorkerForTest(worker)) {
@@ -3049,6 +3097,9 @@ int main() {
     }
     if (!TestWindowsRelayPeerAbortBeforeTerminalOrderingForTest()) {
         return 219;
+    }
+    if (!TestWindowsRelayPeerSendShutdownDrainDoesNotTerminalDetachForTest()) {
+        return 220;
     }
     if (!TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest()) {
         return 209;

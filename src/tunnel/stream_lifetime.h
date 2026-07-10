@@ -122,6 +122,8 @@ public:
     static void SetFailNextRegisterSendCompletionForTest(bool fail) noexcept;
     static void ResetTestDetachedOwnerDestroyCountForTest() noexcept;
     static uint64_t TestDetachedOwnerDestroyCountForTest() noexcept;
+    bool SendDirectionCompleteForTest() const noexcept;
+    uint64_t CancelOnLossErrorCodeForTest() const noexcept;
 #endif
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
@@ -191,6 +193,8 @@ private:
     bool DesiredReceiveAbort_{false};
     bool SubmittedReceiveAbort_{false};
     bool ReservedReceiveAbort_{false};
+    bool SendDirectionComplete_{false};
+    uint64_t CancelOnLossErrorCode_{0};
     std::vector<std::unique_ptr<uint64_t>> SendKeyEnvelopes_;
 };
 

@@ -333,5 +333,32 @@ int main() {
         if (sendCleanups != 1) return 62;
     }
 
+    {
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started, target);
+        QUIC_STREAM_EVENT sendShutdown{};
+        sendShutdown.Type = QUIC_STREAM_EVENT_SEND_SHUTDOWN_COMPLETE;
+        sendShutdown.SEND_SHUTDOWN_COMPLETE.Graceful = TRUE;
+        if (QUIC_FAILED(owner->DispatchForTest(&sendShutdown))) return 63;
+        if (!owner->SendDirectionCompleteForTest()) return 64;
+        if (owner->GetPhase() != TqStreamLifetime::Phase::Started) return 65;
+        if (target->Calls != 1) return 66;
+    }
+
+    {
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started, target);
+        QUIC_STREAM_EVENT cancelOnLoss{};
+        cancelOnLoss.Type = QUIC_STREAM_EVENT_CANCEL_ON_LOSS;
+        cancelOnLoss.CANCEL_ON_LOSS.ErrorCode = 0;
+        if (QUIC_FAILED(owner->DispatchForTest(&cancelOnLoss))) return 67;
+        if (owner->CancelOnLossErrorCodeForTest() != 0x54515043ULL) return 68;
+        if (cancelOnLoss.CANCEL_ON_LOSS.ErrorCode != 0x54515043ULL) return 69;
+        if (owner->GetPhase() != TqStreamLifetime::Phase::Started) return 70;
+        if (target->Calls != 1) return 71;
+    }
+
     return 0;
 }

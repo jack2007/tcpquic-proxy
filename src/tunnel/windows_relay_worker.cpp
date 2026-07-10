@@ -1497,16 +1497,20 @@ void TqWindowsRelayWorker::Run() {
             break;
         case TqWindowsIocpOperationType::QuicPeerSendAborted:
             if (relay) {
-                ProcessQuicPeerAborted(relay, "stream_peer_send_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    relay, TqWindowsIocpOperationType::QuicPeerSendAborted, op->Value);
             } else {
-                ProcessQuicPeerAborted(op->RelayId, "stream_peer_send_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    op->RelayId, TqWindowsIocpOperationType::QuicPeerSendAborted, op->Value);
             }
             break;
         case TqWindowsIocpOperationType::QuicPeerReceiveAborted:
             if (relay) {
-                ProcessQuicPeerAborted(relay, "stream_peer_receive_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    relay, TqWindowsIocpOperationType::QuicPeerReceiveAborted, op->Value);
             } else {
-                ProcessQuicPeerAborted(op->RelayId, "stream_peer_receive_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    op->RelayId, TqWindowsIocpOperationType::QuicPeerReceiveAborted, op->Value);
             }
             break;
         case TqWindowsIocpOperationType::QuicPeerSendShutdown:
@@ -1758,8 +1762,7 @@ bool TqWindowsRelayWorker::CommitRelay(
             Relays_.erase(relay->Id);
         }
         if (tcpFdConsumed) {
-            TqCloseSocket(relay->TcpFd);
-            relay->TcpFd = TqInvalidSocket;
+            BeginTcpCancellation(relay, TqRelayCloseMode::GracefulDrain);
             RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
         }
         return false;
@@ -2041,17 +2044,20 @@ void TqWindowsRelayWorker::DispatchQuicShutdownComplete(
     const std::shared_ptr<RelayContext>& relay) {
     if (op.TerminalCleanup != nullptr) {
         ProcessTerminalShutdownComplete(*op.TerminalCleanup);
-    } else if (relay) {
-        ProcessQuicShutdownComplete(
-            relay,
-            op.Value,
-            static_cast<uint32_t>(op.Length));
-    } else {
-        ProcessQuicShutdownComplete(
-            op.RelayId,
-            op.Value,
-            static_cast<uint32_t>(op.Length));
+        return;
     }
+    std::shared_ptr<RelayContext> resolved = relay;
+    if (!resolved && op.RelayId != 0) {
+        resolved = FindRelayByIdLocal(op.RelayId);
+    }
+    if (!resolved || op.Generation == 0 || resolved->Generation != op.Generation) {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    ProcessQuicShutdownComplete(
+        resolved,
+        op.Value,
+        static_cast<uint32_t>(op.Length));
 }
 
 void TqWindowsRelayWorker::ProcessTerminalShutdownComplete(
@@ -2848,16 +2854,20 @@ bool TqWindowsRelayWorker::TestDrainPostedCallbackOperationsForTest(size_t expec
             break;
         case TqWindowsIocpOperationType::QuicPeerSendAborted:
             if (resolvedCallbackById) {
-                ProcessQuicPeerAborted(relay, "stream_peer_send_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    relay, TqWindowsIocpOperationType::QuicPeerSendAborted, op->Value);
             } else {
-                ProcessQuicPeerAborted(op->RelayId, "stream_peer_send_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    op->RelayId, TqWindowsIocpOperationType::QuicPeerSendAborted, op->Value);
             }
             break;
         case TqWindowsIocpOperationType::QuicPeerReceiveAborted:
             if (resolvedCallbackById) {
-                ProcessQuicPeerAborted(relay, "stream_peer_receive_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    relay, TqWindowsIocpOperationType::QuicPeerReceiveAborted, op->Value);
             } else {
-                ProcessQuicPeerAborted(op->RelayId, "stream_peer_receive_aborted", op->Value);
+                ProcessQuicPeerAborted(
+                    op->RelayId, TqWindowsIocpOperationType::QuicPeerReceiveAborted, op->Value);
             }
             break;
         case TqWindowsIocpOperationType::QuicShutdownComplete:
@@ -3678,19 +3688,19 @@ bool TqWindowsRelayWorker::HasPendingAfterStreamShutdown(
 
 void TqWindowsRelayWorker::ProcessQuicPeerAborted(
     uint64_t relayId,
-    const char* reason,
+    TqWindowsIocpOperationType abortType,
     uint64_t errorCode) {
     auto relay = FindRelayById(relayId);
     if (!relay || relay->Closing.load(std::memory_order_acquire)) {
         PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    ProcessQuicPeerAborted(relay, reason, errorCode);
+    ProcessQuicPeerAborted(relay, abortType, errorCode);
 }
 
 void TqWindowsRelayWorker::ProcessQuicPeerAborted(
     const std::shared_ptr<RelayContext>& relay,
-    const char* reason,
+    TqWindowsIocpOperationType abortType,
     uint64_t errorCode) {
     if (!relay) {
         return;
@@ -3700,7 +3710,10 @@ void TqWindowsRelayWorker::ProcessQuicPeerAborted(
     }
     (void)errorCode;
     const bool peerSendAborted =
-        reason != nullptr && std::strstr(reason, "peer_send_aborted") != nullptr;
+        abortType == TqWindowsIocpOperationType::QuicPeerSendAborted;
+    const char* reason = peerSendAborted
+        ? "stream_peer_send_aborted"
+        : "stream_peer_receive_aborted";
     RequestActiveStreamShutdown(
         relay,
         TqWindowsStreamCloseDisposition::ActiveShutdown,
@@ -3746,16 +3759,14 @@ void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
     uint64_t relayId,
     uint64_t errorCode,
     uint32_t status) {
+    (void)errorCode;
+    (void)status;
     auto relay = FindRelayById(relayId);
-    if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+    if (!relay) {
         PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    if (relay->StreamShutdownComplete.load(std::memory_order_acquire)) {
-        TryRetireRelay(relay, false);
-        return;
-    }
-    ProcessQuicShutdownComplete(relay, errorCode, status);
+    PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TqWindowsRelayWorker::ProcessQuicShutdownComplete(
@@ -4064,7 +4075,7 @@ bool TqWindowsRelayWorker::CloseRelayIfDrained(const std::shared_ptr<RelayContex
     CloseRelay(
         relay,
         TqRelayCloseMode::GracefulDrain,
-        TqWindowsStreamCloseDisposition::TerminalLogicalDetach,
+        TqWindowsStreamCloseDisposition::ActiveShutdown,
         "close_after_drained");
     return true;
 }
@@ -5415,6 +5426,16 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
                 TqWindowsIocpOperationType::QuicPeerSendShutdown, *binding)) {
             Errors_.fetch_add(1, std::memory_order_relaxed);
         }
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_STREAM_EVENT_SEND_SHUTDOWN_COMPLETE) {
+        auto relay = ResolveRelayForCallback(binding->RelayId, binding->Generation);
+        if (relay) {
+            relay->QuicSendFinCompleted.store(true, std::memory_order_release);
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
+    if (event->Type == QUIC_STREAM_EVENT_CANCEL_ON_LOSS) {
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE) {
