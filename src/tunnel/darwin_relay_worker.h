@@ -192,6 +192,7 @@ struct TqDarwinRelayWorkerConfig {
 #if defined(TCPQUIC_TESTING)
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
+    void (*AfterPublishHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
 #endif
 };
 
@@ -263,6 +264,7 @@ public:
     bool InvokeTcpEventForTest(uint64_t relayId, int16_t filter, uint16_t flags, intptr_t data);
     bool InvokeQuicReceiveViewForTest(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     uint64_t FindRelayLockedCountForTest() const;
+    uint64_t CommittedRelayCountForTest() const;
     uint64_t FindRelayLocalCountForTest() const;
     uint64_t RetiredRelayPurgeCountForTest() const;
     uint64_t KnownSendLockedCountForTest() const;
@@ -388,6 +390,22 @@ private:
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool SetTcpReadBackpressure(const std::shared_ptr<RelayState>& relay, bool paused);
+    std::shared_ptr<TqDarwinPendingQuicReceive> BuildPendingQuicReceive(
+        RelayState* relay,
+        const std::shared_ptr<StreamBinding>& binding,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin);
+    bool QueuePrecommitQuicReceive(
+        RelayState* relay,
+        StreamBinding* binding,
+        const std::shared_ptr<StreamBinding>& bindingOwner,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin,
+        bool& handled);
     TqDarwinQuicReceiveEnqueueResult QueueDeferredQuicReceive(
         const std::shared_ptr<StreamBinding>& binding,
         MsQuicStream* stream,

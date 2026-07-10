@@ -2,6 +2,7 @@
 
 #include "darwin_relay_worker.h"
 #include "compress.h"
+#include "stream_lifetime.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -10,6 +11,7 @@
 #include <zstd.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +44,24 @@ std::condition_variable g_blockingSendContinue;
 bool g_blockingSendEntered{false};
 bool g_blockingSendMayContinue{false};
 bool g_blockingSendReturned{false};
+
+std::shared_ptr<TqStreamLifetime> g_PrecommitOwner;
+std::array<uint8_t, 8> g_PrecommitPayload{};
+QUIC_STATUS g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+bool g_PrecommitUncommitted = false;
+
+void AfterManagedPublishHook(TqDarwinRelayWorker* worker, uint64_t) {
+    g_PrecommitUncommitted =
+        worker != nullptr && worker->CommittedRelayCountForTest() == 0;
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = g_PrecommitPayload.data();
+    buffer.Length = static_cast<uint32_t>(g_PrecommitPayload.size());
+    QUIC_STREAM_EVENT receive{};
+    receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receive.RECEIVE.BufferCount = 1;
+    receive.RECEIVE.Buffers = &buffer;
+    g_PrecommitReceiveStatus = g_PrecommitOwner->DispatchForTest(&receive);
+}
 
 struct FailingDecompressor final : ITqDecompressor {
     bool Decompress(const uint8_t*, size_t, std::vector<uint8_t>&) override {
@@ -3784,6 +3804,115 @@ void SnapshotDuringConcurrentUnregisterRemainsBestEffort() {
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
+void PreparedReceiveBufferedBeforeCommit() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload.fill(0xAB);
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+    g_PrecommitUncommitted = false;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.FailCommitForTest = true;
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(!result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(g_PrecommitUncommitted);
+    CHECK(g_PrecommitReceiveStatus == QUIC_STATUS_PENDING);
+    CHECK(fcntl(consumedFd, F_GETFD) == -1);
+    CHECK(errno == EBADF);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void PreparedReceivePrecommitDiscardIncrementsDeferredComplete() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload = {1, 2, 3, 4, 5, 6, 7, 8};
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.FailCommitForTest = true;
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(!result.Ok);
+    CHECK(g_PrecommitReceiveStatus == QUIC_STATUS_PENDING);
+    CHECK(worker.Snapshot().DeferredReceiveCompletes == 1);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard() {
+    ResetFakeReceiveComplete();
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload = {9, 8, 7, 6, 5, 4, 3, 2};
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.FailCommitForTest = true;
+    config.AfterPublishHookForTest = [](TqDarwinRelayWorker* worker, uint64_t relayId) {
+        AfterManagedPublishHook(worker, relayId);
+        (void)g_PrecommitOwner->PublishTerminalAndTakeTarget();
+    };
+
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+    registration.Handle = &handle;
+
+    TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    CHECK(!result.Ok);
+    CHECK(g_PrecommitReceiveStatus == QUIC_STATUS_PENDING);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(g_PrecommitOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    CHECK(worker.Snapshot().DeferredReceiveCompletes == 1);
+
+    worker.SetReceiveCompleteForTest(nullptr);
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
 } // namespace
 
 int main() {
@@ -3854,6 +3983,9 @@ int main() {
     StopPurgesQueuedShutdownCloseWithoutLockedLookup();
     RegisteredBindingSurvivesCallbackWithoutMapLookupRequirement();
     SnapshotDuringConcurrentUnregisterRemainsBestEffort();
+    PreparedReceiveBufferedBeforeCommit();
+    PreparedReceivePrecommitDiscardIncrementsDeferredComplete();
+    TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard();
     return 0;
 }
 

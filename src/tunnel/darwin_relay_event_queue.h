@@ -10,6 +10,7 @@
 #include <vector>
 
 struct MsQuicStream;
+class TqStreamLifetime;
 
 struct TqDarwinQuicReceiveSlice {
     const uint8_t* Data{nullptr};
@@ -18,8 +19,10 @@ struct TqDarwinQuicReceiveSlice {
 
 struct TqDarwinPendingQuicReceive {
     MsQuicStream* Stream{nullptr};
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
     uint64_t RelayId{0};
     std::shared_ptr<void> BindingOwner;
+    bool CallbackBudgetHeld{false};
     std::vector<TqDarwinQuicReceiveSlice> Slices;
     size_t SliceIndex{0};
     size_t SliceOffset{0};
