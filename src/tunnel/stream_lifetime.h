@@ -78,6 +78,8 @@ public:
     static std::shared_ptr<TqStreamLifetime> CreateForTest(
         Phase phase,
         std::shared_ptr<Target> initialTarget = nullptr);
+    bool InstallStreamForTest(MsQuicStream* stream) noexcept;
+    void ReleaseStreamForTest() noexcept;
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
     void* TargetContextForTest() const noexcept;
 #endif

@@ -130,6 +130,15 @@ QUIC_STATUS TqStreamLifetime::DispatchForTest(QUIC_STREAM_EVENT* event) noexcept
     return Dispatch(nullptr, event);
 }
 
+bool TqStreamLifetime::InstallStreamForTest(MsQuicStream* stream) noexcept {
+    return InstallStream(stream);
+}
+
+void TqStreamLifetime::ReleaseStreamForTest() noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    Stream_ = nullptr;
+}
+
 void* TqStreamLifetime::TargetContextForTest() const noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     return Target_ != nullptr ? Target_->ContextForTest() : nullptr;

@@ -4191,10 +4191,15 @@ void LateReceiveAfterInactiveBindingUsesFailSafeSink() {
 
 void LeaseHeldDeferredReceiveDoesNotDiscard() {
     ResetFakeReceiveComplete();
+
     ManagedRelayHarness harness;
     CHECK(harness.OpenSocketPair());
     CHECK(harness.Register());
+    std::memset(harness.StreamStorage, 0, sizeof(harness.StreamStorage));
+    harness.Stream = reinterpret_cast<MsQuicStream*>(harness.StreamStorage);
+    CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
     harness.Worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    harness.Worker.SetSendMsgForTest(PartialSendMsg);
 
     const char payload[] = "lease-hold";
     QUIC_BUFFER buffer{};
@@ -4204,19 +4209,24 @@ void LeaseHeldDeferredReceiveDoesNotDiscard() {
     receive.Type = QUIC_STREAM_EVENT_RECEIVE;
     receive.RECEIVE.BufferCount = 1;
     receive.RECEIVE.Buffers = &buffer;
+    SetSendMsgMode(1);
     CHECK(harness.DispatchViaRouter(receive) == QUIC_STATUS_PENDING);
     CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(harness.Worker.Snapshot().DeferredReceiveDiscards == 0);
 
     auto lease = harness.Owner->TryAcquireApi();
     CHECK(static_cast<bool>(lease));
-    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
 
     lease = {};
+    SetSendMsgMode(0);
     CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
 
+    harness.Worker.SetSendMsgForTest(nullptr);
     harness.Worker.SetReceiveCompleteForTest(nullptr);
+    harness.Owner->ReleaseStreamForTest();
     harness.StopAndClosePeer();
 }
 
