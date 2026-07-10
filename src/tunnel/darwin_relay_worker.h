@@ -291,6 +291,11 @@ public:
     uint64_t QuicReceiveViewBackpressureQueuedForTest() const;
     void SetRunningForTest(bool running);
     void MarkWorkerThreadExitedForTest();
+    bool BindingActiveForTest(uint64_t relayId);
+    std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
+    uint64_t RetiredStreamBindingCountForTest();
+    MsQuicStream* RelayStreamForTest(uint64_t relayId);
+    uint32_t BindingCallbackRefsForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);

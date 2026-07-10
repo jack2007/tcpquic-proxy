@@ -708,6 +708,69 @@ uint64_t TqDarwinRelayWorker::PendingTcpWriteBytesForTest(uint64_t relayId) {
     std::lock_guard<std::mutex> relayLock(relay->Mutex);
     return relay->PendingTcpWriteBytes;
 }
+
+bool TqDarwinRelayWorker::BindingActiveForTest(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end() && it->second->Binding != nullptr) {
+        return it->second->Binding->Active.load(std::memory_order_acquire);
+    }
+    for (const auto& binding : RetiredStreamBindings) {
+        if (binding->RelayId == relayId) {
+            return binding->Active.load(std::memory_order_acquire);
+        }
+    }
+    return false;
+}
+
+std::shared_ptr<TqStreamLifetime> TqDarwinRelayWorker::StreamOwnerForTest(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end()) {
+        return it->second->StreamOwner;
+    }
+    for (const auto& relay : RetiredRelays) {
+        if (relay->Id == relayId) {
+            return relay->StreamOwner;
+        }
+    }
+    return nullptr;
+}
+
+uint64_t TqDarwinRelayWorker::RetiredStreamBindingCountForTest() {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    return RetiredStreamBindings.size();
+}
+
+MsQuicStream* TqDarwinRelayWorker::RelayStreamForTest(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end()) {
+        std::lock_guard<std::mutex> relayLock(it->second->Mutex);
+        return it->second->Stream;
+    }
+    for (const auto& relay : RetiredRelays) {
+        if (relay->Id == relayId) {
+            std::lock_guard<std::mutex> relayLock(relay->Mutex);
+            return relay->Stream;
+        }
+    }
+    return nullptr;
+}
+
+uint32_t TqDarwinRelayWorker::BindingCallbackRefsForTest(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end() && it->second->Binding != nullptr) {
+        return it->second->Binding->CallbackRefs.load(std::memory_order_acquire);
+    }
+    for (const auto& binding : RetiredStreamBindings) {
+        if (binding->RelayId == relayId) {
+            return binding->CallbackRefs.load(std::memory_order_acquire);
+        }
+    }
+    return 0;
+}
 #endif
 
 void TqDarwinRelayWorker::CompleteRegisterCommand(
