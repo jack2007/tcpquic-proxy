@@ -116,7 +116,7 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::atomic<TqDarwinRelayWorker*> Worker{nullptr};
     std::shared_ptr<CallbackEndpoint> Endpoint;
     std::shared_ptr<TqRelayStopControl> StopControl;
-    std::atomic<MsQuicStream*> RetiredStream{nullptr};
+    std::atomic<bool> Retired{false};
     std::atomic<bool> Active{true};
     std::atomic<bool> Terminal{false};
     std::atomic<bool> Closing{false};
@@ -191,6 +191,9 @@ struct TqDarwinRelayWorker::RelayState {
     bool QuicSendFinSubmitted{false};
     bool QuicSendFinCompleted{false};
     bool Closing{false};
+    std::atomic<bool> LogicallyDetached{false};
+    std::atomic<bool> TerminalOwnerReleased{false};
+    std::atomic<bool> RetiredToWorker{false};
     uint64_t SubmittingQuicSends{0};
     TqRelayBufferBudget TcpReadBuffers;
     uint64_t InFlightQuicSends{0};
@@ -309,7 +312,9 @@ void TqDarwinRelayWorker::Stop() {
                         TqStreamLifetime::ShutdownIntent::AbortBoth);
                 }
                 RemoveTcpFilters(entry.second);
-                RetireRelay(entry.second);
+                RetireRelay(
+                    entry.second,
+                    TqDarwinRelayCloseDisposition::ActiveShutdown);
             }
             close(KqueueFd);
             KqueueFd = -1;
@@ -724,6 +729,20 @@ bool TqDarwinRelayWorker::BindingActiveForTest(uint64_t relayId) {
     return false;
 }
 
+bool TqDarwinRelayWorker::BindingTerminalForTest(uint64_t relayId) {
+    std::lock_guard<std::mutex> lock(RelayMutex);
+    const auto it = Relays.find(relayId);
+    if (it != Relays.end() && it->second->Binding != nullptr) {
+        return it->second->Binding->Terminal.load(std::memory_order_acquire);
+    }
+    for (const auto& binding : RetiredStreamBindings) {
+        if (binding->RelayId == relayId) {
+            return binding->Terminal.load(std::memory_order_acquire);
+        }
+    }
+    return false;
+}
+
 std::shared_ptr<TqStreamLifetime> TqDarwinRelayWorker::StreamOwnerForTest(uint64_t relayId) {
     std::lock_guard<std::mutex> lock(RelayMutex);
     const auto it = Relays.find(relayId);
@@ -832,9 +851,13 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
             break;
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+            if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
+                CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
+            }
+            break;
         case TqDarwinRelayEventType::QuicShutdownComplete:
             if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
-                CloseRelay(relay);
+                CloseRelay(relay, TqDarwinRelayCloseDisposition::TerminalLogicalDetach);
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
@@ -897,9 +920,13 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             break;
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+            if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
+                CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
+            }
+            break;
         case TqDarwinRelayEventType::QuicShutdownComplete:
             if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
-                CloseRelay(relay, 1);
+                CloseRelay(relay, TqDarwinRelayCloseDisposition::TerminalLogicalDetach);
             }
             break;
         case TqDarwinRelayEventType::QuicIdealSendBuffer:
@@ -1085,11 +1112,36 @@ void TqDarwinRelayWorker::ClearPublicHandle(const std::shared_ptr<RelayState>& r
 
 void TqDarwinRelayWorker::RetireRelay(
     const std::shared_ptr<RelayState>& relay,
-    uint32_t retainedCallbackRefs) {
+    TqDarwinRelayCloseDisposition disposition) {
     if (relay == nullptr) {
         return;
     }
+
+    const bool terminalDetach =
+        disposition == TqDarwinRelayCloseDisposition::TerminalLogicalDetach;
+    if (terminalDetach) {
+        bool expected = false;
+        if (!relay->LogicallyDetached.compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel)) {
+            return;
+        }
+    } else {
+        if (relay->LogicallyDetached.load(std::memory_order_acquire)) {
+            return;
+        }
+        bool expected = false;
+        if (!relay->RetiredToWorker.compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel)) {
+            return;
+        }
+    }
+
     std::shared_ptr<StreamBinding> binding;
+    MsQuicStream* legacyStreamForCallbackClear = nullptr;
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> receivesToDiscard;
     // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     {
@@ -1122,30 +1174,35 @@ void TqDarwinRelayWorker::RetireRelay(
         relay->PendingQuicReceiveBytes = 0;
         relay->PendingTcpWrites.clear();
         relay->PendingTcpWriteBytes = 0;
-        relay->Binding.reset();
-        const auto completions = binding != nullptr ? binding->Completions : nullptr;
-        const bool hasKnownOperations = completions != nullptr &&
-            completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0;
-        if (relay->Stream != nullptr && binding != nullptr && relay->StreamOwner == nullptr &&
+        if (!terminalDetach && relay->StreamOwner == nullptr && relay->Stream != nullptr) {
+            const auto completions = binding != nullptr ? binding->Completions : nullptr;
+            const bool hasKnownOperations = completions != nullptr &&
+                completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0;
+            if (!hasKnownOperations && relay->InFlightQuicSends == 0) {
 #if defined(TCPQUIC_TESTING)
-            TqDarwinRelayStreamUsableForTest(relay->Stream) &&
+                if (TqDarwinRelayStreamUsableForTest(relay->Stream)) {
+                    legacyStreamForCallbackClear = relay->Stream;
+                }
 #endif
-            relay->Stream->Context == binding.get()) {
-            if (hasKnownOperations) {
-                binding->RetiredStream.store(relay->Stream, std::memory_order_release);
-            } else {
-                relay->Stream->Callback = MsQuicStream::NoOpCallback;
-                relay->Stream->Context = nullptr;
             }
         }
+        relay->Binding.reset();
         relay->Stream = nullptr;
-        if (relay->StreamOwner != nullptr) {
-            relay->StreamOwner.reset();
+        if (terminalDetach) {
+            if (relay->StreamOwner != nullptr) {
+                relay->StreamOwner.reset();
+                relay->TerminalOwnerReleased.store(true, std::memory_order_release);
+            }
         }
+    }
+    if (legacyStreamForCallbackClear != nullptr) {
+        legacyStreamForCallbackClear->Callback = MsQuicStream::NoOpCallback;
+        legacyStreamForCallbackClear->Context = nullptr;
     }
     for (const auto& receive : receivesToDiscard) {
         (void)DiscardDeferredQuicReceive(nullptr, receive);
     }
+    bool retireBinding = false;
     if (binding != nullptr) {
         std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> callbackPendingReceives;
         {
@@ -1157,19 +1214,17 @@ void TqDarwinRelayWorker::RetireRelay(
             (void)DiscardDeferredQuicReceive(nullptr, receive);
         }
         binding->Active.store(false, std::memory_order_release);
-        static constexpr uint32_t kMaxCallbackRefYields = 100000;
-        uint32_t callbackRefYields = 0;
-        while (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs &&
-               callbackRefYields < kMaxCallbackRefYields) {
-            ++callbackRefYields;
-            std::this_thread::yield();
+        if (terminalDetach) {
+            binding->Relay.reset();
         }
-        if (binding->CallbackRefs.load(std::memory_order_acquire) > retainedCallbackRefs) {
-            Errors.fetch_add(1, std::memory_order_relaxed);
-        }
-        binding->Relay.reset();
+        bool bindingExpected = false;
+        retireBinding = binding->Retired.compare_exchange_strong(
+            bindingExpected,
+            true,
+            std::memory_order_acq_rel);
         const auto completions = binding->Completions;
-        if (completions == nullptr || completions->KnownSendOperationCount.load(std::memory_order_acquire) == 0) {
+        if (completions == nullptr ||
+            completions->KnownSendOperationCount.load(std::memory_order_acquire) == 0) {
             binding->Worker.store(nullptr, std::memory_order_release);
         }
     }
@@ -1181,33 +1236,59 @@ void TqDarwinRelayWorker::RetireRelay(
         std::lock_guard<std::mutex> relayLock(relay->Mutex);
         inFlight = relay->InFlightQuicSends;
     }
-    if (inFlight != 0) {
-        RetiredRelays.push_back(relay);
+    const bool waitingTerminalOwner =
+        relay->StreamOwner != nullptr &&
+        !relay->TerminalOwnerReleased.load(std::memory_order_acquire);
+    if (inFlight != 0 || waitingTerminalOwner) {
+        bool alreadyRetired = false;
+        for (const auto& retired : RetiredRelays) {
+            if (retired == relay) {
+                alreadyRetired = true;
+                break;
+            }
+        }
+        if (!alreadyRetired) {
+            RetiredRelays.push_back(relay);
+        }
     }
-    if (binding != nullptr) {
+    if (binding != nullptr && retireBinding) {
         RetiredStreamBindings.push_back(std::move(binding));
     }
 }
 
 void TqDarwinRelayWorker::CloseRelay(
     const std::shared_ptr<RelayState>& relay,
-    uint32_t retainedCallbackRefs) {
+    TqDarwinRelayCloseDisposition disposition) {
     if (relay == nullptr) {
         return;
     }
 
+    if (disposition == TqDarwinRelayCloseDisposition::TerminalLogicalDetach &&
+        relay->LogicallyDetached.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    bool removed = false;
     // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     {
         std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
         const auto it = Relays.find(relay->Id);
-        if (it == Relays.end() || it->second != relay) {
-            return;
+        if (it != Relays.end() && it->second == relay) {
+            Relays.erase(it);
+            removed = true;
         }
-        Relays.erase(it);
     }
-    RemoveTcpFilters(relay);
-    RetireRelay(relay, retainedCallbackRefs);
+    if (disposition == TqDarwinRelayCloseDisposition::ActiveShutdown && !removed) {
+        return;
+    }
+    if (removed) {
+        RemoveTcpFilters(relay);
+        if (disposition == TqDarwinRelayCloseDisposition::ActiveShutdown) {
+            RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
+        }
+    }
+    RetireRelay(relay, disposition);
     PurgeRetiredRelaysIfSafe();
 }
 
@@ -1220,11 +1301,15 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
     std::lock_guard<std::mutex> lock(RelayMutex);
     for (auto it = RetiredRelays.begin(); it != RetiredRelays.end();) {
         uint64_t sends = 0;
+        bool waitingTerminalOwner = false;
         {
             std::lock_guard<std::mutex> relayLock((*it)->Mutex);
             sends = (*it)->InFlightQuicSends;
+            waitingTerminalOwner =
+                (*it)->StreamOwner != nullptr &&
+                !(*it)->TerminalOwnerReleased.load(std::memory_order_acquire);
         }
-        if (sends == 0) {
+        if (sends == 0 && !waitingTerminalOwner) {
             it = RetiredRelays.erase(it);
         } else {
             ++it;
@@ -1243,7 +1328,6 @@ void TqDarwinRelayWorker::PurgeRetiredRelaysIfSafe() {
         }
         if ((*it)->CallbackRefs.load(std::memory_order_acquire) == 0 && !hasKnownOperations &&
             !hasCallbackReceives && !hasCallbackPendingQuicReceives) {
-            ClearRetiredStreamCallbackIfSafe(it->get());
             (*it)->Worker.store(nullptr, std::memory_order_release);
             it = RetiredStreamBindings.erase(it);
         } else {
@@ -1336,9 +1420,6 @@ void TqDarwinRelayWorker::DetachRetiredBindingsForDestruction() {
     std::lock_guard<std::mutex> lock(RelayMutex);
     for (const auto& binding : RetiredStreamBindings) {
         binding->Active.store(false, std::memory_order_release);
-        if (drained) {
-            ClearRetiredStreamCallbackIfSafe(binding.get());
-        }
         binding->Worker.store(nullptr, std::memory_order_release);
     }
     if (drained) {
@@ -1555,7 +1636,6 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperation(
                 completions->KnownSendOperationCount.fetch_sub(1, std::memory_order_acq_rel);
             }
         }
-        ClearRetiredStreamCallbackIfSafe(binding.get());
     }
     return true;
 }
@@ -1585,37 +1665,11 @@ bool TqDarwinRelayWorker::UnregisterKnownSendOperationLocal(
         if (completions != nullptr) {
             completions->KnownSendOperationCount.fetch_sub(1, std::memory_order_acq_rel);
         }
-        ClearRetiredStreamCallbackIfSafe(binding.get());
     }
 #if defined(TCPQUIC_TESTING)
     ActiveSendLocalCompleteCount.fetch_add(1, std::memory_order_relaxed);
 #endif
     return true;
-}
-
-void TqDarwinRelayWorker::ClearRetiredStreamCallbackIfSafe(StreamBinding* binding) {
-    if (binding == nullptr) {
-        return;
-    }
-    const auto completions = binding->Completions;
-    if (completions != nullptr &&
-        completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0) {
-        return;
-    }
-    MsQuicStream* stream = binding->RetiredStream.load(std::memory_order_acquire);
-    if (stream == nullptr) {
-        return;
-    }
-#if defined(TCPQUIC_TESTING)
-    if (!TqDarwinRelayStreamUsableForTest(stream)) {
-        return;
-    }
-#endif
-    if (stream->Context == binding) {
-        stream->Callback = MsQuicStream::NoOpCallback;
-        stream->Context = nullptr;
-        binding->RetiredStream.store(nullptr, std::memory_order_release);
-    }
 }
 
 bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation) {
@@ -1632,7 +1686,6 @@ bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDar
         worker->FallbackSendCompletionCount.fetch_add(1, std::memory_order_relaxed);
     }
 #endif
-    ClearRetiredStreamCallbackIfSafe(binding);
     delete operation;
     return true;
 }
@@ -1731,19 +1784,19 @@ void TqDarwinRelayWorker::ProcessTcpEvents(uint64_t relayId, int16_t filter, uin
 
     if ((flags & EV_ERROR) != 0) {
         Errors.fetch_add(1, std::memory_order_relaxed);
-        CloseRelay(relay);
+        CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
         return;
     }
 
     if (filter == EVFILT_READ) {
         if (!DrainTcpReadable(relay)) {
-            CloseRelay(relay);
+            CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
         }
         return;
     }
     if (filter == EVFILT_WRITE) {
         if (!FlushTcpWrites(relay)) {
-            CloseRelay(relay);
+            CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
         }
         return;
     }
@@ -3444,10 +3497,11 @@ void TqDarwinRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
         }
         relay = it->second;
         Relays.erase(it);
-        RemoveTcpFilters(relay);
     }
 
-    RetireRelay(relay);
+    RemoveTcpFilters(relay);
+    RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
+    RetireRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
     PurgeRetiredRelaysIfSafe();
 }
 

@@ -1960,10 +1960,8 @@ void StopReturnedLateCompletionUsesCurrentStreamCallback() {
     CHECK(stream->Callback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.InFlightQuicSendCountForTest(result.RelayId) == 0);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
-    CHECK(stream->Callback == MsQuicStream::NoOpCallback);
-    CHECK(stream->Context == nullptr);
-    CHECK(stream->Callback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.KnownSendOperationCountForTest() == 0);
+    CHECK(stream->Callback == TqDarwinRelayWorker::StreamCallback);
+    CHECK(stream->Context != nullptr);
 
     worker.SetStreamSendForTest(nullptr);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -2023,8 +2021,8 @@ void StopReturnedLateCompletionClearsProductionStreamContextWithoutExternalOwner
     auto callback = stream->Callback;
     CHECK(callback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.KnownSendOperationCountForTest() == 0);
-    CHECK(stream->Callback == MsQuicStream::NoOpCallback);
-    CHECK(stream->Context == nullptr);
+    CHECK(stream->Callback == TqDarwinRelayWorker::StreamCallback);
+    CHECK(stream->Context != nullptr);
 
     worker.SetStreamSendForTest(nullptr);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -4242,12 +4240,29 @@ void ManagedCloseRetirePurgePreservesStreamCallback() {
     QUIC_STREAM_EVENT terminal{};
     terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
     CHECK(harness.Worker.DrainOneEventForTest());
     CHECK(harness.Worker.Snapshot().ActiveRelays == 0);
     CHECK(harness.Worker.RelayStreamForTest(harness.Result.RelayId) == nullptr);
     CHECK(harness.Worker.RetiredStreamBindingCountForTest() >= retiredBefore);
     CHECK(harness.Stream->Callback == callbackBefore);
     CHECK(harness.Stream->Context == contextBefore);
+    harness.StopAndClosePeer();
+}
+
+void ManagedPeerAbortUsesActiveShutdownWithoutTerminal() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    QUIC_STREAM_EVENT abort{};
+    abort.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+    abort.PEER_SEND_ABORTED.ErrorCode = 1;
+    CHECK(harness.DispatchViaRouter(abort) == QUIC_STATUS_SUCCESS);
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
     harness.StopAndClosePeer();
 }
 
@@ -5023,6 +5038,7 @@ int main() {
     ManagedTerminalCallbackReturnsBeforeEventDrained();
     ManagedTunnelOwnerReleaseRetainsBinding();
     ManagedCloseRetirePurgePreservesStreamCallback();
+    ManagedPeerAbortUsesActiveShutdownWithoutTerminal();
     ManagedTerminalWithTcpErrorClosesOnce();
     ManagedTerminalBeforeTcpErrorClosesOnce();
     ManagedTcpErrorBeforeTerminalClosesOnce();

@@ -45,6 +45,11 @@ struct TqDarwinRelayRegistrationResult {
     uint64_t RelayId{0};
 };
 
+enum class TqDarwinRelayCloseDisposition {
+    ActiveShutdown,
+    TerminalLogicalDetach,
+};
+
 enum class TqDarwinSendOperationState : uint32_t {
     Created = 0,
     Registered = 1,
@@ -293,6 +298,7 @@ public:
     void SetRunningForTest(bool running);
     void MarkWorkerThreadExitedForTest();
     bool BindingActiveForTest(uint64_t relayId);
+    bool BindingTerminalForTest(uint64_t relayId);
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
@@ -455,8 +461,14 @@ private:
     void RequestRelayShutdown(
         const std::shared_ptr<RelayState>& relay,
         TqStreamLifetime::ShutdownIntent intent);
-    void RetireRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
-    void CloseRelay(const std::shared_ptr<RelayState>& relay, uint32_t retainedCallbackRefs = 0);
+    void RetireRelay(
+        const std::shared_ptr<RelayState>& relay,
+        TqDarwinRelayCloseDisposition disposition =
+            TqDarwinRelayCloseDisposition::ActiveShutdown);
+    void CloseRelay(
+        const std::shared_ptr<RelayState>& relay,
+        TqDarwinRelayCloseDisposition disposition =
+            TqDarwinRelayCloseDisposition::ActiveShutdown);
     void PurgeRetiredRelaysIfSafe();
     bool WaitForKnownOperationsToDrain();
     void DetachActiveSendOperationsForStop();
@@ -489,7 +501,6 @@ private:
         TqDarwinRelaySendOperation* operation,
         KnownSendOperationInfo* info,
         TqDarwinRelayWorker* testingWorker = nullptr);
-    static void ClearRetiredStreamCallbackIfSafe(StreamBinding* binding);
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
 
     struct CallbackEndpoint;
