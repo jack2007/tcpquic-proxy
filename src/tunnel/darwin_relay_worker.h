@@ -192,6 +192,7 @@ struct TqDarwinRelayWorkerConfig {
 #if defined(TCPQUIC_TESTING)
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
+    bool FailManagedBindingForTest{false};
     void (*AfterPublishHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
 #endif
 };

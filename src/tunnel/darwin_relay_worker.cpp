@@ -3267,6 +3267,13 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->TcpReadArmed = true;
     }
+#if defined(TCPQUIC_TESTING)
+    if (Config.FailManagedBindingForTest) {
+        FailManagedBinding(relay.get(), nullptr);
+        ClearPublicHandle(relay);
+        return result;
+    }
+#endif
     auto binding = std::make_shared<StreamBinding>();
     binding->Worker.store(this, std::memory_order_release);
     binding->Completions = std::make_shared<CompletionState>();
