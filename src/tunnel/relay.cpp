@@ -395,12 +395,16 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->WindowsRelayId = 0;
         handle->WindowsRelayGeneration = 0;
         handle->WindowsWorkerIndex = 0;
-        if (!handle->Stop.load(std::memory_order_acquire)) {
+        handle->Stop.store(true);
+        if (control != nullptr) {
+            control->Stop.store(true, std::memory_order_release);
+        }
+        if (relayId != 0) {
             TqWindowsRelayRuntime::Instance().StopRelay(
                 control, workerIndex, relayId, relayGeneration, controlGeneration);
-            return;
         }
         TqRelayUnregisterActive();
+        handle->Control.reset();
         return;
     }
 #endif

@@ -1553,7 +1553,7 @@ TqWindowsRelayRegistrationResult TqWindowsRelayWorker::RegisterRelayWithIdLocal(
     result.TcpFdConsumed = tcpFdConsumed;
 
     if (!PublishRelayTarget(registration, relay)) {
-        RollbackPreparedRelay(relay, tcpFdConsumed, registration);
+        RollbackPreparedRelay(relay, tcpFdConsumed, registration, false);
         return result;
     }
 
@@ -1561,7 +1561,7 @@ TqWindowsRelayRegistrationResult TqWindowsRelayWorker::RegisterRelayWithIdLocal(
         relay->StreamBinding == nullptr ||
         relay->StreamBinding->Closing.load(std::memory_order_acquire)) {
         FailManagedBinding(relay, relay->StreamBinding);
-        RollbackPreparedRelay(relay, tcpFdConsumed, registration);
+        RollbackPreparedRelay(relay, tcpFdConsumed, registration, true);
         return result;
     }
 
@@ -1647,7 +1647,7 @@ bool TqWindowsRelayWorker::CommitRelay(
 #if defined(TQ_UNIT_TESTING)
     if (registration.FailCommitForTest) {
         FailManagedBinding(relay, relay->StreamBinding);
-        RollbackPreparedRelay(relay, tcpFdConsumed, registration);
+        RollbackPreparedRelay(relay, tcpFdConsumed, registration, true);
         return false;
     }
 #endif
@@ -1659,7 +1659,7 @@ bool TqWindowsRelayWorker::CommitRelay(
         (registration.StreamOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished ||
          relay->StreamBinding->Closing.load(std::memory_order_acquire))) {
         FailManagedBinding(relay, relay->StreamBinding);
-        RollbackPreparedRelay(relay, tcpFdConsumed, registration);
+        RollbackPreparedRelay(relay, tcpFdConsumed, registration, true);
         return false;
     }
 
@@ -1669,6 +1669,7 @@ bool TqWindowsRelayWorker::CommitRelay(
         activationOk = MaybePostTcpRecv(relay);
     }
     if (!activationOk) {
+        WithdrawPublishedRelayTarget(registration, relay);
         FailManagedBinding(relay, relay->StreamBinding);
         {
             std::lock_guard<std::mutex> guard(Lock_);
@@ -1689,12 +1690,31 @@ bool TqWindowsRelayWorker::CommitRelay(
     return true;
 }
 
+void TqWindowsRelayWorker::WithdrawPublishedRelayTarget(
+    const TqWindowsRelayRegistration& registration,
+    const std::shared_ptr<RelayContext>& relay) {
+    if (registration.StreamOwner == nullptr || relay == nullptr ||
+        relay->ManagedBinding == nullptr) {
+        return;
+    }
+    const auto phase = registration.StreamOwner->GetPhase();
+    if (phase != TqStreamLifetime::Phase::Starting &&
+        phase != TqStreamLifetime::Phase::Started) {
+        return;
+    }
+    (void)registration.StreamOwner->PublishTerminalAndTakeTarget();
+}
+
 void TqWindowsRelayWorker::RollbackPreparedRelay(
     const std::shared_ptr<RelayContext>& relay,
     bool tcpFdConsumed,
-    const TqWindowsRelayRegistration& registration) {
+    const TqWindowsRelayRegistration& registration,
+    bool targetPublished) {
     if (!relay) {
         return;
+    }
+    if (targetPublished) {
+        WithdrawPublishedRelayTarget(registration, relay);
     }
     FailManagedBinding(relay, relay->StreamBinding);
     {
@@ -1705,10 +1725,12 @@ void TqWindowsRelayWorker::RollbackPreparedRelay(
         TqCloseSocket(relay->TcpFd);
         relay->TcpFd = TqInvalidSocket;
     }
-    if (registration.StreamOwner != nullptr &&
-        registration.StreamOwner->GetPhase() != TqStreamLifetime::Phase::StartFailed &&
-        registration.StreamOwner->GetPhase() != TqStreamLifetime::Phase::CreatedNotStarted) {
-        RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
+    if (registration.StreamOwner != nullptr) {
+        const auto phase = registration.StreamOwner->GetPhase();
+        if (phase == TqStreamLifetime::Phase::Starting ||
+            phase == TqStreamLifetime::Phase::Started) {
+            RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
+        }
     }
 }
 
@@ -1828,6 +1850,14 @@ void TqWindowsRelayWorker::SetQuicReceiveViewDrainEnabledForTest(bool enabled) {
 
 bool TqWindowsRelayWorker::RegisterRelayForTest(
     const TqWindowsRelayRegistration& registration) {
+    if (!Thread_.joinable()) {
+        if (Iocp_ == nullptr) {
+            (void)TestCreateIocpForCallbackPostOnly();
+        }
+        if (Iocp_ != nullptr && !Stopping_.load(std::memory_order_acquire)) {
+            return RegisterRelayWithIdLocal(registration).Ok;
+        }
+    }
     return RegisterRelayWithId(registration).Ok;
 }
 
@@ -1852,7 +1882,17 @@ bool TqWindowsRelayWorker::RegisterRelayForTest(
         handle,
         tuning,
         compressAlgo);
-    const auto result = RegisterRelayWithId(registration);
+    const TqWindowsRelayRegistrationResult result = [&]() {
+        if (!Thread_.joinable()) {
+            if (Iocp_ == nullptr) {
+                (void)TestCreateIocpForCallbackPostOnly();
+            }
+            if (Iocp_ != nullptr && !Stopping_.load(std::memory_order_acquire)) {
+                return RegisterRelayWithIdLocal(registration);
+            }
+        }
+        return RegisterRelayWithId(registration);
+    }();
     FillWindowsRelayTestHandle(handle, result);
     return result.Ok;
 }
@@ -3621,11 +3661,25 @@ bool TqWindowsRelayWorker::ShouldRejectReceiveInCallback(
     MsQuicStream* stream,
     const QUIC_STREAM_EVENT& event,
     uint64_t receiveBytes) {
-    (void)binding;
-    (void)stream;
-    (void)event;
-    (void)receiveBytes;
-    return false;
+    const bool fin = (event.RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
+    if (fin || receiveBytes == 0) {
+        return false;
+    }
+    auto relay = ResolveRelayForCallback(binding.RelayId, binding.Generation);
+    if (relay == nullptr || relay->Closing.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const uint64_t limit = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
+    if (limit == 0) {
+        return false;
+    }
+    const uint64_t pending = relay->PendingQuicReceiveBytes.load(std::memory_order_acquire);
+    if (pending < limit && receiveBytes <= limit - pending) {
+        return false;
+    }
+    CallbackReceiveBudgetRejectedCount_.fetch_add(1, std::memory_order_relaxed);
+    PauseQuicReceiveFromCallback(binding, *relay, stream);
+    return true;
 }
 
 std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferredQuicReceiveView(
@@ -4592,7 +4646,9 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
             precommitHandled) {
             return QUIC_STATUS_SUCCESS;
         }
-        (void)ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes);
+        if (ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes)) {
+            return QUIC_STATUS_SUCCESS;
+        }
         auto view = BuildDeferredQuicReceiveView(
             *binding,
             stream,

@@ -571,11 +571,14 @@ bool TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest() {
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
-    return status == QUIC_STATUS_PENDING &&
-           after.CallbackReceiveBudgetRejectedCount == before.CallbackReceiveBudgetRejectedCount &&
-           after.CallbackReceiveBudgetPausedCount == before.CallbackReceiveBudgetPausedCount &&
-           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes + sizeof(payload) &&
-           g_StreamReceiveSetEnabledCalls == 0;
+    return status == QUIC_STATUS_SUCCESS &&
+           after.CallbackReceiveBudgetRejectedCount ==
+               before.CallbackReceiveBudgetRejectedCount + 1 &&
+           after.CallbackReceiveBudgetPausedCount ==
+               before.CallbackReceiveBudgetPausedCount + 1 &&
+           after.CallbackReceiveCopyBytes == before.CallbackReceiveCopyBytes &&
+           g_StreamReceiveSetEnabledCalls == 1 &&
+           g_LastStreamReceiveEnabled == FALSE;
 }
 
 bool TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest() {

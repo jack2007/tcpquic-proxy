@@ -327,10 +327,14 @@ private:
         const TqWindowsRelayRegistration& registration,
         const std::shared_ptr<RelayContext>& relay,
         bool tcpFdConsumed);
+    void WithdrawPublishedRelayTarget(
+        const TqWindowsRelayRegistration& registration,
+        const std::shared_ptr<RelayContext>& relay);
     void RollbackPreparedRelay(
         const std::shared_ptr<RelayContext>& relay,
         bool tcpFdConsumed,
-        const TqWindowsRelayRegistration& registration);
+        const TqWindowsRelayRegistration& registration,
+        bool targetPublished);
     void ActivateManagedBinding(
         const std::shared_ptr<RelayContext>& relay,
         WindowsStreamRelayBinding* binding);
