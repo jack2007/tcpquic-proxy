@@ -116,6 +116,8 @@ public:
         std::shared_ptr<Target> initialTarget = nullptr);
     bool InstallStreamForTest(MsQuicStream* stream) noexcept;
     void ReleaseStreamForTest() noexcept;
+    // 单元测试可将 placement-new 的 detached MsQuicStream 挂到 owner 上。
+    bool InstallDetachedStreamForTest(MsQuicStream* stream) noexcept;
     void* TargetContextForTest() const noexcept;
     static void SetFailNextRegisterSendCompletionForTest(bool fail) noexcept;
 #endif
@@ -180,6 +182,7 @@ private:
     uint64_t RouteGeneration_{1};
     QUIC_STATUS StartFailureStatus_{QUIC_STATUS_SUCCESS};
     bool TerminalRetained_{false};
+    bool DetachedStreamForTest_{false};
     uint8_t DesiredSendShutdown_{0}; // 0=open, 1=graceful, 2=abort
     uint8_t SubmittedSendShutdown_{0};
     uint8_t ReservedSendShutdown_{0};

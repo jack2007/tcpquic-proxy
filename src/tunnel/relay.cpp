@@ -38,13 +38,39 @@ bool TqRelayStartImpl(
     TqApplyRelayPoolBudget(tuning, activeRelays);
 
 #if defined(_WIN32)
-    if (!TqWindowsRelayRuntime::Instance().Start(tuning) ||
-        !TqWindowsRelayRuntime::Instance().RegisterRelay(
-            tcpFd, stream, compressor, decompressor, handle, tuning, compressAlgo)) {
+    if (streamOwner == nullptr) {
         TqRelayUnregisterActive();
         return false;
     }
+    if (!TqWindowsRelayRuntime::Instance().Start(tuning)) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    TqWindowsRelayRegistration registration{};
+    registration.TcpFd = tcpFd;
+    registration.Stream = stream;
+    registration.StreamOwner = std::move(streamOwner);
+    registration.StopControl = handle->Control;
+    registration.Compressor = compressor;
+    registration.Decompressor = decompressor;
+    registration.Tuning = tuning;
+    registration.CompressAlgo = compressAlgo;
+
+    const auto registered = TqWindowsRelayRuntime::Instance().RegisterRelay(registration);
+    if (tcpFdConsumed != nullptr) {
+        *tcpFdConsumed = registered.TcpFdConsumed;
+    }
+    if (!registered.Ok) {
+        TqRelayUnregisterActive();
+        return false;
+    }
+
     handle->Stop.store(false);
+    handle->Backend = TqRelayBackendType::WindowsWorker;
+    handle->WindowsWorker = registered.Worker;
+    handle->WindowsRelayId = registered.RelayId;
+    handle->WindowsWorkerIndex = registered.WorkerIndex;
     return true;
 #elif defined(__linux__)
     // Linux production relay requires the manual-cleanup lifetime owner.  The
@@ -331,8 +357,14 @@ void TqRelaySetTraceContext(TqRelayHandle* handle, uint64_t tunnelId, const char
         return;
     }
 #if defined(_WIN32)
-    if (handle->Backend == TqRelayBackendType::WindowsWorker && handle->WindowsWorker != nullptr) {
-        handle->WindowsWorker->SetRelayTraceContext(handle->WindowsRelayId, tunnelId, target);
+    if (handle->Backend == TqRelayBackendType::WindowsWorker && handle->WindowsRelayId != 0) {
+        TqWindowsRelayRuntime::Instance().SetRelayTraceContext(
+            handle->Control,
+            handle->WindowsWorkerIndex,
+            handle->WindowsRelayId,
+            0,
+            tunnelId,
+            target);
     }
 #else
     (void)target;
@@ -346,14 +378,17 @@ void TqRelayStop(TqRelayHandle* handle) {
 
 #if defined(_WIN32)
     if (handle->Backend == TqRelayBackendType::WindowsWorker) {
-        if (!handle->Stop.load(std::memory_order_acquire)) {
-            TqWindowsRelayRuntime::Instance().StopRelay(handle);
-            return;
-        }
+        const auto control = handle->Control;
+        const uint32_t workerIndex = handle->WindowsWorkerIndex;
+        const uint64_t relayId = handle->WindowsRelayId;
         handle->Backend = TqRelayBackendType::None;
         handle->WindowsWorker = nullptr;
         handle->WindowsRelayId = 0;
         handle->WindowsWorkerIndex = 0;
+        if (!handle->Stop.load(std::memory_order_acquire)) {
+            TqWindowsRelayRuntime::Instance().StopRelay(control, workerIndex, relayId, 0);
+            return;
+        }
         TqRelayUnregisterActive();
         return;
     }

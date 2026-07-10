@@ -1286,6 +1286,7 @@ if(WIN32)
         unittest/windows_relay_worker_test.cpp
         unittest/trace_metrics_stub.cpp
         tunnel/windows_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         protocol/compress.cpp

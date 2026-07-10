@@ -385,6 +385,29 @@ void TqTraceRelayUnregister(
     (void)state;
 }
 
+void TqTraceWindowsReceiveFlowDiag(
+    uint32_t workerIndex,
+    uint64_t relayId,
+    const char* phase,
+    const char* detail,
+    uint64_t pendingBytes,
+    uint64_t pendingQueue,
+    bool quicReceivePaused,
+    uint64_t receiveBytes,
+    uint64_t limitBytes,
+    uint64_t extra) {
+    (void)workerIndex;
+    (void)relayId;
+    (void)phase;
+    (void)detail;
+    (void)pendingBytes;
+    (void)pendingQueue;
+    (void)quicReceivePaused;
+    (void)receiveBytes;
+    (void)limitBytes;
+    (void)extra;
+}
+
 void TqTraceOpenResult(uint64_t tunnelId, bool ok, TqOpenError error, uint32_t connIdField) {
     (void)tunnelId;
     (void)ok;

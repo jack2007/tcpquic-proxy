@@ -58,9 +58,11 @@ TqStreamLifetime::TqStreamLifetime(
 TqStreamLifetime::~TqStreamLifetime() noexcept {
     MsQuicStream* stream = nullptr;
     std::vector<void*> completionKeys;
+    bool detachedStreamForTest = false;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         stream = Stream_;
+        detachedStreamForTest = DetachedStreamForTest_;
         Stream_ = nullptr;
         Phase_ = Phase::Closed;
         Target_.reset();
@@ -75,7 +77,9 @@ TqStreamLifetime::~TqStreamLifetime() noexcept {
             g_claimedSendCompletions.erase(key);
         }
     }
-    delete stream;
+    if (!detachedStreamForTest) {
+        delete stream;
+    }
 }
 
 bool TqStreamLifetime::InstallStream(MsQuicStream* stream) noexcept {
@@ -154,6 +158,22 @@ void TqStreamLifetime::ReleaseStreamForTest() noexcept {
     Stream_ = nullptr;
 }
 
+bool TqStreamLifetime::InstallDetachedStreamForTest(MsQuicStream* stream) noexcept {
+    if (stream == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    if (Stream_ != nullptr || Phase_ == Phase::Closed) {
+        return false;
+    }
+    stream->CleanUpMode = CleanUpManual;
+    stream->Callback = Callback;
+    stream->Context = this;
+    Stream_ = stream;
+    DetachedStreamForTest_ = true;
+    return true;
+}
+
 void* TqStreamLifetime::TargetContextForTest() const noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     return Target_ != nullptr ? Target_->ContextForTest() : nullptr;
@@ -166,7 +186,12 @@ void TqStreamLifetime::SetFailNextRegisterSendCompletionForTest(bool fail) noexc
 
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
 QUIC_STATUS TqStreamLifetime::DispatchForTest(QUIC_STREAM_EVENT* event) noexcept {
-    return Dispatch(nullptr, event);
+    MsQuicStream* stream = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        stream = Stream_;
+    }
+    return Dispatch(stream, event);
 }
 #endif
 

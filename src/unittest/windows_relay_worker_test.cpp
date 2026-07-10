@@ -78,13 +78,13 @@ size_t FakeStreamSendPayloadCount() {
     return g_StreamSendPayloads.size();
 }
 
-void CompleteFakeStreamSends(TqWindowsRelayWorker& worker, MsQuicStream* stream, void* callbackContext) {
+void CompleteFakeStreamSends(TqWindowsRelayWorker& worker, MsQuicStream* stream, void* /*callbackContext*/) {
     (void)worker;
     for (void* context : TakeFakeStreamSendContexts()) {
         QUIC_STREAM_EVENT complete{};
         complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
         complete.SEND_COMPLETE.ClientContext = context;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &complete);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, &complete);
     }
 }
 
@@ -247,7 +247,7 @@ bool TestWindowsRelayReceiveViewIocpCallbackQueue() {
     event.RECEIVE.BufferCount = 2;
     event.RECEIVE.Buffers = buffers;
 
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     if (status != QUIC_STATUS_PENDING) {
         receiveWorker.Stop();
         TqCloseSocket(pair[1]);
@@ -520,7 +520,7 @@ bool TestWindowsRelayCallbackReceiveCopyMetricsForTest() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
@@ -566,7 +566,7 @@ bool TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
@@ -614,7 +614,7 @@ bool TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest() {
     event.RECEIVE.TotalBufferLength = sizeof(payload);
     event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     const auto before = worker.Snapshot();
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
@@ -665,7 +665,7 @@ bool TestWindowsRelayCallbackReceiveBudgetSkipsStaleGenerationForTest() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const auto after = worker.Snapshot();
     worker.Stop();
     MsQuic = nullptr;
@@ -716,7 +716,7 @@ bool TestWindowsRelayCallbackReceiveBudgetSkipsClosingRelayForTest() {
     event.RECEIVE.Buffers = &buffer;
     event.RECEIVE.BufferCount = 1;
     event.RECEIVE.TotalBufferLength = sizeof(payload);
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const auto after = worker.Snapshot();
     MsQuic = nullptr;
     return (status == QUIC_STATUS_PENDING || status == QUIC_STATUS_SUCCESS) &&
@@ -915,7 +915,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         QUIC_STREAM_EVENT aborted{};
         aborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
         aborted.PEER_RECEIVE_ABORTED.ErrorCode = 1;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &aborted);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -961,7 +961,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         QUIC_STREAM_EVENT aborted{};
         aborted.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
         aborted.PEER_SEND_ABORTED.ErrorCode = 1;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &aborted);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &aborted);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot after{};
         do {
@@ -997,7 +997,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         QUIC_STREAM_EVENT shutdown{};
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = TRUE;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &shutdown);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
@@ -1030,7 +1030,7 @@ int TestWindowsRelayQuicTeardownOnWorker() {
         QUIC_STREAM_EVENT shutdown{};
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = FALSE;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &shutdown);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
         do {
@@ -1334,7 +1334,7 @@ bool TestWindowsRelaySendCompleteCallbackDoesNotFindRelayForTest() {
     event.SEND_COMPLETE.ClientContext = operation;
 
     const TqWindowsRelayWorkerSnapshot before = worker.Snapshot();
-    if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) !=
+    if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
         QUIC_STATUS_SUCCESS) {
         return false;
     }
@@ -1381,7 +1381,7 @@ bool TestWindowsRelayReceiveCallbackDoesNotFindRelayForTest() {
     event.RECEIVE.Buffers = &buffer;
 
     const TqWindowsRelayWorkerSnapshot before = worker.Snapshot();
-    const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+    const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
     const TqWindowsRelayWorkerSnapshot after = worker.Snapshot();
     const bool noCallbackFind = after.FindRelayByIdCount == before.FindRelayByIdCount;
     const bool drained = worker.TestDrainSingleReceiveReadyForTest();
@@ -2054,7 +2054,7 @@ int main() {
         event.RECEIVE.Buffers = buffers;
 
         const QUIC_STATUS status =
-            TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+            TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
         if (status != QUIC_STATUS_PENDING) {
             const TqWindowsRelayWorkerSnapshot failedSnapshot = receiveWorker.Snapshot();
             if (failedSnapshot.DeferredReceiveQueued == 1) {
@@ -2174,7 +2174,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, callbackContext, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -2268,7 +2268,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 41;
@@ -2335,7 +2335,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
 
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 131;
@@ -2385,7 +2385,7 @@ int main() {
         receive.Type = QUIC_STREAM_EVENT_RECEIVE;
         receive.RECEIVE.BufferCount = 1;
         receive.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &receive) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
             QUIC_STATUS_PENDING) {
             callbackOrderWorker.Stop();
             MsQuic = nullptr;
@@ -2395,7 +2395,7 @@ int main() {
         QUIC_STREAM_EVENT ideal{};
         ideal.Type = QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE;
         ideal.IDEAL_SEND_BUFFER_SIZE.ByteCount = 4096;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &ideal) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &ideal) !=
             QUIC_STATUS_SUCCESS) {
             callbackOrderWorker.Stop();
             MsQuic = nullptr;
@@ -2405,7 +2405,7 @@ int main() {
         QUIC_STREAM_EVENT peerReceiveAborted{};
         peerReceiveAborted.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
         peerReceiveAborted.PEER_RECEIVE_ABORTED.ErrorCode = 17;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &peerReceiveAborted) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &peerReceiveAborted) !=
             QUIC_STATUS_SUCCESS) {
             callbackOrderWorker.Stop();
             MsQuic = nullptr;
@@ -2416,7 +2416,7 @@ int main() {
         shutdownComplete.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdownComplete.SHUTDOWN_COMPLETE.ConnectionErrorCode = 23;
         shutdownComplete.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_SUCCESS;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdownComplete) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &shutdownComplete) !=
             QUIC_STATUS_SUCCESS) {
             callbackOrderWorker.Stop();
             MsQuic = nullptr;
@@ -2473,7 +2473,7 @@ int main() {
         QUIC_STREAM_EVENT event{};
         event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
         event.SEND_COMPLETE.ClientContext = operation;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
             QUIC_STATUS_SUCCESS) {
             sendCompleteWorker.Stop();
             return 137;
@@ -2512,7 +2512,7 @@ int main() {
         QUIC_STREAM_EVENT event{};
         event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
         event.SEND_COMPLETE.ClientContext = operation;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
             QUIC_STATUS_SUCCESS) {
             return 407;
         }
@@ -2563,7 +2563,7 @@ int main() {
         event.RECEIVE.BufferCount = 0;
         event.RECEIVE.Buffers = nullptr;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             return 48;
@@ -2616,7 +2616,7 @@ int main() {
             event.RECEIVE.Buffers = nullptr;
             callbackThreadStarted.store(true, std::memory_order_release);
             while (!callbackThreadStop.load(std::memory_order_acquire)) {
-                (void)TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event);
+                (void)TqWindowsRelayDispatchTestStreamEvent(stream, callbackContext, &event);
             }
         });
 
@@ -2639,7 +2639,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 0;
         event.RECEIVE.Buffers = nullptr;
-        if (TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event) != QUIC_STATUS_SUCCESS) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, callbackContext, &event) != QUIC_STATUS_SUCCESS) {
             receiveWorker.Stop();
             return 58;
         }
@@ -2843,7 +2843,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
         event.RECEIVE.Flags = static_cast<QUIC_RECEIVE_FLAGS>(0);
-        if (TqWindowsRelayWorker::StreamCallback(stream, callbackContext, &event) !=
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, callbackContext, &event) !=
             QUIC_STATUS_SUCCESS) {
             receiveWorker.Stop();
             return 219;
@@ -2893,7 +2893,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &firstBuffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 72;
@@ -2903,7 +2903,7 @@ int main() {
         secondBuffer.Buffer = secondData;
         secondBuffer.Length = sizeof(secondData);
         event.RECEIVE.Buffers = &secondBuffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 403;
@@ -2981,7 +2981,7 @@ int main() {
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
             return 79;
@@ -3049,7 +3049,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
 
-        const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+        const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
         if (status != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             MsQuic = nullptr;
@@ -3147,7 +3147,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -3225,7 +3225,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -3243,7 +3243,7 @@ int main() {
         QUIC_STREAM_EVENT shutdown{};
         shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         shutdown.SHUTDOWN_COMPLETE.ConnectionShutdown = FALSE;
-        (void)TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &shutdown);
+        (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &shutdown);
 
         const auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         TqWindowsRelayWorkerSnapshot snapshot{};
@@ -3810,7 +3810,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
 
-        const QUIC_STATUS status = TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event);
+        const QUIC_STATUS status = TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event);
         if (status != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
@@ -3916,7 +3916,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
 
-        if (TqWindowsRelayWorker::StreamCallback(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
