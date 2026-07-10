@@ -1,4 +1,6 @@
 #include "client_tunnel_open.h"
+#include "stream_lifetime.h"
+#include "tunnel_reaper.h"
 #include "msquic.hpp"
 #include "relay.h"
 #include "speed_test.h"
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <type_traits>
 #include <vector>
+#include <thread>
 
 const MsQuicApi* MsQuic = nullptr;
 
@@ -407,6 +410,15 @@ bool TqAttachServerSpeedControlStream(
     return false;
 }
 
+bool TqAttachServerSpeedControlStreamManaged(
+    TqServerSpeedTestController&,
+    MsQuicConnection*,
+    std::shared_ptr<TqStreamLifetime>,
+    std::vector<uint8_t>,
+    std::function<void()>) {
+    return false;
+}
+
 bool TqRelayStart(
     TqSocketHandle tcpFd,
     MsQuicStream* stream,
@@ -431,6 +443,59 @@ bool TqRelayStart(
     return true;
 }
 
+namespace {
+class RelayCaptureTarget final : public TqStreamLifetime::Target {
+public:
+    explicit RelayCaptureTarget(std::shared_ptr<TqRelayStopControl> control)
+        : Control(std::move(control)) {}
+    QUIC_STATUS OnStreamEvent(
+        MsQuicStream* stream,
+        QUIC_STREAM_EVENT* event,
+        uint64_t) noexcept override {
+        if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE && Control != nullptr) {
+            Control->Stop.store(true, std::memory_order_release);
+        }
+        return RelayCaptureCallback(stream, nullptr, event);
+    }
+    std::shared_ptr<TqRelayStopControl> Control;
+};
+}
+
+bool TqRelayStartManaged(
+    TqSocketHandle tcpFd,
+    MsQuicStream*,
+    std::shared_ptr<TqStreamLifetime> owner,
+    ITqCompressor*,
+    ITqDecompressor*,
+    TqRelayHandle* handle,
+    const TqTuningConfig&,
+    TqCompressAlgo,
+    bool* tcpFdConsumed) {
+    if (handle == nullptr || owner == nullptr ||
+        handle->Backend != TqRelayBackendType::None || g_relay_start_should_fail) {
+        return false;
+    }
+    auto target = std::make_shared<RelayCaptureTarget>(handle->Control);
+    if (!owner->PublishTarget(owner->RouteGeneration(), std::move(target))) {
+        return false;
+    }
+    ++g_relay_start_count;
+    if (tcpFdConsumed != nullptr) {
+        *tcpFdConsumed = true;
+    }
+    g_last_relay_fd = tcpFd;
+    handle->Backend = TqRelayBackendType::LinuxWorker;
+    return true;
+}
+
+bool TqSetServerConnectionClientName(MsQuicConnection*, const std::string&) {
+    return false;
+}
+
+std::string TqLookupServerConnectionPeerId(MsQuicConnection*) {
+    return {};
+}
+
 bool TqRelayStartQuicReceiveSink(
     MsQuicStream*,
     TqRelayHandle* handle,
@@ -440,6 +505,25 @@ bool TqRelayStartQuicReceiveSink(
         return false;
     }
     if (g_relay_start_should_fail) {
+        return false;
+    }
+    ++g_relay_start_count;
+    handle->Backend = TqRelayBackendType::LinuxWorker;
+    return true;
+}
+
+bool TqRelayStartQuicReceiveSinkManaged(
+    MsQuicStream*,
+    std::shared_ptr<TqStreamLifetime> owner,
+    TqRelayHandle* handle,
+    const TqTuningConfig&,
+    std::atomic<uint64_t>*) {
+    if (handle == nullptr || owner == nullptr ||
+        handle->Backend != TqRelayBackendType::None || g_relay_start_should_fail) {
+        return false;
+    }
+    auto target = std::make_shared<RelayCaptureTarget>(handle->Control);
+    if (!owner->PublishTarget(owner->RouteGeneration(), std::move(target))) {
         return false;
     }
     ++g_relay_start_count;
@@ -565,6 +649,8 @@ int TestOpenSuccessWaitsForExplicitAcceptBeforeRelay() {
     if (!TqAcceptClientTunnelOpen(handle)) return 18;
     if (g_relay_start_count != 1) return 19;
     if (g_last_relay_fd == TqInvalidSocket) return 20;
+    if (!DispatchFakeShutdownComplete(stream)) return 201;
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     return 0;
 }
 
@@ -593,6 +679,8 @@ int TestOpenResponsePayloadIsDeliveredToRelayAfterAccept() {
     g_capture_relay_receive = true;
     if (!TqAcceptClientTunnelOpen(handle)) return 25;
     if (g_relay_receive_bytes != payload) return 26;
+    if (!DispatchFakeShutdownComplete(stream)) return 261;
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
     return 0;
 }
 
@@ -620,6 +708,8 @@ int TestRejectInsideCompletionDoesNotStartRelay() {
     if (completions != 1) return 33;
     if (g_relay_start_count != 0) return 34;
     if (FakeShutdownCount(stream) == 0) return 35;
+    if (!DispatchFakeSendComplete(stream)) return 351;
+    if (!DispatchFakeShutdownComplete(stream)) return 352;
     return 0;
 }
 
@@ -647,6 +737,8 @@ int TestCancelInsideCompletionDoesNotDoubleDeleteOrStartRelay() {
     if (completions != 1) return 43;
     if (g_relay_start_count != 0) return 44;
     if (FakeShutdownCount(stream) == 0) return 45;
+    if (!DispatchFakeSendComplete(stream)) return 451;
+    if (!DispatchFakeShutdownComplete(stream)) return 452;
     return 0;
 }
 
@@ -681,6 +773,8 @@ int TestFailureResponseCompletesAndCleansUpWithoutRelay() {
     if (TqSend(fake.Fds[1], &byte, 1, TqSendFlags::None) != 1) return 57;
     TqRejectClientTunnelOpen(handle);
     if (FakeShutdownCount(stream) == 0) return 58;
+    if (!DispatchFakeSendComplete(stream)) return 581;
+    if (!DispatchFakeShutdownComplete(stream)) return 582;
     return 0;
 }
 
@@ -740,7 +834,9 @@ int TestAcceptBeforeSendCompleteThenShutdownCleansUpContext() {
     if (g_relay_start_count != 0) return 74;
     if (!DispatchFakeShutdownComplete(stream)) return 75;
     if (g_trace_stream_closed_count == 0) return 76;
-    if (FakeCloseCount(stream) == 0) return 77;
+    if (FakeCloseCount(stream) != 0) return 77;
+    if (!DispatchFakeSendComplete(stream)) return 78;
+    if (FakeCloseCount(stream) == 0) return 79;
     return 0;
 }
 
@@ -779,6 +875,10 @@ int TestAcceptReturnsFalseAndCleansUpWhenRelayStartFails() {
 } // namespace
 
 int main() {
+    struct ReaperGuard {
+        ReaperGuard() { TqTunnelReaper::Instance().Start(); }
+        ~ReaperGuard() { TqTunnelReaper::Instance().Stop(); }
+    } reaperGuard;
     if (int rc = TestInvalidInputsReturnNullAndDoNotComplete()) return rc;
     if (int rc = TestCancelNullIsSafe()) return rc;
     if (int rc = TestOpenSuccessWaitsForExplicitAcceptBeforeRelay()) return rc;

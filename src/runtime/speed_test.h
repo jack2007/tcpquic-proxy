@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -12,6 +13,7 @@
 struct TqConfig;
 struct MsQuicStream;
 struct MsQuicConnection;
+class TqStreamLifetime;
 
 class TqEphemeralTargetAuthorizer {
 public:
@@ -50,11 +52,9 @@ void TqHandleServerSpeedControlStream(
     MsQuicConnection* conn,
     HQUIC rawStream);
 
-// Internal handoff for the server incoming-stream dispatcher after it has already
-// wrapped the raw stream and buffered initial bytes.
-bool TqAttachServerSpeedControlStream(
+bool TqAttachServerSpeedControlStreamManaged(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,
-    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> owner,
     std::vector<uint8_t> initialBytes,
     std::function<void()> onComplete = {});

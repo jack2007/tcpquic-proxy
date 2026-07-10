@@ -1,4 +1,5 @@
 #include "speed_test.h"
+#include "stream_lifetime.h"
 
 #include "config.h"
 #include "platform_socket.h"
@@ -1040,6 +1041,9 @@ public:
         OnComplete_(std::move(onComplete)) {}
 
     ~TqServerSpeedControlStreamContext() {
+        if (CallbackTarget_ != nullptr) {
+            CallbackTarget_->Detach();
+        }
         CleanupSession();
         if (OnComplete_) {
             OnComplete_();
@@ -1068,6 +1072,14 @@ public:
         return self->OnStreamEvent(stream, event);
     }
 
+    void SetStreamOwner(
+        std::shared_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqStreamCallbackTarget> target) {
+        StreamOwner_ = std::move(owner);
+        CallbackTarget_ = std::move(target);
+        Stream_ = StreamOwner_->StreamForInitialization();
+    }
+
 private:
     QUIC_STATUS OnStreamEvent(MsQuicStream*, QUIC_STREAM_EVENT* event) noexcept {
         switch (event->Type) {
@@ -1082,8 +1094,10 @@ private:
             ProcessBuffered();
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            TqControlSendContext::Delete(
-                static_cast<TqControlSendContext*>(event->SEND_COMPLETE.ClientContext));
+            if (StreamOwner_ == nullptr) {
+                TqControlSendContext::Delete(
+                    static_cast<TqControlSendContext*>(event->SEND_COMPLETE.ClientContext));
+            }
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
             CleanupSession();
@@ -1216,8 +1230,28 @@ private:
         if (sendContext == nullptr) {
             return false;
         }
-        const QUIC_STATUS status = Stream_->Send(&sendContext->Buffer, 1, flags, sendContext);
+        TqStreamLifetime::ApiLease lease;
+        void* completionKey = sendContext;
+        if (StreamOwner_ != nullptr) {
+            lease = StreamOwner_->TryAcquireApi();
+            if (!lease) {
+                TqControlSendContext::Delete(sendContext);
+                return false;
+            }
+            completionKey = StreamOwner_->RegisterSendCompletion(
+                sendContext,
+                [sendContext] { TqControlSendContext::Delete(sendContext); });
+            if (completionKey == nullptr) {
+                TqControlSendContext::Delete(sendContext);
+                return false;
+            }
+        }
+        const QUIC_STATUS status = Stream_->Send(
+            &sendContext->Buffer, 1, flags, completionKey);
         if (QUIC_FAILED(status)) {
+            if (StreamOwner_ != nullptr) {
+                (void)StreamOwner_->CancelSendCompletion(completionKey);
+            }
             TqControlSendContext::Delete(sendContext);
             return false;
         }
@@ -1235,13 +1269,18 @@ private:
 
     void AbortAndCleanupSession() {
         CleanupSession();
-        if (Stream_ != nullptr) {
+        if (StreamOwner_ != nullptr) {
+            (void)StreamOwner_->RequestShutdown(
+                TqStreamLifetime::ShutdownIntent::AbortBoth);
+        } else if (Stream_ != nullptr) {
             (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
     TqServerSpeedTestController& Controller_;
     MsQuicStream* Stream_{nullptr};
+    std::shared_ptr<TqStreamLifetime> StreamOwner_;
+    std::shared_ptr<TqStreamCallbackTarget> CallbackTarget_;
     std::function<void()> OnComplete_;
     std::vector<uint8_t> BufferedRx_;
     bool SessionStarted_{false};
@@ -1744,43 +1783,41 @@ void TqHandleServerSpeedControlStream(
         return;
     }
 
-    auto* stream = new (std::nothrow) MsQuicStream(
-        rawStream,
-        CleanUpAutoDelete,
-        TqServerSpeedControlStreamContext::Callback,
-        nullptr);
-    if (stream == nullptr || !stream->IsValid()) {
-        delete stream;
-        MsQuic->StreamClose(rawStream);
+    auto owner = TqStreamLifetime::AdoptAccepted(rawStream, nullptr);
+    if (owner == nullptr) {
         return;
     }
-
-    if (!TqAttachServerSpeedControlStream(controller, conn, stream, {}, {})) {
-        (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+    if (!TqAttachServerSpeedControlStreamManaged(controller, conn, owner, {}, {})) {
+        auto lease = owner->TryAcquireApi();
+        if (lease) {
+            (void)owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::AbortBoth);
+        }
     }
 }
 
-bool TqAttachServerSpeedControlStream(
+bool TqAttachServerSpeedControlStreamManaged(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,
-    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> owner,
     std::vector<uint8_t> initialBytes,
     std::function<void()> onComplete) {
-    if (stream == nullptr || !stream->IsValid()) {
+    if (owner == nullptr || owner->StreamForInitialization() == nullptr) {
         return false;
     }
-
     (void)conn;
     auto* context = new (std::nothrow) TqServerSpeedControlStreamContext(
-        controller,
-        stream,
-        std::move(onComplete));
+        controller, owner->StreamForInitialization(), std::move(onComplete));
     if (context == nullptr) {
         return false;
     }
-
-    stream->Callback = TqServerSpeedControlStreamContext::Callback;
-    stream->Context = context;
+    auto target = std::make_shared<TqStreamCallbackTarget>(
+        TqServerSpeedControlStreamContext::Callback, context);
+    if (!owner->PublishTarget(owner->RouteGeneration(), target)) {
+        target->Detach();
+        delete context;
+        return false;
+    }
+    context->SetStreamOwner(std::move(owner), std::move(target));
     if (!context->Prime(std::move(initialBytes))) {
         delete context;
         return false;

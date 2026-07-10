@@ -121,6 +121,7 @@ set(TCPQUIC_PROXY_SOURCES
     protocol/quic_session.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tcp_tunnel.cpp
+    tunnel/stream_lifetime.cpp
     tunnel/tunnel_registry.cpp
     ingress/http_connect_server.cpp
     ingress/proxy_auth.cpp
@@ -292,6 +293,15 @@ endif()
 set(TCPQUIC_TEST_LIBS libzstd)
 set(TCPQUIC_TEST_INCLUDES)
 set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1)
+
+add_tcpquic_executable(tcpquic_stream_lifetime_test
+    unittest/stream_lifetime_test.cpp
+    tunnel/stream_lifetime.cpp
+)
+tcpquic_target_include_dirs(tcpquic_stream_lifetime_test)
+target_link_libraries(tcpquic_stream_lifetime_test PRIVATE Threads::Threads)
+target_compile_definitions(tcpquic_stream_lifetime_test PRIVATE TQ_UNIT_TESTING=1)
+tcpquic_link_mimalloc(tcpquic_stream_lifetime_test)
 set(TCPQUIC_SERVER_TEST_SOURCES
     runtime/thread_pool.cpp
     tunnel/tcp_dialer.cpp
@@ -447,6 +457,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/linux_relay_worker_queue_test.cpp
         unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         config/tuning.cpp
@@ -463,6 +474,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/linux_relay_worker_io_test.cpp
         unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         protocol/compress.cpp
@@ -655,6 +667,7 @@ set_property(TARGET tcpquic_control_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 add_executable(tcpquic_speed_test_test
     unittest/speed_test_test.cpp
     runtime/speed_test.cpp
+    tunnel/stream_lifetime.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
@@ -675,6 +688,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/linux_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
     )
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -774,6 +788,7 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
     unittest/tcp_tunnel_test.cpp
     runtime/speed_test.cpp
     tunnel/tcp_tunnel.cpp
+    tunnel/stream_lifetime.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
     config/tuning.cpp
@@ -878,6 +893,7 @@ set(TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
     unittest/client_tunnel_open_test.cpp
     tunnel/client_tunnel_open.cpp
     tunnel/tcp_tunnel.cpp
+    tunnel/stream_lifetime.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
     tunnel/tunnel_reaper.cpp
@@ -1057,6 +1073,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/linux_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
     )
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")

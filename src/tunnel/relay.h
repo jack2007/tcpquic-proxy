@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 
 #include "compress.h"
 #include "platform_socket.h"
@@ -11,6 +12,7 @@ struct MsQuicStream;
 class TqLinuxRelayWorker;
 class TqWindowsRelayWorker;
 class TqDarwinRelayWorker;
+class TqStreamLifetime;
 
 enum class TqRelayBackendType {
     None,
@@ -19,8 +21,13 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+struct TqRelayStopControl {
+    std::atomic<bool> Stop{false};
+};
+
 struct TqRelayHandle {
     std::atomic<bool> Stop{false};
+    std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
     TqRelayBackendType Backend{TqRelayBackendType::None};
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};
@@ -40,8 +47,26 @@ bool TqRelayStart(
     const TqTuningConfig& tuning,
     TqCompressAlgo compressAlgo = TqCompressAlgo::None);
 
+bool TqRelayStartManaged(
+    TqSocketHandle tcpFd,
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo = TqCompressAlgo::None,
+    bool* tcpFdConsumed = nullptr);
+
 bool TqRelayStartQuicReceiveSink(
     MsQuicStream* stream,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    std::atomic<uint64_t>* receiveBytes);
+
+bool TqRelayStartQuicReceiveSinkManaged(
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
     TqRelayHandle* handle,
     const TqTuningConfig& tuning,
     std::atomic<uint64_t>* receiveBytes);

@@ -15,6 +15,14 @@
 #include <thread>
 #include <vector>
 
+bool TqSetServerConnectionClientName(MsQuicConnection*, const std::string&) {
+    return false;
+}
+
+std::string TqLookupServerConnectionPeerId(MsQuicConnection*) {
+    return {};
+}
+
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
     (void)connection;
     return 0;

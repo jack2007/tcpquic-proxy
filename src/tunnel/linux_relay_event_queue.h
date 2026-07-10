@@ -9,6 +9,7 @@
 #include <vector>
 
 struct MsQuicStream;
+class TqStreamLifetime;
 
 struct TqQuicReceiveSlice {
     const uint8_t* Data{nullptr};
@@ -17,6 +18,7 @@ struct TqQuicReceiveSlice {
 
 struct TqPendingQuicReceive {
     MsQuicStream* Stream{nullptr};
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
     uint64_t RelayId{0};
     std::vector<TqQuicReceiveSlice> Slices;
     size_t SliceIndex{0};

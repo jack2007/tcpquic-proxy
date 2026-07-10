@@ -8,6 +8,7 @@
 #include "relay.h"
 #include "server_dial_reactor.h"
 #include "speed_test.h"
+#include "stream_lifetime.h"
 #include "tcp_dialer.h"
 #include "trace.h"
 #include "tunnel_registry.h"
@@ -130,6 +131,20 @@ struct TqTunnelSendContext {
         std::free(context);
     }
 };
+
+using TqStableCallbackTarget = TqStreamCallbackTarget;
+
+void TqSubmitStreamShutdown(
+    const std::shared_ptr<TqStreamLifetime>& owner,
+    MsQuicStream* stream,
+    TqStreamLifetime::ShutdownIntent intent,
+    QUIC_STREAM_SHUTDOWN_FLAGS legacyFlags) {
+    if (owner != nullptr) {
+        (void)owner->RequestShutdown(intent);
+    } else if (stream != nullptr) {
+        (void)stream->Shutdown(0, legacyFlags);
+    }
+}
 
 enum class TqTunnelRole {
     ClientOpen,
@@ -454,6 +469,9 @@ public:
     }
 
     ~TqTunnelContext() {
+        if (CallbackTarget != nullptr) {
+            CallbackTarget->Detach();
+        }
         (void)CancelServerDialAndMaybeDelete();
         UnregisterFromConnection();
         EmitTraceClosed();
@@ -478,6 +496,14 @@ public:
 
     void SetStream(MsQuicStream* stream) {
         Stream = stream;
+    }
+
+    void SetStreamOwner(
+        std::shared_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqStableCallbackTarget> target) {
+        StreamOwner = std::move(owner);
+        CallbackTarget = std::move(target);
+        Stream = StreamOwner != nullptr ? StreamOwner->StreamForInitialization() : nullptr;
     }
 
     void SetClientMetadata(TqClientTunnelMetadata metadata) {
@@ -555,17 +581,30 @@ public:
             tcpFd = TcpFd;
         }
 
+        if (StreamOwner == nullptr) {
+            return false;
+        }
+        bool tcpFdConsumed = false;
         const bool relayStarted = ReceiveSink
-            ? TqRelayStartQuicReceiveSink(stream, &RelayHandle, Config.Tuning, ReceiveSinkBytes)
-            : TqRelayStart(
+            ? TqRelayStartQuicReceiveSinkManaged(
+                  stream, StreamOwner, &RelayHandle, Config.Tuning, ReceiveSinkBytes)
+            : TqRelayStartManaged(
                   tcpFd,
                   stream,
+                  StreamOwner,
                   Compressor.get(),
                   Decompressor.get(),
                   &RelayHandle,
                   Config.Tuning,
-                  algo);
+                  algo,
+                  &tcpFdConsumed);
         if (!relayStarted) {
+            if (tcpFdConsumed) {
+                std::lock_guard<std::mutex> guard(Lock);
+                if (TcpFd == tcpFd) {
+                    TcpFd = TqInvalidSocket;
+                }
+            }
             TqTunnelDebugLog(
                 "event=relay_start_failed role=%s tunnel_id=%llu target=%s flags=0x%x",
                 Role == TqTunnelRole::ClientOpen ? "client" : "server",
@@ -634,7 +673,7 @@ public:
             std::lock_guard<std::mutex> guard(Lock);
             PendingRelayRxDispatchBuffer.swap(PendingRelayRx);
         }
-        if (PendingRelayRxDispatchBuffer.empty() || stream->Callback == nullptr) {
+        if (PendingRelayRxDispatchBuffer.empty()) {
             return;
         }
 
@@ -645,7 +684,9 @@ public:
         event.Type = QUIC_STREAM_EVENT_RECEIVE;
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
-        (void)stream->Callback(stream, stream->Context, &event);
+        if (StreamOwner != nullptr) {
+            (void)StreamOwner->DispatchBufferedEvent(&event);
+        }
     }
 
     void ArmSelfDeleteOnShutdown() {
@@ -664,7 +705,11 @@ public:
             }
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
@@ -791,7 +836,11 @@ public:
             deleteAfterCancel = ShouldDeletePreRelayLocked();
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
         TqReleaseClientTunnelOpenHandle(releaseHandle);
         return deleteAfterCancel;
@@ -831,7 +880,11 @@ public:
             deleteAfterAbandon = ShouldDeletePreRelayLocked();
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
         TqReleaseClientTunnelOpenHandle(releaseHandle);
         return deleteAfterAbandon;
@@ -906,7 +959,11 @@ public:
             deleteAfterReject = ShouldDeletePreRelayLocked();
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
         TqReleaseClientTunnelOpenHandle(releaseHandle);
         if (deleteAfterReject) {
@@ -945,7 +1002,11 @@ public:
             deleteAfterAbort = ShouldDeletePreRelayLocked();
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
         return deleteAfterAbort;
     }
@@ -1077,7 +1138,11 @@ public:
 
         if (stopRelay) {
             if (shutdownStream) {
-                (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
             }
             TraceRelayStopping("connection_shutdown");
             TqRelayStop(&RelayHandle);
@@ -1085,7 +1150,11 @@ public:
         }
 
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
@@ -1105,7 +1174,11 @@ public:
             }
         }
         if (stream != nullptr) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::GracefulSend,
+                QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
         }
     }
 
@@ -1121,11 +1194,22 @@ private:
     QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept {
         bool deleteAfterEvent = false;
         switch (event->Type) {
+        case QUIC_STREAM_EVENT_START_COMPLETE:
+            if (QUIC_FAILED(event->START_COMPLETE.Status)) {
+                CompleteOpen(false, TqOpenResponse{false, TqOpenError::Internal, 0});
+                std::lock_guard<std::mutex> guard(Lock);
+                Stream = nullptr;
+                ShutdownComplete = true;
+                deleteAfterEvent = ShouldDeletePreRelayLocked();
+            }
+            break;
         case QUIC_STREAM_EVENT_RECEIVE:
             return OnReceive(stream, event);
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            TqTunnelSendContext::Delete(
-                static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            if (StreamOwner == nullptr) {
+                TqTunnelSendContext::Delete(
+                    static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            }
             if (Role == TqTunnelRole::ServerOpen) {
                 bool shutdownAfterFailure = false;
                 {
@@ -1656,7 +1740,11 @@ private:
             }
         }
         if (shutdownStream) {
-            (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
+            TqSubmitStreamShutdown(
+                StreamOwner,
+                stream,
+                TqStreamLifetime::ShutdownIntent::AbortReceive,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE);
         }
     }
 
@@ -1667,6 +1755,8 @@ private:
         }
 
         MsQuicStream* stream = nullptr;
+        TqStreamLifetime::ApiLease lease;
+        void* completionKey = nullptr;
         auto streamOpLock = StreamOpLock;
         std::lock_guard<std::mutex> streamGuard(*streamOpLock);
         {
@@ -1675,12 +1765,45 @@ private:
                 TqTunnelSendContext::Delete(sendContext);
                 return false;
             }
-            stream = Stream;
+            if (StreamOwner != nullptr) {
+                if ((flags & QUIC_SEND_FLAG_START) != 0 &&
+                    StreamOwner->GetPhase() == TqStreamLifetime::Phase::CreatedNotStarted &&
+                    !StreamOwner->BeginStart()) {
+                    TqTunnelSendContext::Delete(sendContext);
+                    return false;
+                }
+                lease = StreamOwner->TryAcquireApi();
+                completionKey = lease
+                    ? StreamOwner->RegisterSendCompletion(
+                          sendContext,
+                          [sendContext] { TqTunnelSendContext::Delete(sendContext); })
+                    : nullptr;
+                if (!lease || completionKey == nullptr) {
+                    TqTunnelSendContext::Delete(sendContext);
+                    return false;
+                }
+                stream = lease.Stream();
+            } else {
+                stream = Stream;
+            }
         }
 
         const QUIC_STATUS status =
-            stream->Send(&sendContext->Buffer, 1, flags, sendContext);
+            stream->Send(
+                &sendContext->Buffer,
+                1,
+                flags,
+                StreamOwner != nullptr ? completionKey : sendContext);
         if (QUIC_FAILED(status)) {
+            if (StreamOwner != nullptr) {
+                (void)StreamOwner->CancelSendCompletion(completionKey);
+                if ((flags & QUIC_SEND_FLAG_START) != 0) {
+                    (void)StreamOwner->PublishStartFailureAndTakeTarget(status);
+                    std::lock_guard<std::mutex> guard(Lock);
+                    Stream = nullptr;
+                    ShutdownComplete = true;
+                }
+            }
             TqTunnelSendContext::Delete(sendContext);
             return false;
         }
@@ -1793,6 +1916,8 @@ private:
 
     TqTunnelRole Role;
     MsQuicStream* Stream;
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
+    std::shared_ptr<TqStableCallbackTarget> CallbackTarget;
     TqSocketHandle TcpFd{TqInvalidSocket};
     TqConfig Config;
     const TqAcl* Acl;
@@ -1851,7 +1976,9 @@ bool TqTunnelRelayStopped(const TqTunnelContext* ctx) {
     if (ctx == nullptr) {
         return true;
     }
-    return ctx->RelayHandle.Stop.load();
+    return ctx->RelayHandle.Stop.load() ||
+        (ctx->RelayHandle.Control != nullptr &&
+         ctx->RelayHandle.Control->Stop.load(std::memory_order_acquire));
 }
 
 void TqReapTunnelContext(TqTunnelContext* ctx) {
@@ -1900,19 +2027,17 @@ TqTunnelStartResult TqStartClientTunnelInternal(
         return {false, TqOpenError::Internal};
     }
 
-    auto* stream = new (std::nothrow) MsQuicStream(
-        *conn,
-        QUIC_STREAM_OPEN_FLAG_NONE,
-        CleanUpAutoDelete,
-        TqTunnelContext::Callback,
-        context);
-    if (stream == nullptr || !stream->IsValid()) {
-        delete stream;
+    auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
+        TqTunnelContext::Callback, context);
+    auto streamOwner = TqStreamLifetime::OpenOutgoing(
+        *conn, QUIC_STREAM_OPEN_FLAG_NONE, callbackTarget);
+    if (streamOwner == nullptr) {
+        callbackTarget->Detach();
         delete context;
         return {false, TqOpenError::Internal};
     }
 
-    context->SetStream(stream);
+    context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
     context->RegisterWithConnectionIfNeeded();
     auto releaseClientOpenOwner = [context]() {
         if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
@@ -2034,14 +2159,12 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         return nullptr;
     }
 
-    auto* stream = new (std::nothrow) MsQuicStream(
-        *conn,
-        QUIC_STREAM_OPEN_FLAG_NONE,
-        CleanUpAutoDelete,
-        TqTunnelContext::Callback,
-        context);
-    if (stream == nullptr || !stream->IsValid()) {
-        delete stream;
+    auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
+        TqTunnelContext::Callback, context);
+    auto streamOwner = TqStreamLifetime::OpenOutgoing(
+        *conn, QUIC_STREAM_OPEN_FLAG_NONE, callbackTarget);
+    if (streamOwner == nullptr) {
+        callbackTarget->Detach();
         delete context;
         delete handle;
         TqTunnelDebugLog(
@@ -2050,7 +2173,7 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         return nullptr;
     }
 
-    context->SetStream(stream);
+    context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
     context->SetClientMetadata(std::move(metadata));
     context->RegisterWithConnectionIfNeeded();
 
@@ -2227,14 +2350,33 @@ namespace {
 
 bool TqSendDispatcherBytes(
     MsQuicStream* stream,
+    const std::shared_ptr<TqStreamLifetime>& owner,
     const std::vector<uint8_t>& data,
     QUIC_SEND_FLAGS flags) {
     auto* sendContext = TqTunnelSendContext::New(data.data(), data.size());
     if (sendContext == nullptr) {
         return false;
     }
-    const QUIC_STATUS status = stream->Send(&sendContext->Buffer, 1, flags, sendContext);
+    TqStreamLifetime::ApiLease lease;
+    void* completionKey = sendContext;
+    if (owner != nullptr) {
+        lease = owner->TryAcquireApi();
+        completionKey = lease
+            ? owner->RegisterSendCompletion(
+                  sendContext,
+                  [sendContext] { TqTunnelSendContext::Delete(sendContext); })
+            : nullptr;
+        if (!lease || completionKey == nullptr) {
+            TqTunnelSendContext::Delete(sendContext);
+            return false;
+        }
+    }
+    const QUIC_STATUS status = stream->Send(
+        &sendContext->Buffer, 1, flags, completionKey);
     if (QUIC_FAILED(status)) {
+        if (owner != nullptr) {
+            (void)owner->CancelSendCompletion(completionKey);
+        }
         TqTunnelSendContext::Delete(sendContext);
         return false;
     }
@@ -2243,6 +2385,7 @@ bool TqSendDispatcherBytes(
 
 bool TqSendDispatcherSpeedError(
     MsQuicStream* stream,
+    const std::shared_ptr<TqStreamLifetime>& owner,
     uint32_t sessionId,
     TqSpeedError error,
     const char* message) {
@@ -2250,7 +2393,7 @@ bool TqSendDispatcherSpeedError(
     if (!TqEncodeSpeedError(TqSpeedErrorMessage{sessionId, error, message}, encoded)) {
         return false;
     }
-    return TqSendDispatcherBytes(stream, encoded, QUIC_SEND_FLAG_FIN);
+    return TqSendDispatcherBytes(stream, owner, encoded, QUIC_SEND_FLAG_FIN);
 }
 
 class TqServerIncomingStreamDispatcher final {
@@ -2274,9 +2417,20 @@ public:
         OnAclDenied_(std::move(onAclDenied)) {}
 
     ~TqServerIncomingStreamDispatcher() {
+        if (CallbackTarget_ != nullptr) {
+            CallbackTarget_->Detach();
+        }
         if (!OwnershipTransferred_ && OnComplete_) {
             OnComplete_();
         }
+    }
+
+    void SetStreamOwner(
+        std::shared_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqStableCallbackTarget> target) {
+        StreamOwner_ = std::move(owner);
+        CallbackTarget_ = std::move(target);
+        Stream_ = StreamOwner_ != nullptr ? StreamOwner_->StreamForInitialization() : nullptr;
     }
 
     static QUIC_STATUS QUIC_API Callback(
@@ -2307,8 +2461,10 @@ private:
             TryDispatch();
             break;
         case QUIC_STREAM_EVENT_SEND_COMPLETE:
-            TqTunnelSendContext::Delete(
-                static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            if (StreamOwner_ == nullptr) {
+                TqTunnelSendContext::Delete(
+                    static_cast<TqTunnelSendContext*>(event->SEND_COMPLETE.ClientContext));
+            }
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             Stream_ = nullptr;
@@ -2387,7 +2543,11 @@ private:
 
         CloseAfterClientHello_ = true;
         if (Stream_ != nullptr) {
-            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+            TqSubmitStreamShutdown(
+                StreamOwner_,
+                Stream_,
+                TqStreamLifetime::ShutdownIntent::GracefulSend,
+                QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
         }
     }
 
@@ -2409,10 +2569,17 @@ private:
             return;
         }
 
-        context->SetStream(Stream_);
+        auto target = std::make_shared<TqStableCallbackTarget>(
+            TqTunnelContext::Callback, context);
+        if (StreamOwner_ == nullptr ||
+            !StreamOwner_->PublishTarget(StreamOwner_->RouteGeneration(), target)) {
+            target->Detach();
+            delete context;
+            AbortOrClose();
+            return;
+        }
+        context->SetStreamOwner(StreamOwner_, std::move(target));
         context->TakeOpeningBytes(std::move(BufferedRx_));
-        Stream_->Callback = TqTunnelContext::Callback;
-        Stream_->Context = context;
         context->RegisterWithConnectionIfNeeded();
 
         OwnershipTransferred_ = true;
@@ -2445,10 +2612,10 @@ private:
             return;
         }
 
-        if (!TqAttachServerSpeedControlStream(
+        if (!TqAttachServerSpeedControlStreamManaged(
                 *Speed_,
                 Conn_,
-                Stream_,
+                StreamOwner_,
                 std::move(BufferedRx_),
                 std::move(OnComplete_))) {
             AbortOrClose();
@@ -2465,7 +2632,8 @@ private:
         uint32_t sessionId,
         TqSpeedError error,
         const char* message) {
-        if (!TqSendDispatcherSpeedError(stream, sessionId, error, message)) {
+        if (!TqSendDispatcherSpeedError(
+                stream, StreamOwner_, sessionId, error, message)) {
             return false;
         }
         CloseAfterStructuredError_ = true;
@@ -2474,12 +2642,18 @@ private:
 
     void AbortOrClose() {
         if (Stream_ != nullptr) {
-            (void)Stream_->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+            TqSubmitStreamShutdown(
+                StreamOwner_,
+                Stream_,
+                TqStreamLifetime::ShutdownIntent::AbortBoth,
+                QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
         }
     }
 
     MsQuicConnection* Conn_{nullptr};
     MsQuicStream* Stream_{nullptr};
+    std::shared_ptr<TqStreamLifetime> StreamOwner_;
+    std::shared_ptr<TqStableCallbackTarget> CallbackTarget_;
     const TqAcl& Acl_;
     TqConfig Config_;
     TqServerSpeedTestController* Speed_{nullptr};
@@ -2505,23 +2679,9 @@ void TqHandleServerIncomingStreamInternal(
         return;
     }
 
-    auto* stream = new (std::nothrow) MsQuicStream(
-        rawStream,
-        CleanUpAutoDelete,
-        MsQuicStream::NoOpCallback,
-        nullptr);
-    if (stream == nullptr || !stream->IsValid()) {
-        delete stream;
-        if (onComplete) {
-            onComplete();
-        }
-        MsQuic->StreamClose(rawStream);
-        return;
-    }
-
     auto* dispatcher = new (std::nothrow) TqServerIncomingStreamDispatcher(
         conn,
-        stream,
+        nullptr,
         acl,
         cfg,
         speed,
@@ -2529,16 +2689,21 @@ void TqHandleServerIncomingStreamInternal(
         std::move(onComplete),
         std::move(onAclDenied));
     if (dispatcher == nullptr) {
-        delete stream;
         if (onComplete) {
             onComplete();
         }
-        MsQuic->StreamClose(rawStream);
+        TqStreamLifetime::RejectAccepted(rawStream);
         return;
     }
-
-    stream->Callback = TqServerIncomingStreamDispatcher::Callback;
-    stream->Context = dispatcher;
+    auto target = std::make_shared<TqStableCallbackTarget>(
+        TqServerIncomingStreamDispatcher::Callback, dispatcher);
+    auto streamOwner = TqStreamLifetime::AdoptAccepted(rawStream, target);
+    if (streamOwner == nullptr) {
+        target->Detach();
+        delete dispatcher;
+        return;
+    }
+    dispatcher->SetStreamOwner(std::move(streamOwner), std::move(target));
 }
 
 } // namespace

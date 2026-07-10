@@ -497,6 +497,7 @@ thread apply all bt
 | `src/tunnel/tunnel_registry.cpp` | connection -> tunnel abort registry |
 | `src/tunnel/tunnel_reaper.cpp` | 全局 tunnel context reaper |
 | `src/tunnel/relay.cpp` | 平台 relay runtime 选择和 active relay 计数 |
+| `src/tunnel/stream_lifetime.cpp` | QUIC stream wrapper owner、稳定 callback 路由、send completion 和 shutdown 账本 |
 | `src/tunnel/linux_relay_worker.cpp` | Linux 生产 relay：epoll/readv/writev、pending receive、zstd worker 解压 |
 | `src/tunnel/relay_buffer.cpp` | OS 无关 relay 按需 buffer：mimalloc/std malloc 分配、pending bytes 预算 |
 | `src/tunnel/relay_alloc.cpp` | relay buffer allocator 封装 |
@@ -505,6 +506,20 @@ thread apply all bt
 | `src/config/tuning.cpp` | tuning、relay memory budget、runtime samples |
 | `src/protocol/compress.cpp` | zstd streaming compress/decompress |
 
-## 13. 一句话总结
+## 13. QUIC stream wrapper 生命周期
+
+当前 tunnel、server dispatcher、speed control 和 Linux managed relay 共用 `TqStreamLifetime` 管理 `CleanUpManual` 的 `MsQuicStream` wrapper。wrapper 不再由各阶段通过改写 `Callback` / `Context` 交接；MsQuic 始终回调 owner，owner 再把事件路由到当前 generation 的 `TqStreamCallbackTarget`。
+
+owner 的主要阶段为 `CreatedNotStarted -> Starting -> Started`，启动失败进入 `StartFailed`，收到终态后进入 `TerminalPublished`，最终只关闭一次 wrapper 并进入 `Closed`。accepted stream 可直接 adopt；在 owner 建立失败的早期异常路径中，`RejectAccepted()` 会提交 abort 并等待终态后关闭，避免 callback 仍在运行时释放 wrapper。
+
+callback target 的 detach 会阻止新 callback 进入并等待已进入的 callback 退出；callback 内自 detach 使用 generation/active-call 规则避免自锁。控制面调用 `StreamSend`、`StreamReceiveComplete`、`StreamReceiveSetEnabled` 前通过 owner 获取短期 API lease；终态发布后不再发放新 lease。
+
+`StreamSend` 的 `ClientContext` 是 owner 分配的不可复用 envelope，不直接暴露 tunnel 或 relay operation 指针。`SEND_COMPLETE` 先通过全局 registry 恢复类型化 context，再执行对应清理；未知或重复 completion 被忽略。即使 stream 终态先到，completion registry 仍保留 owner 和 send 资源，直到 completion 到达。
+
+shutdown 统一经 owner 的方向账本提交。send 方向会合并重复请求，并允许 graceful 升级为 abort；receive abort 单独记账。Linux fake FIN、TCP hard error 和 relay stop 因而不会从不同线程重复或降级提交 shutdown。
+
+Linux managed relay 的接管顺序是 `prepare -> publish target -> commit epoll`。target 在 TCP fd 对 worker 可见前已发布；发布后的 commit 失败会关闭已消费的 fd 并请求 stream shutdown。终态 callback 先封闭 binding，再投递 worker 做逻辑 detach；worker 后续只处理本地 relay 状态，不解引用已经终止的 wrapper。`TqRelayStopControl` 由 handle、binding 和 tunnel 共享，使 callback 降级路径无需访问裸 public handle。
+
+## 14. 一句话总结
 
 当前 `tcpquic-proxy` 的生产线程模型是：MsQuic 负责 QUIC/datapath worker；client 用共享 `TqClientIngressReactor` 管理本地 SOCKS5 / HTTP CONNECT 入口、OPEN completion 和同步 start 失败 delayed retry，异步断开由 MsQuic callback 在 `SHUTDOWN_COMPLETE` 后重建 slot；server 用 `TqServerDialReactor` 处理普通 OPEN 的 ACL、DNS 和 TCP connect；relay 层由 Linux epoll worker、Windows IOCP worker 或 macOS kqueue worker 分片多路复用所有 TCP fd。QUIC receive callback 统一轻量 pending，实际 TCP 写出、zstd 解压和 `StreamReceiveComplete` 由 relay worker 按真实进度完成。

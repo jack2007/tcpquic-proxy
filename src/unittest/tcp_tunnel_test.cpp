@@ -2,6 +2,7 @@
 #include "quic_session.h"
 #include "quic_receive_guard.h"
 #include "speed_test.h"
+#include "stream_lifetime.h"
 #include "relay.h"
 #if defined(__linux__)
 #include "server_dial_reactor.h"
@@ -629,15 +630,17 @@ MsQuicStream* LookupFakeMsQuicStream(HQUIC handle) {
 
 TqTunnelContext* LookupFakeTunnelContext(HQUIC handle) {
     MsQuicStream* stream = LookupFakeMsQuicStream(handle);
-    return stream == nullptr ? nullptr : static_cast<TqTunnelContext*>(stream->Context);
+    if (stream == nullptr || stream->Context == nullptr) {
+        return nullptr;
+    }
+    auto* owner = static_cast<TqStreamLifetime*>(stream->Context);
+    return static_cast<TqTunnelContext*>(owner->TargetContextForTest());
 }
 
 bool ReapPreparedFakeTunnel(MsQuicStream* stream, TqTunnelContext* context) {
     if (stream == nullptr || context == nullptr) {
         return false;
     }
-    stream->Callback = MsQuicStream::NoOpCallback;
-    stream->Context = nullptr;
     TqReapTunnelContext(context);
     return true;
 }

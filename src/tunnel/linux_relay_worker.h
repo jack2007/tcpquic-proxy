@@ -6,6 +6,7 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_error.h"
+#include "stream_lifetime.h"
 #include "tuning.h"
 
 #include <msquic.hpp>
@@ -46,11 +47,19 @@ struct TqLinuxRelayWorkerConfig {
     size_t EventQueueCapacity{4096};
     bool TrackEventProducers{false};
     uint32_t ControlCommandTimeoutMs{5000};
+#if defined(TQ_UNIT_TESTING)
+    bool FailPrepareForTest{false};
+    bool FailCommitForTest{false};
+    void (*AfterPublishHookForTest)(TqLinuxRelayWorker*, uint64_t){nullptr};
+#endif
 };
 
 struct TqLinuxRelayRegistration {
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
+    // 新路径使用公共 manual-cleanup owner；非空时 worker 只发布 router
+    // target，不改写已经启动 wrapper 的 Callback/Context。
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
     TqRelayHandle* Handle{nullptr};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
@@ -62,6 +71,7 @@ struct TqLinuxRelayRegistration {
 
 struct TqLinuxRelayRegistrationResult {
     bool Ok{false};
+    bool TcpFdConsumed{false};
     uint64_t RelayId{0};
 };
 
@@ -72,6 +82,7 @@ struct TqLinuxRelaySendOperation {
     uint64_t RelayId{0};
     uint64_t TotalBytes{0};
     bool Fin{false};
+    TqLinuxRelaySendOperation* FallbackNext{nullptr};
     std::vector<TqBufferView> Views;
     std::vector<QUIC_BUFFER> QuicBuffers;
 };
@@ -123,6 +134,9 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t ActiveTcpRelays{0};
     uint64_t ActiveSinkRelays{0};
     uint64_t ActiveQuicSendRelays{0};
+    uint64_t TerminalRetainedOwnerCount{0};
+    uint64_t TerminalRetainedOldestAgeMs{0};
+    uint64_t StopRemaining{0};
     uint64_t CurrentPendingQuicReceiveBytes{0};
     uint64_t CurrentPendingQuicReceiveQueue{0};
     uint64_t TcpReadArmedRelays{0};
@@ -311,14 +325,10 @@ public:
     void SetNextRelayIdForTest(uint64_t nextRelayId);
     uint64_t AllocateRelayIdForTest();
     int WakeFdForTest() const;
+    uint64_t CommittedRelayCountForTest() const;
     bool ArmTcpReadableForTest(uint64_t relayId, bool enabled);
     bool RelayIndexesConsistentForTest() const;
 #endif
-
-    static QUIC_STATUS QUIC_API StreamCallback(
-        _In_ MsQuicStream* stream,
-        _In_opt_ void* context,
-        _Inout_ QUIC_STREAM_EVENT* event) noexcept;
 
 private:
 #if defined(TQ_UNIT_TESTING)
@@ -342,6 +352,7 @@ private:
 
     struct RelayState;
     struct StreamRelayBinding;
+    struct CallbackEndpoint;
     struct RegisterRelayCommand {
         TqLinuxRelayRegistration Registration;
         TqLinuxRelayRegistrationResult Result;
@@ -489,6 +500,10 @@ private:
         bool fin);
     void SetRelayStop(RelayState* relay, const char* trigger);
     void AbortRelayAndRelease(RelayState* relay, const char* trigger, bool abortStream);
+    void RequestRelayShutdown(
+        RelayState* relay,
+        MsQuicStream* callbackStream,
+        TqStreamLifetime::ShutdownIntent intent);
     bool CanAbortCallbackStream(
         uint64_t relayId,
         StreamRelayBinding* binding,
@@ -497,11 +512,13 @@ private:
         RelayState* relay,
         MsQuicStream* stream,
         StreamRelayBinding* binding);
+    void RetireStreamBinding(RelayState* relay, StreamRelayBinding* binding);
     void BeginStreamShutdownCompleteDetach(RelayState* relay);
     void CompletePendingStreamDetach(RelayState* relay);
     bool HasAbortableStream(RelayState* relay) const;
     bool HasPendingAfterStreamShutdown(RelayState* relay) const;
     void CompleteAndDiscardQuicReceive(TqPendingQuicReceive& view);
+    void DiscardTerminalQuicReceive(TqPendingQuicReceive& view);
     void FailRelayFatal(RelayState* relay, const char* trigger, bool abortStream);
     uint64_t CurrentMaxBufferedQuicSendBytes() const;
     uint64_t CurrentResumeBufferedQuicSendBytes() const;
@@ -525,6 +542,8 @@ private:
     void RetryPendingQuicSends(RelayState* relay);
     bool IsQuicSendBackpressureStatus(QUIC_STATUS status) const;
     void CompleteQuicSend(void* context);
+    bool QueueQuicSendCompletionFallback(void* context) noexcept;
+    void DrainQuicSendCompletionFallbacks();
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
     uint64_t FindRelayIdByStream(MsQuicStream* stream);
@@ -534,6 +553,23 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin);
+    std::shared_ptr<TqPendingQuicReceive> BuildPendingQuicReceive(
+        RelayState* relay,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        uint64_t completedPrefix,
+        bool fin);
+    bool QueuePrecommitQuicReceive(
+        RelayState* relay,
+        StreamRelayBinding* binding,
+        MsQuicStream* stream,
+        const QUIC_BUFFER* buffers,
+        uint32_t bufferCount,
+        bool fin,
+        bool& handled);
+    void ActivateManagedBinding(RelayState* relay, StreamRelayBinding* binding);
+    void FailManagedBinding(RelayState* relay, StreamRelayBinding* binding);
     void ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event);
     void DrainCallbackPendingQuicReceives(RelayState* relay);
     void FlushDeferredQuicReceives(RelayState* relay);
@@ -570,7 +606,6 @@ private:
     void ProcessTcpEvents(uint64_t relayId, uint32_t events);
     void DrainWakeFd();
     bool DispatchEncodedEpollEvent(uint64_t epollData, uint32_t events);
-    QUIC_STATUS OnStreamEvent(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
     QUIC_STATUS OnStreamEventWithBinding(
         MsQuicStream* stream,
         QUIC_STREAM_EVENT* event,
@@ -578,6 +613,7 @@ private:
     void Run();
 
     TqLinuxRelayWorkerConfig Config;
+    std::shared_ptr<CallbackEndpoint> StreamCallbackEndpoint;
     int WakeFd{-1};
     int EpollFd{-1};
     std::atomic<bool> Running{false};
@@ -695,7 +731,9 @@ private:
     std::atomic<uint64_t> FatalRelayResets{0};
     std::atomic<int64_t> LastQuicSendStatus{0};
     mutable std::mutex RetiredBindingLock;
+    std::atomic<TqLinuxRelaySendOperation*> SendCompletionFallbackHead{nullptr};
     std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;
+    std::vector<std::shared_ptr<StreamRelayBinding>> RetiredManagedStreamBindings;
 };
 
 class TqLinuxRelayRuntime final {

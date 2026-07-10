@@ -1548,6 +1548,9 @@ int main() {
         if (bodyText.find("\"linux_relay_fake_fin_receive_count\":") == std::string::npos) return 372;
         if (bodyText.find("\"linux_relay_late_tcp_error_after_stream_shutdown\":") == std::string::npos) return 374;
         if (bodyText.find("\"linux_relay_stream_lookup_scan_count\":") == std::string::npos) return 373;
+        if (bodyText.find("\"linux_relay_terminal_retained_owner_count\":") == std::string::npos) return 375;
+        if (bodyText.find("\"linux_relay_terminal_retained_oldest_age_ms\":") == std::string::npos) return 376;
+        if (bodyText.find("\"linux_relay_stop_remaining\":") == std::string::npos) return 377;
 #if defined(__linux__)
         if (bodyText.find("\"linux_relay_backend\":\"epoll\"") == std::string::npos) return 235;
 #elif defined(__APPLE__)

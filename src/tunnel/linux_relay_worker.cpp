@@ -403,19 +403,81 @@ bool TqLinuxRelayWorker::ArmTcpReadableForTest(uint64_t relayId, bool enabled) {
 }
 #endif
 
-struct TqLinuxRelayWorker::StreamRelayBinding {
+struct TqLinuxRelayWorker::CallbackEndpoint final {
+    explicit CallbackEndpoint(TqLinuxRelayWorker* worker) : Worker(worker) {}
+
+    TqLinuxRelayWorker* TryEnter() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (Worker == nullptr) {
+            return nullptr;
+        }
+        ++ActiveCalls;
+        return Worker;
+    }
+
+    void Leave() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (--ActiveCalls == 0) {
+            Drained.notify_all();
+        }
+    }
+
+    void CloseAndWait() {
+        std::unique_lock<std::mutex> guard(Lock);
+        Worker = nullptr;
+        Drained.wait(guard, [this] { return ActiveCalls == 0; });
+    }
+
+    std::mutex Lock;
+    std::condition_variable Drained;
     TqLinuxRelayWorker* Worker{nullptr};
+    uint32_t ActiveCalls{0};
+};
+
+struct TqLinuxRelayWorker::StreamRelayBinding final
+    : TqStreamLifetime::Target,
+      std::enable_shared_from_this<TqLinuxRelayWorker::StreamRelayBinding> {
+    TqLinuxRelayWorker* Worker{nullptr};
+    std::shared_ptr<CallbackEndpoint> Endpoint;
     std::atomic<RelayState*> Relay{nullptr};
-    std::atomic<TqRelayHandle*> Handle{nullptr};
+    std::shared_ptr<TqRelayStopControl> StopControl;
     std::atomic<uint32_t> CallbackRefs{0};
     std::atomic<bool> Closing{false};
+    std::atomic<bool> Retired{false};
+    enum class Activation : uint8_t { Prepared, Active, Failed };
+    std::atomic<Activation> ActivationState{Activation::Prepared};
+    std::mutex PrecommitLock;
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> PrecommitReceives;
+    uint64_t PrecommitPendingBytes{0};
+    uint64_t PrecommitMaxPendingBytes{0};
+
+    QUIC_STATUS OnStreamEvent(
+        MsQuicStream* stream,
+        QUIC_STREAM_EVENT* event,
+        uint64_t) noexcept override {
+        auto endpoint = Endpoint;
+        if (endpoint == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        auto* worker = endpoint->TryEnter();
+        if (worker == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        struct Guard {
+            std::shared_ptr<CallbackEndpoint> Endpoint;
+            ~Guard() { Endpoint->Leave(); }
+        } guard{std::move(endpoint)};
+        return worker->OnStreamEventWithBinding(stream, event, this);
+    }
 };
 
 struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     uint64_t Id{0};
     int TcpFd{-1};
     MsQuicStream* Stream{nullptr};
+    std::shared_ptr<TqStreamLifetime> StreamOwner;
     TqRelayHandle* Handle{nullptr};
+    std::shared_ptr<TqRelayStopControl> StopControl;
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
@@ -426,6 +488,7 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     bool SinkQuicReceives{false};
     std::atomic<uint64_t>* SinkQuicReceiveBytes{nullptr};
     bool Closing{false};
+    bool Committed{false};
     bool TcpReadClosed{false};
     bool TcpWriteClosed{false};
     bool StreamShutdownComplete{false};
@@ -452,13 +515,15 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
     uint64_t TcpWriteEagainCount{0};
     uint64_t EpollOutEvents{0};
     StreamRelayBinding* StreamBinding{nullptr};
-    MsQuicStream* RetiringStream{nullptr};
+    std::shared_ptr<StreamRelayBinding> ManagedStreamBinding;
     StreamRelayBinding* RetiringStreamBinding{nullptr};
 
     RelayState(const TqLinuxRelayRegistration& registration, const TqLinuxRelayWorkerConfig& config)
         : TcpFd(registration.TcpFd),
           Stream(registration.Stream),
+          StreamOwner(registration.StreamOwner),
           Handle(registration.Handle),
+          StopControl(registration.Handle != nullptr ? registration.Handle->Control : nullptr),
           Compressor(registration.Compressor),
           Decompressor(registration.Decompressor),
           CompressAlgo(registration.CompressAlgo),
@@ -474,10 +539,12 @@ struct TqLinuxRelayWorker::RelayState : TqRelayBufferBudget {
 
 TqLinuxRelayWorker::TqLinuxRelayWorker(const TqLinuxRelayWorkerConfig& config)
     : Config(config),
+      StreamCallbackEndpoint(std::make_shared<CallbackEndpoint>(this)),
       EventQueue(config.EventQueueCapacity) {}
 
 TqLinuxRelayWorker::~TqLinuxRelayWorker() {
     Stop();
+    StreamCallbackEndpoint->CloseAndWait();
 }
 
 bool TqLinuxRelayWorker::Start() {
@@ -797,7 +864,7 @@ void TqLinuxRelayWorker::TraceRelayStreamEvent(
 }
 
 void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
-    if (relay == nullptr || relay->Handle == nullptr) {
+    if (relay == nullptr) {
         return;
     }
 #if defined(__GNUC__)
@@ -824,7 +891,12 @@ void TqLinuxRelayWorker::SetRelayStop(RelayState* relay, const char* trigger) {
 #else
     (void)trigger;
 #endif
-    relay->Handle->Stop.store(true, std::memory_order_release);
+    if (relay->StopControl != nullptr) {
+        relay->StopControl->Stop.store(true, std::memory_order_release);
+    }
+    if (relay->Handle != nullptr) {
+        relay->Handle->Stop.store(true, std::memory_order_release);
+    }
 }
 
 bool TqLinuxRelayWorker::CanAbortCallbackStream(
@@ -856,42 +928,57 @@ void TqLinuxRelayWorker::DetachRelayStreamBinding(
     }
     binding->Closing.store(true, std::memory_order_release);
     binding->Relay.store(nullptr, std::memory_order_release);
-    binding->Handle.store(nullptr, std::memory_order_release);
+    std::atomic_store(&binding->StopControl, std::shared_ptr<TqRelayStopControl>{});
 
-    MsQuicStream* boundStream = stream;
-    if (boundStream == nullptr && relay != nullptr) {
-        boundStream = relay->Stream;
-    }
-    if (boundStream != nullptr && boundStream->Context == binding) {
-        boundStream->Callback = MsQuicStream::NoOpCallback;
-        boundStream->Context = nullptr;
-    }
+    (void)stream;
     if (relay != nullptr) {
         relay->Stream = nullptr;
         relay->StreamBinding = nullptr;
     }
+    RetireStreamBinding(relay, binding);
+}
+
+void TqLinuxRelayWorker::RetireStreamBinding(
+    RelayState* relay,
+    StreamRelayBinding* binding) {
+    if (binding == nullptr) {
+        return;
+    }
+    bool expected = false;
+    if (!binding->Retired.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return;
+    }
     std::lock_guard<std::mutex> guard(RetiredBindingLock);
-    RetiredStreamBindings.emplace_back(binding);
+    if (relay != nullptr && relay->ManagedStreamBinding.get() == binding) {
+        RetiredManagedStreamBindings.emplace_back(std::move(relay->ManagedStreamBinding));
+    } else {
+        RetiredStreamBindings.emplace_back(binding);
+    }
 }
 
 void TqLinuxRelayWorker::BeginStreamShutdownCompleteDetach(RelayState* relay) {
     if (relay == nullptr) {
         return;
     }
-    MsQuicStream* stream = relay->Stream;
     StreamRelayBinding* binding = relay->StreamBinding;
     if (binding != nullptr) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
-        binding->Handle.store(nullptr, std::memory_order_release);
+        std::atomic_store(&binding->StopControl, std::shared_ptr<TqRelayStopControl>{});
     }
     relay->Stream = nullptr;
     relay->StreamBinding = nullptr;
     if (relay->OutstandingQuicSends == 0) {
-        DetachRelayStreamBinding(relay, stream, binding);
+        // SHUTDOWN_COMPLETE is terminal for the C++ wrapper.  The callback may
+        // have returned (and CleanUpAutoDelete may therefore have deleted the
+        // wrapper) before this worker event is consumed.  Terminal detach must
+        // only retire the stable binding; it must never inspect or rewrite the
+        // wrapper's Callback/Context fields.
+        RetireStreamBinding(relay, binding);
+        relay->StreamOwner.reset();
         return;
     }
-    relay->RetiringStream = stream;
     relay->RetiringStreamBinding = binding;
 }
 
@@ -899,15 +986,19 @@ void TqLinuxRelayWorker::CompletePendingStreamDetach(RelayState* relay) {
     if (relay == nullptr) {
         return;
     }
-    MsQuicStream* stream = relay->RetiringStream != nullptr
-        ? relay->RetiringStream
-        : relay->Stream;
     StreamRelayBinding* binding = relay->RetiringStreamBinding != nullptr
         ? relay->RetiringStreamBinding
         : relay->StreamBinding;
-    relay->RetiringStream = nullptr;
     relay->RetiringStreamBinding = nullptr;
-    DetachRelayStreamBinding(relay, stream, binding);
+    relay->Stream = nullptr;
+    relay->StreamBinding = nullptr;
+    if (binding != nullptr) {
+        binding->Closing.store(true, std::memory_order_release);
+        binding->Relay.store(nullptr, std::memory_order_release);
+        std::atomic_store(&binding->StopControl, std::shared_ptr<TqRelayStopControl>{});
+        RetireStreamBinding(relay, binding);
+    }
+    relay->StreamOwner.reset();
 }
 
 void TqLinuxRelayWorker::AbortRelayAndRelease(
@@ -930,12 +1021,15 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
     }
     auto* binding = relay->StreamBinding;
     if (abortQuicStream) {
-        (void)relay->Stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        RequestRelayShutdown(
+            relay,
+            relay->Stream,
+            TqStreamLifetime::ShutdownIntent::AbortBoth);
     }
     if (binding != nullptr) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
-        binding->Handle.store(nullptr, std::memory_order_release);
+        std::atomic_store(&binding->StopControl, std::shared_ptr<TqRelayStopControl>{});
     }
     if (relay->OutstandingQuicSends == 0) {
         CompletePendingStreamDetach(relay);
@@ -944,7 +1038,11 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
     relay->PendingQuicSendRetries.clear();
     for (auto& pending : relay->PendingQuicReceives) {
         if (pending) {
-            CompleteAndDiscardQuicReceive(*pending);
+            if (relay->StreamShutdownComplete) {
+                DiscardTerminalQuicReceive(*pending);
+            } else {
+                CompleteAndDiscardQuicReceive(*pending);
+            }
         }
     }
     relay->PendingQuicReceives.clear();
@@ -953,10 +1051,33 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
         std::lock_guard<std::mutex> guard(relay->CallbackPendingQuicReceiveLock);
         for (auto& pending : relay->CallbackPendingQuicReceives) {
             if (pending) {
-                CompleteAndDiscardQuicReceive(*pending);
+                if (relay->StreamShutdownComplete) {
+                    DiscardTerminalQuicReceive(*pending);
+                } else {
+                    CompleteAndDiscardQuicReceive(*pending);
+                }
             }
         }
         relay->CallbackPendingQuicReceives.clear();
+    }
+}
+
+void TqLinuxRelayWorker::RequestRelayShutdown(
+    RelayState* relay,
+    MsQuicStream* callbackStream,
+    TqStreamLifetime::ShutdownIntent intent) {
+    if (relay != nullptr && relay->StreamOwner != nullptr) {
+        (void)relay->StreamOwner->RequestShutdown(intent);
+    } else if (callbackStream != nullptr) {
+        QUIC_STREAM_SHUTDOWN_FLAGS flags = QUIC_STREAM_SHUTDOWN_FLAG_ABORT;
+        if (intent == TqStreamLifetime::ShutdownIntent::AbortReceive) {
+            flags = QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE;
+        } else if (intent == TqStreamLifetime::ShutdownIntent::AbortSend) {
+            flags = QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND;
+        } else if (intent == TqStreamLifetime::ShutdownIntent::GracefulSend) {
+            flags = QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL;
+        }
+        (void)callbackStream->Shutdown(0, flags);
     }
 }
 
@@ -1091,6 +1212,7 @@ size_t TqLinuxRelayWorker::DrainForTest(size_t budget) {
 }
 
 size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
+    DrainQuicSendCompletionFallbacks();
     size_t processed = 0;
     while (processed < budget) {
         TqLinuxRelayEvent event{};
@@ -1556,6 +1678,11 @@ bool TqLinuxRelayWorker::IsWorkerThread() const {
 TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
     const TqLinuxRelayRegistration& registration) {
     TqLinuxRelayRegistrationResult result{};
+#if defined(TQ_UNIT_TESTING)
+    if (Config.FailPrepareForTest) {
+        return result;
+    }
+#endif
     if ((!registration.SinkQuicReceives && registration.TcpFd < 0) ||
         (registration.SinkQuicReceives && registration.Stream == nullptr) ||
         EpollFd < 0) {
@@ -1596,22 +1723,20 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
         registration.EnableQuicSends ? 1 : 0,
         registration.SinkQuicReceives ? 1 : 0);
 
-    if (registration.TcpFd >= 0 &&
-        ::epoll_ctl(EpollFd, EPOLL_CTL_ADD, registration.TcpFd, &event) != 0) {
-        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
-            if ((*it)->Id == relay->Id) {
-                Relays.erase(it);
-                break;
-            }
-        }
-        RelaysById.erase(relay->Id);
-        result.Ok = false;
-        result.RelayId = 0;
-        return result;
-    }
-
     if (registration.Stream != nullptr) {
-        std::unique_ptr<StreamRelayBinding> binding(new (std::nothrow) StreamRelayBinding{});
+        std::shared_ptr<StreamRelayBinding> managedBinding;
+        StreamRelayBinding* binding = nullptr;
+        if (registration.StreamOwner != nullptr) {
+            managedBinding = std::shared_ptr<StreamRelayBinding>(
+                new (std::nothrow) StreamRelayBinding{});
+            binding = managedBinding.get();
+        } else {
+            // Unit tests can register an inert stream and drive events through
+            // DispatchStreamEventForTest().  This path intentionally has no
+            // callback capability and is not reachable through Linux's public
+            // production relay entry point.
+            binding = new (std::nothrow) StreamRelayBinding{};
+        }
         if (!binding) {
             if (registration.TcpFd >= 0) {
                 ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, registration.TcpFd, nullptr);
@@ -1628,11 +1753,103 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
             return result;
         }
         binding->Worker = this;
+        binding->Endpoint = registration.StreamOwner != nullptr
+            ? StreamCallbackEndpoint
+            : nullptr;
         binding->Relay.store(relay.get(), std::memory_order_release);
-        binding->Handle.store(registration.Handle, std::memory_order_release);
-        relay->StreamBinding = binding.get();
-        registration.Stream->Callback = TqLinuxRelayWorker::StreamCallback;
-        registration.Stream->Context = binding.release();
+        binding->StopControl = registration.Handle != nullptr
+            ? registration.Handle->Control
+            : nullptr;
+        binding->PrecommitMaxPendingBytes = MaxPendingQuicReceiveBytesPerRelay();
+        relay->StreamBinding = binding;
+        if (registration.StreamOwner != nullptr) {
+            const uint64_t generation = registration.StreamOwner->RouteGeneration();
+            if (!registration.StreamOwner->PublishTarget(generation, managedBinding)) {
+                binding->Closing.store(true, std::memory_order_release);
+                binding->Relay.store(nullptr, std::memory_order_release);
+                relay->StreamBinding = nullptr;
+                if (registration.TcpFd >= 0) {
+                    ::epoll_ctl(EpollFd, EPOLL_CTL_DEL, registration.TcpFd, nullptr);
+                }
+                for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+                    if ((*it)->Id == relay->Id) {
+                        Relays.erase(it);
+                        break;
+                    }
+                }
+                RelaysById.erase(relay->Id);
+                result.Ok = false;
+                result.RelayId = 0;
+                return result;
+            }
+            relay->ManagedStreamBinding = std::move(managedBinding);
+            result.TcpFdConsumed = registration.TcpFd >= 0;
+#if defined(TQ_UNIT_TESTING)
+            if (Config.AfterPublishHookForTest != nullptr) {
+                Config.AfterPublishHookForTest(this, relay->Id);
+            }
+#endif
+        } else {
+            binding->ActivationState.store(
+                StreamRelayBinding::Activation::Active,
+                std::memory_order_release);
+            result.TcpFdConsumed = registration.TcpFd >= 0;
+        }
+    }
+
+    // Commit: callback target 已完整发布后才 arm epoll。publish 成功即表示
+    // prepared token 接管 fd；activation 失败也由 worker close，caller 不得再 close。
+    if (registration.StreamOwner != nullptr &&
+        (registration.StreamOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished ||
+         relay->StreamBinding == nullptr ||
+         relay->StreamBinding->Closing.load(std::memory_order_acquire))) {
+        FailManagedBinding(relay.get(), relay->StreamBinding);
+        if (result.TcpFdConsumed) {
+            TqCloseSocket(relay->TcpFd);
+            relay->TcpFd = -1;
+        }
+        RelaysById.erase(relay->Id);
+        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+            if ((*it)->Id == relay->Id) {
+                Relays.erase(it);
+                break;
+            }
+        }
+        result.Ok = false;
+        result.RelayId = 0;
+        return result;
+    }
+    bool commitFailed = false;
+#if defined(TQ_UNIT_TESTING)
+    commitFailed = Config.FailCommitForTest;
+#endif
+    if (registration.TcpFd >= 0 &&
+        (commitFailed ||
+         ::epoll_ctl(EpollFd, EPOLL_CTL_ADD, registration.TcpFd, &event) != 0)) {
+        FailManagedBinding(relay.get(), relay->StreamBinding);
+        for (auto it = Relays.begin(); it != Relays.end(); ++it) {
+            if ((*it)->Id == relay->Id) {
+                Relays.erase(it);
+                break;
+            }
+        }
+        RelaysById.erase(relay->Id);
+        if (result.TcpFdConsumed) {
+            TqCloseSocket(relay->TcpFd);
+            relay->TcpFd = -1;
+            RequestRelayShutdown(
+                relay.get(),
+                registration.Stream,
+                TqStreamLifetime::ShutdownIntent::AbortBoth);
+        }
+        result.Ok = false;
+        result.RelayId = 0;
+        return result;
+    }
+    result.TcpFdConsumed = registration.TcpFd >= 0;
+    relay->Committed = true;
+    if (relay->StreamBinding != nullptr) {
+        ActivateManagedBinding(relay.get(), relay->StreamBinding);
     }
 
     return result;
@@ -1647,6 +1864,16 @@ bool TqLinuxRelayWorker::RegisterRelayForTest(const TqLinuxRelayRegistration& re
 }
 
 #if defined(TQ_UNIT_TESTING)
+uint64_t TqLinuxRelayWorker::CommittedRelayCountForTest() const {
+    uint64_t count = 0;
+    for (const auto& relay : Relays) {
+        if (relay != nullptr && relay->Committed) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 bool TqLinuxRelayWorker::RelayIndexesConsistentForTest() const {
     if (IsWorkerThread()) {
         return RelayIndexesConsistentForTestLocal();
@@ -1805,7 +2032,7 @@ void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     if (binding != nullptr) {
         binding->Closing.store(true, std::memory_order_release);
         binding->Relay.store(nullptr, std::memory_order_release);
-        binding->Handle.store(nullptr, std::memory_order_release);
+        std::atomic_store(&binding->StopControl, std::shared_ptr<TqRelayStopControl>{});
     }
     if (removed->OutstandingQuicSends == 0) {
         DetachRelayStreamBinding(removed.get(), removed->Stream, binding);
@@ -1814,7 +2041,11 @@ void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
     removed->PendingQuicSendRetries.clear();
     for (auto& pending : removed->PendingQuicReceives) {
         if (pending) {
-            CompleteAndDiscardQuicReceive(*pending);
+            if (removed->StreamShutdownComplete) {
+                DiscardTerminalQuicReceive(*pending);
+            } else {
+                CompleteAndDiscardQuicReceive(*pending);
+            }
         }
     }
     removed->PendingQuicReceives.clear();
@@ -1823,7 +2054,11 @@ void TqLinuxRelayWorker::UnregisterRelayLocal(uint64_t relayId) {
         std::lock_guard<std::mutex> guard(removed->CallbackPendingQuicReceiveLock);
         for (auto& pending : removed->CallbackPendingQuicReceives) {
             if (pending) {
-                CompleteAndDiscardQuicReceive(*pending);
+                if (removed->StreamShutdownComplete) {
+                    DiscardTerminalQuicReceive(*pending);
+                } else {
+                    CompleteAndDiscardQuicReceive(*pending);
+                }
             }
         }
         removed->CallbackPendingQuicReceives.clear();
@@ -2164,6 +2399,13 @@ void TqLinuxRelayWorker::CompleteAndDiscardQuicReceive(TqPendingQuicReceive& vie
     FlushDeferredReceiveCompletion(view, true);
 }
 
+void TqLinuxRelayWorker::DiscardTerminalQuicReceive(TqPendingQuicReceive& view) {
+    view.CompletedLength = view.TotalLength;
+    view.PendingCompleteBytes = 0;
+    view.Stream = nullptr;
+    view.StreamOwner.reset();
+}
+
 // In production, ClientContext owns TqLinuxRelaySendOperation until
 // QUIC_STREAM_EVENT_SEND_COMPLETE is delivered back to the owner worker.
 // Tests can disable sends to verify readv batching without a live MsQuic stream.
@@ -2301,7 +2543,25 @@ bool TqLinuxRelayWorker::TrySubmitQuicSendOperation(
         return false;
     }
     MsQuicStream* stream = relay->Stream;
+    TqStreamLifetime::ApiLease lease;
+    void* completionKey = operation;
+    if (relay->StreamOwner != nullptr) {
+        lease = relay->StreamOwner->TryAcquireApi();
+        if (!lease) {
+            delete operation;
+            return false;
+        }
+        stream = lease.Stream();
+        completionKey = relay->StreamOwner->RegisterSendCompletion(operation);
+        if (completionKey == nullptr) {
+            delete operation;
+            return false;
+        }
+    }
     if (stream == nullptr || stream->Handle == nullptr || relay->Closing) {
+        if (relay->StreamOwner != nullptr && completionKey != nullptr) {
+            (void)relay->StreamOwner->CancelSendCompletion(completionKey);
+        }
         delete operation;
         RecordError(RelayErrorKind::QuicSend);
         QuicSendFatalErrors.fetch_add(1);
@@ -2324,8 +2584,11 @@ bool TqLinuxRelayWorker::TrySubmitQuicSendOperation(
         operation->QuicBuffers.empty() ? nullptr : operation->QuicBuffers.data(),
         static_cast<uint32_t>(operation->QuicBuffers.size()),
         operation->Fin ? QUIC_SEND_FLAG_FIN : QUIC_SEND_FLAG_NONE,
-        operation);
+        completionKey);
     if (QUIC_FAILED(status)) {
+        if (relay->StreamOwner != nullptr) {
+            (void)relay->StreamOwner->CancelSendCompletion(completionKey);
+        }
         LastQuicSendStatus.store(static_cast<int64_t>(status));
         if (IsQuicSendBackpressureStatus(status)) {
             QuicSendBackpressureEvents.fetch_add(1);
@@ -2440,6 +2703,30 @@ void TqLinuxRelayWorker::CompleteQuicSend(void* context) {
     }
 }
 
+bool TqLinuxRelayWorker::QueueQuicSendCompletionFallback(void* context) noexcept {
+    auto* operation = static_cast<TqLinuxRelaySendOperation*>(context);
+    if (operation == nullptr || operation->Magic != TqLinuxRelaySendOperation::MagicValue) {
+        return false;
+    }
+    auto* head = SendCompletionFallbackHead.load(std::memory_order_acquire);
+    do {
+        operation->FallbackNext = head;
+    } while (!SendCompletionFallbackHead.compare_exchange_weak(
+        head, operation, std::memory_order_release, std::memory_order_acquire));
+    Wake();
+    return true;
+}
+
+void TqLinuxRelayWorker::DrainQuicSendCompletionFallbacks() {
+    auto* pending = SendCompletionFallbackHead.exchange(nullptr, std::memory_order_acq_rel);
+    while (pending != nullptr) {
+        auto* next = pending->FallbackNext;
+        pending->FallbackNext = nullptr;
+        CompleteQuicSend(pending);
+        pending = next;
+    }
+}
+
 std::shared_ptr<TqLinuxRelayWorker::RelayState> TqLinuxRelayWorker::FindRelayById(uint64_t relayId) {
     auto active = RelaysById.find(relayId);
     if (active != RelaysById.end()) {
@@ -2479,15 +2766,18 @@ void TqLinuxRelayWorker::AbortRelayFromCallback(
     StreamRelayBinding* binding,
     MsQuicStream* stream) {
     if (CanAbortCallbackStream(relayId, binding, stream)) {
-        (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+        RequestRelayShutdown(
+            binding->Relay.load(std::memory_order_acquire),
+            stream,
+            TqStreamLifetime::ShutdownIntent::AbortBoth);
     }
     TqLinuxRelayEvent shutdown{};
     shutdown.Type = TqLinuxRelayEventType::CallbackReceiveQueueFailedShutdown;
     shutdown.RelayId = relayId;
     if (!Enqueue(std::move(shutdown)) && binding != nullptr) {
-        if (auto* handle = binding->Handle.load(std::memory_order_acquire);
-            handle != nullptr) {
-            handle->Stop.store(true, std::memory_order_release);
+        auto control = std::atomic_load(&binding->StopControl);
+        if (control != nullptr) {
+            control->Stop.store(true, std::memory_order_release);
         }
     }
 }
@@ -2605,53 +2895,11 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     uint32_t bufferCount,
     uint64_t completedPrefix,
     bool fin) {
-    if (relay == nullptr || relay->Closing ||
-        (bufferCount != 0 && buffers == nullptr)) {
-        return false;
-    }
-
-    std::shared_ptr<TqPendingQuicReceive> view(new (std::nothrow) TqPendingQuicReceive{});
+    auto view = BuildPendingQuicReceive(
+        relay, stream, buffers, bufferCount, completedPrefix, fin);
     if (!view) {
-        RecordError(RelayErrorKind::QuicReceiveView);
-        QuicReceiveViewAllocFailures.fetch_add(1);
         return false;
     }
-    view->Stream = stream;
-    view->RelayId = relay->Id;
-    view->Fin = fin;
-    view->PendingCompleteBytes = completedPrefix;
-    view->Slices.reserve(bufferCount);
-
-    uint64_t skip = completedPrefix;
-    for (uint32_t i = 0; i < bufferCount; ++i) {
-        if (buffers[i].Length == 0) {
-            continue;
-        }
-        if (buffers[i].Buffer == nullptr) {
-            RecordError(RelayErrorKind::QuicReceiveView);
-            QuicReceiveViewNullBufferFailures.fetch_add(1);
-            return false;
-        }
-        const uint8_t* data = buffers[i].Buffer;
-        uint32_t length = buffers[i].Length;
-        if (skip >= length) {
-            skip -= length;
-            continue;
-        }
-        if (skip > 0) {
-            data += skip;
-            length -= static_cast<uint32_t>(skip);
-            skip = 0;
-        }
-        view->Slices.push_back(TqQuicReceiveSlice{data, length});
-        view->TotalLength += length;
-    }
-    if (view->TotalLength == 0 && !fin) {
-        RecordError(RelayErrorKind::QuicReceiveView);
-        QuicReceiveViewEmptyFailures.fetch_add(1);
-        return false;
-    }
-    RecordQuicReceiveView(view->TotalLength, view->Slices.size());
 
     TqLinuxRelayEvent event{};
     event.Type = TqLinuxRelayEventType::QuicReceiveView;
@@ -2675,6 +2923,170 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     return true;
 }
 
+std::shared_ptr<TqPendingQuicReceive> TqLinuxRelayWorker::BuildPendingQuicReceive(
+    RelayState* relay,
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    uint64_t completedPrefix,
+    bool fin) {
+    if (relay == nullptr || relay->Closing ||
+        (bufferCount != 0 && buffers == nullptr)) {
+        return {};
+    }
+
+    std::shared_ptr<TqPendingQuicReceive> view(new (std::nothrow) TqPendingQuicReceive{});
+    if (!view) {
+        RecordError(RelayErrorKind::QuicReceiveView);
+        QuicReceiveViewAllocFailures.fetch_add(1);
+        return {};
+    }
+    view->Stream = stream;
+    view->StreamOwner = relay->StreamOwner;
+    view->RelayId = relay->Id;
+    view->Fin = fin;
+    view->PendingCompleteBytes = completedPrefix;
+    view->Slices.reserve(bufferCount);
+
+    uint64_t skip = completedPrefix;
+    for (uint32_t i = 0; i < bufferCount; ++i) {
+        if (buffers[i].Length == 0) {
+            continue;
+        }
+        if (buffers[i].Buffer == nullptr) {
+            RecordError(RelayErrorKind::QuicReceiveView);
+            QuicReceiveViewNullBufferFailures.fetch_add(1);
+            return {};
+        }
+        const uint8_t* data = buffers[i].Buffer;
+        uint32_t length = buffers[i].Length;
+        if (skip >= length) {
+            skip -= length;
+            continue;
+        }
+        if (skip > 0) {
+            data += skip;
+            length -= static_cast<uint32_t>(skip);
+            skip = 0;
+        }
+        view->Slices.push_back(TqQuicReceiveSlice{data, length});
+        view->TotalLength += length;
+    }
+    if (view->TotalLength == 0 && !fin) {
+        RecordError(RelayErrorKind::QuicReceiveView);
+        QuicReceiveViewEmptyFailures.fetch_add(1);
+        return {};
+    }
+    RecordQuicReceiveView(view->TotalLength, view->Slices.size());
+    return view;
+}
+
+bool TqLinuxRelayWorker::QueuePrecommitQuicReceive(
+    RelayState* relay,
+    StreamRelayBinding* binding,
+    MsQuicStream* stream,
+    const QUIC_BUFFER* buffers,
+    uint32_t bufferCount,
+    bool fin,
+    bool& handled) {
+    handled = false;
+    if (binding == nullptr ||
+        binding->ActivationState.load(std::memory_order_acquire) ==
+            StreamRelayBinding::Activation::Active) {
+        return true;
+    }
+    handled = true;
+    if (binding->ActivationState.load(std::memory_order_acquire) ==
+            StreamRelayBinding::Activation::Failed ||
+        binding->Closing.load(std::memory_order_acquire)) {
+        return false;
+    }
+    auto view = BuildPendingQuicReceive(relay, stream, buffers, bufferCount, 0, fin);
+    if (!view) {
+        return false;
+    }
+    std::lock_guard<std::mutex> guard(binding->PrecommitLock);
+    const auto activation = binding->ActivationState.load(std::memory_order_acquire);
+    if (activation == StreamRelayBinding::Activation::Active) {
+        handled = false;
+        return true;
+    }
+    if (activation == StreamRelayBinding::Activation::Failed ||
+        binding->Closing.load(std::memory_order_acquire)) {
+        return false;
+    }
+    const uint64_t pending = view->TotalLength - view->CompletedLength;
+    if (pending > binding->PrecommitMaxPendingBytes -
+            std::min(binding->PrecommitPendingBytes, binding->PrecommitMaxPendingBytes)) {
+        return false;
+    }
+    binding->PrecommitPendingBytes += pending;
+    binding->PrecommitReceives.push_back(std::move(view));
+    return true;
+}
+
+void TqLinuxRelayWorker::ActivateManagedBinding(
+    RelayState* relay,
+    StreamRelayBinding* binding) {
+    if (relay == nullptr || binding == nullptr) {
+        return;
+    }
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> pending;
+    {
+        std::lock_guard<std::mutex> guard(binding->PrecommitLock);
+        if (binding->ActivationState.load(std::memory_order_acquire) !=
+            StreamRelayBinding::Activation::Prepared) {
+            return;
+        }
+        binding->ActivationState.store(
+            StreamRelayBinding::Activation::Active,
+            std::memory_order_release);
+        pending.swap(binding->PrecommitReceives);
+        binding->PrecommitPendingBytes = 0;
+    }
+    while (!pending.empty()) {
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::QuicReceiveView;
+        event.RelayId = relay->Id;
+        event.ReceiveView = std::move(pending.front());
+        pending.pop_front();
+        if (event.ReceiveView != nullptr) {
+            event.TotalLength = event.ReceiveView->TotalLength;
+            event.Fin = event.ReceiveView->Fin;
+        }
+        ProcessQuicReceiveViewEvent(event);
+    }
+}
+
+void TqLinuxRelayWorker::FailManagedBinding(
+    RelayState*,
+    StreamRelayBinding* binding) {
+    if (binding == nullptr) {
+        return;
+    }
+    std::deque<std::shared_ptr<TqPendingQuicReceive>> pending;
+    {
+        std::lock_guard<std::mutex> guard(binding->PrecommitLock);
+        binding->ActivationState.store(
+            StreamRelayBinding::Activation::Failed,
+            std::memory_order_release);
+        pending.swap(binding->PrecommitReceives);
+        binding->PrecommitPendingBytes = 0;
+    }
+    while (!pending.empty()) {
+        if (pending.front() != nullptr) {
+            DiscardTerminalQuicReceive(*pending.front());
+        }
+        pending.pop_front();
+    }
+    binding->Closing.store(true, std::memory_order_release);
+    binding->Relay.store(nullptr, std::memory_order_release);
+    auto control = std::atomic_load(&binding->StopControl);
+    if (control != nullptr) {
+        control->Stop.store(true, std::memory_order_release);
+    }
+}
+
 void TqLinuxRelayWorker::CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes) {
     if (bytes == 0) {
         return;
@@ -2696,7 +3108,14 @@ void TqLinuxRelayWorker::FlushDeferredReceiveCompletion(
     if (!force && threshold != 0 && view.PendingCompleteBytes < threshold) {
         return;
     }
-    CompleteDeferredQuicReceive(view.Stream, view.PendingCompleteBytes);
+    if (view.StreamOwner != nullptr) {
+        auto lease = view.StreamOwner->TryAcquireApi();
+        if (lease) {
+            CompleteDeferredQuicReceive(lease.Stream(), view.PendingCompleteBytes);
+        }
+    } else {
+        CompleteDeferredQuicReceive(view.Stream, view.PendingCompleteBytes);
+    }
     view.PendingCompleteBytes = 0;
     DeferredReceiveCompletionFlushes.fetch_add(1);
 }
@@ -2721,7 +3140,12 @@ void TqLinuxRelayWorker::SetQuicReceiveEnabled(RelayState* relay, bool enabled) 
     } else {
         QuicReceivePausedCount.fetch_add(1);
     }
-    if (relay->Stream->Handle != nullptr) {
+    if (relay->StreamOwner != nullptr) {
+        auto lease = relay->StreamOwner->TryAcquireApi();
+        if (lease) {
+            (void)lease.Stream()->ReceiveSetEnabled(enabled);
+        }
+    } else if (relay->Stream->Handle != nullptr) {
         (void)relay->Stream->ReceiveSetEnabled(enabled);
     }
 }
@@ -2750,7 +3174,13 @@ void TqLinuxRelayWorker::ProcessQuicReceiveViewEvent(TqLinuxRelayEvent& event) {
     auto relay = FindRelayById(event.RelayId);
     if (relay == nullptr || relay->Closing || !event.ReceiveView) {
         if (event.ReceiveView) {
-            CompleteAndDiscardQuicReceive(*event.ReceiveView);
+            if (event.ReceiveView->StreamOwner != nullptr &&
+                event.ReceiveView->StreamOwner->GetPhase() ==
+                    TqStreamLifetime::Phase::TerminalPublished) {
+                DiscardTerminalQuicReceive(*event.ReceiveView);
+            } else {
+                CompleteAndDiscardQuicReceive(*event.ReceiveView);
+            }
         }
         return;
     }
@@ -3510,7 +3940,7 @@ uint64_t TqLinuxRelayWorker::AllocateRelayId() {
 
 void TqLinuxRelayWorker::ProcessTcpEvents(uint64_t relayId, uint32_t events) {
     auto relay = FindRelayById(relayId);
-    if (relay == nullptr || relay->Closing) {
+    if (relay == nullptr || relay->Closing || !relay->Committed) {
         return;
     }
     if ((events & EPOLLERR) != 0) {
@@ -3619,7 +4049,17 @@ void TqLinuxRelayWorker::ProcessQuicReceiveEvent(TqLinuxRelayEvent& event) {
 QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
     MsQuicStream* stream,
     QUIC_STREAM_EVENT* event) {
-    return OnStreamEvent(stream, event);
+    std::shared_ptr<RelayState> relay;
+    for (const auto& candidate : Relays) {
+        if (candidate->Stream == stream) {
+            relay = candidate;
+            break;
+        }
+    }
+    return OnStreamEventWithBinding(
+        stream,
+        event,
+        relay != nullptr ? relay->StreamBinding : nullptr);
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
@@ -3683,6 +4123,10 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     TqLinuxRelayWorkerSnapshot snapshot{};
+    const auto retained = TqStreamLifetime::SnapshotTerminalRetentions();
+    snapshot.TerminalRetainedOwnerCount = retained.OwnerCount;
+    snapshot.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
+    snapshot.StopRemaining = Relays.size() + RetiredRelays.size();
     snapshot.WorkerIndex = Config.WorkerIndex;
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
@@ -3798,11 +4242,14 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.MultipleEventProducerThreadsObserved =
         MultipleEventProducerThreadsObserved.load(std::memory_order_acquire);
 
-    snapshot.ActiveRelays = Relays.size();
-    snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
+    snapshot.ActiveRelays = 0;
     snapshot.ActiveRelayStates.reserve(Relays.size());
     bool hasHotRelay = false;
     for (const auto& relay : Relays) {
+        if (!relay->Committed) {
+            continue;
+        }
+        ++snapshot.ActiveRelays;
         uint64_t relayPendingBytes =
             relay->PendingBufferBytes.load(std::memory_order_relaxed);
         snapshot.BufferAcquireCount +=
@@ -3928,6 +4375,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
         active.PeerAddress = GetSocketNameString(relay->TcpFd, true);
         snapshot.ActiveRelayStates.push_back(std::move(active));
     }
+    snapshot.MaxWorkerActiveRelays = snapshot.ActiveRelays;
     snapshot.SnapshotActiveRelaysScanned = snapshot.ActiveRelayStates.size();
     snapshot.MaxWorkerPendingBytes = snapshot.PendingBytes;
     return snapshot;
@@ -3970,24 +4418,6 @@ void TqLinuxRelayWorker::Run() {
     }
 }
 
-QUIC_STATUS QUIC_API TqLinuxRelayWorker::StreamCallback(
-    _In_ MsQuicStream* stream,
-    _In_opt_ void* context,
-    _Inout_ QUIC_STREAM_EVENT* event) noexcept {
-    auto* binding = static_cast<StreamRelayBinding*>(context);
-    if (binding == nullptr || binding->Worker == nullptr) {
-        return QUIC_STATUS_SUCCESS;
-    }
-    return binding->Worker->OnStreamEventWithBinding(stream, event, binding);
-}
-
-QUIC_STATUS TqLinuxRelayWorker::OnStreamEvent(
-    MsQuicStream* stream,
-    QUIC_STREAM_EVENT* event) noexcept {
-    auto* binding = static_cast<StreamRelayBinding*>(stream != nullptr ? stream->Context : nullptr);
-    return OnStreamEventWithBinding(stream, event, binding);
-}
-
 QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
     MsQuicStream* stream,
     QUIC_STREAM_EVENT* event,
@@ -4000,7 +4430,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         queued.Type = TqLinuxRelayEventType::QuicSendComplete;
         queued.Value = reinterpret_cast<uintptr_t>(event->SEND_COMPLETE.ClientContext);
         if (!Enqueue(std::move(queued))) {
-            return QUIC_STATUS_OUT_OF_MEMORY;
+            (void)QueueQuicSendCompletionFallback(event->SEND_COMPLETE.ClientContext);
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -4048,15 +4478,18 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 true);
             FakeFinReceiveCount.fetch_add(1);
             if (CanAbortCallbackStream(relayId, binding, stream)) {
-                (void)stream->Shutdown(0, QUIC_STREAM_SHUTDOWN_FLAG_ABORT);
+                RequestRelayShutdown(
+                    relay,
+                    stream,
+                    TqStreamLifetime::ShutdownIntent::AbortBoth);
             }
             TqLinuxRelayEvent shutdown{};
             shutdown.Type = TqLinuxRelayEventType::FakeFinReceiveShutdown;
             shutdown.RelayId = relayId;
             if (!Enqueue(std::move(shutdown)) && binding != nullptr) {
-                if (auto* handle = binding->Handle.load(std::memory_order_acquire);
-                    handle != nullptr) {
-                    handle->Stop.store(true, std::memory_order_release);
+                auto control = std::atomic_load(&binding->StopControl);
+                if (control != nullptr) {
+                    control->Stop.store(true, std::memory_order_release);
                 }
             }
             return QUIC_STATUS_SUCCESS;
@@ -4075,6 +4508,22 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
                 event->RECEIVE.BufferCount,
                 static_cast<uint32_t>(event->RECEIVE.Flags),
                 true);
+        }
+        bool precommitHandled = false;
+        const bool precommitQueued = QueuePrecommitQuicReceive(
+            relay,
+            binding,
+            stream,
+            event->RECEIVE.Buffers,
+            event->RECEIVE.BufferCount,
+            fin,
+            precommitHandled);
+        if (precommitHandled) {
+            if (!precommitQueued) {
+                AbortRelayFromCallback(relayId, binding, stream);
+                return QUIC_STATUS_OUT_OF_MEMORY;
+            }
+            return QUIC_STATUS_PENDING;
         }
         if (!QueueDeferredQuicReceive(
                 relay,
@@ -4097,13 +4546,27 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+        // Seal the callback route before publishing the asynchronous worker
+        // event.  After this callback returns an auto-cleanup wrapper is no
+        // longer a valid capability, while the binding remains independently
+        // retained until the worker observes CallbackRefs == 0.
+        binding->Closing.store(true, std::memory_order_release);
+        FailManagedBinding(relay, binding);
         TqLinuxRelayEvent queued{};
         queued.Type = TqLinuxRelayEventType::QuicShutdownComplete;
         queued.RelayId = relayId;
         queued.Value = event->SHUTDOWN_COMPLETE.ConnectionErrorCode;
         queued.Length = static_cast<size_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus);
+        queued.ControlOwner = binding->weak_from_this().lock();
         if (!Enqueue(std::move(queued))) {
-            return QUIC_STATUS_OUT_OF_MEMORY;
+            // owner terminal is already published by the stable router.  A
+            // full worker queue must not ask MsQuic to retry or resurrect the
+            // route; publish callback-safe stop so reaper/unregister performs
+            // the remaining local cleanup without touching the wrapper.
+            auto control = std::atomic_load(&binding->StopControl);
+            if (control != nullptr) {
+                control->Stop.store(true, std::memory_order_release);
+            }
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -4311,6 +4774,11 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
             total.HotRelayPeerAddress = snapshot.HotRelayPeerAddress;
         }
         total.TcpReadBatches += snapshot.TcpReadBatches;
+        total.TerminalRetainedOwnerCount = std::max(
+            total.TerminalRetainedOwnerCount, snapshot.TerminalRetainedOwnerCount);
+        total.TerminalRetainedOldestAgeMs = std::max(
+            total.TerminalRetainedOldestAgeMs, snapshot.TerminalRetainedOldestAgeMs);
+        total.StopRemaining += snapshot.StopRemaining;
         total.TcpReadBytes += snapshot.TcpReadBytes;
         total.QuicSendOperations += snapshot.QuicSendOperations;
         total.MaxTcpReadIovUsed = std::max(total.MaxTcpReadIovUsed, snapshot.MaxTcpReadIovUsed);

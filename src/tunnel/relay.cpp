@@ -13,14 +13,20 @@
 #include "msquic.hpp"
 #include "tuning.h"
 
-bool TqRelayStart(
+namespace {
+bool TqRelayStartImpl(
     TqSocketHandle tcpFd,
     MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
     ITqCompressor* compressor,
     ITqDecompressor* decompressor,
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
-    TqCompressAlgo compressAlgo) {
+    TqCompressAlgo compressAlgo,
+    bool* tcpFdConsumed) {
+    if (tcpFdConsumed != nullptr) {
+        *tcpFdConsumed = false;
+    }
     if (handle == nullptr || handle->Backend != TqRelayBackendType::None) {
         return false;
     }
@@ -39,6 +45,13 @@ bool TqRelayStart(
     handle->Stop.store(false);
     return true;
 #elif defined(__linux__)
+    // Linux production relay requires the manual-cleanup lifetime owner.  The
+    // unowned entry point remains available for non-Linux backends, but must
+    // never install a handler on a started Linux wrapper.
+    if (streamOwner == nullptr) {
+        TqRelayUnregisterActive();
+        return false;
+    }
     if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
@@ -53,6 +66,7 @@ bool TqRelayStart(
     TqLinuxRelayRegistration registration{};
     registration.TcpFd = tcpFd;
     registration.Stream = stream;
+    registration.StreamOwner = std::move(streamOwner);
     registration.Handle = handle;
     registration.Compressor = compressor;
     registration.Decompressor = decompressor;
@@ -60,6 +74,9 @@ bool TqRelayStart(
     registration.EnableQuicSends = true;
 
     const auto registered = worker->RegisterRelayWithId(registration);
+    if (tcpFdConsumed != nullptr) {
+        *tcpFdConsumed = registered.TcpFdConsumed;
+    }
     if (!registered.Ok) {
         TqRelayUnregisterActive();
         return false;
@@ -112,9 +129,46 @@ bool TqRelayStart(
     return false;
 #endif
 }
+} // namespace
 
-bool TqRelayStartQuicReceiveSink(
+bool TqRelayStart(
+    TqSocketHandle tcpFd,
     MsQuicStream* stream,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo) {
+    return TqRelayStartImpl(
+        tcpFd, stream, nullptr, compressor, decompressor, handle, tuning, compressAlgo, nullptr);
+}
+
+bool TqRelayStartManaged(
+    TqSocketHandle tcpFd,
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo,
+    bool* tcpFdConsumed) {
+    return TqRelayStartImpl(
+        tcpFd,
+        stream,
+        std::move(streamOwner),
+        compressor,
+        decompressor,
+        handle,
+        tuning,
+        compressAlgo,
+        tcpFdConsumed);
+}
+
+namespace {
+bool TqRelayStartQuicReceiveSinkImpl(
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
     std::atomic<uint64_t>* receiveBytes) {
@@ -127,6 +181,10 @@ bool TqRelayStartQuicReceiveSink(
     TqApplyRelayPoolBudget(tuning, activeRelays);
 
 #if defined(__linux__)
+    if (streamOwner == nullptr) {
+        TqRelayUnregisterActive();
+        return false;
+    }
     if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
@@ -141,6 +199,7 @@ bool TqRelayStartQuicReceiveSink(
     TqLinuxRelayRegistration registration{};
     registration.TcpFd = -1;
     registration.Stream = stream;
+    registration.StreamOwner = std::move(streamOwner);
     registration.Handle = handle;
     registration.EnableQuicSends = false;
     registration.SinkQuicReceives = true;
@@ -163,6 +222,26 @@ bool TqRelayStartQuicReceiveSink(
     TqRelayUnregisterActive();
     return false;
 #endif
+}
+} // namespace
+
+bool TqRelayStartQuicReceiveSink(
+    MsQuicStream* stream,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    std::atomic<uint64_t>* receiveBytes) {
+    return TqRelayStartQuicReceiveSinkImpl(
+        stream, nullptr, handle, tuning, receiveBytes);
+}
+
+bool TqRelayStartQuicReceiveSinkManaged(
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    std::atomic<uint64_t>* receiveBytes) {
+    return TqRelayStartQuicReceiveSinkImpl(
+        stream, std::move(streamOwner), handle, tuning, receiveBytes);
 }
 
 void TqRelaySetTraceContext(TqRelayHandle* handle, uint64_t tunnelId, const char* target) {
@@ -206,6 +285,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->LinuxWorker = nullptr;
         handle->LinuxRelayId = 0;
         handle->Stop.store(true);
+        if (handle->Control != nullptr) handle->Control->Stop.store(true);
         if (worker != nullptr && relayId != 0) {
             worker->UnregisterRelay(relayId);
         }
@@ -222,6 +302,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->DarwinWorker = nullptr;
         handle->DarwinRelayId = 0;
         handle->Stop.store(true);
+        if (handle->Control != nullptr) handle->Control->Stop.store(true);
         if (worker != nullptr && relayId != 0) {
             worker->UnregisterRelay(relayId);
         }
@@ -231,6 +312,7 @@ void TqRelayStop(TqRelayHandle* handle) {
 #endif
 
     handle->Stop.store(true);
+    if (handle->Control != nullptr) handle->Control->Stop.store(true);
 }
 
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle) {

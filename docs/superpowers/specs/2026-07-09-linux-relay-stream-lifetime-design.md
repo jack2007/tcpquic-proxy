@@ -1,5 +1,7 @@
 # Linux relay stream lifetime hardening 设计
 
+> 状态说明：本文记录 2026-07-09 事故的最小修复设计。后续实现已由 `docs/superpowers/plans/2026-07-10-linux-relay-stream-wrapper-terminal-lifetime.md` 扩展为统一的 `TqStreamLifetime` owner、稳定 callback 路由、类型化 send completion、shutdown 账本和 Linux managed relay `prepare -> publish -> commit` 模型。本文中的 callback/context 重写和裸 wrapper detach 描述不再代表当前 managed 生产路径。
+
 ## 背景
 
 `2026-07-09 19:44:42 +0800` 的 client 崩溃由 Crashpad 和 core 同时捕获：

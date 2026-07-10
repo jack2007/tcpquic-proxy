@@ -24,6 +24,30 @@ namespace {
 
 std::mutex g_FakeSendMutex;
 std::vector<void*> g_FakeSendContexts;
+std::shared_ptr<TqStreamLifetime> g_PrecommitOwner;
+std::array<uint8_t, 32> g_PrecommitPayload{};
+QUIC_STATUS g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+bool g_PrecommitSnapshotHidden = false;
+bool g_PrecommitPublishTerminal = false;
+
+void AfterManagedPublishHook(TqLinuxRelayWorker* worker, uint64_t) {
+    g_PrecommitSnapshotHidden =
+        worker != nullptr && worker->CommittedRelayCountForTest() == 0;
+    if (g_PrecommitPublishTerminal) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        g_PrecommitReceiveStatus = g_PrecommitOwner->DispatchForTest(&terminal);
+        return;
+    }
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = g_PrecommitPayload.data();
+    buffer.Length = static_cast<uint32_t>(g_PrecommitPayload.size());
+    QUIC_STREAM_EVENT receive{};
+    receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receive.RECEIVE.BufferCount = 1;
+    receive.RECEIVE.Buffers = &buffer;
+    g_PrecommitReceiveStatus = g_PrecommitOwner->DispatchForTest(&receive);
+}
 
 QUIC_STATUS QUIC_API FakeStreamSend(
     HQUIC,
@@ -2682,9 +2706,9 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
-        if (fakeStream->Callback != TqLinuxRelayWorker::StreamCallback ||
-            fakeStream->Context == &worker ||
-            fakeStream->Context == nullptr) {
+        // The inert test registration must not install a production handler;
+        // tests drive the binding explicitly through DispatchStreamEventForTest.
+        if (fakeStream->Callback != nullptr || fakeStream->Context != nullptr) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -4287,6 +4311,99 @@ int main() {
         TqLinuxRelayRuntime::Instance().Stop();
         if (!pickOk) return 3411;
         if (snapshot.RuntimeLockAcquireCount == 0) return 3412;
+    }
+
+    // prepare failure leaves fd ownership with the caller and publishes no relay.
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.FailPrepareForTest = true;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 5001;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5002;
+        auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = reinterpret_cast<MsQuicStream*>(storage);
+        registration.StreamOwner = owner;
+        const auto result = worker.RegisterRelayWithId(registration);
+        if (result.Ok || result.TcpFdConsumed || ::fcntl(fds[0], F_GETFD) < 0 ||
+            worker.Snapshot().ActiveRelays != 0) return 5003;
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)owner->DispatchForTest(&terminal);
+        worker.Stop();
+        ::close(fds[0]);
+        ::close(fds[1]);
+    }
+
+    // receive between publish/commit is bounded and invisible; commit failure
+    // consumes/closes the old fd exactly once and cannot later close its reused number.
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+        config.FailCommitForTest = true;
+        config.AfterPublishHookForTest = AfterManagedPublishHook;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 5004;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5005;
+        const int consumedFd = fds[0];
+        g_PrecommitOwner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started);
+        g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+        g_PrecommitSnapshotHidden = false;
+        g_PrecommitPublishTerminal = false;
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = consumedFd;
+        registration.Stream = reinterpret_cast<MsQuicStream*>(storage);
+        registration.StreamOwner = g_PrecommitOwner;
+        const auto result = worker.RegisterRelayWithId(registration);
+        if (result.Ok || !result.TcpFdConsumed || !g_PrecommitSnapshotHidden ||
+            g_PrecommitReceiveStatus != QUIC_STATUS_PENDING ||
+            ::fcntl(consumedFd, F_GETFD) != -1 || errno != EBADF) return 5006;
+
+        int reused[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, reused) != 0) return 5007;
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)g_PrecommitOwner->DispatchForTest(&terminal);
+        g_PrecommitOwner.reset();
+        (void)worker.DrainForTest(128);
+        worker.Stop();
+        if (::fcntl(reused[0], F_GETFD) < 0 || ::fcntl(reused[1], F_GETFD) < 0) return 5008;
+        ::close(fds[1]);
+        ::close(reused[0]);
+        ::close(reused[1]);
+    }
+
+    // terminal at the publish boundary wins before epoll commit and still consumes fd.
+    {
+        TqLinuxRelayWorkerConfig config{};
+        config.AfterPublishHookForTest = AfterManagedPublishHook;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 5009;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5010;
+        g_PrecommitOwner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started);
+        g_PrecommitPublishTerminal = true;
+        g_PrecommitSnapshotHidden = false;
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = reinterpret_cast<MsQuicStream*>(storage);
+        registration.StreamOwner = g_PrecommitOwner;
+        const auto result = worker.RegisterRelayWithId(registration);
+        if (result.Ok || !result.TcpFdConsumed || !g_PrecommitSnapshotHidden ||
+            g_PrecommitOwner->GetPhase() != TqStreamLifetime::Phase::TerminalPublished) return 5011;
+        g_PrecommitOwner.reset();
+        (void)worker.DrainForTest(128);
+        worker.Stop();
+        ::close(fds[1]);
+        g_PrecommitPublishTerminal = false;
     }
 
     return 0;

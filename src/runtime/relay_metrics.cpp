@@ -333,6 +333,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LinuxRelayLateTcpErrorAfterStreamShutdown =
         snapshot.LateTcpErrorAfterStreamShutdown;
     metrics.LinuxRelayStreamLookupScanCount = snapshot.StreamLookupScanCount;
+    metrics.LinuxRelayTerminalRetainedOwnerCount = snapshot.TerminalRetainedOwnerCount;
+    metrics.LinuxRelayTerminalRetainedOldestAgeMs = snapshot.TerminalRetainedOldestAgeMs;
+    metrics.LinuxRelayStopRemaining = snapshot.StopRemaining;
     metrics.CompressedTcpBytes = snapshot.CompressedTcpBytes;
     metrics.DecompressedTcpBytes = snapshot.DecompressedTcpBytes;
     metrics.ZstdDecompressInputBytes = snapshot.ZstdDecompressInputBytes;
@@ -748,6 +751,12 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.LinuxRelayFakeFinReceiveCount;
     out << ",\"linux_relay_late_tcp_error_after_stream_shutdown\":"
         << metrics.LinuxRelayLateTcpErrorAfterStreamShutdown;
+    out << ",\"linux_relay_terminal_retained_owner_count\":"
+        << metrics.LinuxRelayTerminalRetainedOwnerCount;
+    out << ",\"linux_relay_terminal_retained_oldest_age_ms\":"
+        << metrics.LinuxRelayTerminalRetainedOldestAgeMs;
+    out << ",\"linux_relay_stop_remaining\":"
+        << metrics.LinuxRelayStopRemaining;
     out << ",\"linux_relay_stream_lookup_scan_count\":"
         << metrics.LinuxRelayStreamLookupScanCount;
     out << ',';

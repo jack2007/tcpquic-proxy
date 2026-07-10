@@ -40,8 +40,8 @@ flowchart TD
     L --> M[TqLinuxRelayWorker::RegisterRelayWithId]
     M --> N[worker 本地 RegisterRelayWithIdLocal]
     N --> O[设置 TCP non-blocking / keepalive / user timeout]
-    O --> P[epoll_ctl ADD TCP fd]
-    P --> Q[替换 MsQuic stream callback 为 Linux relay callback]
+    O --> P[发布 managed callback target]
+    P --> Q[epoll_ctl ADD TCP fd]
     Q --> R[relay 数据面开始]
 ```
 
@@ -74,8 +74,8 @@ TqRelayStart()
   -> TqLinuxRelayWorker::RegisterRelayWithId()
   -> worker event: RegisterRelay
   -> RegisterRelayWithIdLocal()
+  -> publish Linux relay callback target
   -> epoll ADD tcp fd
-  -> stream callback = TqLinuxRelayWorker::StreamCallback
   -> TqRelayHandle 记录 LinuxWorker + LinuxRelayId
 ```
 
@@ -83,11 +83,27 @@ TqRelayStart()
 
 - TCP fd 设置 non-blocking。
 - 配置 keepalive 和 `TCP_USER_TIMEOUT`。
-- 注册 `EPOLLIN | EPOLLRDHUP | EPOLLERR`。
+- 在 owner 的稳定 callback router 上发布 Linux relay target。
+- 发布成功后注册 `EPOLLIN | EPOLLRDHUP | EPOLLERR`；若这一步失败，worker 关闭已消费的 TCP fd 并通过 owner 请求 stream shutdown。
 - `epoll_event.data.u64` 放 relay id，worker 通过 `RelaysById` O(1) 找回 relay。
 - 为 MsQuic stream 建立 `StreamRelayBinding`，callback 侧通过 binding 原子字段拿到 relay。
 
-### 1.3 TCP -> QUIC
+该顺序是 `prepare -> publish -> commit`：任何可见的 TCP/epoll 数据面事件发生前，callback target 已经可用；commit 失败也不会把已发布 target 留给调用方继续使用。managed 路径不改写 `MsQuicStream::Callback` / `Context`，旧的非 managed 注册入口仅作为兼容路径保留。
+
+### 1.3 Stream 生命周期与终态
+
+Linux managed relay 不拥有裸 `MsQuicStream` wrapper 的析构权。`TqStreamLifetime` 持有 wrapper，并提供稳定 callback router、API lease、send completion registry 和 shutdown 账本：
+
+- relay binding target 通过 generation 发布；detach 会阻止新 callback 并等待已进入的 callback 退出。
+- `StreamSend` 使用不可复用的 opaque envelope。`SEND_COMPLETE` 由 registry 恢复为 `TqLinuxRelaySendOperation`，重复或未知 completion 不会重复释放；stream 终态先到也不会吞掉稍后的 completion。
+- `StreamReceiveComplete` / `StreamReceiveSetEnabled` 和 send 提交必须先取得 API lease；终态后不再取得新的 wrapper 调用权。
+- send graceful、send abort 和 receive abort 由方向账本合并；重复请求只提交一次，send graceful 可以升级为 abort。
+- `SHUTDOWN_COMPLETE` callback 先封闭 binding，再投递终态事件。worker 的终态处理只逻辑 detach、清理 pending receive/TCP 状态并设置共享 `TqRelayStopControl`，不再解引用 wrapper。
+- event queue 满时，send completion 使用预分配 operation 上的 intrusive fallback 队列回投 worker，不在 callback 失败路径额外分配内存。
+
+因此晚到的 TCP `EPOLLERR`、fake FIN、send completion 或 callback 不能重新获得已经终止 stream 的 API 权限；tunnel reaper 通过共享 stop control 判断 relay 已停止。
+
+### 1.4 TCP -> QUIC
 
 TCP 可读事件只在 owner worker 线程处理。
 
@@ -126,7 +142,7 @@ TCP 读侧背压：
 - ideal send 初始来自 `InitialQuicReadAheadBytes`；收到 `QUIC_STREAM_EVENT_IDEAL_SEND_BUFFER_SIZE` 后只增长到更大的 `ByteCount`。
 - MsQuic send 返回 `QUIC_STATUS_OUT_OF_MEMORY` 或 `QUIC_STATUS_BUFFER_TOO_SMALL` 时，operation 进入 `PendingQuicSendRetries`，同时暂停 TCP read。
 
-### 1.4 QUIC -> TCP
+### 1.5 QUIC -> TCP
 
 MsQuic receive callback 不直接写 TCP。Linux relay callback 只保存 MsQuic buffer view、投递 event，然后返回 `QUIC_STATUS_PENDING`。真正写 TCP 和 `ReceiveComplete()` 都由 owner worker 完成。
 
@@ -174,7 +190,7 @@ QUIC receive 背压：
 - callback 会尝试 abort 当前 MsQuic stream，并投递 `FakeFinReceiveShutdown` 给 owner worker；真正的 relay fatal reset 仍在 owner worker 线程内串行完成。
 - 如果 fake FIN fatal shutdown event 投递失败，则通过 binding handle 降级标记当前 relay stopped，避免 callback 线程直接修改 worker-owned relay 状态。
 
-### 1.5 client/server 差异
+### 1.6 client/server 差异
 
 client ingress 路径：
 
@@ -205,7 +221,7 @@ MsQuic incoming stream
 
 server 侧 OPEN 和首批 relay 数据可能粘在同一个 QUIC receive 中。`TryHandleServerOpen()` 会把控制头之后的 bytes 保存到 `PendingRelayRx`，relay 启动后再构造 synthetic receive 交给 Linux relay callback，避免 early data 丢失。
 
-### 1.6 关闭和生命周期
+### 1.7 关闭和生命周期
 
 relay 正常关闭需要满足：
 
@@ -224,7 +240,7 @@ fatal 路径会调用 `AbortRelayAndRelease()` 或 `FailRelayFatal()`：
 - detach stream binding。
 - 清空 pending queue，并对未完成 receive 调 `ReceiveComplete()` 归还 MsQuic buffer。
 
-### 1.7 Active relay snapshot 和 admin API
+### 1.8 Active relay snapshot 和 admin API
 
 Linux active relay 明细已由 worker 本地 snapshot 直接产出，不再只依赖 worker 聚合指标排障。
 
@@ -285,7 +301,7 @@ admin API 行为：
 
 影响：排查单连接卡顿时只能看 `linux_relay_hot_relay_*` 和 worker 聚合计数，无法枚举所有 active relay 的 pending、backpressure、TCP/QUIC 方向状态和地址信息。
 
-当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。实现行为见 [1.7 Active relay snapshot 和 admin API](#17-active-relay-snapshot-和-admin-api)，详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
+当前状态：Linux worker snapshot 已按计划补齐逐 relay 明细，由 runtime 聚合后复用 admin active relay API 输出。实现行为见 [1.8 Active relay snapshot 和 admin API](#18-active-relay-snapshot-和-admin-api)，详细设计和开发计划见 `docs/superpowers/plans/2026-07-04-linux-active-relay-detail.md`。
 
 ### 3.2 Event queue capacity 已补齐配置
 
