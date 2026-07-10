@@ -409,6 +409,10 @@ int main() {
         if (js.find("async function saveDiagnostics()") == std::string_view::npos) return 531;
         if (js.find("api('/diagnostics', { method: 'PATCH', body: payload })") == std::string_view::npos) return 532;
         if (js.find("api('/relay/workers')") == std::string_view::npos) return 533;
+        if (js.find("api('/relay/metrics')") != std::string_view::npos) return 1368;
+        if (js.find("const [data, workers] = await Promise.all") != std::string_view::npos) return 1369;
+        if (js.find("worker_id === 'aggregate'") == std::string_view::npos) return 1370;
+        if (js.find("snapshot_complete") == std::string_view::npos) return 1371;
         if (js.find("renderRelayCapabilities") == std::string_view::npos) return 534;
         if (html.find("id=\"relay-workers-rows\"") == std::string_view::npos) return 535;
         if (js.find("async function saveRuntimeConfig()") == std::string_view::npos) return 536;
@@ -502,7 +506,7 @@ int main() {
         if (js.find("data.linux_relay_backend") == std::string_view::npos) return 433;
         if (js.find("data.darwin_relay_backend") == std::string_view::npos) return 434;
         if (js.find("data.windows_relay_backend") == std::string_view::npos) return 435;
-        if (js.find("setElementText('relay-backend', platformRelayBackend(data));") == std::string_view::npos) return 436;
+        if (js.find("setElementText('relay-backend', platformRelayBackend(aggregate));") == std::string_view::npos) return 436;
         if (js.find("renderConfig") == std::string_view::npos) return 369;
         if (js.find("renderDiagnostics") == std::string_view::npos) return 370;
         if (js.find("allocator:dump") == std::string_view::npos) return 371;

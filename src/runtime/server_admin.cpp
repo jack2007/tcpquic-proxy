@@ -51,6 +51,7 @@ std::string RelayMetricsJson() {
         {"tcp_read_bytes", metrics.TcpReadBytes},
         {"tcp_write_bytes", metrics.TcpWriteBytes},
         {"errors", metrics.Errors},
+        {"snapshot_complete", metrics.SnapshotComplete},
     };
     MergeObject(body, RelayMetricsJsonValue(metrics));
     return body.dump();
@@ -320,15 +321,14 @@ std::string HandleServerAdmin(
             !DecodePathSegment(encodedWorkerId, workerId) || workerId.empty()) {
             return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
         }
-        bool found = false;
-        bool supported = false;
-        const std::string body = TqRelayWorkerDetailJson(workerId, found, supported);
-        if (!supported) {
-            return TqJsonResponse(503, StructuredErrorJson(
-                "not_supported", "relay worker detail is not supported by this backend"));
-        }
-        if (!found) {
+        TqRelayWorkerLookupStatus status = TqRelayWorkerLookupStatus::SnapshotUnavailable;
+        const std::string body = TqRelayWorkerDetailJson(workerId, status);
+        if (status == TqRelayWorkerLookupStatus::NotFound) {
             return TqJsonResponse(404, StructuredErrorJson("not_found", "not found"));
+        }
+        if (status == TqRelayWorkerLookupStatus::SnapshotUnavailable) {
+            return TqJsonResponse(503, StructuredErrorJson(
+                "snapshot_unavailable", "relay worker snapshot is unavailable"));
         }
         return TqJsonResponse(200, body);
     }

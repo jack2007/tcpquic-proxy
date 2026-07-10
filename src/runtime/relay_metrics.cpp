@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <sstream>
 
 namespace {
@@ -94,7 +95,31 @@ static void TqAppendJsonString(std::ostringstream& out, const char* name, const 
 
 namespace {
 
-TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot() {
+#if defined(__linux__)
+TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
+    const std::vector<TqRelayWorkerSnapshot>& workers,
+    const char* backend,
+    bool snapshotComplete) {
+    TqRelayWorkerSnapshot aggregate{};
+    aggregate.Backend = backend;
+    aggregate.WorkerIndex = 0;
+    aggregate.WorkerId = "aggregate";
+    aggregate.SnapshotComplete = snapshotComplete;
+    for (const auto& worker : workers) {
+        aggregate.ActiveRelays += worker.ActiveRelays;
+        aggregate.PendingBytes += worker.PendingBytes;
+        aggregate.TcpReadBytes += worker.TcpReadBytes;
+        aggregate.TcpWriteBytes += worker.TcpWriteBytes;
+        aggregate.Errors += worker.Errors;
+        aggregate.EventQueueCapacity = std::max(
+            aggregate.EventQueueCapacity, worker.EventQueueCapacity);
+    }
+    return aggregate;
+}
+#endif
+
+#if !defined(__linux__)
+TqRelayWorkerSnapshot MakeLegacyAggregateRelayWorkerSnapshot() {
     const auto metrics = TqSnapshotRelayMetrics();
     TqRelayWorkerSnapshot aggregate{};
     aggregate.Backend = metrics.Backend;
@@ -105,9 +130,11 @@ TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot() {
     aggregate.TcpReadBytes = metrics.TcpReadBytes;
     aggregate.TcpWriteBytes = metrics.TcpWriteBytes;
     aggregate.Errors = metrics.Errors;
-    aggregate.EventQueueCapacity = metrics.LinuxRelayEventQueueCapacity;
+    aggregate.EventQueueCapacity = metrics.RelayEventQueueCapacity;
+    aggregate.SnapshotComplete = metrics.SnapshotComplete;
     return aggregate;
 }
+#endif
 
 #if defined(__linux__)
 TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSnapshot& snapshot) {
@@ -121,6 +148,7 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
     worker.TcpWriteBytes = snapshot.TcpWriteBytes;
     worker.Errors = snapshot.Errors;
     worker.EventQueueCapacity = snapshot.EventQueueCapacity;
+    worker.SnapshotComplete = snapshot.SnapshotComplete;
     return worker;
 }
 
@@ -232,6 +260,7 @@ nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
         {"tcp_write_bytes", worker.TcpWriteBytes},
         {"errors", worker.Errors},
         {"event_queue_capacity", worker.EventQueueCapacity},
+        {"snapshot_complete", worker.SnapshotComplete},
     };
 }
 
@@ -259,6 +288,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     TqRelayMetricsSnapshot metrics;
 #if defined(__linux__)
     const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
+    metrics.SnapshotComplete = snapshot.SnapshotComplete;
     metrics.Backend = "epoll";
     metrics.Wakeups = snapshot.WakeupWrites;
     metrics.EventsProcessed = snapshot.EventsProcessed;
@@ -367,6 +397,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.Errors = snapshot.Errors;
     metrics.EventQueueFullErrors = snapshot.EventQueueFullErrors;
     metrics.LinuxRelayEventQueueCapacity = snapshot.EventQueueCapacity;
+    metrics.RelayEventQueueCapacity = snapshot.EventQueueCapacity;
     metrics.LinuxRelayEventQueuePushCasRetries = snapshot.EventQueuePushCasRetries;
     metrics.LinuxRelayEventQueuePopCasRetries = snapshot.EventQueuePopCasRetries;
     metrics.LinuxRelayEventProducerThreadsObserved = snapshot.EventProducerThreadsObserved;
@@ -424,6 +455,9 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
 #elif defined(__APPLE__)
     const auto snapshot = TqDarwinRelayRuntime::Instance().Snapshot();
     metrics.Backend = "kqueue";
+    // Darwin has not yet adopted the bounded result type on this branch.
+    // Preserve its legacy aggregate behavior until that platform migration.
+    metrics.SnapshotComplete = true;
     metrics.Wakeups = snapshot.Wakeups;
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = snapshot.PendingEvents;
@@ -485,6 +519,8 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         }
     }
     metrics.Backend = "iocp";
+    // Windows has not yet adopted the bounded result type on this branch.
+    metrics.SnapshotComplete = true;
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = 0;
     metrics.EventQueueFullErrors = 0;
@@ -565,16 +601,28 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     return metrics;
 }
 
-std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers() {
-    std::vector<TqRelayWorkerSnapshot> workers;
-    workers.push_back(MakeAggregateRelayWorkerSnapshot());
+TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers() {
+    TqRelayWorkersSnapshotResult result;
 #if defined(__linux__)
     const auto linuxWorkers = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
-    for (const auto& snapshot : linuxWorkers) {
+    result.SnapshotComplete = linuxWorkers.SnapshotComplete && linuxWorkers.IdentitiesComplete;
+    result.IdentitiesComplete = linuxWorkers.IdentitiesComplete;
+    std::vector<TqRelayWorkerSnapshot> workers;
+    workers.reserve(linuxWorkers.Workers.size());
+    for (const auto& snapshot : linuxWorkers.Workers) {
         workers.push_back(ConvertLinuxRelayWorkerSnapshot(snapshot));
     }
+    result.Workers.reserve(workers.size() + 1);
+    result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
+        workers, "epoll", result.SnapshotComplete));
+    result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
+#else
+    const TqRelayWorkerSnapshot aggregate = MakeLegacyAggregateRelayWorkerSnapshot();
+    result.SnapshotComplete = aggregate.SnapshotComplete;
+    result.IdentitiesComplete = true;
+    result.Workers.push_back(aggregate);
 #endif
-    return workers;
+    return result;
 }
 
 std::string TqRelayActiveRelaysJson() {
@@ -607,29 +655,37 @@ std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool
 }
 
 std::string TqRelayWorkersJson() {
-    const auto workers = TqSnapshotRelayWorkers();
+    const auto result = TqSnapshotRelayWorkers();
     nlohmann::json body{
         {"capabilities", TqRelayCapabilitiesJsonValue()},
+        {"snapshot_complete", result.SnapshotComplete},
         {"workers", nlohmann::json::array()},
     };
-    for (const auto& worker : workers) {
+    for (const auto& worker : result.Workers) {
         body["workers"].push_back(TqRelayWorkerJsonValue(worker));
     }
     return body.dump();
 }
 
-std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
-    found = false;
-    supported = true;
-    const auto workers = TqSnapshotRelayWorkers();
-    for (const auto& worker : workers) {
+std::string TqRelayWorkerDetailJson(
+    const std::string& workerId,
+    TqRelayWorkerLookupStatus& status) {
+    status = TqRelayWorkerLookupStatus::SnapshotUnavailable;
+    const auto result = TqSnapshotRelayWorkers();
+    for (const auto& worker : result.Workers) {
         if (worker.WorkerId != workerId) {
             continue;
         }
-        found = true;
+        if (!result.SnapshotComplete || !worker.SnapshotComplete) {
+            return "{}";
+        }
+        status = TqRelayWorkerLookupStatus::Ok;
         nlohmann::json body = TqRelayWorkerJsonValue(worker);
         body["relays"] = nlohmann::json::array();
         return body.dump();
+    }
+    if (result.IdentitiesComplete) {
+        status = TqRelayWorkerLookupStatus::NotFound;
     }
     return "{}";
 }
@@ -653,7 +709,9 @@ static void TqAppendNeutralRelayMetricsJson(std::ostringstream& out, const TqRel
     out << ",\"relay_quic_receive_resumed_count\":" << metrics.QuicReceiveResumedCount;
     out << ",\"relay_errors\":" << metrics.Errors;
     out << ",\"relay_event_queue_full_errors\":" << metrics.EventQueueFullErrors;
-    out << ",\"relay_event_queue_capacity\":" << metrics.LinuxRelayEventQueueCapacity;
+    out << ",\"relay_event_queue_capacity\":" << metrics.RelayEventQueueCapacity;
+    out << ",\"relay_snapshot_complete\":"
+        << (metrics.SnapshotComplete ? "true" : "false");
     out << ",\"relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
     out << ',';
     TqAppendJsonString(out, "relay_backend", metrics.Backend);

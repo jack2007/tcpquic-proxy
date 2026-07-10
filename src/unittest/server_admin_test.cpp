@@ -139,6 +139,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TcpReadBytes = 11;
     metrics.TcpWriteBytes = 22;
     metrics.Errors = 3;
+    metrics.SnapshotComplete = true;
     return metrics;
 }
 
@@ -156,14 +157,23 @@ std::string TqRelayActiveRelayJson(const std::string&, bool& found, bool& suppor
     return "{}";
 }
 
-std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported) {
-    supported = workerId == "aggregate";
-    found = supported;
-    return "{\"worker_id\":\"aggregate\",\"worker_index\":0,\"errors\":3,\"relays\":[]}";
+std::string TqRelayWorkerDetailJson(
+    const std::string& workerId,
+    TqRelayWorkerLookupStatus& status) {
+    if (workerId == "aggregate") {
+        status = TqRelayWorkerLookupStatus::Ok;
+        return "{\"worker_id\":\"aggregate\",\"worker_index\":0,\"errors\":3,\"snapshot_complete\":true,\"relays\":[]}";
+    }
+    if (workerId == "snapshot-unavailable") {
+        status = TqRelayWorkerLookupStatus::SnapshotUnavailable;
+        return "{}";
+    }
+    status = TqRelayWorkerLookupStatus::NotFound;
+    return "{}";
 }
 
 std::string TqRelayWorkersJson() {
-    return "{\"capabilities\":{\"active_relay_detail\":false,\"worker_detail\":true,\"per_worker_active_relays\":false},\"workers\":[{\"worker_id\":\"aggregate\",\"backend\":\"test\",\"worker_index\":0,\"active_relays\":7,\"pending_bytes\":1234,\"tcp_read_bytes\":11,\"tcp_write_bytes\":22,\"errors\":3}]}";
+    return "{\"capabilities\":{\"active_relay_detail\":false,\"worker_detail\":true,\"per_worker_active_relays\":false},\"snapshot_complete\":true,\"workers\":[{\"worker_id\":\"aggregate\",\"backend\":\"test\",\"worker_index\":0,\"active_relays\":7,\"pending_bytes\":1234,\"tcp_read_bytes\":11,\"tcp_write_bytes\":22,\"errors\":3,\"snapshot_complete\":true}]}";
 }
 
 std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot&) {
@@ -705,6 +715,7 @@ int main() {
     if (relayMetrics.find("HTTP/1.1 200 OK") == std::string::npos) return 149;
     if (relayMetrics.find("\"backend\":\"test\"") == std::string::npos) return 150;
     if (relayMetrics.find("\"active_relays\":7") == std::string::npos) return 151;
+    if (relayMetrics.find("\"snapshot_complete\":true") == std::string::npos) return 191;
 
     if (relayMetrics.find("\"relay_backend\":\"test\"") == std::string::npos) return 180;
     if (relayMetrics.find("\"linux_relay_backend\":\"test\"") == std::string::npos) return 181;
@@ -718,6 +729,7 @@ int main() {
     if (relayWorkers.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 153;
     if (relayWorkers.find("\"capabilities\":{") == std::string::npos) return 154;
     if (relayWorkers.find("\"worker_detail\":true") == std::string::npos) return 155;
+    if (relayWorkers.find("\"snapshot_complete\":true") == std::string::npos) return 186;
 
     std::string activeRelays = TqHandleServerAdmin(Request("GET", "/relay/active-relays"), metrics, 10);
     if (activeRelays.find("HTTP/1.1 200 OK") == std::string::npos) return 154;
@@ -727,6 +739,15 @@ int main() {
     if (aggregateWorker.find("HTTP/1.1 200 OK") == std::string::npos) return 156;
     if (aggregateWorker.find("\"relays\":[") == std::string::npos) return 157;
     if (aggregateWorker.find("\"errors\":") == std::string::npos) return 158;
+
+    std::string missingWorker = TqHandleServerAdmin(Request("GET", "/relay/workers/missing"), metrics, 10);
+    if (missingWorker.find("HTTP/1.1 404 Not Found") == std::string::npos) return 187;
+    if (missingWorker.find("\"code\":\"not_found\"") == std::string::npos) return 188;
+
+    std::string unavailableWorker = TqHandleServerAdmin(
+        Request("GET", "/relay/workers/snapshot-unavailable"), metrics, 10);
+    if (unavailableWorker.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 189;
+    if (unavailableWorker.find("\"code\":\"snapshot_unavailable\"") == std::string::npos) return 190;
 
     std::string missingRelay = TqHandleServerAdmin(Request("GET", "/relay/active-relays/relay-missing"), metrics, 10);
     if (missingRelay.find("HTTP/1.1 503 Service Unavailable") == std::string::npos) return 157;

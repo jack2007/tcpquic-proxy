@@ -15,6 +15,7 @@
 #include <csignal>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -29,6 +30,23 @@ std::array<uint8_t, 32> g_PrecommitPayload{};
 QUIC_STATUS g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
 bool g_PrecommitSnapshotHidden = false;
 bool g_PrecommitPublishTerminal = false;
+
+std::mutex g_RuntimeSnapshotHookMutex;
+std::condition_variable g_RuntimeSnapshotHookCv;
+bool g_RuntimeSnapshotHookEntered = false;
+bool g_RuntimeSnapshotHookRelease = false;
+
+void BlockSecondRuntimeWorkerSnapshot(TqLinuxRelayWorker* worker) {
+    if (worker == nullptr || worker->WorkerIndexForTest() != 1) {
+        return;
+    }
+    std::unique_lock<std::mutex> lock(g_RuntimeSnapshotHookMutex);
+    g_RuntimeSnapshotHookEntered = true;
+    g_RuntimeSnapshotHookCv.notify_all();
+    g_RuntimeSnapshotHookCv.wait(lock, []() {
+        return g_RuntimeSnapshotHookRelease;
+    });
+}
 
 void AfterManagedPublishHook(TqLinuxRelayWorker* worker, uint64_t) {
     g_PrecommitSnapshotHidden =
@@ -4199,13 +4217,15 @@ int main() {
             return 1;
         }
         const auto snapshots = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
-        if (snapshots.size() != 2) {
+        if (!snapshots.SnapshotComplete || !snapshots.IdentitiesComplete ||
+            snapshots.Workers.size() != 2) {
             runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
             ::close(runtimeFds[1]);
             TqLinuxRelayRuntime::Instance().Stop();
             return 1;
         }
-        if (snapshots[0].WorkerIndex != 0 || snapshots[1].WorkerIndex != 1) {
+        if (snapshots.Workers[0].WorkerIndex != 0 ||
+            snapshots.Workers[1].WorkerIndex != 1) {
             runtimeWorker->UnregisterRelay(runtimeRelay.RelayId);
             ::close(runtimeFds[1]);
             TqLinuxRelayRuntime::Instance().Stop();
@@ -4311,6 +4331,93 @@ int main() {
         TqLinuxRelayRuntime::Instance().Stop();
         if (!pickOk) return 3411;
         if (snapshot.RuntimeLockAcquireCount == 0) return 3412;
+    }
+
+    // Start publishes a complete worker generation or nothing at all.  A
+    // failed worker must not leave a partially started runtime behind.
+    {
+        auto& runtime = TqLinuxRelayRuntime::Instance();
+        runtime.Stop();
+        runtime.SetFailStartWorkerIndexForTest(1);
+        TqTuningConfig tuning{};
+        tuning.RelayWorkerCount = 2;
+        if (runtime.Start(tuning)) return 3413;
+        const auto stopped = runtime.SnapshotWorkers();
+        if (!stopped.SnapshotComplete || !stopped.IdentitiesComplete ||
+            !stopped.Workers.empty()) return 3414;
+
+        runtime.SetFailStartWorkerIndexForTest(-1);
+        if (!runtime.Start(tuning)) return 3415;
+        const auto restarted = runtime.SnapshotWorkers();
+        runtime.Stop();
+        if (!restarted.SnapshotComplete || !restarted.IdentitiesComplete ||
+            restarted.Workers.size() != 2 ||
+            restarted.Workers[0].WorkerIndex != 0 ||
+            restarted.Workers[1].WorkerIndex != 1) return 3416;
+    }
+
+    // All workers consume one runtime deadline.  The blocked second worker
+    // returns an incomplete, but still slot-identifiable, row rather than
+    // extending the request by another per-worker timeout.
+    {
+        auto& runtime = TqLinuxRelayRuntime::Instance();
+        runtime.Stop();
+        {
+            std::lock_guard<std::mutex> lock(g_RuntimeSnapshotHookMutex);
+            g_RuntimeSnapshotHookEntered = false;
+            g_RuntimeSnapshotHookRelease = false;
+        }
+        runtime.SetBeforeWorkerSnapshotHookForTest(BlockSecondRuntimeWorkerSnapshot);
+        TqTuningConfig tuning{};
+        tuning.RelayWorkerCount = 2;
+        if (!runtime.Start(tuning)) return 3417;
+
+        std::mutex resultMutex;
+        std::condition_variable resultCv;
+        bool resultReady = false;
+        TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot> result{};
+        const auto started = std::chrono::steady_clock::now();
+        std::thread snapshotThread([&]() {
+            const auto sampled = runtime.SnapshotWorkers(
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(100));
+            {
+                std::lock_guard<std::mutex> lock(resultMutex);
+                result = sampled;
+                resultReady = true;
+            }
+            resultCv.notify_all();
+        });
+
+        bool hookEntered = false;
+        {
+            std::unique_lock<std::mutex> lock(g_RuntimeSnapshotHookMutex);
+            hookEntered = g_RuntimeSnapshotHookCv.wait_for(lock, std::chrono::seconds(2), []() {
+                    return g_RuntimeSnapshotHookEntered;
+                });
+        }
+        bool completed = false;
+        {
+            std::unique_lock<std::mutex> lock(resultMutex);
+            completed = resultCv.wait_for(lock, std::chrono::seconds(2), [&]() {
+                    return resultReady;
+                });
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+        {
+            std::lock_guard<std::mutex> lock(g_RuntimeSnapshotHookMutex);
+            g_RuntimeSnapshotHookRelease = true;
+        }
+        g_RuntimeSnapshotHookCv.notify_all();
+        snapshotThread.join();
+        runtime.Stop();
+        runtime.SetBeforeWorkerSnapshotHookForTest(nullptr);
+
+        if (!hookEntered) return 3418;
+        if (!completed) return 3419;
+        if (elapsed >= std::chrono::seconds(1) || result.SnapshotComplete ||
+            !result.IdentitiesComplete || result.Workers.size() != 2 ||
+            result.Workers[0].WorkerIndex != 0 || result.Workers[1].WorkerIndex != 1 ||
+            result.Workers[1].SnapshotComplete) return 3420;
     }
 
     // prepare failure leaves fd ownership with the caller and publishes no relay.

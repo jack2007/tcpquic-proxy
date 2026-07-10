@@ -552,6 +552,11 @@ bool TqLinuxRelayWorker::Start() {
     if (Running.load()) {
         return false;
     }
+#if defined(TQ_UNIT_TESTING)
+    if (Config.FailStartForTest) {
+        return false;
+    }
+#endif
     WakeFd = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (WakeFd < 0) {
         return false;
@@ -1337,16 +1342,28 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
                     break;
                 }
 
-                TqLinuxRelayWorkerSnapshot snapshot = SnapshotLocal();
-
-                {
-                    std::lock_guard<std::mutex> guard(command->Mutex);
-                    if (!command->Cancelled) {
-                        command->Result = std::move(snapshot);
+                try {
+#if defined(TQ_UNIT_TESTING)
+                    if (Config.BeforeSnapshotHookForTest != nullptr) {
+                        Config.BeforeSnapshotHookForTest(this);
                     }
-                    command->Done = true;
+#endif
+                    TqLinuxRelayWorkerSnapshot snapshot = SnapshotLocal();
+
+                    {
+                        std::lock_guard<std::mutex> guard(command->Mutex);
+                        if (!command->Cancelled) {
+                            command->Result = std::move(snapshot);
+                        }
+                        command->Done = true;
+                    }
+                    command->Cv.notify_one();
+                } catch (...) {
+                    // A control-plane sample must never terminate the worker
+                    // thread.  Complete the command with the default,
+                    // explicitly incomplete snapshot instead.
+                    CompleteSnapshotCommand(command, {});
                 }
-                command->Cv.notify_one();
             } else {
                 CompleteSnapshotCommand(command, {});
             }
@@ -1598,13 +1615,23 @@ bool TqLinuxRelayWorker::WaitUnregisterCommand(UnregisterRelayCommand& command) 
         ControlCommandTimeouts);
 }
 
-bool TqLinuxRelayWorker::WaitSnapshotCommand(SnapshotCommand& command) const {
-    const bool done = WaitForCommandDone(
-        command,
-        Config.ControlCommandTimeoutMs,
-        ControlCommandWaitNanos,
-        ControlCommandWaitCount,
-        ControlCommandTimeouts);
+bool TqLinuxRelayWorker::WaitSnapshotCommand(
+    SnapshotCommand& command,
+    std::chrono::steady_clock::time_point deadline) const {
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    const bool done = command.Cv.wait_until(lock, deadline, [&command]() {
+        return command.Done;
+    });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    command.WaitNanos = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+    ControlCommandWaitNanos.fetch_add(command.WaitNanos, std::memory_order_relaxed);
+    ControlCommandWaitCount.fetch_add(1, std::memory_order_relaxed);
+    if (!done) {
+        command.Cancelled = true;
+        ControlCommandTimeouts.fetch_add(1, std::memory_order_relaxed);
+    }
     SnapshotCommandWaitNanos.fetch_add(command.WaitNanos, std::memory_order_relaxed);
     SnapshotCommandWaitCount.fetch_add(1, std::memory_order_relaxed);
     if (!done) {
@@ -4063,8 +4090,16 @@ QUIC_STATUS TqLinuxRelayWorker::DispatchStreamEventForTest(
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
+    return Snapshot(
+        std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(Config.ControlCommandTimeoutMs));
+}
+
+TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot(
+    std::chrono::steady_clock::time_point deadline) const {
     auto snapshotControlCounters = [this]() {
         TqLinuxRelayWorkerSnapshot snapshot{};
+        snapshot.WorkerIndex = Config.WorkerIndex;
         snapshot.ControlLockWaitNanos = ControlLockWaitNanos.load(std::memory_order_relaxed);
         snapshot.ControlLockAcquireCount = ControlLockAcquireCount.load(std::memory_order_relaxed);
         snapshot.ControlCommandWaitNanos = ControlCommandWaitNanos.load(std::memory_order_relaxed);
@@ -4081,6 +4116,10 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
     auto command = std::make_shared<SnapshotCommand>();
 
     for (uint32_t attempt = 0; attempt < kLinuxRelayControlEnqueueRetries; ++attempt) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            SnapshotCommandTimeouts.fetch_add(1, std::memory_order_relaxed);
+            return snapshotControlCounters();
+        }
         bool enqueued = false;
         {
             const auto current = std::this_thread::get_id();
@@ -4103,7 +4142,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::Snapshot() const {
             continue;
         }
 
-        if (!WaitSnapshotCommand(*command)) {
+        if (!WaitSnapshotCommand(*command, deadline)) {
             return snapshotControlCounters();
         }
         const auto counters = snapshotControlCounters();
@@ -4128,6 +4167,7 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
     snapshot.StopRemaining = Relays.size() + RetiredRelays.size();
     snapshot.WorkerIndex = Config.WorkerIndex;
+    snapshot.SnapshotComplete = true;
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
     snapshot.PendingEvents = EventQueue.SizeApprox();
@@ -4600,86 +4640,108 @@ std::unique_lock<std::mutex> TqLinuxRelayRuntime::AcquireRuntimeLockForMetrics()
     return lock;
 }
 
-std::vector<TqLinuxRelayWorker*> TqLinuxRelayRuntime::AcquireSnapshotWorkers() const {
-    std::vector<TqLinuxRelayWorker*> workers;
-    {
-        auto runtimeGuard = AcquireRuntimeLockForMetrics();
-        workers.reserve(Workers.size());
-        for (const auto& worker : Workers) {
-            workers.push_back(worker.get());
+std::unique_lock<std::mutex> TqLinuxRelayRuntime::AcquireRuntimeLockForSnapshot(
+    std::chrono::steady_clock::time_point deadline) const {
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(Lock, std::defer_lock);
+    while (!lock.try_lock()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            RuntimeLockWaitNanos.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                std::memory_order_relaxed);
+            return lock;
         }
-        std::lock_guard<std::mutex> snapshotGuard(SnapshotLock);
-        ++RuntimeSnapshotsInFlight;
-        RuntimeSnapshotInFlightMax.store(
-            std::max<uint64_t>(
-                RuntimeSnapshotInFlightMax.load(std::memory_order_relaxed),
-                RuntimeSnapshotsInFlight),
-            std::memory_order_relaxed);
+        std::this_thread::yield();
     }
-    return workers;
-}
-
-void TqLinuxRelayRuntime::ReleaseSnapshotWorkers() const {
-    std::lock_guard<std::mutex> snapshotGuard(SnapshotLock);
-    if (RuntimeSnapshotsInFlight > 0) {
-        --RuntimeSnapshotsInFlight;
-    }
-    if (RuntimeSnapshotsInFlight == 0) {
-        SnapshotCv.notify_all();
-    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    RuntimeLockWaitNanos.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+        std::memory_order_relaxed);
+    RuntimeLockAcquireCount.fetch_add(1, std::memory_order_relaxed);
+    return lock;
 }
 
 bool TqLinuxRelayRuntime::Start(const TqTuningConfig& tuning) {
     auto guard = AcquireRuntimeLockForMetrics();
-    if (!Workers.empty()) {
+    if (State == TqRelayRuntimeState::Running) {
         return true;
     }
 
-    TqRelayResetQuicReadAhead(tuning.InitialQuicReadAheadBytes);
-    const uint32_t workerCount = std::max<uint32_t>(1, tuning.RelayWorkerCount);
-    for (uint32_t i = 0; i < workerCount; ++i) {
-        TqLinuxRelayWorkerConfig config{};
-        config.EventBudget = tuning.RelayWorkerEventBudget;
-        config.EventQueueCapacity = tuning.RelayEventQueueCapacity;
-        config.TrackEventProducers = true;
-        config.WorkerIndex = i;
-        config.ByteBudgetPerTick = tuning.RelayWorkerByteBudgetPerTick;
-        config.ReadChunkSize = tuning.RelayReadChunkSize;
-        config.ReadBatchBytes = tuning.RelayReadBatchBytes;
-        config.MaxIov = tuning.RelayMaxIov;
-        config.TcpWriteMaxBytes = tuning.RelayTcpWriteMaxBytes;
-        config.TcpWriteBurstBytes = tuning.RelayTcpWriteBurstBytes;
-        config.MaxPendingBufferBytes = tuning.MaxPendingBufferBytesPerRelay;
-        config.MaxPendingQuicReceiveBytesPerRelay = tuning.RelayPerTunnelPendingBytes;
-        config.DeferredReceiveCompleteBatchBytes = tuning.RelayQuicReceiveCompleteBatchBytes;
-        config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
-        config.MaxBufferedQuicSendBytes = tuning.InitialQuicReadAheadBytes;
-        config.UseDynamicQuicReadAhead = true;
-        auto worker = std::make_unique<TqLinuxRelayWorker>(config);
-        if (!worker->Start()) {
-            Workers.clear();
-            return false;
-        }
-        Workers.push_back(std::move(worker));
+    if (State != TqRelayRuntimeState::Stopped || !Workers.empty()) {
+        return false;
     }
-    return true;
+    State = TqRelayRuntimeState::Starting;
+    std::vector<std::unique_ptr<TqLinuxRelayWorker>> stagedWorkers;
+    try {
+        TqRelayResetQuicReadAhead(tuning.InitialQuicReadAheadBytes);
+        const uint32_t workerCount = std::max<uint32_t>(1, tuning.RelayWorkerCount);
+        stagedWorkers.reserve(workerCount);
+        for (uint32_t i = 0; i < workerCount; ++i) {
+            TqLinuxRelayWorkerConfig config{};
+            config.EventBudget = tuning.RelayWorkerEventBudget;
+            config.EventQueueCapacity = tuning.RelayEventQueueCapacity;
+            config.TrackEventProducers = true;
+            config.WorkerIndex = i;
+            config.ByteBudgetPerTick = tuning.RelayWorkerByteBudgetPerTick;
+            config.ReadChunkSize = tuning.RelayReadChunkSize;
+            config.ReadBatchBytes = tuning.RelayReadBatchBytes;
+            config.MaxIov = tuning.RelayMaxIov;
+            config.TcpWriteMaxBytes = tuning.RelayTcpWriteMaxBytes;
+            config.TcpWriteBurstBytes = tuning.RelayTcpWriteBurstBytes;
+            config.MaxPendingBufferBytes = tuning.MaxPendingBufferBytesPerRelay;
+            config.MaxPendingQuicReceiveBytesPerRelay = tuning.RelayPerTunnelPendingBytes;
+            config.DeferredReceiveCompleteBatchBytes = tuning.RelayQuicReceiveCompleteBatchBytes;
+            config.MaxInFlightQuicSends = tuning.RelayMaxInFlightSends;
+            config.MaxBufferedQuicSendBytes = tuning.InitialQuicReadAheadBytes;
+            config.UseDynamicQuicReadAhead = true;
+#if defined(TQ_UNIT_TESTING)
+            config.FailStartForTest = static_cast<int32_t>(i) == FailStartWorkerIndexForTest;
+            config.BeforeSnapshotHookForTest = BeforeWorkerSnapshotHookForTest;
+#endif
+            auto worker = std::make_unique<TqLinuxRelayWorker>(config);
+            if (!worker->Start()) {
+                for (auto& started : stagedWorkers) {
+                    started->Stop();
+                }
+                State = TqRelayRuntimeState::Stopped;
+                return false;
+            }
+            stagedWorkers.push_back(std::move(worker));
+        }
+        Workers.swap(stagedWorkers);
+        NextWorker = 0;
+        State = TqRelayRuntimeState::Running;
+        return true;
+    } catch (...) {
+        for (auto& started : stagedWorkers) {
+            started->Stop();
+        }
+        State = TqRelayRuntimeState::Stopped;
+        return false;
+    }
 }
 
 void TqLinuxRelayRuntime::Stop() {
     auto guard = AcquireRuntimeLockForMetrics();
-    {
-        std::unique_lock<std::mutex> snapshotGuard(SnapshotLock);
-        SnapshotCv.wait(snapshotGuard, [this]() {
-            return RuntimeSnapshotsInFlight == 0;
-        });
+    if (State == TqRelayRuntimeState::Stopped) {
+        return;
+    }
+    State = TqRelayRuntimeState::Stopping;
+    SnapshotSupport.WaitForIdleLocked(guard);
+    for (auto& worker : Workers) {
+        worker->Stop();
     }
     Workers.clear();
     NextWorker = 0;
+    State = TqRelayRuntimeState::Stopped;
 }
 
 TqLinuxRelayWorker* TqLinuxRelayRuntime::PickWorker() {
     auto guard = AcquireRuntimeLockForMetrics();
-    if (Workers.empty()) {
+    if (State != TqRelayRuntimeState::Running || Workers.empty()) {
         return nullptr;
     }
     TqLinuxRelayWorker* worker = Workers[NextWorker % Workers.size()].get();
@@ -4688,19 +4750,21 @@ TqLinuxRelayWorker* TqLinuxRelayRuntime::PickWorker() {
 }
 
 TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
-    const auto workers = AcquireSnapshotWorkers();
-    struct SnapshotReleaseGuard {
-        const TqLinuxRelayRuntime* Runtime;
-        ~SnapshotReleaseGuard() { Runtime->ReleaseSnapshotWorkers(); }
-    } release{this};
+    return Snapshot(std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
+
+TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot(
+    std::chrono::steady_clock::time_point deadline) const {
+    const auto result = SnapshotWorkers(deadline);
+    const auto& workers = result.Workers;
 
     TqLinuxRelayWorkerSnapshot total{};
     total.RuntimeLockWaitNanos = RuntimeLockWaitNanos.load(std::memory_order_relaxed);
     total.RuntimeLockAcquireCount = RuntimeLockAcquireCount.load(std::memory_order_relaxed);
-    total.RuntimeSnapshotInFlightMax = RuntimeSnapshotInFlightMax.load(std::memory_order_relaxed);
+    total.RuntimeSnapshotInFlightMax = SnapshotSupport.Stats().InFlightMax;
+    total.SnapshotComplete = result.SnapshotComplete;
     total.ActiveRelayStates.reserve(workers.size());
-    for (const auto* worker : workers) {
-        const auto snapshot = worker->Snapshot();
+    for (const auto& snapshot : workers) {
         total.EventsProcessed += snapshot.EventsProcessed;
         total.WakeupWrites += snapshot.WakeupWrites;
         total.PendingEvents += snapshot.PendingEvents;
@@ -4872,17 +4936,68 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayRuntime::Snapshot() const {
     return total;
 }
 
-std::vector<TqLinuxRelayWorkerSnapshot> TqLinuxRelayRuntime::SnapshotWorkers() const {
-    const auto workers = AcquireSnapshotWorkers();
-    struct SnapshotReleaseGuard {
-        const TqLinuxRelayRuntime* Runtime;
-        ~SnapshotReleaseGuard() { Runtime->ReleaseSnapshotWorkers(); }
-    } release{this};
-
-    std::vector<TqLinuxRelayWorkerSnapshot> snapshots;
-    snapshots.reserve(workers.size());
-    for (const auto* worker : workers) {
-        snapshots.push_back(worker->Snapshot());
-    }
-    return snapshots;
+TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot>
+TqLinuxRelayRuntime::SnapshotWorkers() const {
+    return SnapshotWorkers(std::chrono::steady_clock::now() + std::chrono::seconds(5));
 }
+
+TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot>
+TqLinuxRelayRuntime::SnapshotWorkers(
+    std::chrono::steady_clock::time_point deadline) const {
+    TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot> result{};
+    auto runtimeGuard = AcquireRuntimeLockForSnapshot(deadline);
+    if (!runtimeGuard.owns_lock()) {
+        SnapshotSupport.RecordFailure();
+        return result;
+    }
+
+    if (State != TqRelayRuntimeState::Stopped && State != TqRelayRuntimeState::Running) {
+        SnapshotSupport.RecordFailure();
+        return result;
+    }
+
+    try {
+        auto lease = SnapshotSupport.AcquireWorkersLocked(runtimeGuard, Workers);
+        const bool stopped = State == TqRelayRuntimeState::Stopped;
+        runtimeGuard.unlock();
+
+        result.IdentitiesComplete = true;
+        result.SnapshotComplete = true;
+        result.Workers.reserve(lease.Workers().size());
+        for (const auto& workerRef : lease.Workers()) {
+            TqLinuxRelayWorkerSnapshot snapshot{};
+            try {
+                snapshot = workerRef.Worker->Snapshot(deadline);
+            } catch (...) {
+                SnapshotSupport.RecordFailure();
+            }
+            // The runtime slot, rather than a worker-provided fallback
+            // snapshot, is the stable public identity.
+            snapshot.WorkerIndex = workerRef.WorkerIndex;
+            result.SnapshotComplete = result.SnapshotComplete && snapshot.SnapshotComplete;
+            result.Workers.push_back(std::move(snapshot));
+        }
+        if (stopped) {
+            result.SnapshotComplete = true;
+        }
+    } catch (...) {
+        SnapshotSupport.RecordFailure();
+        result.SnapshotComplete = false;
+    }
+    return result;
+}
+
+#if defined(TQ_UNIT_TESTING)
+void TqLinuxRelayRuntime::SetFailStartWorkerIndexForTest(int32_t workerIndex) {
+    auto guard = AcquireRuntimeLockForMetrics();
+    assert(State == TqRelayRuntimeState::Stopped);
+    FailStartWorkerIndexForTest = workerIndex;
+}
+
+void TqLinuxRelayRuntime::SetBeforeWorkerSnapshotHookForTest(
+    void (*hook)(TqLinuxRelayWorker*)) {
+    auto guard = AcquireRuntimeLockForMetrics();
+    assert(State == TqRelayRuntimeState::Stopped);
+    BeforeWorkerSnapshotHookForTest = hook;
+}
+#endif

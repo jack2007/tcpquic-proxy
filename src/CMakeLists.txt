@@ -294,6 +294,15 @@ set(TCPQUIC_TEST_LIBS libzstd)
 set(TCPQUIC_TEST_INCLUDES)
 set(TCPQUIC_TEST_DEFS TCPQUIC_HAS_ZSTD=1)
 
+add_executable(tcpquic_relay_runtime_snapshot_test
+    unittest/relay_runtime_snapshot_test.cpp
+)
+tcpquic_target_include_dirs(tcpquic_relay_runtime_snapshot_test)
+target_link_libraries(tcpquic_relay_runtime_snapshot_test PRIVATE Threads::Threads)
+target_compile_definitions(tcpquic_relay_runtime_snapshot_test PRIVATE TQ_UNIT_TESTING=1)
+set_property(TARGET tcpquic_relay_runtime_snapshot_test PROPERTY FOLDER "tools")
+set_property(TARGET tcpquic_relay_runtime_snapshot_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
 add_tcpquic_executable(tcpquic_stream_lifetime_test
     unittest/stream_lifetime_test.cpp
     tunnel/stream_lifetime.cpp
@@ -1292,6 +1301,7 @@ if(WIN32)
 endif()
 
 set(TCPQUIC_TEST_TARGETS
+    tcpquic_relay_runtime_snapshot_test
     tcpquic_relay_buffer_test
     tcpquic_relay_alloc_test
     tcpquic_memory_stats_test

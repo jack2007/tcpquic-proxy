@@ -6,6 +6,9 @@
 
 struct TqRelayMetricsSnapshot {
     const char* Backend{"unsupported"};
+    // A bounded runtime snapshot can return partial values.  Callers must not
+    // treat them as a healthy, authoritative sample.
+    bool SnapshotComplete{false};
     uint64_t Wakeups{0};
     uint64_t EventsProcessed{0};
     uint64_t PendingEvents{0};
@@ -112,6 +115,9 @@ struct TqRelayMetricsSnapshot {
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t LinuxRelayEventQueueCapacity{0};
+    // Cross-platform queue capacity.  Keep the Linux-prefixed field above as
+    // a backwards-compatible alias for existing metrics consumers.
+    uint64_t RelayEventQueueCapacity{0};
     uint64_t LinuxRelayEventQueuePushCasRetries{0};
     uint64_t LinuxRelayEventQueuePopCasRetries{0};
     uint64_t LinuxRelayEventProducerThreadsObserved{0};
@@ -243,13 +249,28 @@ struct TqRelayWorkerSnapshot {
     uint64_t TcpWriteBytes{0};
     uint64_t Errors{0};
     uint64_t EventQueueCapacity{0};
+    bool SnapshotComplete{false};
+};
+
+struct TqRelayWorkersSnapshotResult {
+    bool SnapshotComplete{false};
+    bool IdentitiesComplete{false};
+    std::vector<TqRelayWorkerSnapshot> Workers;
+};
+
+enum class TqRelayWorkerLookupStatus {
+    Ok,
+    NotFound,
+    SnapshotUnavailable,
 };
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics();
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays();
-std::vector<TqRelayWorkerSnapshot> TqSnapshotRelayWorkers();
+TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers();
 std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot& metrics);
 std::string TqRelayActiveRelaysJson();
 std::string TqRelayActiveRelayJson(const std::string& relayId, bool& found, bool& supported);
 std::string TqRelayWorkersJson();
-std::string TqRelayWorkerDetailJson(const std::string& workerId, bool& found, bool& supported);
+std::string TqRelayWorkerDetailJson(
+    const std::string& workerId,
+    TqRelayWorkerLookupStatus& status);

@@ -331,10 +331,11 @@ admin API 行为：
 
 ### 3.4 runtime snapshot 持锁范围已收敛
 
-当前状态：已调整为在 `Runtime::Lock` 内只复制 worker 指针/引用，随后释放 runtime lock，再逐个调用 `worker->Snapshot()`。worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。
+当前状态：Runtime 在 lock 内创建带 slot identity 的 snapshot lease，随后释放 runtime lock，再逐个调用 `worker->Snapshot(deadline)`。lease 未释放前 `Stop()` 保持 runtime lock 并等待，不能停止或析构已借出的 worker；worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。
 
 影响：
 
+- 所有 worker 共享同一绝对 deadline；任一 worker 超时会保留 runtime slot 对应的 `linux-N` identity，并以 `snapshot_complete:false` 标记，不会把 `linux-1` 错报为 `linux-0`。
 - admin snapshot 慢或 worker 忙时，`PickWorker()` 不再被 runtime lock 覆盖整个 worker snapshot 过程；剩余风险主要体现在单个 worker command wait 超时或部分 worker snapshot 结果缺失。
 - 如果未来 snapshot 更重，控制面抖动会更明显。
 
@@ -343,7 +344,7 @@ admin API 行为：
 - 关注 `linux_relay_runtime_lock_wait_nanos`、`linux_relay_runtime_lock_acquire_count` 和 `linux_relay_runtime_snapshot_inflight_max`，确认 admin snapshot 不再放大建链路径 runtime lock 等待。
 - 结合 `linux_relay_snapshot_command_wait_nanos`、`linux_relay_snapshot_command_wait_count` 和 `linux_relay_snapshot_command_timeouts` 判断是否存在 worker 忙导致的 snapshot 降级。
 
-推进状态：本轮已落地 runtime snapshot 持锁范围收敛、snapshot in-flight guard 和对应 metrics；后续只保留现场观测与细节优化。
+推进状态：本轮已落地 runtime state、staged Start 回滚、snapshot lease/Stop barrier、共享 deadline、稳定 slot identity 和对应 metrics；后续只保留现场观测与细节优化。
 
 ### 3.5 `ControlLock` 持锁等待 worker command 已收敛
 

@@ -1168,16 +1168,24 @@ static constexpr char kConsoleJsStorage[] =
 
     async function renderRelay() {
       try {
-        const [data, workers] = await Promise.all([
-          api('/relay/metrics'),
-          api('/relay/workers')
-        ]);
-        setElementText('relay-backend', platformRelayBackend(data));
-        setElementText('relay-active', firstDefined(data.active_relays, data.active, data.active_count));
-        setElementText('relay-pending', firstDefined(data.pending_bytes, data.pending, data.pending_relay_bytes));
-        setElementText('relay-errors', firstDefined(data.errors, data.error_count, data.last_error));
+        const workers = await api('/relay/workers');
+        const rows = workers.workers || [];
+        const aggregate = rows.find(worker => worker.worker_id === 'aggregate');
+        const snapshotComplete = workers.snapshot_complete === true &&
+          aggregate && aggregate.snapshot_complete === true;
+        if (snapshotComplete) {
+          setElementText('relay-backend', platformRelayBackend(aggregate));
+          setElementText('relay-active', firstDefined(aggregate.active_relays, aggregate.active, aggregate.active_count));
+          setElementText('relay-pending', firstDefined(aggregate.pending_bytes, aggregate.pending, aggregate.pending_relay_bytes));
+          setElementText('relay-errors', firstDefined(aggregate.errors, aggregate.error_count, aggregate.last_error));
+        } else {
+          setElementText('relay-backend', aggregate ? platformRelayBackend(aggregate) : 'snapshot unavailable');
+          setElementText('relay-active', 'snapshot incomplete');
+          setElementText('relay-pending', 'snapshot incomplete');
+          setElementText('relay-errors', 'snapshot incomplete');
+        }
         renderRelayCapabilities(workers.capabilities || {});
-        renderRows(document.getElementById('relay-workers-rows'), workers.workers || [], ['worker_id','backend','worker_index','active_relays','pending_bytes','tcp_read_bytes','tcp_write_bytes','errors'], 8);
+        renderRows(document.getElementById('relay-workers-rows'), rows, ['worker_id','backend','worker_index','active_relays','pending_bytes','tcp_read_bytes','tcp_write_bytes','errors'], 8);
       } catch (error) {
         renderPanelError('relay-errors', error);
         throw error;

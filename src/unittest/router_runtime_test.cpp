@@ -1334,6 +1334,7 @@ int main() {
         std::string relayMetricsResp = adminRuntime.HandleAdmin(relayMetrics);
         if (relayMetricsResp.find("HTTP/1.1 200 OK") == std::string::npos) return 312;
         if (relayMetricsResp.find("\"active_relays\":") == std::string::npos) return 313;
+        if (relayMetricsResp.find("\"snapshot_complete\":true") == std::string::npos) return 1366;
         if (relayMetricsResp.find("\"linux_relay_event_queue_capacity\"") == std::string::npos) return 354;
         if (relayMetricsResp.find("\"linux_relay_event_queue_push_cas_retries\"") == std::string::npos) return 355;
         if (relayMetricsResp.find("\"linux_relay_event_queue_pop_cas_retries\"") == std::string::npos) return 356;
@@ -1349,6 +1350,7 @@ int main() {
         if (relayWorkersResp.find("\"per_worker_active_relays\":false") == std::string::npos) return 349;
         if (relayWorkersResp.find("\"errors\":") == std::string::npos) return 350;
         if (relayWorkersResp.find("\"event_queue_capacity\":") == std::string::npos) return 359;
+        if (relayWorkersResp.find("\"snapshot_complete\":true") == std::string::npos) return 1367;
 
         TqHttpRequest activeRelays = Request("GET", "/relay/active-relays", "");
         std::string activeRelaysResp = adminRuntime.HandleAdmin(activeRelays);

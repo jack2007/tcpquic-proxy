@@ -6,12 +6,14 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_error.h"
+#include "relay_runtime_snapshot.h"
 #include "stream_lifetime.h"
 #include "tuning.h"
 
 #include <msquic.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -50,7 +52,9 @@ struct TqLinuxRelayWorkerConfig {
 #if defined(TQ_UNIT_TESTING)
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
+    bool FailStartForTest{false};
     void (*AfterPublishHookForTest)(TqLinuxRelayWorker*, uint64_t){nullptr};
+    void (*BeforeSnapshotHookForTest)(TqLinuxRelayWorker*){nullptr};
 #endif
 };
 
@@ -278,6 +282,7 @@ struct TqLinuxRelayWorkerSnapshot {
     int64_t LastQuicSendStatus{0};
     uint64_t EventProducerThreadsObserved{0};
     bool MultipleEventProducerThreadsObserved{false};
+    bool SnapshotComplete{false};
 };
 
 #if defined(TQ_UNIT_TESTING)
@@ -306,6 +311,8 @@ public:
     bool EnqueueForTest(TqLinuxRelayEvent event);
     size_t DrainForTest(size_t budget);
     TqLinuxRelayWorkerSnapshot Snapshot() const;
+    TqLinuxRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline) const;
     TqLinuxRelayRegistrationResult RegisterRelayWithId(const TqLinuxRelayRegistration& registration);
     bool RegisterRelay(const TqLinuxRelayRegistration& registration);
     bool RegisterRelayForTest(const TqLinuxRelayRegistration& registration);
@@ -326,6 +333,7 @@ public:
     uint64_t AllocateRelayIdForTest();
     int WakeFdForTest() const;
     uint64_t CommittedRelayCountForTest() const;
+    uint32_t WorkerIndexForTest() const { return Config.WorkerIndex; }
     bool ArmTcpReadableForTest(uint64_t relayId, bool enabled);
     bool RelayIndexesConsistentForTest() const;
 #endif
@@ -479,7 +487,9 @@ private:
         bool result);
     bool WaitRegisterCommand(RegisterRelayCommand& command) const;
     bool WaitUnregisterCommand(UnregisterRelayCommand& command) const;
-    bool WaitSnapshotCommand(SnapshotCommand& command) const;
+    bool WaitSnapshotCommand(
+        SnapshotCommand& command,
+        std::chrono::steady_clock::time_point deadline) const;
     void RecordError(RelayErrorKind kind);
     void RecordBufferAcquireFailure(RelayErrorKind kind, TqBufferAcquireFailure failure);
     void RecordTcpWriteAttempt(uint64_t bytes);
@@ -743,21 +753,33 @@ public:
     void Stop();
     TqLinuxRelayWorker* PickWorker();
     TqLinuxRelayWorkerSnapshot Snapshot() const;
-    std::vector<TqLinuxRelayWorkerSnapshot> SnapshotWorkers() const;
+    TqLinuxRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot> SnapshotWorkers() const;
+    TqRelayRuntimeSnapshotResult<TqLinuxRelayWorkerSnapshot> SnapshotWorkers(
+        std::chrono::steady_clock::time_point deadline) const;
+
+#if defined(TQ_UNIT_TESTING)
+    void SetFailStartWorkerIndexForTest(int32_t workerIndex);
+    void SetBeforeWorkerSnapshotHookForTest(
+        void (*hook)(TqLinuxRelayWorker*));
+#endif
 
 private:
     TqLinuxRelayRuntime() = default;
     std::unique_lock<std::mutex> AcquireRuntimeLockForMetrics() const;
-    std::vector<TqLinuxRelayWorker*> AcquireSnapshotWorkers() const;
-    void ReleaseSnapshotWorkers() const;
+    std::unique_lock<std::mutex> AcquireRuntimeLockForSnapshot(
+        std::chrono::steady_clock::time_point deadline) const;
 
     mutable std::mutex Lock;
-    mutable std::mutex SnapshotLock;
-    mutable std::condition_variable SnapshotCv;
-    mutable uint32_t RuntimeSnapshotsInFlight{0};
+    mutable TqRelayRuntimeSnapshotSupport SnapshotSupport;
+    TqRelayRuntimeState State{TqRelayRuntimeState::Stopped};
     mutable std::atomic<uint64_t> RuntimeLockWaitNanos{0};
     mutable std::atomic<uint64_t> RuntimeLockAcquireCount{0};
-    mutable std::atomic<uint64_t> RuntimeSnapshotInFlightMax{0};
     std::vector<std::unique_ptr<TqLinuxRelayWorker>> Workers;
     size_t NextWorker{0};
+#if defined(TQ_UNIT_TESTING)
+    int32_t FailStartWorkerIndexForTest{-1};
+    void (*BeforeWorkerSnapshotHookForTest)(TqLinuxRelayWorker*){nullptr};
+#endif
 };
