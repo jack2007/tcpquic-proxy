@@ -224,6 +224,9 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t QuicReceiveViewCount{0};
     uint64_t QuicReceiveViewBytes{0};
     uint64_t DeferredReceiveCompletes{0};
+    uint64_t DeferredReceiveDiscards{0};
+    uint64_t ReceiveFailSafeCount{0};
+    uint64_t LateTerminalReceiveCount{0};
     uint64_t QuicSendBackpressureEvents{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
@@ -547,6 +550,9 @@ private:
     std::atomic<uint64_t> QuicReceiveViewCount{0};
     std::atomic<uint64_t> QuicReceiveViewBytes{0};
     std::atomic<uint64_t> DeferredReceiveCompletes{0};
+    std::atomic<uint64_t> DeferredReceiveDiscards{0};
+    std::atomic<uint64_t> ReceiveFailSafeCount{0};
+    std::atomic<uint64_t> LateTerminalReceiveCount{0};
     std::atomic<uint64_t> QuicSendBackpressureEvents{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};

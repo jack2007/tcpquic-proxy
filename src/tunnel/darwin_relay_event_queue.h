@@ -18,8 +18,8 @@ struct TqDarwinQuicReceiveSlice {
 };
 
 struct TqDarwinPendingQuicReceive {
-    MsQuicStream* Stream{nullptr};
     std::shared_ptr<TqStreamLifetime> StreamOwner;
+    MsQuicStream* ReceiveCompleteStream{nullptr};
     uint64_t RelayId{0};
     std::shared_ptr<void> BindingOwner;
     bool CallbackBudgetHeld{false};
@@ -29,7 +29,17 @@ struct TqDarwinPendingQuicReceive {
     uint64_t TotalLength{0};
     uint64_t CompletedLength{0};
     uint64_t PendingCompleteBytes{0};
+    std::atomic<bool> CompletionDispatched{false};
     bool Fin{false};
+
+    bool TryClaimCompletionDispatch() noexcept {
+        bool expected = false;
+        return CompletionDispatched.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire);
+    }
 };
 
 enum class TqDarwinRelayEventType {
