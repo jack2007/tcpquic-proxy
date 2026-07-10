@@ -3475,6 +3475,53 @@ int RunWindowsRelayTask5GateTestsForTest() {
     return 0;
 }
 
+int RunWindowsRelayTask6GateTestsForTest() {
+    {
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            return 600;
+        }
+        if (!TqSetNonBlocking(pair[1])) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            return 601;
+        }
+        TqWindowsRelayWorker worker;
+        if (!StartRelayWorkerForTest(worker)) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            return 602;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(601));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!worker.RegisterRelay(
+                pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+            worker.Stop();
+            TqCloseSocket(pair[1]);
+            return 603;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        if (worker.TestGetInFlightTcpRecvsForTest(relayId) == 0) {
+            worker.Stop();
+            TqCloseSocket(pair[1]);
+            return 604;
+        }
+        worker.Stop();
+        if (worker.TestHasIocpForTest() || worker.Snapshot().ActiveRelays != 0) {
+            TqCloseSocket(pair[1]);
+            return 605;
+        }
+        TqCloseSocket(pair[1]);
+    }
+    return 0;
+}
+
 }  // namespace
 #endif
 
@@ -3552,7 +3599,12 @@ int main() {
             return task5Exit;
         }
     }
-
+    {
+        const int task6Exit = RunWindowsRelayTask6GateTestsForTest();
+        if (task6Exit != 0) {
+            return task6Exit;
+        }
+    }
     if (!TestWindowsRelayReceiveViewIocpCallbackQueue()) {
         return 39;
     }

@@ -278,6 +278,13 @@ public:
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestReleaseQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestMarkTcpSendInFlightForTest(uint64_t relayId);
+    bool TestInjectTcpIocpCompletionForTest(
+        uint64_t relayId,
+        bool tcpRecv,
+        DWORD bytes,
+        DWORD error);
+    uint32_t TestGetInFlightTcpRecvsForTest(uint64_t relayId) const;
+    uint32_t TestGetInFlightTcpSendsForTest(uint64_t relayId) const;
     bool TestRecordIocpCompletionErrorForTest(uint64_t relayId, bool tcpSend, DWORD error);
     bool TestHandleTcpPostFailureForTest(uint64_t relayId, int error);
     bool TestGetRelayDrainFlagsForTest(
@@ -368,6 +375,15 @@ private:
 
     void Run();
     void PostStop();
+    void BeginWorkerStopOnWorkerThread();
+    bool WorkerIocpOwnershipIsZero() const;
+    void FinalizeWorkerStopOnWorkerThread();
+    void SwitchRelayTargetToShutdownSink(const std::shared_ptr<RelayContext>& relay);
+    void FlushPendingQuicReceivesOnClose(const std::shared_ptr<RelayContext>& relay);
+    void NudgeClosingRelayRetirement();
+    void ClearOrphanTcpInFlightOnStop(const std::shared_ptr<RelayContext>& relay);
+    void ForceClearStuckTcpInFlightOnStopDrain();
+    struct WindowsShutdownSinkTarget;
     TqWindowsRelayRegistrationResult RegisterRelayWithIdLocal(
         const TqWindowsRelayRegistration& registration);
     bool PrepareRelay(
@@ -632,6 +648,7 @@ private:
     void* Iocp_{nullptr};
     std::thread Thread_;
     std::atomic<bool> Stopping_{false};
+    std::atomic<bool> WorkerStopBeginDone_{false};
     std::atomic<uint64_t> WorkerThreadToken_{0};
     std::atomic<uint64_t> NextRelayId_{1};
     std::atomic<uint64_t> NextGeneration_{1};
