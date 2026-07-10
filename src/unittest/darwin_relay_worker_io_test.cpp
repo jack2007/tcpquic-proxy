@@ -3960,38 +3960,15 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
     const uint64_t before = worker.FindRelayLockedCountForTest();
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    std::mutex callbackMutex;
-    std::condition_variable callbackCv;
-    bool callbackDone = false;
-    std::thread callbackThread([&] {
-        CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
-        {
-            std::lock_guard<std::mutex> lock(callbackMutex);
-            callbackDone = true;
-        }
-        callbackCv.notify_one();
-    });
-
-    bool doneBeforeDrain = false;
-    {
-        std::unique_lock<std::mutex> lock(callbackMutex);
-        doneBeforeDrain = callbackCv.wait_for(lock, std::chrono::milliseconds(50), [&] { return callbackDone; });
-    }
-    CHECK(!doneBeforeDrain);
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.FindRelayLockedCountForTest() == before);
+    CHECK(handle.Stop.load(std::memory_order_acquire));
     CHECK(worker.Snapshot().ActiveRelays == 1);
 
     CHECK(worker.DrainOneEventForTest());
-    {
-        std::unique_lock<std::mutex> lock(callbackMutex);
-        CHECK(callbackCv.wait_for(lock, std::chrono::seconds(2), [&] { return callbackDone; }));
-    }
-    callbackThread.join();
     CHECK(worker.DrainOneEventForTest());
-    CHECK(worker.DrainOneEventForTest());
-    CHECK(worker.Snapshot().ActiveRelays == 0);
-
     worker.Stop();
+    CHECK(worker.Snapshot().ActiveRelays == 0);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
@@ -4866,8 +4843,7 @@ void ManagedRegisterRejectsTerminalOwnerBeforePublish() {
     harness.StopAndClosePeer();
 }
 
-void ManagedPublishHookTerminalAllowsCommitUntilTask3() {
-    // Task 3: Darwin should move TerminalPublished check after AfterPublishHook like Linux.
+void ManagedPublishHookTerminalRejectsCommitAfterTask3() {
     g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
     g_PrecommitPublishTerminal = true;
     TqDarwinRelayWorkerConfig config{};
@@ -4884,14 +4860,10 @@ void ManagedPublishHookTerminalAllowsCommitUntilTask3() {
     registration.StreamOwner = g_PrecommitOwner;
     registration.Handle = &handle;
     const auto result = worker.RegisterRelayWithId(registration);
-    CHECK(result.Ok);
+    CHECK(!result.Ok);
     CHECK(result.TcpFdConsumed);
     CHECK(g_PrecommitOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
-    QUIC_STREAM_EVENT terminal{};
-    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(g_PrecommitOwner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.DrainOneEventForTest());
-    CHECK(worker.Snapshot().ActiveRelays == 0);
+    CHECK(fcntl(fds[1], F_GETFD) == -1);
     g_PrecommitOwner.reset();
     g_PrecommitPublishTerminal = false;
     worker.Stop();
@@ -5075,7 +5047,7 @@ int main() {
     ManagedRegisterRejectsTerminalOwnerBeforePublish();
     ManagedRegisterStartFailedPublishRejectsAndTerminalClosesOnce();
     ManagedRegisterBindingAllocFailureRejectsAndTerminalClosesOnce();
-    ManagedPublishHookTerminalAllowsCommitUntilTask3();
+    ManagedPublishHookTerminalRejectsCommitAfterTask3();
     ManagedHandleReleasedAndImmediateReuseSafe();
     ManagedLateKqueueEventAfterFdReuseMissesNewRelay();
     ManagedEmergencyAcceptedRejectClosesOnce();

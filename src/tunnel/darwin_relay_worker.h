@@ -448,6 +448,10 @@ private:
         StreamBinding* binding) noexcept;
     void ActivateManagedBinding(const std::shared_ptr<RelayState>& relay, StreamBinding* binding);
     void FailManagedBinding(RelayState* relay, StreamBinding* binding);
+    void SealManagedBindingTerminal(RelayState* relay, StreamBinding* binding);
+    void HandoffTerminalCloseToShutdownSink(
+        const std::shared_ptr<RelayState>& relay,
+        StreamBinding* binding);
     void RequestRelayShutdown(
         const std::shared_ptr<RelayState>& relay,
         TqStreamLifetime::ShutdownIntent intent);

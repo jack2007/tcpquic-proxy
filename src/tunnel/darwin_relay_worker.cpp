@@ -118,6 +118,7 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::shared_ptr<TqRelayStopControl> StopControl;
     std::atomic<MsQuicStream*> RetiredStream{nullptr};
     std::atomic<bool> Active{true};
+    std::atomic<bool> Terminal{false};
     std::atomic<bool> Closing{false};
     std::atomic<uint32_t> CallbackRefs{0};
     std::atomic<bool> CallbackQuicReceivePaused{false};
@@ -2171,32 +2172,15 @@ bool TqDarwinRelayWorker::EnqueueRelayCloseFromCallback(
         return false;
     }
 
-    uint32_t attempts = 0;
-    const bool workerThread = IsWorkerThread();
-    while (Running.load(std::memory_order_acquire) || (!workerThread && !WorkerThreadExited())) {
-        TqDarwinRelayEvent event{};
-        event.Type = type;
-        event.RelayId = relay->Id;
-        event.RelayOwner = relay;
-        if (EventQueue.TryPush(std::move(event))) {
-            (void)Wake();
-            return true;
-        }
-        if (workerThread) {
-            CloseRelay(relay, 1);
-            return true;
-        }
-        if ((attempts++ & 0x3F) == 0) {
-            (void)Wake();
-            std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
-        } else {
-            std::this_thread::yield();
-        }
+    TqDarwinRelayEvent event{};
+    event.Type = type;
+    event.RelayId = relay->Id;
+    event.RelayOwner = relay;
+    if (EventQueue.TryPush(std::move(event))) {
+        (void)Wake();
+        return true;
     }
-
-    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
-    CloseRelay(relay, 1);
-    return true;
+    return false;
 }
 
 void TqDarwinRelayWorker::RetryPendingQuicSends(const std::shared_ptr<RelayState>& relay) {
@@ -3214,6 +3198,35 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
     }
 }
 
+void TqDarwinRelayWorker::SealManagedBindingTerminal(
+    RelayState* relay,
+    StreamBinding* binding) {
+    (void)relay;
+    if (binding == nullptr) {
+        return;
+    }
+    binding->Active.store(false, std::memory_order_release);
+    binding->Terminal.store(true, std::memory_order_release);
+    binding->Closing.store(true, std::memory_order_release);
+    binding->Relay.reset();
+}
+
+void TqDarwinRelayWorker::HandoffTerminalCloseToShutdownSink(
+    const std::shared_ptr<RelayState>& relay,
+    StreamBinding* binding) {
+    if (binding != nullptr && binding->StopControl != nullptr) {
+        binding->StopControl->Stop.store(true, std::memory_order_release);
+    }
+    if (relay != nullptr) {
+        if (relay->StopControl != nullptr) {
+            relay->StopControl->Stop.store(true, std::memory_order_release);
+        }
+        if (relay->PublicHandle != nullptr) {
+            relay->PublicHandle->Stop.store(true, std::memory_order_release);
+        }
+    }
+}
+
 void TqDarwinRelayWorker::ActivateManagedBinding(
     const std::shared_ptr<RelayState>& relay,
     StreamBinding* binding) {
@@ -3313,6 +3326,12 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         result.RelayId = relay->Id;
     }
 
+#if defined(TCPQUIC_TESTING)
+    if (registration.StreamOwner != nullptr && Config.AfterPublishHookForTest != nullptr) {
+        Config.AfterPublishHookForTest(this, relay->Id);
+    }
+#endif
+
     if (registration.StreamOwner != nullptr &&
         (registration.StreamOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished ||
          relay->Binding == nullptr ||
@@ -3332,12 +3351,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         result.RelayId = 0;
         return result;
     }
-
-#if defined(TCPQUIC_TESTING)
-    if (registration.StreamOwner != nullptr && Config.AfterPublishHookForTest != nullptr) {
-        Config.AfterPublishHookForTest(this, relay->Id);
-    }
-#endif
 
     bool commitFailed = false;
 #if defined(TCPQUIC_TESTING)
@@ -3646,19 +3659,57 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED ||
         event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
-        if (worker != nullptr) {
-            std::shared_ptr<RelayState> relay = binding->Relay.lock();
-            if (relay == nullptr) {
-                return QUIC_STATUS_SUCCESS;
+        if (worker == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        std::shared_ptr<RelayState> relay = binding->Relay.lock();
+        if (relay == nullptr) {
+            return QUIC_STATUS_SUCCESS;
+        }
+        if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+            if (relay->StreamOwner != nullptr) {
+                SealManagedBindingTerminal(relay.get(), binding);
+                if (!worker->EnqueueRelayCloseFromCallback(
+                        relay,
+                        TqDarwinRelayEventType::QuicShutdownComplete)) {
+                    worker->HandoffTerminalCloseToShutdownSink(relay, binding);
+                }
+            } else {
+                binding->Active.store(false, std::memory_order_release);
+                if (!worker->EnqueueRelayCloseFromCallback(
+                        relay,
+                        TqDarwinRelayEventType::QuicShutdownComplete)) {
+                    worker->HandoffTerminalCloseToShutdownSink(relay, binding);
+                }
             }
-            binding->Active.store(false, std::memory_order_release);
-            TqDarwinRelayEventType closeEventType = TqDarwinRelayEventType::QuicShutdownComplete;
-            if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
-                closeEventType = TqDarwinRelayEventType::QuicPeerSendAborted;
-            } else if (event->Type == QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED) {
-                closeEventType = TqDarwinRelayEventType::QuicPeerReceiveAborted;
+            return QUIC_STATUS_SUCCESS;
+        }
+        if (relay->StreamOwner != nullptr) {
+            const TqStreamLifetime::ShutdownIntent intent =
+                event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
+                    ? TqStreamLifetime::ShutdownIntent::AbortSend
+                    : TqStreamLifetime::ShutdownIntent::AbortReceive;
+            const uint64_t errorCode =
+                event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
+                    ? event->PEER_SEND_ABORTED.ErrorCode
+                    : event->PEER_RECEIVE_ABORTED.ErrorCode;
+            (void)relay->StreamOwner->RequestShutdown(intent, errorCode);
+            const TqDarwinRelayEventType closeEventType =
+                event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
+                    ? TqDarwinRelayEventType::QuicPeerSendAborted
+                    : TqDarwinRelayEventType::QuicPeerReceiveAborted;
+            if (!worker->EnqueueRelayCloseFromCallback(relay, closeEventType)) {
+                worker->HandoffTerminalCloseToShutdownSink(relay, binding);
             }
-            (void)worker->EnqueueRelayCloseFromCallback(relay, closeEventType);
+            return QUIC_STATUS_SUCCESS;
+        }
+        binding->Active.store(false, std::memory_order_release);
+        const TqDarwinRelayEventType closeEventType =
+            event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED
+                ? TqDarwinRelayEventType::QuicPeerSendAborted
+                : TqDarwinRelayEventType::QuicPeerReceiveAborted;
+        if (!worker->EnqueueRelayCloseFromCallback(relay, closeEventType)) {
+            worker->HandoffTerminalCloseToShutdownSink(relay, binding);
         }
         return QUIC_STATUS_SUCCESS;
     }
@@ -3736,9 +3787,11 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::AllocationFailed: {
             if (std::shared_ptr<RelayState> relay = binding->Relay.lock()) {
-                (void)worker->EnqueueRelayCloseFromCallback(
-                    relay,
-                    TqDarwinRelayEventType::QuicShutdownComplete);
+                if (!worker->EnqueueRelayCloseFromCallback(
+                        relay,
+                        TqDarwinRelayEventType::QuicShutdownComplete)) {
+                    worker->HandoffTerminalCloseToShutdownSink(relay, binding);
+                }
             }
             if (totalLength > 0 || fin) {
                 worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
