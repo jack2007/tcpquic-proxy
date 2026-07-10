@@ -263,6 +263,7 @@ public:
     bool TestCreateIocpForCallbackPostOnly();
     bool TestDrainSingleQuicSendCompleteForTest();
     bool TestDrainSingleReceiveReadyForTest();
+    bool TestDrainPendingReceivesForTest(uint64_t relayId);
     bool TestDrainPostedCallbackOperationsForTest(size_t expectedCount);
     bool TestNoWorkerEventQueueReceiveViewForTest() const;
     bool TestCompleteReceiveViewForCleanup(uint64_t relayId, uint64_t completedLength);

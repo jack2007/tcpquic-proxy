@@ -2830,6 +2830,15 @@ bool TqWindowsRelayWorker::TestDrainSingleReceiveReadyForTest() {
     return ok != FALSE;
 }
 
+bool TqWindowsRelayWorker::TestDrainPendingReceivesForTest(uint64_t relayId) {
+    auto relay = FindRelayByIdLocal(relayId);
+    if (!relay) {
+        return false;
+    }
+    DrainRelayReceives(relay);
+    return true;
+}
+
 bool TqWindowsRelayWorker::TestDrainPostedCallbackOperationsForTest(size_t expectedCount) {
     if (Iocp_ == nullptr) {
         return false;
@@ -4773,10 +4782,12 @@ void TqWindowsRelayWorker::ActiveFlushDeferredReceiveCompletion(
         return;
     }
     const uint64_t completeBytes = view.PendingCompleteBytes;
+    if (!ActiveReceiveCompleteViaOwner(view.StreamOwner, completeBytes)) {
+        return;
+    }
     DeferredReceiveCompleteBytes_.fetch_add(completeBytes, std::memory_order_relaxed);
     DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
     DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
-    ActiveReceiveCompleteViaOwner(view.StreamOwner, completeBytes);
     view.PendingCompleteBytes = 0;
 }
 
@@ -4795,10 +4806,14 @@ void TqWindowsRelayWorker::ActiveFlushBatchedDeferredReceiveCompletion(
     if (ShouldDiscardReceiveView(owner)) {
         return;
     }
+    if (!ActiveReceiveCompleteViaOwner(owner, completeBytes)) {
+        relay->DeferredReceiveCompleteBatchPending.store(
+            completeBytes, std::memory_order_release);
+        return;
+    }
     DeferredReceiveCompleteBytes_.fetch_add(completeBytes, std::memory_order_relaxed);
     DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
     DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
-    ActiveReceiveCompleteViaOwner(owner, completeBytes);
 }
 
 void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(

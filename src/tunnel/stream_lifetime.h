@@ -161,6 +161,7 @@ public:
         void* clientContext,
         void* deliveredContext,
         std::function<void()> completionCleanup = {}) noexcept;
+    void DenyReceiveApiLeasesForTest(uint32_t count) noexcept;
 #endif
     QUIC_STATUS RequestShutdown(ShutdownIntent intent, uint64_t errorCode = 0) noexcept;
 
@@ -206,6 +207,9 @@ private:
     bool SendDirectionComplete_{false};
     uint64_t CancelOnLossErrorCode_{0};
     std::vector<std::unique_ptr<uint64_t>> SendKeyEnvelopes_;
+#if defined(TQ_UNIT_TESTING)
+    uint32_t DenyReceiveApiLeasesForTest_{0};
+#endif
 };
 
 // callback-safe target adapter。Detach 从外部线程调用时等待已经进入的 callback；

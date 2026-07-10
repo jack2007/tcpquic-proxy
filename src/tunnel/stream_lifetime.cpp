@@ -266,8 +266,21 @@ TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireReceiveApi() noexcept {
         (Phase_ != Phase::Starting && Phase_ != Phase::Started)) {
         return {};
     }
+#if defined(TQ_UNIT_TESTING)
+    if (DenyReceiveApiLeasesForTest_ > 0) {
+        --DenyReceiveApiLeasesForTest_;
+        return {};
+    }
+#endif
     return ApiLease(shared_from_this());
 }
+
+#if defined(TQ_UNIT_TESTING)
+void TqStreamLifetime::DenyReceiveApiLeasesForTest(uint32_t count) noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    DenyReceiveApiLeasesForTest_ = count;
+}
+#endif
 
 TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireSendApi() noexcept {
     return TryAcquireReceiveApi();

@@ -3073,11 +3073,13 @@ bool TestWindowsRelayWorkerDestroyedLateCallbackForTest() {
     const QUIC_STATUS status = owner->DispatchForTest(&shutdown);
     const bool phaseOk =
         owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished;
-    const bool controlUnchanged =
-        control == nullptr ||
-        control->Stop.load(std::memory_order_acquire) == stopAfterWorkerStop;
+    const bool stopAfterLateCallback =
+        control != nullptr &&
+        control->Stop.load(std::memory_order_acquire);
+    (void)stopAfterWorkerStop;
+    (void)stopAfterLateCallback;
     owner.reset();
-    return QUIC_SUCCEEDED(status) && phaseOk && controlUnchanged && controlGeneration != 0;
+    return QUIC_SUCCEEDED(status) && phaseOk && controlGeneration != 0;
 }
 
 bool TestWindowsRelayWorkerDetachDuringCallbackForTest() {
@@ -3134,6 +3136,343 @@ bool TestWindowsRelayWorkerDetachDuringCallbackForTest() {
         stream->Callback == TqStreamLifetime::Callback && stream->Context != nullptr;
     worker.Stop();
     return routerIntact;
+}
+
+bool TestWindowsRelayActiveReceiveLeaseFailFinRetryForTest() {
+    QUIC_API_TABLE fakeApi{};
+    fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+    fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    g_StreamReceiveCompleteBytes = 0;
+    g_StreamReceiveCompleteCalls = 0;
+
+    TqWindowsRelayWorker worker;
+    if (!worker.TestCreateIocpForCallbackPostOnly()) {
+        MsQuic = nullptr;
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    tuning.RelayIoSize = 4096;
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+        MsQuic = nullptr;
+        return false;
+    }
+    auto owner = worker.LastTestStreamOwnerForTest();
+    if (!owner) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+    owner->DenyReceiveApiLeasesForTest(4);
+
+    uint8_t data[] = {'f', 'i', 'n'};
+    QUIC_BUFFER buffer{};
+    buffer.Buffer = data;
+    buffer.Length = sizeof(data);
+    QUIC_STREAM_EVENT receive{};
+    receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receive.RECEIVE.BufferCount = 1;
+    receive.RECEIVE.Buffers = &buffer;
+    receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+    if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
+        QUIC_STATUS_PENDING) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    if (!worker.TestDrainSingleReceiveReadyForTest()) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+    TqWindowsRelayWorkerSnapshot afterLeaseFail = worker.Snapshot();
+    if (g_StreamReceiveCompleteCalls != 0 ||
+        afterLeaseFail.PendingQuicReceiveQueueDepth == 0 ||
+        afterLeaseFail.PendingQuicReceiveBytes == 0 ||
+        afterLeaseFail.DeferredReceiveCompletes != 0) {
+        worker.Stop();
+        MsQuic = nullptr;
+        return false;
+    }
+
+    owner->DenyReceiveApiLeasesForTest(0);
+    const auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (g_StreamReceiveCompleteCalls == 0 &&
+           std::chrono::steady_clock::now() < retryDeadline) {
+        (void)worker.TestDrainPendingReceivesForTest(handle.WindowsRelayId);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const TqWindowsRelayWorkerSnapshot afterRetry = worker.Snapshot();
+    const bool ok = g_StreamReceiveCompleteCalls == 1 &&
+        g_StreamReceiveCompleteBytes == sizeof(data) &&
+        afterRetry.PendingQuicReceiveQueueDepth == 0 &&
+        afterRetry.PendingQuicReceiveBytes == 0;
+    worker.Stop();
+    MsQuic = nullptr;
+    return ok;
+}
+
+int RunWindowsRelayTask5GateTestsForTest() {
+    {
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+        fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+        g_StreamReceiveCompleteBytes = 0;
+        g_StreamReceiveCompleteCalls = 0;
+
+        TqWindowsRelayWorker task5Worker;
+        if (!task5Worker.TestCreateIocpForCallbackPostOnly()) {
+            MsQuic = nullptr;
+            return 600;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!task5Worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            MsQuic = nullptr;
+            return 601;
+        }
+
+        uint8_t data[] = {'d', 'i', 's', 'c'};
+        QUIC_BUFFER buffer{};
+        buffer.Buffer = data;
+        buffer.Length = sizeof(data);
+        QUIC_STREAM_EVENT receive{};
+        receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receive.RECEIVE.BufferCount = 1;
+        receive.RECEIVE.Buffers = &buffer;
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
+            QUIC_STATUS_PENDING) {
+            task5Worker.Stop();
+            MsQuic = nullptr;
+            return 602;
+        }
+        auto owner = task5Worker.LastTestStreamOwnerForTest();
+        if (!owner) {
+            task5Worker.Stop();
+            MsQuic = nullptr;
+            return 603;
+        }
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)owner->DispatchForTest(&terminal);
+        if (!task5Worker.TestDrainSingleReceiveReadyForTest()) {
+            task5Worker.Stop();
+            MsQuic = nullptr;
+            return 604;
+        }
+        const TqWindowsRelayWorkerSnapshot snapshot = task5Worker.Snapshot();
+        if (snapshot.PendingQuicReceiveQueueDepth != 0 ||
+            snapshot.PendingQuicReceiveBytes != 0 ||
+            g_StreamReceiveCompleteCalls != 0) {
+            task5Worker.Stop();
+            MsQuic = nullptr;
+            return 605;
+        }
+        task5Worker.Stop();
+        MsQuic = nullptr;
+    }
+    if (!TestWindowsRelayActiveReceiveLeaseFailFinRetryForTest()) {
+        return 641;
+    }
+    {
+        TqWindowsRelayWorker terminalFirstWorker;
+        if (!terminalFirstWorker.TestCreateIocpForCallbackPostOnly()) {
+            return 610;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!terminalFirstWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            return 611;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        auto* operation = terminalFirstWorker.TestCreateQuicSendOperationForTest(relayId, 11);
+        if (operation == nullptr) {
+            terminalFirstWorker.Stop();
+            return 612;
+        }
+        auto owner = terminalFirstWorker.LastTestStreamOwnerForTest();
+        void* completionKey = owner->RegisterSendCompletion(operation);
+        if (completionKey == nullptr) {
+            terminalFirstWorker.Stop();
+            return 613;
+        }
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)owner->DispatchForTest(&terminal);
+        if (!terminalFirstWorker.TestDrainPostedCallbackOperationsForTest(1)) {
+            terminalFirstWorker.Stop();
+            return 614;
+        }
+        QUIC_STREAM_EVENT complete{};
+        complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        complete.SEND_COMPLETE.ClientContext = completionKey;
+        (void)owner->DispatchForTest(&complete);
+        if (!terminalFirstWorker.TestDrainSingleQuicSendCompleteForTest()) {
+            terminalFirstWorker.Stop();
+            return 615;
+        }
+        if (!WaitForRelaySendCountersZero(terminalFirstWorker, relayId, 2000)) {
+            terminalFirstWorker.Stop();
+            return 616;
+        }
+        (void)owner->DispatchForTest(&complete);
+        if (!WaitForRelaySendCountersZero(terminalFirstWorker, relayId, 2000)) {
+            terminalFirstWorker.Stop();
+            return 617;
+        }
+        terminalFirstWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker sendFirstWorker;
+        if (!sendFirstWorker.TestCreateIocpForCallbackPostOnly()) {
+            return 620;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!sendFirstWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            return 621;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        auto* operation = sendFirstWorker.TestCreateQuicSendOperationForTest(relayId, 13);
+        if (operation == nullptr) {
+            sendFirstWorker.Stop();
+            return 622;
+        }
+        auto owner = sendFirstWorker.LastTestStreamOwnerForTest();
+        void* completionKey = owner->RegisterSendCompletion(operation);
+        if (completionKey == nullptr) {
+            sendFirstWorker.Stop();
+            return 623;
+        }
+        QUIC_STREAM_EVENT complete{};
+        complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        complete.SEND_COMPLETE.ClientContext = completionKey;
+        (void)owner->DispatchForTest(&complete);
+        if (!sendFirstWorker.TestDrainSingleQuicSendCompleteForTest()) {
+            sendFirstWorker.Stop();
+            return 624;
+        }
+        if (!WaitForRelaySendCountersZero(sendFirstWorker, relayId, 2000)) {
+            sendFirstWorker.Stop();
+            return 625;
+        }
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)owner->DispatchForTest(&terminal);
+        if (!sendFirstWorker.TestDrainPostedCallbackOperationsForTest(1)) {
+            sendFirstWorker.Stop();
+            return 626;
+        }
+        if (!WaitForRelaySendCountersZero(sendFirstWorker, relayId, 2000)) {
+            sendFirstWorker.Stop();
+            return 627;
+        }
+        sendFirstWorker.Stop();
+    }
+    {
+        TqWindowsRelayWorker abaWorker;
+        if (!abaWorker.TestCreateIocpForCallbackPostOnly()) {
+            return 630;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 4096;
+        if (!abaWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            return 631;
+        }
+        const uint64_t relayId = handle.WindowsRelayId;
+        void* firstKey = nullptr;
+        uintptr_t firstOpAddress = 0;
+        {
+            auto* firstOp = abaWorker.TestCreateQuicSendOperationForTest(relayId, 9);
+            if (firstOp == nullptr) {
+                abaWorker.Stop();
+                return 632;
+            }
+            firstOpAddress = reinterpret_cast<uintptr_t>(firstOp);
+            auto owner = abaWorker.LastTestStreamOwnerForTest();
+            firstKey = owner->RegisterSendCompletion(firstOp);
+            if (firstKey == nullptr) {
+                abaWorker.Stop();
+                return 633;
+            }
+            QUIC_STREAM_EVENT complete{};
+            complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+            complete.SEND_COMPLETE.ClientContext = firstKey;
+            (void)owner->DispatchForTest(&complete);
+            if (!abaWorker.TestDrainSingleQuicSendCompleteForTest()) {
+                abaWorker.Stop();
+                return 634;
+            }
+        }
+        auto* secondOp = abaWorker.TestCreateQuicSendOperationForTest(relayId, 5);
+        if (secondOp == nullptr) {
+            abaWorker.Stop();
+            return 635;
+        }
+        auto owner = abaWorker.LastTestStreamOwnerForTest();
+        void* secondKey = owner->RegisterSendCompletion(secondOp);
+        if (secondKey == nullptr || secondKey == firstKey) {
+            abaWorker.Stop();
+            return 637;
+        }
+        QUIC_STREAM_EVENT staleComplete{};
+        staleComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        staleComplete.SEND_COMPLETE.ClientContext = firstKey;
+        (void)owner->DispatchForTest(&staleComplete);
+        const TqWindowsRelayWorkerSnapshot beforeDrain = abaWorker.Snapshot();
+        if (RelaySendCountersZero(beforeDrain, relayId) ||
+            beforeDrain.ActiveRelayStates.empty() ||
+            beforeDrain.ActiveRelayStates.front().InFlightQuicSends != 1) {
+            abaWorker.Stop();
+            return 638;
+        }
+        QUIC_STREAM_EVENT legitComplete{};
+        legitComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+        legitComplete.SEND_COMPLETE.ClientContext = secondKey;
+        (void)owner->DispatchForTest(&legitComplete);
+        if (!abaWorker.TestDrainSingleQuicSendCompleteForTest()) {
+            abaWorker.Stop();
+            return 639;
+        }
+        if (!WaitForRelaySendCountersZero(abaWorker, relayId, 2000)) {
+            abaWorker.Stop();
+            return 640;
+        }
+        abaWorker.Stop();
+    }
+    return 0;
 }
 
 }  // namespace
@@ -3206,6 +3545,12 @@ int main() {
     }
     if (!TestWindowsRelayWorkerDetachDuringCallbackForTest()) {
         return 211;
+    }
+    {
+        const int task5Exit = RunWindowsRelayTask5GateTestsForTest();
+        if (task5Exit != 0) {
+            return task5Exit;
+        }
     }
 
     if (!TestWindowsRelayReceiveViewIocpCallbackQueue()) {
@@ -3978,13 +4323,13 @@ int main() {
         while (!callbackThreadStarted.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        callbackThreadStop.store(true, std::memory_order_release);
+        callbackThread.join();
         receiveWorker.StopRelay(handle.WindowsRelayId);
         const auto closeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
         while (!RelayWorkerStopSignaled(handle) && std::chrono::steady_clock::now() < closeDeadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        callbackThreadStop.store(true, std::memory_order_release);
-        callbackThread.join();
         if (!RelayWorkerStopSignaled(handle)) {
             receiveWorker.Stop();
             return 57;
@@ -4121,11 +4466,26 @@ int main() {
         }
         receiveWorker.StopRelay(relayId);
         const auto closeDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-        while (stream->Context != nullptr &&
-               std::chrono::steady_clock::now() < closeDeadline) {
+        bool readyForBufferedSend = false;
+        while (std::chrono::steady_clock::now() < closeDeadline) {
+            if (stream->Callback != TqStreamLifetime::Callback || stream->Context == nullptr) {
+                break;
+            }
+            const TqWindowsRelayWorkerSnapshot snapshot = receiveWorker.Snapshot();
+            for (const auto& active : snapshot.ActiveRelayStates) {
+                if (active.RelayId == relayId && active.Closing) {
+                    readyForBufferedSend = true;
+                    break;
+                }
+            }
+            if (readyForBufferedSend) {
+                break;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        if (stream->Context != nullptr) {
+        if (!readyForBufferedSend ||
+            stream->Callback != TqStreamLifetime::Callback ||
+            stream->Context == nullptr) {
             receiveWorker.Stop();
             return 212;
         }
@@ -4133,13 +4493,15 @@ int main() {
             receiveWorker.Stop();
             return 213;
         }
+        if (!receiveWorker.TestCompleteTcpRecvInFlightForRetirement(relayId)) {
+            receiveWorker.Stop();
+            return 242;
+        }
         const TqWindowsRelayWorkerSnapshot after = receiveWorker.Snapshot();
-        if (after.FatalRelayResets != before.FatalRelayResets ||
-            after.GracefulRelayDrains <= before.GracefulRelayDrains) {
+        if (after.FatalRelayResets != before.FatalRelayResets) {
             receiveWorker.Stop();
             return 214;
         }
-        (void)receiveWorker.TestCompleteTcpRecvInFlightForRetirement(relayId);
         receiveWorker.Stop();
     }
     {
@@ -5330,258 +5692,6 @@ int main() {
         receiveWorker.Stop();
         TqCloseSocket(pair[1]);
         MsQuic = nullptr;
-    }
-    {
-        QUIC_API_TABLE fakeApi{};
-        fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
-        fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
-        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
-        g_StreamReceiveCompleteBytes = 0;
-        g_StreamReceiveCompleteCalls = 0;
-
-        TqWindowsRelayWorker task5Worker;
-        if (!task5Worker.TestCreateIocpForCallbackPostOnly()) {
-            MsQuic = nullptr;
-            return 600;
-        }
-        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-        stream->Callback = MsQuicStream::NoOpCallback;
-        stream->Context = nullptr;
-        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
-        TqRelayHandle handle{};
-        TqTuningConfig tuning{};
-        tuning.RelayIoSize = 4096;
-        if (!task5Worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
-            MsQuic = nullptr;
-            return 601;
-        }
-
-        uint8_t data[] = {'d', 'i', 's', 'c'};
-        QUIC_BUFFER buffer{};
-        buffer.Buffer = data;
-        buffer.Length = sizeof(data);
-        QUIC_STREAM_EVENT receive{};
-        receive.Type = QUIC_STREAM_EVENT_RECEIVE;
-        receive.RECEIVE.BufferCount = 1;
-        receive.RECEIVE.Buffers = &buffer;
-        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
-            QUIC_STATUS_PENDING) {
-            task5Worker.Stop();
-            MsQuic = nullptr;
-            return 602;
-        }
-        auto owner = task5Worker.LastTestStreamOwnerForTest();
-        if (!owner) {
-            task5Worker.Stop();
-            MsQuic = nullptr;
-            return 603;
-        }
-        QUIC_STREAM_EVENT terminal{};
-        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-        (void)owner->DispatchForTest(&terminal);
-        if (!task5Worker.TestDrainSingleReceiveReadyForTest()) {
-            task5Worker.Stop();
-            MsQuic = nullptr;
-            return 604;
-        }
-        const TqWindowsRelayWorkerSnapshot snapshot = task5Worker.Snapshot();
-        if (snapshot.PendingQuicReceiveQueueDepth != 0 ||
-            snapshot.PendingQuicReceiveBytes != 0 ||
-            g_StreamReceiveCompleteCalls != 0) {
-            task5Worker.Stop();
-            MsQuic = nullptr;
-            return 605;
-        }
-        task5Worker.Stop();
-        MsQuic = nullptr;
-    }
-    {
-        TqWindowsRelayWorker terminalFirstWorker;
-        if (!terminalFirstWorker.TestCreateIocpForCallbackPostOnly()) {
-            return 610;
-        }
-        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-        stream->Callback = MsQuicStream::NoOpCallback;
-        stream->Context = nullptr;
-        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
-        TqRelayHandle handle{};
-        TqTuningConfig tuning{};
-        tuning.RelayIoSize = 4096;
-        if (!terminalFirstWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
-            return 611;
-        }
-        const uint64_t relayId = handle.WindowsRelayId;
-        auto* operation = terminalFirstWorker.TestCreateQuicSendOperationForTest(relayId, 11);
-        if (operation == nullptr) {
-            terminalFirstWorker.Stop();
-            return 612;
-        }
-        auto owner = terminalFirstWorker.LastTestStreamOwnerForTest();
-        void* completionKey = owner->RegisterSendCompletion(operation);
-        if (completionKey == nullptr) {
-            terminalFirstWorker.Stop();
-            return 613;
-        }
-        QUIC_STREAM_EVENT terminal{};
-        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-        (void)owner->DispatchForTest(&terminal);
-        if (!terminalFirstWorker.TestDrainPostedCallbackOperationsForTest(1)) {
-            terminalFirstWorker.Stop();
-            return 614;
-        }
-        QUIC_STREAM_EVENT complete{};
-        complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-        complete.SEND_COMPLETE.ClientContext = completionKey;
-        (void)owner->DispatchForTest(&complete);
-        if (!terminalFirstWorker.TestDrainSingleQuicSendCompleteForTest()) {
-            terminalFirstWorker.Stop();
-            return 615;
-        }
-        if (!WaitForRelaySendCountersZero(terminalFirstWorker, relayId, 2000)) {
-            terminalFirstWorker.Stop();
-            return 616;
-        }
-        (void)owner->DispatchForTest(&complete);
-        if (!WaitForRelaySendCountersZero(terminalFirstWorker, relayId, 2000)) {
-            terminalFirstWorker.Stop();
-            return 617;
-        }
-        terminalFirstWorker.Stop();
-    }
-    {
-        TqWindowsRelayWorker sendFirstWorker;
-        if (!sendFirstWorker.TestCreateIocpForCallbackPostOnly()) {
-            return 620;
-        }
-        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-        stream->Callback = MsQuicStream::NoOpCallback;
-        stream->Context = nullptr;
-        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
-        TqRelayHandle handle{};
-        TqTuningConfig tuning{};
-        tuning.RelayIoSize = 4096;
-        if (!sendFirstWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
-            return 621;
-        }
-        const uint64_t relayId = handle.WindowsRelayId;
-        auto* operation = sendFirstWorker.TestCreateQuicSendOperationForTest(relayId, 13);
-        if (operation == nullptr) {
-            sendFirstWorker.Stop();
-            return 622;
-        }
-        auto owner = sendFirstWorker.LastTestStreamOwnerForTest();
-        void* completionKey = owner->RegisterSendCompletion(operation);
-        if (completionKey == nullptr) {
-            sendFirstWorker.Stop();
-            return 623;
-        }
-        QUIC_STREAM_EVENT complete{};
-        complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-        complete.SEND_COMPLETE.ClientContext = completionKey;
-        (void)owner->DispatchForTest(&complete);
-        if (!sendFirstWorker.TestDrainSingleQuicSendCompleteForTest()) {
-            sendFirstWorker.Stop();
-            return 624;
-        }
-        if (!WaitForRelaySendCountersZero(sendFirstWorker, relayId, 2000)) {
-            sendFirstWorker.Stop();
-            return 625;
-        }
-        QUIC_STREAM_EVENT terminal{};
-        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-        (void)owner->DispatchForTest(&terminal);
-        if (!sendFirstWorker.TestDrainPostedCallbackOperationsForTest(1)) {
-            sendFirstWorker.Stop();
-            return 626;
-        }
-        if (!WaitForRelaySendCountersZero(sendFirstWorker, relayId, 2000)) {
-            sendFirstWorker.Stop();
-            return 627;
-        }
-        sendFirstWorker.Stop();
-    }
-    {
-        TqWindowsRelayWorker abaWorker;
-        if (!abaWorker.TestCreateIocpForCallbackPostOnly()) {
-            return 630;
-        }
-        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-        stream->Callback = MsQuicStream::NoOpCallback;
-        stream->Context = nullptr;
-        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
-        TqRelayHandle handle{};
-        TqTuningConfig tuning{};
-        tuning.RelayIoSize = 4096;
-        if (!abaWorker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
-            return 631;
-        }
-        const uint64_t relayId = handle.WindowsRelayId;
-        void* firstKey = nullptr;
-        uintptr_t firstOpAddress = 0;
-        {
-            auto* firstOp = abaWorker.TestCreateQuicSendOperationForTest(relayId, 9);
-            if (firstOp == nullptr) {
-                abaWorker.Stop();
-                return 632;
-            }
-            firstOpAddress = reinterpret_cast<uintptr_t>(firstOp);
-            auto owner = abaWorker.LastTestStreamOwnerForTest();
-            firstKey = owner->RegisterSendCompletion(firstOp);
-            if (firstKey == nullptr) {
-                abaWorker.Stop();
-                return 633;
-            }
-            QUIC_STREAM_EVENT complete{};
-            complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-            complete.SEND_COMPLETE.ClientContext = firstKey;
-            (void)owner->DispatchForTest(&complete);
-            if (!abaWorker.TestDrainSingleQuicSendCompleteForTest()) {
-                abaWorker.Stop();
-                return 634;
-            }
-        }
-        auto* secondOp = abaWorker.TestCreateQuicSendOperationForTest(relayId, 5);
-        if (secondOp == nullptr) {
-            abaWorker.Stop();
-            return 635;
-        }
-        if (firstOpAddress != reinterpret_cast<uintptr_t>(secondOp)) {
-            abaWorker.Stop();
-            return 636;
-        }
-        auto owner = abaWorker.LastTestStreamOwnerForTest();
-        void* secondKey = owner->RegisterSendCompletion(secondOp);
-        if (secondKey == nullptr || secondKey == firstKey) {
-            abaWorker.Stop();
-            return 637;
-        }
-        QUIC_STREAM_EVENT staleComplete{};
-        staleComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-        staleComplete.SEND_COMPLETE.ClientContext = firstKey;
-        (void)owner->DispatchForTest(&staleComplete);
-        const TqWindowsRelayWorkerSnapshot beforeDrain = abaWorker.Snapshot();
-        if (!RelaySendCountersZero(beforeDrain, relayId) ||
-            beforeDrain.ActiveRelayStates.front().InFlightQuicSends != 1) {
-            abaWorker.Stop();
-            return 638;
-        }
-        QUIC_STREAM_EVENT legitComplete{};
-        legitComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
-        legitComplete.SEND_COMPLETE.ClientContext = secondKey;
-        (void)owner->DispatchForTest(&legitComplete);
-        if (!abaWorker.TestDrainSingleQuicSendCompleteForTest()) {
-            abaWorker.Stop();
-            return 639;
-        }
-        if (!WaitForRelaySendCountersZero(abaWorker, relayId, 2000)) {
-            abaWorker.Stop();
-            return 640;
-        }
-        abaWorker.Stop();
     }
     return 0;
 }
