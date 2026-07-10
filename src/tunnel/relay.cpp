@@ -225,6 +225,7 @@ bool TqRelayStartQuicReceiveSinkImpl(
     handle->LinuxRelayId = registered.RelayId;
     return true;
 #else
+    (void)streamOwner;
     (void)profileTuning;
     (void)receiveBytes;
     TqRelayUnregisterActive();

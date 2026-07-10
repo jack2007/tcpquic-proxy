@@ -848,7 +848,7 @@ if(BUILD_SHARED_LIBS)
     target_link_libraries(tcpquic_tunnel_test PRIVATE msquic_platform)
 endif()
 target_compile_definitions(tcpquic_tunnel_test PRIVATE ${TCPQUIC_TEST_DEFS} TCPQUIC_TUNNEL_TESTING=1)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR WIN32)
     target_compile_definitions(tcpquic_tunnel_test PRIVATE TQ_UNIT_TESTING=1)
 endif()
 set_property(TARGET tcpquic_tunnel_test PROPERTY FOLDER "tools")
@@ -1084,6 +1084,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         tunnel/darwin_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
         runtime/darwin_reactor.cpp
     )
 endif()

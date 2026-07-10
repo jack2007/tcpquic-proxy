@@ -1154,15 +1154,17 @@ void TqDarwinRelayWorker::ClearPublicHandle(const std::shared_ptr<RelayState>& r
     if (relay == nullptr || relay->PublicHandle == nullptr) {
         return;
     }
-    if (relay->PublicHandle->DarwinRelayId == relay->Id) {
-        relay->PublicHandle->DarwinRelayId = 0;
+    TqRelayHandle* handle = relay->PublicHandle;
+    if (handle->DarwinRelayId == relay->Id) {
+        handle->DarwinRelayId = 0;
     }
-    if (relay->PublicHandle->DarwinWorker == this) {
-        relay->PublicHandle->DarwinWorker = nullptr;
+    if (handle->DarwinWorker == this) {
+        handle->DarwinWorker = nullptr;
     }
-    if (relay->PublicHandle->Backend == TqRelayBackendType::DarwinWorker) {
-        relay->PublicHandle->Backend = TqRelayBackendType::None;
+    if (handle->Backend == TqRelayBackendType::DarwinWorker) {
+        handle->Backend = TqRelayBackendType::None;
     }
+    relay->PublicHandle = nullptr;
 }
 
 void TqDarwinRelayWorker::RetireRelay(

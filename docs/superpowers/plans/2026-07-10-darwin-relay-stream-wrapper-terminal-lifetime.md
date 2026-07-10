@@ -174,7 +174,7 @@
 
 ## Task 7: 验证
 
-- [ ] 在 macOS 运行：
+- [x] 在 macOS 运行：
 
 ```bash
 rtk cmake --build build --target tcpquic_stream_lifetime_test tcpquic_darwin_relay_worker_io_test tcpquic_darwin_relay_worker_queue_test tcpquic_darwin_relay_metrics_test tcpquic_darwin_reactor_test tcpquic_tcp_tunnel_test tcpquic_client_tunnel_open_test tcpquic_speed_test_test tcpquic_router_runtime_test -j$(sysctl -n hw.ncpu)
@@ -190,12 +190,12 @@ rtk build/bin/Release/tcpquic_router_runtime_test
 rtk git diff --check
 ```
 
-- [ ] 在 ASan 构建运行 owner handoff、terminal lifetime 和 pending send completion cases。
-- [ ] 运行 Darwin relay 性能/压力入口，记录 lifetime lease 对 kqueue worker CPU 和吞吐的影响。
-- [ ] 使用 `rtk rg -n "RetiredStream|ClearRetiredStreamCallbackIfSafe|relay->Stream->|receive->Stream|stream->(Callback|Context)" src/tunnel/darwin_relay_worker.cpp` 确认 Darwin worker不再读写 wrapper handler、terminal path不再通过 relay/receive裸指针访问 wrapper；逐项审计剩余 stream API调用均为 callback参数内调用或有效 lease调用。
-- [ ] 保持现有 callback queue-full backpressure、state/map lock 和 send completion 测试通过。
-- [ ] 增加 active `ReceiveComplete` 一次与 terminal receive discard 零次 stream API 的对照测试。
-- [ ] 执行 System Test Darwin矩阵、ASan、k6 baseline和worker-stop恢复场景。
+- [x] 在 ASan 构建运行 owner handoff、terminal lifetime 和 pending send completion cases。（`build-asan/` RelWithDebInfo + ASAN；macOS 不支持 `detect_leaks`）
+- [ ] 运行 Darwin relay 性能/压力入口，记录 lifetime lease 对 kqueue worker CPU 和吞吐的影响。（跳过：需远端 QUIC server + L2–L4 基线对比，见 `docs/test/macos-performance-stress-test-design_cn.md`）
+- [x] 使用 `rtk rg -n "RetiredStream|ClearRetiredStreamCallbackIfSafe|relay->Stream->|receive->Stream|stream->(Callback|Context)" src/tunnel/darwin_relay_worker.cpp` 确认 Darwin worker不再读写 wrapper handler、terminal path不再通过 relay/receive裸指针访问 wrapper；逐项审计剩余 stream API调用均为 callback参数内调用或有效 lease调用。
+- [x] 保持现有 callback queue-full backpressure、state/map lock 和 send completion 测试通过。
+- [x] 增加 active `ReceiveComplete` 一次与 terminal receive discard 零次 stream API 的对照测试。（Task 5：`TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard` + `LeaseHeldDeferredReceiveDoesNotDiscard`）
+- [ ] 执行 System Test Darwin矩阵、ASan、k6 baseline和worker-stop恢复场景。（部分完成：L0 单元 + L1 smoke `scripts/test-tcpquic-proxy.sh` PASS；k6/L2–L4 与 worker-stop 恢复需专用环境，见 system-test-design）
 
 ## 验收标准
 

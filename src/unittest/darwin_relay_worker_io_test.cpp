@@ -100,13 +100,13 @@ public:
 
 struct ManagedRelayHarness {
     TqDarwinRelayWorkerConfig Config{};
-    TqDarwinRelayWorker Worker;
     int Fds[2]{TqInvalidSocket, TqInvalidSocket};
     alignas(MsQuicStream) unsigned char StreamStorage[sizeof(MsQuicStream)]{};
     MsQuicStream* Stream{nullptr};
     TqRelayHandle Handle{};
     std::shared_ptr<TqStreamLifetime> Owner;
     TqDarwinRelayRegistrationResult Result{};
+    TqDarwinRelayWorker Worker;
 
     explicit ManagedRelayHarness(TqDarwinRelayWorkerConfig config = {})
         : Config(std::move(config)), Worker(this->Config) {}
@@ -190,12 +190,12 @@ struct ScopedFakeMsQuicApi {
 struct AdoptedManagedHarness {
     ScopedFakeMsQuicApi FakeApi;
     TqDarwinRelayWorkerConfig Config{};
-    TqDarwinRelayWorker Worker;
     int Fds[2]{TqInvalidSocket, TqInvalidSocket};
     TqRelayHandle Handle{};
     std::shared_ptr<TqStreamLifetime> Owner;
     TqDarwinRelayRegistrationResult Result{};
     HQUIC Raw{nullptr};
+    TqDarwinRelayWorker Worker;
 
     explicit AdoptedManagedHarness(TqDarwinRelayWorkerConfig config = {})
         : Config(std::move(config)), Worker(this->Config) {}
@@ -2111,6 +2111,7 @@ void DestroyedWorkerLateCompletionUsesSharedOwner() {
         sendContext = g_lastSendContext.load(std::memory_order_acquire);
         CHECK(callbackContext != nullptr);
         CHECK(sendContext != nullptr);
+        worker.Stop();
     }
 
     QUIC_STREAM_EVENT event{};
