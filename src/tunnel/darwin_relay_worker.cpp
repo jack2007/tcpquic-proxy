@@ -692,6 +692,14 @@ uint64_t TqDarwinRelayWorker::PendingQuicReceiveBytesForTest(uint64_t relayId) {
     return relay->PendingQuicReceiveBytes;
 }
 
+uint64_t TqDarwinRelayWorker::CallbackPendingReceiveBytesForTest(uint64_t relayId) {
+    auto relay = FindRelay(relayId);
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return 0;
+    }
+    return relay->Binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
+}
+
 uint64_t TqDarwinRelayWorker::PendingTcpWriteBytesForTest(uint64_t relayId) {
     auto relay = FindRelay(relayId);
     if (relay == nullptr) {
@@ -2543,8 +2551,6 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
     event.Fin = fin;
     event.ReceiveView = receive;
     if (!EnqueueEvent(std::move(event))) {
-        receive->CallbackBudgetHeld = false;
-        ReleaseCallbackReceiveBudget(receive);
         QuicReceiveViewBackpressureQueued.fetch_add(1, std::memory_order_relaxed);
         {
             std::lock_guard<std::mutex> guard(binding->CallbackPendingQuicReceivesMutex);
@@ -2985,8 +2991,6 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         return;
     }
     const uint64_t bytes = receive->PendingCompleteBytes;
-    receive->PendingCompleteBytes = 0;
-    DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
     if (receive->StreamOwner != nullptr) {
         auto lease = receive->StreamOwner->TryAcquireApi();
         if (lease) {
@@ -2994,10 +2998,17 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             if (stream == nullptr) {
                 stream = receive->Stream;
             }
+            receive->PendingCompleteBytes = 0;
+            DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
             CompleteMsQuicReceiveFromCallback(stream, bytes);
+            return;
         }
+        receive->PendingCompleteBytes = 0;
+        DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    receive->PendingCompleteBytes = 0;
+    DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
     CompleteMsQuicReceiveFromCallback(receive->Stream, bytes);
 }
 

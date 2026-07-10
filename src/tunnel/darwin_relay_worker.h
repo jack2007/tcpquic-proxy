@@ -283,6 +283,7 @@ public:
     uint64_t CompleteOneInFlightSendForTest(uint64_t relayId);
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
     uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
+    uint64_t CallbackPendingReceiveBytesForTest(uint64_t relayId);
     uint64_t PendingTcpWriteBytesForTest(uint64_t relayId);
     uint64_t EventQueueFullErrorsForTest() const;
     uint64_t CallbackReceiveBudgetRejectsForTest() const;
