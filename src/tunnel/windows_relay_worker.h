@@ -170,9 +170,9 @@ struct TqWindowsRelayWorkerQueueBlockForTest {
 
 struct TqWindowsRelayRegistration {
     TqSocketHandle TcpFd{TqInvalidSocket};
+    // Transitional test-only bare stream; production registration uses StreamOwner only.
     MsQuicStream* Stream{nullptr};
     std::shared_ptr<TqStreamLifetime> StreamOwner;
-    std::shared_ptr<TqRelayStopControl> StopControl;
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
     TqTuningConfig Tuning{};
@@ -187,6 +187,8 @@ struct TqWindowsRelayRegistrationResult {
     bool Ok{false};
     bool TcpFdConsumed{false};
     uint64_t RelayId{0};
+    uint64_t RelayGeneration{0};
+    std::shared_ptr<TqRelayStopControl> StopControl;
     TqWindowsRelayWorker* Worker{nullptr};
     uint32_t WorkerIndex{0};
 };
@@ -281,8 +283,22 @@ public:
     void TestDrainMaintenanceForTest();
 #endif
 
+#if defined(TQ_UNIT_TESTING)
     void StopRelay(uint64_t relayId);
     void SetRelayTraceContext(uint64_t relayId, uint64_t tunnelId, const char* target);
+#endif
+    void StopRelay(
+        const std::shared_ptr<TqRelayStopControl>& control,
+        uint64_t relayId,
+        uint64_t relayGeneration,
+        uint64_t controlGeneration);
+    void SetRelayTraceContext(
+        const std::shared_ptr<TqRelayStopControl>& control,
+        uint64_t relayId,
+        uint64_t relayGeneration,
+        uint64_t controlGeneration,
+        uint64_t tunnelId,
+        const char* target);
     static QUIC_STATUS QUIC_API StreamCallback(
         MsQuicStream* stream,
         void* context,
@@ -333,7 +349,6 @@ private:
         const std::shared_ptr<RelayContext>& relay,
         TqStreamLifetime::ShutdownIntent intent);
     TqStreamLifetime::ApiLease TryRelayStreamLease(const RelayContext& relay) const;
-    MsQuicStream* RelayStreamForCallback(const RelayContext& relay) const;
     uint64_t MaxPendingQuicReceiveBytesPerRelay(const RelayContext& relay) const;
     TqWindowsRelayWorkerSnapshot BuildSnapshotLocal() const;
     void DrainPerRelayMaintenance();
@@ -441,7 +456,7 @@ private:
     void FlushDeferredReceiveCompletion(TqWindowsPendingQuicReceive& view, bool force);
     void FlushBatchedDeferredReceiveCompletion(
         const std::shared_ptr<RelayContext>& relay,
-        MsQuicStream* stream);
+        const std::shared_ptr<TqStreamLifetime>& streamOwner);
     void CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view);
     void CompleteQuicSendAccounting(
         const std::shared_ptr<RelayContext>& relay,
@@ -619,12 +634,14 @@ public:
         const std::shared_ptr<TqRelayStopControl>& control,
         uint32_t workerIndex,
         uint64_t relayId,
-        uint64_t generation);
+        uint64_t relayGeneration,
+        uint64_t controlGeneration);
     void SetRelayTraceContext(
         const std::shared_ptr<TqRelayStopControl>& control,
         uint32_t workerIndex,
         uint64_t relayId,
-        uint64_t generation,
+        uint64_t relayGeneration,
+        uint64_t controlGeneration,
         uint64_t tunnelId,
         const char* target);
 

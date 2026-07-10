@@ -1,5 +1,6 @@
 #include "compress.h"
 #include "platform_socket.h"
+#include "stream_lifetime.h"
 #include "trace.h"
 #include "windows_relay_worker.h"
 
@@ -1869,6 +1870,138 @@ bool TestWindowsRelayTraceContextDropsWhenClosing() {
            staleAfter == staleBefore + 1;
 }
 
+std::shared_ptr<TqStreamLifetime> MakeStartedRelayStreamOwner(MsQuicStream* stream) {
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    if (!owner || stream == nullptr || !owner->InstallDetachedStreamForTest(stream)) {
+        return nullptr;
+    }
+    return owner;
+}
+
+bool TestWindowsRelayRegistrationPrepareRollbackForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        worker.Stop();
+        return false;
+    }
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    TqWindowsRelayRegistration registration{};
+    registration.TcpFd = pair[0];
+    registration.StreamOwner = owner;
+    registration.FailPrepareForTest = true;
+    const auto result = worker.RegisterRelayWithId(registration);
+    const bool ok = !result.Ok && !result.TcpFdConsumed &&
+        worker.Snapshot().ActiveRelays == 0;
+    worker.Stop();
+    TqCloseSocket(pair[0]);
+    TqCloseSocket(pair[1]);
+    return ok;
+}
+
+bool TestWindowsRelayRegistrationCommitRollbackForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(pair)) {
+        worker.Stop();
+        return false;
+    }
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    TqWindowsRelayRegistration registration{};
+    registration.TcpFd = pair[0];
+    registration.StreamOwner = owner;
+    registration.FailCommitForTest = true;
+    const auto result = worker.RegisterRelayWithId(registration);
+    const bool ok = !result.Ok && result.TcpFdConsumed && worker.Snapshot().ActiveRelays == 0;
+    worker.Stop();
+    TqCloseSocket(pair[1]);
+    return ok;
+}
+
+bool TestWindowsRelayHandleReuseControlIsolationForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+    TqRelayHandle handle{};
+    TqTuningConfig tuning{};
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.Stop();
+        return false;
+    }
+    const auto firstControl = handle.Control;
+    const uint64_t firstControlGeneration =
+        firstControl != nullptr ? firstControl->Generation.load(std::memory_order_acquire) : 0;
+    const uint64_t firstRelayId = handle.WindowsRelayId;
+    if (firstControl == nullptr || firstControlGeneration == 0) {
+        worker.StopRelay(firstRelayId);
+        worker.Stop();
+        return false;
+    }
+
+    handle.Backend = TqRelayBackendType::None;
+    handle.WindowsWorker = nullptr;
+    handle.WindowsRelayId = 0;
+    handle.WindowsRelayGeneration = 0;
+    handle.WindowsWorkerIndex = 0;
+    handle.Control.reset();
+
+    if (!worker.RegisterRelayForTest(stream, &handle, tuning)) {
+        worker.StopRelay(firstRelayId);
+        worker.Stop();
+        return false;
+    }
+    const auto secondControl = handle.Control;
+    const bool uniqueControls = secondControl != nullptr && secondControl != firstControl &&
+        secondControl->Generation.load(std::memory_order_acquire) != firstControlGeneration;
+    if (uniqueControls) {
+        firstControl->Stop.store(true, std::memory_order_release);
+    }
+    const bool ok = uniqueControls &&
+        firstControl->Stop.load(std::memory_order_acquire) &&
+        !secondControl->Stop.load(std::memory_order_acquire);
+    worker.StopRelay(handle.WindowsRelayId);
+    worker.Stop();
+    return ok;
+}
+
+bool TestWindowsRelayManagedRegistrationForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(2));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    const bool ok = result.Ok && result.StopControl != nullptr &&
+        result.StopControl->Generation.load(std::memory_order_acquire) != 0 &&
+        result.RelayGeneration != 0;
+    if (result.Ok) {
+        worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
+            result.StopControl->Generation.load(std::memory_order_acquire));
+    }
+    worker.Stop();
+    return ok;
+}
+
 }  // namespace
 #endif
 
@@ -1891,6 +2024,19 @@ int main() {
 
     if (!TestWindowsRelaySnapshotObservability()) {
         return 42;
+    }
+
+    if (!TestWindowsRelayRegistrationPrepareRollbackForTest()) {
+        return 200;
+    }
+    if (!TestWindowsRelayRegistrationCommitRollbackForTest()) {
+        return 201;
+    }
+    if (!TestWindowsRelayHandleReuseControlIsolationForTest()) {
+        return 202;
+    }
+    if (!TestWindowsRelayManagedRegistrationForTest()) {
+        return 203;
     }
 
     if (!TestWindowsRelayLockAndCallbackMetricsInitialState()) {

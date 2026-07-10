@@ -57,6 +57,45 @@ void WaitWindowsRelayCommand(Command& command) {
     command.Cv.wait(guard, [&command] { return command.Done; });
 }
 
+std::atomic<uint64_t> g_NextRelayControlGeneration{1};
+
+std::shared_ptr<TqRelayStopControl> AllocateRelayStopControl() {
+    auto control = std::make_shared<TqRelayStopControl>();
+    control->Generation.store(
+        g_NextRelayControlGeneration.fetch_add(1, std::memory_order_relaxed),
+        std::memory_order_release);
+    return control;
+}
+
+bool ControlGenerationMatches(
+    const std::shared_ptr<TqRelayStopControl>& control,
+    uint64_t expectedGeneration) {
+    return control != nullptr &&
+        control->Generation.load(std::memory_order_acquire) == expectedGeneration;
+}
+
+void PublishStopToControl(
+    const std::shared_ptr<TqRelayStopControl>& control,
+    uint64_t expectedGeneration) {
+    if (!ControlGenerationMatches(control, expectedGeneration)) {
+        return;
+    }
+    control->Stop.store(true, std::memory_order_release);
+}
+
+void ReceiveCompleteViaOwner(
+    const std::shared_ptr<TqStreamLifetime>& owner,
+    uint64_t completeBytes) {
+    if (!owner || completeBytes == 0) {
+        return;
+    }
+    auto lease = owner->TryAcquireApi();
+    MsQuicStream* stream = lease ? lease.Stream() : nullptr;
+    if (stream != nullptr && stream->Handle != nullptr) {
+        stream->ReceiveComplete(completeBytes);
+    }
+}
+
 } // namespace
 
 #if defined(TQ_UNIT_TESTING)
@@ -85,11 +124,11 @@ TqWindowsRelayRegistration MakeWindowsRelayTestRegistration(
     TqRelayHandle* handle,
     const TqTuningConfig& tuning,
     TqCompressAlgo compressAlgo) {
+    (void)handle;
     TqWindowsRelayRegistration registration{};
     registration.TcpFd = tcpFd;
     registration.Stream = stream;
     registration.StreamOwner = owner;
-    registration.StopControl = handle != nullptr ? handle->Control : nullptr;
     registration.Compressor = compressor;
     registration.Decompressor = decompressor;
     registration.Tuning = tuning;
@@ -106,7 +145,9 @@ void FillWindowsRelayTestHandle(
     handle->Backend = TqRelayBackendType::WindowsWorker;
     handle->WindowsWorker = result.Worker;
     handle->WindowsRelayId = result.RelayId;
+    handle->WindowsRelayGeneration = result.RelayGeneration;
     handle->WindowsWorkerIndex = result.WorkerIndex;
+    handle->Control = result.StopControl;
 }
 
 static const char* TestCallbackTypeName(TqWindowsIocpOperationType type) {
@@ -168,7 +209,6 @@ struct TqWindowsQuicReceiveSlice {
 
 struct TqWindowsPendingQuicReceive {
     std::shared_ptr<TqStreamLifetime> StreamOwner;
-    MsQuicStream* Stream{nullptr};
     uint64_t RelayId{0};
     uint64_t Generation{0};
     std::vector<uint8_t> OwnedBuffer;
@@ -233,7 +273,6 @@ struct TqWindowsRelayWorker::WindowsStreamRelayBinding final
     : TqStreamLifetime::Target,
       std::enable_shared_from_this<TqWindowsRelayWorker::WindowsStreamRelayBinding> {
     std::shared_ptr<CallbackEndpoint> Endpoint;
-    std::atomic<RelayContext*> RelayHint{nullptr};
     uint64_t RelayId{0};
     uint64_t Generation{0};
     std::shared_ptr<TqRelayStopControl> StopControl;
@@ -275,6 +314,8 @@ struct TqWindowsRelayWorker::IoOperation {
     std::shared_ptr<RelayContext> Relay;
     uint64_t RelayId{0};
     uint64_t Generation{0};
+    uint64_t ControlGeneration{0};
+    std::shared_ptr<TqRelayStopControl> StopControl;
     uint64_t Value{0};
     size_t Length{0};
     TqBufferRef BufferOwner;
@@ -1236,10 +1277,15 @@ void TqWindowsRelayWorker::Run() {
             op->RelayId != 0) {
             relay = FindRelayByIdLocal(op->RelayId);
             if (relay) {
-                if (op->Generation != 0 && relay->Generation != op->Generation) {
+                if (relay->Generation != op->Generation) {
+                    relay.reset();
+                } else if (!ControlGenerationMatches(relay->StopControl, op->ControlGeneration) ||
+                           !ControlGenerationMatches(op->StopControl, op->ControlGeneration)) {
+                    PostedTraceContextStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
                     relay.reset();
                 } else if (op->Event == TqWindowsIocpOperationType::SetTraceContext &&
                            relay->Closing.load(std::memory_order_acquire)) {
+                    PostedTraceContextStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
                     relay.reset();
                 }
             }
@@ -1434,13 +1480,6 @@ TqStreamLifetime::ApiLease TqWindowsRelayWorker::TryRelayStreamLease(
     return relay.StreamOwner->TryAcquireApi();
 }
 
-MsQuicStream* TqWindowsRelayWorker::RelayStreamForCallback(const RelayContext& relay) const {
-    if (relay.StreamOwner == nullptr) {
-        return nullptr;
-    }
-    return relay.StreamOwner->StreamForInitialization();
-}
-
 uint64_t TqWindowsRelayWorker::MaxPendingQuicReceiveBytesPerRelay(
     const RelayContext& relay) const {
     if (relay.Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay != 0) {
@@ -1532,6 +1571,8 @@ TqWindowsRelayRegistrationResult TqWindowsRelayWorker::RegisterRelayWithIdLocal(
 
     result.Ok = true;
     result.RelayId = relay->Id;
+    result.RelayGeneration = relay->Generation;
+    result.StopControl = relay->StopControl;
     result.Worker = this;
     result.WorkerIndex = WorkerIndex_;
     return result;
@@ -1565,7 +1606,7 @@ bool TqWindowsRelayWorker::PrepareRelay(
     relay->StreamOwner = registration.StreamOwner;
     relay->Compressor = registration.Compressor;
     relay->Decompressor = registration.Decompressor;
-    relay->StopControl = registration.StopControl;
+    relay->StopControl = AllocateRelayStopControl();
     relay->Tuning = registration.Tuning;
     relay->CompressAlgo = registration.CompressAlgo;
 
@@ -1576,8 +1617,7 @@ bool TqWindowsRelayWorker::PrepareRelay(
     managedBinding->Endpoint = StreamCallbackEndpoint_;
     managedBinding->RelayId = relay->Id;
     managedBinding->Generation = relay->Generation;
-    managedBinding->StopControl = registration.StopControl;
-    managedBinding->RelayHint.store(relay.get(), std::memory_order_release);
+    managedBinding->StopControl = relay->StopControl;
     managedBinding->PrecommitMaxPendingBytes = MaxPendingQuicReceiveBytesPerRelay(*relay);
     relay->StreamBinding = managedBinding.get();
     relay->ManagedBinding = std::move(managedBinding);
@@ -1722,11 +1762,12 @@ void TqWindowsRelayWorker::FailManagedBinding(
         pending.pop_front();
     }
     binding->Closing.store(true, std::memory_order_release);
-    binding->RelayHint.store(nullptr, std::memory_order_release);
+    const uint64_t controlGeneration =
+        binding->StopControl != nullptr
+            ? binding->StopControl->Generation.load(std::memory_order_acquire)
+            : 0;
     auto control = std::atomic_load(&binding->StopControl);
-    if (control != nullptr) {
-        control->Stop.store(true, std::memory_order_release);
-    }
+    PublishStopToControl(control, controlGeneration);
     if (relay != nullptr) {
         relay->StreamBinding = nullptr;
         relay->ManagedBinding.reset();
@@ -1924,7 +1965,8 @@ bool TqWindowsRelayWorker::TestPostTraceContextForTest(
     if (Iocp_ == nullptr || !Thread_.joinable() || Stopping_.load(std::memory_order_acquire)) {
         return false;
     }
-    if (!FindRelayById(relayId)) {
+    auto relay = FindRelayById(relayId);
+    if (!relay) {
         return false;
     }
 
@@ -1932,6 +1974,11 @@ bool TqWindowsRelayWorker::TestPostTraceContextForTest(
     op->Event = TqWindowsIocpOperationType::SetTraceContext;
     op->RelayId = relayId;
     op->Generation = generation;
+    op->ControlGeneration =
+        relay->StopControl != nullptr
+            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            : 0;
+    op->StopControl = relay->StopControl;
     op->Value = tunnelId;
     if (target != nullptr) {
         op->Text = target;
@@ -2030,7 +2077,6 @@ bool TqWindowsRelayWorker::TestEnqueueReceiveViewForTest(uint64_t relayId, uint6
     view->Drained = false;
     view->Fin = false;
     view->StreamOwner = relay->StreamOwner;
-    view->Stream = RelayStreamForCallback(*relay);
     relay->PendingQuicReceiveBytes.fetch_add(byteCount, std::memory_order_acq_rel);
     relay->PendingQuicReceiveQueueDepth.fetch_add(1, std::memory_order_acq_rel);
     relay->PendingReceives.push_back(view);
@@ -2372,7 +2418,6 @@ bool TqWindowsRelayWorker::TestLateReceiveViewCompletionIgnored(
     }
     auto view = std::make_shared<TqWindowsPendingQuicReceive>();
     view->StreamOwner = relay->StreamOwner;
-    view->Stream = RelayStreamForCallback(*relay);
     view->RelayId = relay->Id;
     view->TotalLength = bytes;
     view->CompletedLength = bytes;
@@ -2746,7 +2791,6 @@ void TqWindowsRelayWorker::CloseRelay(
     relay->TcpFd = TqInvalidSocket;
     if (relay->ManagedBinding) {
         relay->ManagedBinding->Closing.store(true, std::memory_order_release);
-        relay->ManagedBinding->RelayHint.store(nullptr, std::memory_order_release);
     }
     relay->StreamOwner.reset();
     CompleteAllPendingQuicReceives(relay);
@@ -3098,9 +3142,9 @@ void TqWindowsRelayWorker::TryRetireRelay(
         }
     }
     auto control = std::atomic_load(&relay->StopControl);
-    if (control != nullptr) {
-        control->Stop.store(true, std::memory_order_release);
-    }
+    const uint64_t controlGeneration =
+        control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+    PublishStopToControl(control, controlGeneration);
     if (traceState && TqTraceEnabled()) {
         TqTraceRelayUnregister("windows", BuildRelayTraceState(relay));
     }
@@ -3628,8 +3672,9 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
     auto view = std::make_shared<TqWindowsPendingQuicReceive>();
     if (auto relay = ResolveRelayForCallback(binding.RelayId, binding.Generation)) {
         view->StreamOwner = relay->StreamOwner;
+    } else if (stream != nullptr) {
+        (void)stream;
     }
-    view->Stream = stream;
     view->RelayId = binding.RelayId;
     view->Generation = binding.Generation;
     view->Fin = fin;
@@ -3934,15 +3979,13 @@ void TqWindowsRelayWorker::FlushDeferredReceiveCompletion(
     DeferredReceiveCompleteBytes_.fetch_add(completeBytes, std::memory_order_relaxed);
     DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
     DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
-    if (view.Stream != nullptr && view.Stream->Handle != nullptr) {
-        view.Stream->ReceiveComplete(completeBytes);
-    }
+    ReceiveCompleteViaOwner(view.StreamOwner, completeBytes);
     view.PendingCompleteBytes = 0;
 }
 
 void TqWindowsRelayWorker::FlushBatchedDeferredReceiveCompletion(
     const std::shared_ptr<RelayContext>& relay,
-    MsQuicStream* stream) {
+    const std::shared_ptr<TqStreamLifetime>& streamOwner) {
     if (!relay) {
         return;
     }
@@ -3954,9 +3997,8 @@ void TqWindowsRelayWorker::FlushBatchedDeferredReceiveCompletion(
     DeferredReceiveCompleteBytes_.fetch_add(completeBytes, std::memory_order_relaxed);
     DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
     DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
-    if (stream != nullptr && stream->Handle != nullptr) {
-        stream->ReceiveComplete(completeBytes);
-    }
+    const auto owner = streamOwner != nullptr ? streamOwner : relay->StreamOwner;
+    ReceiveCompleteViaOwner(owner, completeBytes);
 }
 
 void TqWindowsRelayWorker::CompleteRemainingReceiveOwnership(TqWindowsPendingQuicReceive& view) {
@@ -3970,9 +4012,7 @@ void TqWindowsRelayWorker::CompleteRemainingReceiveOwnership(TqWindowsPendingQui
     DeferredReceiveCompleteBytes_.fetch_add(remaining, std::memory_order_relaxed);
     DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
     DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
-    if (view.Stream != nullptr && view.Stream->Handle != nullptr) {
-        view.Stream->ReceiveComplete(remaining);
-    }
+    ReceiveCompleteViaOwner(view.StreamOwner, remaining);
     view.Drained = true;
     view.CompletedLength = view.TotalLength;
     view.PendingCompleteBytes = 0;
@@ -4047,7 +4087,7 @@ bool TqWindowsRelayWorker::FinishReceiveView(
     if (hasPendingReceives && !relay->Closing.load(std::memory_order_acquire)) {
         ScheduleRelayReceiveDrainOrFail(relay, "schedule_receive_drain_after_finish_failed");
     } else if (!hasPendingReceives) {
-        FlushBatchedDeferredReceiveCompletion(relay, view->Stream);
+        FlushBatchedDeferredReceiveCompletion(relay, view->StreamOwner);
     }
     (void)CloseRelayIfDrained(relay);
     ScheduleRelayMaintenance(relay);
@@ -4134,10 +4174,10 @@ void TqWindowsRelayWorker::CompleteAllPendingQuicReceives(const std::shared_ptr<
     }
     std::list<std::shared_ptr<TqWindowsPendingQuicReceive>> pending;
     pending.swap(relay->PendingReceives);
-    MsQuicStream* streamForFlush = nullptr;
+    std::shared_ptr<TqStreamLifetime> streamOwnerForFlush;
     for (const auto& view : pending) {
-        if (view && view->Stream != nullptr) {
-            streamForFlush = view->Stream;
+        if (view && view->StreamOwner != nullptr) {
+            streamOwnerForFlush = view->StreamOwner;
         }
         if (view) {
             FlushDeferredReceiveCompletion(*view, true);
@@ -4151,7 +4191,7 @@ void TqWindowsRelayWorker::CompleteAllPendingQuicReceives(const std::shared_ptr<
         SaturatingFetchSub(relay->PendingQuicReceiveQueueDepth, 1);
     }
     relay->PendingQuicSendRetries.clear();
-    FlushBatchedDeferredReceiveCompletion(relay, streamForFlush);
+    FlushBatchedDeferredReceiveCompletion(relay, streamOwnerForFlush);
 }
 
 void TqWindowsRelayWorker::FinalizeQuicSendAccountingOnClose(
@@ -4348,11 +4388,49 @@ void TqWindowsRelayWorker::ApplyRelayTraceContext(
     relay->TraceTarget = target;
 }
 
+#if defined(TQ_UNIT_TESTING)
+void TqWindowsRelayWorker::StopRelay(uint64_t relayId) {
+    auto relay = FindRelayByIdLocal(relayId);
+    if (!relay) {
+        return;
+    }
+    const uint64_t controlGeneration =
+        relay->StopControl != nullptr
+            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            : 0;
+    StopRelay(relay->StopControl, relayId, relay->Generation, controlGeneration);
+}
+
 void TqWindowsRelayWorker::SetRelayTraceContext(
     uint64_t relayId,
     uint64_t tunnelId,
     const char* target) {
-    if (relayId == 0 || tunnelId == 0) {
+    auto relay = FindRelayByIdLocal(relayId);
+    if (!relay) {
+        return;
+    }
+    const uint64_t controlGeneration =
+        relay->StopControl != nullptr
+            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            : 0;
+    SetRelayTraceContext(
+        relay->StopControl,
+        relayId,
+        relay->Generation,
+        controlGeneration,
+        tunnelId,
+        target);
+}
+#endif
+
+void TqWindowsRelayWorker::SetRelayTraceContext(
+    const std::shared_ptr<TqRelayStopControl>& control,
+    uint64_t relayId,
+    uint64_t relayGeneration,
+    uint64_t controlGeneration,
+    uint64_t tunnelId,
+    const char* target) {
+    if (relayId == 0 || tunnelId == 0 || !ControlGenerationMatches(control, controlGeneration)) {
         return;
     }
 
@@ -4361,14 +4439,18 @@ void TqWindowsRelayWorker::SetRelayTraceContext(
         return;
     }
     auto relay = FindRelayById(relayId);
-    if (!relay) {
+    if (!relay || relay->Generation != relayGeneration ||
+        !ControlGenerationMatches(relay->StopControl, controlGeneration)) {
+        PostedTraceContextStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
     auto op = std::make_unique<IoOperation>();
     op->Event = TqWindowsIocpOperationType::SetTraceContext;
     op->RelayId = relayId;
-    op->Generation = relay->Generation;
+    op->Generation = relayGeneration;
+    op->ControlGeneration = controlGeneration;
+    op->StopControl = control;
     op->Value = tunnelId;
     if (target != nullptr) {
         op->Text = target;
@@ -4388,21 +4470,37 @@ void TqWindowsRelayWorker::SetRelayTraceContext(
     }
 }
 
-void TqWindowsRelayWorker::StopRelay(uint64_t relayId) {
-    if (relayId == 0) {
+void TqWindowsRelayWorker::StopRelay(
+    const std::shared_ptr<TqRelayStopControl>& control,
+    uint64_t relayId,
+    uint64_t relayGeneration,
+    uint64_t controlGeneration) {
+    if (relayId == 0 || !ControlGenerationMatches(control, controlGeneration)) {
         return;
     }
     std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
     if (Iocp_ == nullptr || !Thread_.joinable() || Stopping_.load(std::memory_order_acquire)) {
+        PublishStopToControl(control, controlGeneration);
+        return;
+    }
+    auto relay = FindRelayById(relayId);
+    if (!relay || relay->Generation != relayGeneration ||
+        !ControlGenerationMatches(relay->StopControl, controlGeneration)) {
+        PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
+        PublishStopToControl(control, controlGeneration);
         return;
     }
     auto op = std::make_unique<IoOperation>();
     op->Event = TqWindowsIocpOperationType::CloseRelay;
     op->RelayId = relayId;
+    op->Generation = relayGeneration;
+    op->ControlGeneration = controlGeneration;
+    op->StopControl = control;
     IoOperation* raw = op.release();
     if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
         delete raw;
         Errors_.fetch_add(1, std::memory_order_relaxed);
+        PublishStopToControl(control, controlGeneration);
     }
 }
 
@@ -4727,20 +4825,26 @@ void TqWindowsRelayRuntime::StopRelay(
     const std::shared_ptr<TqRelayStopControl>& control,
     uint32_t workerIndex,
     uint64_t relayId,
-    uint64_t generation) {
-    (void)control;
-    (void)generation;
+    uint64_t relayGeneration,
+    uint64_t controlGeneration) {
+    if (!ControlGenerationMatches(control, controlGeneration)) {
+        PublishStopToControl(control, controlGeneration);
+        return;
+    }
     std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
     TqWindowsRelayWorker* worker = nullptr;
     {
         std::lock_guard<std::mutex> guard(Lock_);
         if (workerIndex >= Workers_.size() || !Workers_[workerIndex]) {
+            PublishStopToControl(control, controlGeneration);
             return;
         }
         worker = Workers_[workerIndex].get();
     }
     if (worker != nullptr && relayId != 0) {
-        worker->StopRelay(relayId);
+        worker->StopRelay(control, relayId, relayGeneration, controlGeneration);
+    } else {
+        PublishStopToControl(control, controlGeneration);
     }
 }
 
@@ -4748,11 +4852,13 @@ void TqWindowsRelayRuntime::SetRelayTraceContext(
     const std::shared_ptr<TqRelayStopControl>& control,
     uint32_t workerIndex,
     uint64_t relayId,
-    uint64_t generation,
+    uint64_t relayGeneration,
+    uint64_t controlGeneration,
     uint64_t tunnelId,
     const char* target) {
-    (void)control;
-    (void)generation;
+    if (!ControlGenerationMatches(control, controlGeneration)) {
+        return;
+    }
     std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
     TqWindowsRelayWorker* worker = nullptr;
     {
@@ -4763,7 +4869,8 @@ void TqWindowsRelayRuntime::SetRelayTraceContext(
         worker = Workers_[workerIndex].get();
     }
     if (worker != nullptr && relayId != 0) {
-        worker->SetRelayTraceContext(relayId, tunnelId, target);
+        worker->SetRelayTraceContext(
+            control, relayId, relayGeneration, controlGeneration, tunnelId, target);
     }
 }
 
