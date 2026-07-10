@@ -278,6 +278,7 @@ public:
     bool TestMarkQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestReleaseQuicSendInFlightForRetirement(uint64_t relayId);
     bool TestMarkTcpSendInFlightForTest(uint64_t relayId);
+    bool TestReleaseTcpSendInFlightForRetirement(uint64_t relayId);
     bool TestInjectTcpIocpCompletionForTest(
         uint64_t relayId,
         bool tcpRecv,
@@ -309,6 +310,7 @@ public:
         TqWindowsRelayWorkerQueueBlockForTest& block,
         uint32_t timeoutMs) const;
     void TestReleaseWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest& block) const;
+    bool TestArmStopDrainForTest();
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestArmRelayClosingOnRelayOnlyForTest(uint64_t relayId);
     bool TestBumpCallbackBindingGenerationForTest(uint64_t relayId, uint64_t delta);
@@ -381,8 +383,8 @@ private:
     void SwitchRelayTargetToShutdownSink(const std::shared_ptr<RelayContext>& relay);
     void FlushPendingQuicReceivesOnClose(const std::shared_ptr<RelayContext>& relay);
     void NudgeClosingRelayRetirement();
-    void ClearOrphanTcpInFlightOnStop(const std::shared_ptr<RelayContext>& relay);
-    void ForceClearStuckTcpInFlightOnStopDrain();
+    void WarnStuckIocpOwnershipOnStopDrain();
+    void DrainMaintenanceQueueOnStop();
     struct WindowsShutdownSinkTarget;
     TqWindowsRelayRegistrationResult RegisterRelayWithIdLocal(
         const TqWindowsRelayRegistration& registration);
@@ -692,6 +694,7 @@ private:
     mutable std::mutex TerminalShutdownSinkLock_;
     std::deque<std::shared_ptr<TerminalCleanupRecord>> TerminalShutdownSink_;
     std::atomic<uint32_t> TerminalShutdownSinkPendingCount_{0};
+    std::atomic<uint32_t> TerminalOperationPendingCount_{0};
     std::atomic<uint64_t> ReceiveReadyPostCount_{0};
     std::atomic<uint64_t> ReceiveDrainScheduledCount_{0};
     std::atomic<uint64_t> ReceiveDrainCoalescedCount_{0};
@@ -720,7 +723,6 @@ private:
     std::atomic<bool> ForceTerminalIocpPostFailureForTest_{false};
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
-    std::atomic<uint32_t> TerminalOperationPendingCount_{0};
     mutable std::mutex PendingTerminalCleanupLock_;
     std::shared_ptr<TerminalCleanupRecord> PendingTerminalCleanupForTest_;
     std::atomic<DWORD> LastCallbackPostWin32Error_{0};
