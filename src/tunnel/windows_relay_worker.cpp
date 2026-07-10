@@ -163,6 +163,8 @@ static const char* TestCallbackTypeName(TqWindowsIocpOperationType type) {
         return "QuicPeerReceiveAborted";
     case TqWindowsIocpOperationType::QuicShutdownComplete:
         return "QuicShutdownComplete";
+    case TqWindowsIocpOperationType::TerminalShutdownSinkDrain:
+        return "TerminalShutdownSinkDrain";
     case TqWindowsIocpOperationType::QuicSendComplete:
         return "QuicSendComplete";
     default:
@@ -275,6 +277,7 @@ struct TqWindowsRelayWorker::WindowsStreamRelayBinding final
       std::enable_shared_from_this<TqWindowsRelayWorker::WindowsStreamRelayBinding> {
     std::shared_ptr<CallbackEndpoint> Endpoint;
     std::atomic<RelayContext*> RelayHint{nullptr};
+    std::atomic<bool> TerminalShutdownPosted{false};
     uint64_t RelayId{0};
     uint64_t Generation{0};
     std::shared_ptr<TqRelayStopControl> StopControl;
@@ -563,6 +566,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         CallbackIocpPostCount_.load(std::memory_order_relaxed);
     snapshot.WindowsCallbackIocpPostFailedCount =
         CallbackIocpPostFailedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsTerminalIocpPostFailedCount =
+        WindowsTerminalIocpPostFailedCount_.load(std::memory_order_relaxed);
     snapshot.WindowsReceiveReadyPostCount =
         ReceiveReadyPostCount_.load(std::memory_order_relaxed);
     snapshot.WindowsReceiveDrainScheduledCount =
@@ -1248,6 +1253,8 @@ void TqWindowsRelayWorker::Run() {
             EnqueueFullMaintenanceScan();
         }
         DrainPerRelayMaintenance();
+        DrainTerminalShutdownSink();
+        DrainPerRelayMaintenance();
 
         DWORD bytes = 0;
         ULONG_PTR key = 0;
@@ -1484,6 +1491,10 @@ void TqWindowsRelayWorker::Run() {
         case TqWindowsIocpOperationType::QuicShutdownComplete:
             DispatchQuicShutdownComplete(*op, relay);
             break;
+        case TqWindowsIocpOperationType::TerminalShutdownSinkDrain:
+            DrainTerminalShutdownSink();
+            DrainPerRelayMaintenance();
+            break;
         case TqWindowsIocpOperationType::QuicSendRetry:
             RetryPendingQuicSends(op->Relay);
             break;
@@ -1498,6 +1509,7 @@ void TqWindowsRelayWorker::Run() {
         }
 
         DrainPerRelayMaintenance();
+        DrainTerminalShutdownSink();
     }
     WorkerThreadToken_.store(0, std::memory_order_release);
 }
@@ -1855,7 +1867,11 @@ bool TqWindowsRelayWorker::PostTerminalShutdownComplete(
     uint32_t connectionCloseStatus) {
     if (!binding || binding->RelayId == 0) {
         CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        WindowsTerminalIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
+    if (binding->TerminalShutdownPosted.exchange(true, std::memory_order_acq_rel)) {
+        return true;
     }
 
     auto record = std::make_shared<TerminalCleanupRecord>();
@@ -1874,58 +1890,116 @@ bool TqWindowsRelayWorker::PostTerminalShutdownComplete(
     record->ConnectionErrorCode = connectionErrorCode;
     record->ConnectionCloseStatus = connectionCloseStatus;
 
-    std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
-    if (Iocp_ == nullptr || Stopping_.load(std::memory_order_acquire)) {
-        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
-        auto control = std::atomic_load(&record->StopControl);
-        PublishStopToControl(control, record->ControlGeneration);
-        return false;
-    }
-
-    auto op = std::make_unique<IoOperation>();
-    op->Event = TqWindowsIocpOperationType::QuicShutdownComplete;
-    op->RelayId = record->RelayId;
-    op->Generation = record->Generation;
-    op->ControlGeneration = record->ControlGeneration;
-    op->StopControl = record->StopControl;
-    op->Value = connectionErrorCode;
-    op->Length = static_cast<size_t>(connectionCloseStatus);
-    op->TerminalCleanup = std::move(record);
-#if defined(TQ_UNIT_TESTING)
+    bool handoffToSink = false;
     {
-        std::lock_guard<std::mutex> guard(PendingTerminalCleanupLock_);
-        PendingTerminalCleanupForTest_ = op->TerminalCleanup;
-    }
-#endif
-    TerminalOperationPendingCount_.fetch_add(1, std::memory_order_acq_rel);
-
-    IoOperation* raw = op.release();
-    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
-        TerminalOperationPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
-        delete raw;
+        std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
+        if (Iocp_ == nullptr || Stopping_.load(std::memory_order_acquire)) {
+            handoffToSink = true;
+        }
 #if defined(TQ_UNIT_TESTING)
-        {
-            std::lock_guard<std::mutex> guard(PendingTerminalCleanupLock_);
-            PendingTerminalCleanupForTest_.reset();
+        else if (ForceTerminalIocpPostFailureForTest_.exchange(
+                     false, std::memory_order_acq_rel)) {
+            handoffToSink = true;
         }
 #endif
-        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
-        auto control = std::atomic_load(&binding->StopControl);
-        const uint64_t controlGeneration =
-            control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
-        PublishStopToControl(control, controlGeneration);
-        return false;
-    }
+        else {
+            auto op = std::make_unique<IoOperation>();
+            op->Event = TqWindowsIocpOperationType::QuicShutdownComplete;
+            op->RelayId = record->RelayId;
+            op->Generation = record->Generation;
+            op->ControlGeneration = record->ControlGeneration;
+            op->StopControl = record->StopControl;
+            op->Value = connectionErrorCode;
+            op->Length = static_cast<size_t>(connectionCloseStatus);
+            op->TerminalCleanup = record;
 #if defined(TQ_UNIT_TESTING)
-    {
-        std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
-        LastPostedCallbackType_ = TqWindowsIocpOperationType::QuicShutdownComplete;
-        LastPostedCallbackRelayId_ = binding->RelayId;
-        PostedCallbackSequence_.push_back(TqWindowsIocpOperationType::QuicShutdownComplete);
-    }
+            {
+                std::lock_guard<std::mutex> guard(PendingTerminalCleanupLock_);
+                PendingTerminalCleanupForTest_ = op->TerminalCleanup;
+            }
 #endif
-    CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
-    return true;
+            TerminalOperationPendingCount_.fetch_add(1, std::memory_order_acq_rel);
+
+            IoOperation* raw = op.release();
+            if (!::PostQueuedCompletionStatus(
+                    static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+                TerminalOperationPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
+                delete raw;
+#if defined(TQ_UNIT_TESTING)
+                {
+                    std::lock_guard<std::mutex> guard(PendingTerminalCleanupLock_);
+                    PendingTerminalCleanupForTest_.reset();
+                }
+#endif
+                handoffToSink = true;
+            } else {
+#if defined(TQ_UNIT_TESTING)
+                {
+                    std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+                    LastPostedCallbackType_ = TqWindowsIocpOperationType::QuicShutdownComplete;
+                    LastPostedCallbackRelayId_ = binding->RelayId;
+                    PostedCallbackSequence_.push_back(
+                        TqWindowsIocpOperationType::QuicShutdownComplete);
+                }
+#endif
+                CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+        }
+    }
+    if (handoffToSink) {
+        CallbackIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        WindowsTerminalIocpPostFailedCount_.fetch_add(1, std::memory_order_relaxed);
+        HandoffTerminalCleanupToShutdownSink(std::move(record));
+    }
+    return false;
+}
+
+void TqWindowsRelayWorker::HandoffTerminalCleanupToShutdownSink(
+    std::shared_ptr<TerminalCleanupRecord> record) {
+    if (!record) {
+        return;
+    }
+    PublishStopToControl(record->StopControl, record->ControlGeneration);
+    if (!record->Relay && record->RelayId != 0) {
+        record->Relay = FindRelayByIdLocal(record->RelayId);
+        if (record->Relay && record->Relay->Generation != record->Generation) {
+            record->Relay.reset();
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(TerminalShutdownSinkLock_);
+        TerminalShutdownSink_.push_back(std::move(record));
+        TerminalShutdownSinkPendingCount_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    RequestTerminalShutdownSinkDrain();
+}
+
+void TqWindowsRelayWorker::RequestTerminalShutdownSinkDrain() {
+    std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
+    if (Iocp_ == nullptr || Stopping_.load(std::memory_order_acquire)) {
+        return;
+    }
+    auto op = std::make_unique<IoOperation>();
+    op->Event = TqWindowsIocpOperationType::TerminalShutdownSinkDrain;
+    IoOperation* raw = op.release();
+    if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+        delete raw;
+    }
+}
+
+void TqWindowsRelayWorker::DrainTerminalShutdownSink() {
+    std::deque<std::shared_ptr<TerminalCleanupRecord>> pending;
+    {
+        std::lock_guard<std::mutex> guard(TerminalShutdownSinkLock_);
+        pending.swap(TerminalShutdownSink_);
+    }
+    while (!pending.empty()) {
+        auto record = std::move(pending.front());
+        pending.pop_front();
+        TerminalShutdownSinkPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
+        ProcessTerminalShutdownComplete(*record, false);
+    }
 }
 
 void TqWindowsRelayWorker::DispatchQuicShutdownComplete(
@@ -1947,8 +2021,11 @@ void TqWindowsRelayWorker::DispatchQuicShutdownComplete(
 }
 
 void TqWindowsRelayWorker::ProcessTerminalShutdownComplete(
-    const TerminalCleanupRecord& record) {
-    TerminalOperationPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
+    const TerminalCleanupRecord& record,
+    bool decrementPendingCounter) {
+    if (decrementPendingCounter) {
+        TerminalOperationPendingCount_.fetch_sub(1, std::memory_order_acq_rel);
+    }
 #if defined(TQ_UNIT_TESTING)
     {
         std::lock_guard<std::mutex> guard(PendingTerminalCleanupLock_);
@@ -1962,7 +2039,7 @@ void TqWindowsRelayWorker::ProcessTerminalShutdownComplete(
             relay.reset();
         }
     }
-    if (!relay || relay->Closing.load(std::memory_order_acquire)) {
+    if (!relay) {
         PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
         auto control = std::atomic_load(&record.StopControl);
         PublishStopToControl(control, record.ControlGeneration);
@@ -2213,6 +2290,18 @@ bool TqWindowsRelayWorker::TestPostTraceContextForTest(
 
 void TqWindowsRelayWorker::TestForceNextTraceContextPostFailureForTest() {
     ForceTraceContextPostFailureForTest_.store(true, std::memory_order_release);
+}
+
+void TqWindowsRelayWorker::TestForceNextTerminalIocpPostFailureForTest() {
+    ForceTerminalIocpPostFailureForTest_.store(true, std::memory_order_release);
+}
+
+uint32_t TqWindowsRelayWorker::TestGetTerminalShutdownSinkPendingForTest() const {
+    return TerminalShutdownSinkPendingCount_.load(std::memory_order_acquire);
+}
+
+void TqWindowsRelayWorker::TestDrainTerminalShutdownSinkForTest() {
+    DrainTerminalShutdownSink();
 }
 
 bool TqWindowsRelayWorker::TestPostWorkerQueueBlockForTest(
@@ -2473,6 +2562,32 @@ bool TqWindowsRelayWorker::TestPostedCallbackSequenceForTest(const char* expecte
         actual += TestCallbackTypeName(type);
     }
     return actual == (expectedCsv != nullptr ? expectedCsv : "");
+}
+
+size_t TqWindowsRelayWorker::TestCountPostedCallbackTypeForTest(
+    TqWindowsIocpOperationType type) const {
+    std::lock_guard<std::mutex> guard(LastPostedCallbackLock_);
+    size_t count = 0;
+    for (TqWindowsIocpOperationType posted : PostedCallbackSequence_) {
+        if (posted == type) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool TqWindowsRelayWorker::TestSetBindingClosingForTest(uint64_t relayId, bool closing) {
+    std::shared_ptr<WindowsStreamRelayBinding> binding;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        const auto it = Relays_.find(relayId);
+        if (it == Relays_.end() || !it->second || !it->second->ManagedBinding) {
+            return false;
+        }
+        binding = it->second->ManagedBinding;
+    }
+    binding->Closing.store(closing, std::memory_order_release);
+    return true;
 }
 
 TqWindowsQuicSendOperation* TqWindowsRelayWorker::TestCreateQuicSendOperationForTest(
@@ -4895,6 +5010,34 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
 
+    if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+        std::shared_ptr<RelayContext> relay;
+        if (auto* hinted = binding->RelayHint.load(std::memory_order_acquire)) {
+            relay = FindRelayByIdLocal(hinted->Id);
+            if (relay && relay.get() != hinted) {
+                relay.reset();
+            }
+        }
+        if (!relay) {
+            relay = ResolveRelayForCallback(binding->RelayId, binding->Generation);
+        }
+        std::shared_ptr<WindowsStreamRelayBinding> bindingOwner;
+        try {
+            bindingOwner = binding->shared_from_this();
+        } catch (...) {
+            bindingOwner.reset();
+        }
+        SealBindingAtTerminal(relay, binding);
+        if (!PostTerminalShutdownComplete(
+                bindingOwner,
+                relay,
+                event->SHUTDOWN_COMPLETE.ConnectionErrorCode,
+                event->SHUTDOWN_COMPLETE.ConnectionCloseStatus)) {
+            Errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+        return QUIC_STATUS_SUCCESS;
+    }
+
     if (event->Type == QUIC_STREAM_EVENT_RECEIVE) {
         const bool fin = (event->RECEIVE.Flags & QUIC_RECEIVE_FLAG_FIN) != 0;
         if (TqIsMsQuicFakeFinReceive(
@@ -4976,9 +5119,7 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
     }
 
     if (binding->Closing.load(std::memory_order_acquire)) {
-        if (event->Type != QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-            return QUIC_STATUS_SUCCESS;
-        }
+        return QUIC_STATUS_SUCCESS;
     }
 
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
@@ -5004,33 +5145,6 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
                 peerSendAborted
                     ? event->PEER_SEND_ABORTED.ErrorCode
                     : event->PEER_RECEIVE_ABORTED.ErrorCode)) {
-            Errors_.fetch_add(1, std::memory_order_relaxed);
-        }
-        return QUIC_STATUS_SUCCESS;
-    }
-    if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
-        std::shared_ptr<RelayContext> relay;
-        if (auto* hinted = binding->RelayHint.load(std::memory_order_acquire)) {
-            relay = FindRelayByIdLocal(hinted->Id);
-            if (relay && relay.get() != hinted) {
-                relay.reset();
-            }
-        }
-        if (!relay) {
-            relay = ResolveRelayForCallback(binding->RelayId, binding->Generation);
-        }
-        std::shared_ptr<WindowsStreamRelayBinding> bindingOwner;
-        try {
-            bindingOwner = binding->shared_from_this();
-        } catch (...) {
-            bindingOwner.reset();
-        }
-        SealBindingAtTerminal(relay, binding);
-        if (!PostTerminalShutdownComplete(
-                bindingOwner,
-                relay,
-                event->SHUTDOWN_COMPLETE.ConnectionErrorCode,
-                event->SHUTDOWN_COMPLETE.ConnectionCloseStatus)) {
             Errors_.fetch_add(1, std::memory_order_relaxed);
         }
         return QUIC_STATUS_SUCCESS;
@@ -5143,6 +5257,7 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.QuicSendCompleteEvents += snapshot.QuicSendCompleteEvents;
         total.WindowsCallbackIocpPostCount += snapshot.WindowsCallbackIocpPostCount;
         total.WindowsCallbackIocpPostFailedCount += snapshot.WindowsCallbackIocpPostFailedCount;
+        total.WindowsTerminalIocpPostFailedCount += snapshot.WindowsTerminalIocpPostFailedCount;
         total.WindowsReceiveReadyPostCount += snapshot.WindowsReceiveReadyPostCount;
         total.WindowsReceiveDrainScheduledCount += snapshot.WindowsReceiveDrainScheduledCount;
         total.WindowsReceiveDrainCoalescedCount += snapshot.WindowsReceiveDrainCoalescedCount;

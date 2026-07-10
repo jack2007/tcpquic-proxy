@@ -2488,6 +2488,155 @@ bool TestWindowsRelayTerminalAtPrepareBoundaryForTest() {
     return ok;
 }
 
+bool TestWindowsRelayDuplicateTerminalPostsOnceForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(17));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionErrorCode = 11;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_SUCCESS;
+    (void)owner->DispatchForTest(&shutdown);
+    (void)TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &shutdown);
+
+    TqWindowsTerminalOperationSnapshotForTest terminal{};
+    const bool onceOnly =
+        worker.TestCountPostedCallbackTypeForTest(
+            TqWindowsIocpOperationType::QuicShutdownComplete) == 1 &&
+        worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
+        terminal.Pending &&
+        terminal.RelayId == result.RelayId;
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    (void)WaitForTerminalOperationDrainForTest(worker, 2000);
+    worker.Stop();
+    return onceOnly;
+}
+
+bool TestWindowsRelayClosingBindingStillPublishesTerminalForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(18));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok) {
+        worker.Stop();
+        return false;
+    }
+
+    TqWindowsRelayWorkerQueueBlockForTest block{};
+    if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+        !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    if (!worker.TestSetBindingClosingForTest(result.RelayId, true)) {
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+        worker.Stop();
+        return false;
+    }
+
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionErrorCode = 13;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_ABORTED;
+    (void)owner->DispatchForTest(&shutdown);
+
+    TqWindowsTerminalOperationSnapshotForTest terminal{};
+    const bool ok = worker.TestGetTerminalOperationSnapshotForTest(&terminal) &&
+        terminal.Pending &&
+        terminal.RelayId == result.RelayId &&
+        terminal.ConnectionErrorCode == 13;
+
+    worker.TestReleaseWorkerQueueBlockForTest(block);
+    (void)WaitForTerminalOperationDrainForTest(worker, 2000);
+    worker.Stop();
+    return ok;
+}
+
+bool TestWindowsRelayTerminalIocpPostFailureFallbackForTest() {
+    TqWindowsRelayWorker worker;
+    if (!StartRelayWorkerForTest(worker)) {
+        return false;
+    }
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(19));
+    auto owner = MakeStartedRelayStreamOwner(stream);
+    if (!owner) {
+        worker.Stop();
+        return false;
+    }
+    TqWindowsRelayRegistration registration{};
+    registration.StreamOwner = owner;
+    const auto result = worker.RegisterRelayWithId(registration);
+    if (!result.Ok || result.StopControl == nullptr) {
+        worker.Stop();
+        return false;
+    }
+
+    worker.TestForceNextTerminalIocpPostFailureForTest();
+    QUIC_STREAM_EVENT shutdown{};
+    shutdown.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionErrorCode = 17;
+    shutdown.SHUTDOWN_COMPLETE.ConnectionCloseStatus = QUIC_STATUS_SUCCESS;
+    (void)owner->DispatchForTest(&shutdown);
+
+    bool drained = false;
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const auto snapshotAfter = worker.Snapshot();
+        if (worker.TestGetTerminalShutdownSinkPendingForTest() == 0 &&
+            snapshotAfter.ActiveRelays == 0 &&
+            snapshotAfter.WindowsTerminalIocpPostFailedCount == 1 &&
+            snapshotAfter.WindowsCallbackIocpPostFailedCount == 1 &&
+            result.StopControl->Stop.load(std::memory_order_acquire)) {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    worker.Stop();
+    return drained;
+}
+
 bool TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest() {
     TqWindowsRelayWorker worker;
     if (!StartRelayWorkerForTest(worker)) {
@@ -2780,6 +2929,15 @@ int main() {
     }
     if (!TestWindowsRelayTerminalAtPrepareBoundaryForTest()) {
         return 214;
+    }
+    if (!TestWindowsRelayDuplicateTerminalPostsOnceForTest()) {
+        return 215;
+    }
+    if (!TestWindowsRelayClosingBindingStillPublishesTerminalForTest()) {
+        return 216;
+    }
+    if (!TestWindowsRelayTerminalIocpPostFailureFallbackForTest()) {
+        return 217;
     }
     if (!TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest()) {
         return 209;

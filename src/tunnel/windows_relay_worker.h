@@ -52,6 +52,7 @@ enum class TqWindowsIocpOperationType : uint32_t {
     QuicPeerSendAborted,
     QuicPeerReceiveAborted,
     QuicShutdownComplete,
+    TerminalShutdownSinkDrain,
 #if defined(TQ_UNIT_TESTING)
     TestBlockWorkerQueue,
 #endif
@@ -122,6 +123,7 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t QuicSendCompleteEvents{0};
     uint64_t WindowsCallbackIocpPostCount{0};
     uint64_t WindowsCallbackIocpPostFailedCount{0};
+    uint64_t WindowsTerminalIocpPostFailedCount{0};
     uint64_t WindowsReceiveReadyPostCount{0};
     uint64_t WindowsReceiveDrainScheduledCount{0};
     uint64_t WindowsReceiveDrainCoalescedCount{0};
@@ -241,6 +243,8 @@ public:
     bool TestLastPostedCallbackWasReceiveReadyForTest(uint64_t relayId) const;
     bool TestLastPostedCallbackWasQuicSendCompleteForTest(uint64_t relayId) const;
     bool TestPostedCallbackSequenceForTest(const char* expectedCsv) const;
+    size_t TestCountPostedCallbackTypeForTest(TqWindowsIocpOperationType type) const;
+    bool TestSetBindingClosingForTest(uint64_t relayId, bool closing);
     TqWindowsQuicSendOperation* TestCreateQuicSendOperationForTest(uint64_t relayId, uint64_t bytes);
     bool TestResolveStaleCallbackForTest(uint64_t relayId);
     bool TestDispatchIdealSendBufferByIdForTest(uint64_t relayId, uint64_t byteCount);
@@ -280,6 +284,9 @@ public:
         uint64_t tunnelId,
         const char* target);
     void TestForceNextTraceContextPostFailureForTest();
+    void TestForceNextTerminalIocpPostFailureForTest();
+    uint32_t TestGetTerminalShutdownSinkPendingForTest() const;
+    void TestDrainTerminalShutdownSinkForTest();
     bool TestPostWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest* block);
     bool TestWaitWorkerQueueBlockEnteredForTest(
         TqWindowsRelayWorkerQueueBlockForTest& block,
@@ -383,7 +390,12 @@ private:
         uint64_t connectionErrorCode,
         uint32_t connectionCloseStatus);
     void ProcessTerminalShutdownComplete(
-        const TerminalCleanupRecord& record);
+        const TerminalCleanupRecord& record,
+        bool decrementPendingCounter = true);
+    void HandoffTerminalCleanupToShutdownSink(
+        std::shared_ptr<TerminalCleanupRecord> record);
+    void DrainTerminalShutdownSink();
+    void RequestTerminalShutdownSinkDrain();
     void DispatchQuicShutdownComplete(
         IoOperation& op,
         const std::shared_ptr<RelayContext>& relay);
@@ -625,6 +637,10 @@ private:
     uint32_t WorkerIndex_{0};
     std::atomic<uint64_t> CallbackIocpPostCount_{0};
     std::atomic<uint64_t> CallbackIocpPostFailedCount_{0};
+    std::atomic<uint64_t> WindowsTerminalIocpPostFailedCount_{0};
+    mutable std::mutex TerminalShutdownSinkLock_;
+    std::deque<std::shared_ptr<TerminalCleanupRecord>> TerminalShutdownSink_;
+    std::atomic<uint32_t> TerminalShutdownSinkPendingCount_{0};
     std::atomic<uint64_t> ReceiveReadyPostCount_{0};
     std::atomic<uint64_t> ReceiveDrainScheduledCount_{0};
     std::atomic<uint64_t> ReceiveDrainCoalescedCount_{0};
@@ -650,6 +666,7 @@ private:
     std::atomic<uint64_t> ReceiveViewFinishNotFrontCount_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
+    std::atomic<bool> ForceTerminalIocpPostFailureForTest_{false};
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     std::atomic<uint32_t> TerminalOperationPendingCount_{0};
