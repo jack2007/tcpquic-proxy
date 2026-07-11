@@ -2,6 +2,7 @@
 
 #include "darwin_relay_worker.h"
 #include "compress.h"
+#include "relay_runtime_snapshot.h"
 #include "stream_lifetime.h"
 
 #include <sys/socket.h>
@@ -863,6 +864,139 @@ void SnapshotRetriesAfterFullQueue() {
     CHECK(snapshot.PendingEvents == 0);
     worker.Stop();
 }
+
+#if defined(TQ_UNIT_TESTING)
+struct SnapshotDispatchHoldState {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    bool Entered{false};
+    bool Release{false};
+};
+
+SnapshotDispatchHoldState* g_SnapshotDispatchHold = nullptr;
+
+void HoldSnapshotDispatchUntilReleased(TqDarwinRelayWorker*) {
+    auto* state = g_SnapshotDispatchHold;
+    CHECK(state != nullptr);
+    std::unique_lock<std::mutex> lock(state->Mutex);
+    state->Entered = true;
+    state->Cv.notify_all();
+    state->Cv.wait(lock, [&] { return state->Release; });
+}
+
+void SnapshotDeadlineReturnsIncompleteWhenDispatchBlocked() {
+    SnapshotDispatchHoldState hold;
+    g_SnapshotDispatchHold = &hold;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.WorkerIndex = 2;
+    config.EventQueueCapacity = 16;
+    config.BeforeSnapshotHookForTest = HoldSnapshotDispatchUntilReleased;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    TqRelayRuntimeSnapshotExecutionGate gate;
+    auto permit = gate.TryAcquire(
+        std::chrono::steady_clock::now() + std::chrono::seconds(1));
+    CHECK(permit != nullptr);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    const TqDarwinRelayWorkerSnapshot snapshot =
+        worker.Snapshot(deadline, std::move(permit));
+    CHECK(!snapshot.SnapshotComplete);
+    CHECK(snapshot.WorkerIndex == 2);
+    CHECK(snapshot.EventQueueCapacity == 16);
+
+    {
+        std::unique_lock<std::mutex> lock(hold.Mutex);
+        CHECK(hold.Cv.wait_for(lock, std::chrono::seconds(2), [&] { return hold.Entered; }));
+    }
+    // Permit stays busy while the detached late command is outstanding.
+    CHECK(gate.Stats().Busy == 1u);
+
+    {
+        std::lock_guard<std::mutex> lock(hold.Mutex);
+        hold.Release = true;
+    }
+    hold.Cv.notify_all();
+
+    const auto releaseDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < releaseDeadline) {
+        if (gate.Stats().Busy == 0u) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(gate.Stats().Busy == 0u);
+
+    const TqDarwinRelayWorkerSnapshot after = worker.Snapshot();
+    CHECK(after.SnapshotComplete);
+    CHECK(after.WorkerIndex == 2);
+    worker.Stop();
+    g_SnapshotDispatchHold = nullptr;
+}
+
+void ConsecutiveSnapshotTimeoutsDoNotDangleCommands() {
+    SnapshotDispatchHoldState hold;
+    g_SnapshotDispatchHold = &hold;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.WorkerIndex = 4;
+    config.EventQueueCapacity = 32;
+    config.BeforeSnapshotHookForTest = HoldSnapshotDispatchUntilReleased;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    const auto first = worker.Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(150));
+    CHECK(!first.SnapshotComplete);
+
+    {
+        std::unique_lock<std::mutex> lock(hold.Mutex);
+        CHECK(hold.Cv.wait_for(lock, std::chrono::seconds(2), [&] { return hold.Entered; }));
+    }
+
+    // Second timeout while the worker is still blocked on the first command.
+    // Both commands are heap shared_ptr — late completion must not UAF.
+    const auto second = worker.Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(150));
+    CHECK(!second.SnapshotComplete);
+
+    {
+        std::lock_guard<std::mutex> lock(hold.Mutex);
+        hold.Release = true;
+    }
+    hold.Cv.notify_all();
+
+    const auto third = worker.Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    CHECK(third.SnapshotComplete);
+    CHECK(third.WorkerIndex == 4);
+    worker.Stop();
+    g_SnapshotDispatchHold = nullptr;
+}
+
+void SnapshotLocalThrowKeepsWorkerAliveAndReturnsIncomplete() {
+    TqDarwinRelayWorkerConfig config{};
+    config.WorkerIndex = 5;
+    config.EventQueueCapacity = 16;
+    config.FailNextSnapshotLocalForTest = true;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    const TqDarwinRelayWorkerSnapshot failed = worker.Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    CHECK(!failed.SnapshotComplete);
+    CHECK(failed.WorkerIndex == 5);
+    CHECK(worker.Snapshot().Errors >= 1);
+
+    const TqDarwinRelayWorkerSnapshot recovered = worker.Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    CHECK(recovered.SnapshotComplete);
+    CHECK(recovered.WorkerIndex == 5);
+    worker.Stop();
+}
+#endif
 
 void UnregisterQueuesDuringStartupWindow() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
@@ -6601,6 +6735,11 @@ int main() {
     ControlEventRetriesAfterWakeFailure();
     UnregisterWakesAfterFullQueueWakeFailures();
     SnapshotRetriesAfterFullQueue();
+#if defined(TQ_UNIT_TESTING)
+    SnapshotDeadlineReturnsIncompleteWhenDispatchBlocked();
+    ConsecutiveSnapshotTimeoutsDoNotDangleCommands();
+    SnapshotLocalThrowKeepsWorkerAliveAndReturnsIncomplete();
+#endif
     UnregisterQueuesDuringStartupWindow();
     WorkerRegistersTcpReadinessShell();
     EventizedUnregisterClearsHandleAndRelayCount();

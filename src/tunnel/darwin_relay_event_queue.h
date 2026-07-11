@@ -86,6 +86,10 @@ struct TqDarwinRelayEvent {
     void* Relay{nullptr};
     std::shared_ptr<void> RelayOwner;
     void* Control{nullptr};
+    // Shared ownership for control commands that outlive the caller wait
+    // (e.g. Snapshot after deadline detach). Raw Control remains for
+    // Register/Unregister stack commands that have not migrated yet.
+    std::shared_ptr<void> ControlOwner;
     TqBufferRef Buffer;
     std::vector<TqBufferRef> Buffers;
     size_t Length{0};

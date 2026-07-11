@@ -20,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -1090,17 +1091,58 @@ void TqDarwinRelayWorker::CompleteUnregisterCommand(UnregisterRelayCommand* comm
 }
 
 void TqDarwinRelayWorker::CompleteSnapshotCommand(
-    SnapshotCommand* command,
+    const std::shared_ptr<SnapshotCommand>& command,
     TqDarwinRelayWorkerSnapshot result) {
-    if (command == nullptr) {
+    if (!command) {
         return;
     }
+    TqRelayRuntimeSnapshotExecutionGate::Permit releasedPermit;
     {
         std::lock_guard<std::mutex> lock(command->Mutex);
-        command->Result = result;
-        command->Done = true;
+        if (command->State == SnapshotCommandState::Completed ||
+            command->State == SnapshotCommandState::Cancelled) {
+            return;
+        }
+        try {
+            command->Result = std::move(result);
+        } catch (...) {
+            command->Result = TqDarwinRelayWorkerSnapshot{};
+        }
+        command->State = SnapshotCommandState::Completed;
+        releasedPermit = std::move(command->Permit);
     }
-    command->Cv.notify_one();
+    command->Cv.notify_all();
+}
+
+void TqDarwinRelayWorker::CancelSnapshotCommand(
+    const std::shared_ptr<SnapshotCommand>& command) {
+    if (!command) {
+        return;
+    }
+    TqRelayRuntimeSnapshotExecutionGate::Permit releasedPermit;
+    {
+        std::lock_guard<std::mutex> lock(command->Mutex);
+        if (command->State == SnapshotCommandState::Completed ||
+            command->State == SnapshotCommandState::Cancelled) {
+            return;
+        }
+        command->State = SnapshotCommandState::Cancelled;
+        releasedPermit = std::move(command->Permit);
+    }
+    command->Cv.notify_all();
+}
+
+std::shared_ptr<TqDarwinRelayWorker::SnapshotCommand>
+TqDarwinRelayWorker::SnapshotCommandFromEvent(const TqDarwinRelayEvent& event) {
+    if (event.ControlOwner) {
+        return std::static_pointer_cast<SnapshotCommand>(event.ControlOwner);
+    }
+    if (event.Control != nullptr) {
+        // Legacy raw-only path should not own Snapshot lifetime; refuse to
+        // fabricate a shared_ptr that would delete a stack object.
+        return {};
+    }
+    return {};
 }
 
 uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
@@ -1167,12 +1209,32 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
             break;
         }
         case TqDarwinRelayEventType::Snapshot: {
-            auto* command = static_cast<SnapshotCommand*>(event.Control);
-            if (command == nullptr) {
+            auto command = SnapshotCommandFromEvent(event);
+            if (!command) {
                 Errors.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
-            CompleteSnapshotCommand(command, SnapshotLocal());
+            bool cancelled = false;
+            {
+                std::lock_guard<std::mutex> lock(command->Mutex);
+                cancelled = command->State == SnapshotCommandState::Cancelled;
+            }
+            if (cancelled) {
+                CancelSnapshotCommand(command);
+                break;
+            }
+            try {
+#if defined(TQ_UNIT_TESTING)
+                if (Config.BeforeSnapshotHookForTest != nullptr) {
+                    Config.BeforeSnapshotHookForTest(this);
+                }
+#endif
+                CompleteSnapshotCommand(command, SnapshotLocal());
+            } catch (...) {
+                // Control-plane sampling must never kill the worker thread.
+                Errors.fetch_add(1, std::memory_order_relaxed);
+                CompleteSnapshotCommand(command, MakeIncompleteSnapshot());
+            }
             break;
         }
         default:
@@ -1225,7 +1287,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             CompleteUnregisterCommand(static_cast<UnregisterRelayCommand*>(event.Control));
             break;
         case TqDarwinRelayEventType::Snapshot:
-            CompleteSnapshotCommand(static_cast<SnapshotCommand*>(event.Control), SnapshotLocal());
+            CancelSnapshotCommand(SnapshotCommandFromEvent(event));
             break;
         default:
             break;
@@ -4502,8 +4564,25 @@ void TqDarwinRelayWorker::UnregisterRelay(uint64_t relayId) {
     }
 }
 
-TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
+TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::MakeIncompleteSnapshot() const {
     TqDarwinRelayWorkerSnapshot snapshot{};
+    snapshot.WorkerIndex = Config.WorkerIndex;
+    snapshot.EventQueueCapacity = EventQueue.Capacity();
+    snapshot.SnapshotComplete = false;
+    return snapshot;
+}
+
+TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
+#if defined(TQ_UNIT_TESTING)
+    if (Config.FailNextSnapshotLocalForTest) {
+        const_cast<TqDarwinRelayWorkerConfig&>(Config).FailNextSnapshotLocalForTest = false;
+        throw std::bad_alloc();
+    }
+#endif
+    TqDarwinRelayWorkerSnapshot snapshot{};
+    snapshot.WorkerIndex = Config.WorkerIndex;
+    snapshot.EventQueueCapacity = EventQueue.Capacity();
+    snapshot.SnapshotComplete = true;
     snapshot.EventsProcessed = EventsProcessed.load(std::memory_order_relaxed);
     snapshot.Wakeups = Wakeups.load(std::memory_order_relaxed);
     snapshot.PendingEvents = EventQueue.SizeApprox();
@@ -4608,28 +4687,42 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
 }
 
 TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
+    return Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
+
+TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot(
+    std::chrono::steady_clock::time_point deadline,
+    TqRelayRuntimeSnapshotExecutionGate::Permit permit) const {
     if (IsWorkerThread()) {
         return SnapshotLocal();
     }
 
-    SnapshotCommand command{};
-    uint32_t attempts = 0;
-    for (;;) {
+    auto command = std::make_shared<SnapshotCommand>();
+    command->Permit = std::move(permit);
+
+    for (uint32_t attempts = 0;; ++attempts) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            CancelSnapshotCommand(command);
+            return MakeIncompleteSnapshot();
+        }
         {
             std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
             if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
+                CancelSnapshotCommand(command);
                 return SnapshotLocal();
             }
 
             TqDarwinRelayEvent event{};
             event.Type = TqDarwinRelayEventType::Snapshot;
-            event.Control = &command;
+            event.Control = command.get();
+            event.ControlOwner = command;
             if (EventQueue.TryPush(std::move(event))) {
                 (void)Wake();
                 break;
             }
         }
-        if ((attempts++ & 0x3F) == 0) {
+        if ((attempts & 0x3F) == 0) {
             (void)Wake();
             std::this_thread::sleep_for(kControlCommandWakeRetryInterval);
         } else {
@@ -4637,19 +4730,36 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::Snapshot() const {
         }
     }
 
-    std::unique_lock<std::mutex> lock(command.Mutex);
-    while (!command.Done) {
-        if (command.Cv.wait_for(
-                lock,
-                kControlCommandWakeRetryInterval,
-                [&command] { return command.Done; })) {
+    std::unique_lock<std::mutex> lock(command->Mutex);
+    while (command->State == SnapshotCommandState::Pending) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            break;
+        }
+        const auto sliceEnd = std::min(deadline, now + kControlCommandWakeRetryInterval);
+        if (command->Cv.wait_until(lock, sliceEnd, [&command] {
+                return command->State != SnapshotCommandState::Pending;
+            })) {
             break;
         }
         lock.unlock();
         (void)Wake();
         lock.lock();
     }
-    return command.Result;
+    if (command->State == SnapshotCommandState::Completed) {
+        return command->Result;
+    }
+    if (command->State == SnapshotCommandState::Cancelled) {
+        return MakeIncompleteSnapshot();
+    }
+    if (command->State == SnapshotCommandState::Pending) {
+        // Timeout: detach only. Shared command + permit stay alive until the
+        // worker completes or cancels the late command.
+        command->State = SnapshotCommandState::Detached;
+        return MakeIncompleteSnapshot();
+    }
+    // Already Detached (should be rare); treat as incomplete.
+    return MakeIncompleteSnapshot();
 }
 
 QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
@@ -5050,11 +5160,14 @@ void TqAccumulateDarwinRelayWorkerSnapshot(
     total.ActiveFailureQueueFull += part.ActiveFailureQueueFull;
     total.WorkerExitedPurgeEvents += part.WorkerExitedPurgeEvents;
     total.StopOldestAgeMs = std::max(total.StopOldestAgeMs, part.StopOldestAgeMs);
+    total.EventQueueCapacity = std::max(total.EventQueueCapacity, part.EventQueueCapacity);
+    total.SnapshotComplete = total.SnapshotComplete && part.SnapshotComplete;
 }
 
 TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot() const {
     std::lock_guard<std::mutex> lock(Mutex);
     TqDarwinRelayWorkerSnapshot snapshot{};
+    snapshot.SnapshotComplete = true;
     for (const auto& worker : Workers) {
         if (worker == nullptr) {
             continue;

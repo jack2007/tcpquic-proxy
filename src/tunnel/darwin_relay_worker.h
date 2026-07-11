@@ -8,10 +8,12 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_buffer.h"
+#include "relay_runtime_snapshot.h"
 #include "stream_lifetime.h"
 #include "tuning.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -234,6 +236,12 @@ struct TqDarwinRelayWorkerConfig {
     // DetachActiveSendOperationsForStop, before WorkerThreadId is cleared.
     // Used to enqueue mixed events that Stop must purge off-thread (P2-8).
     void (*BeforeWorkerExitHookForTest)(TqDarwinRelayWorker*){nullptr};
+#if defined(TQ_UNIT_TESTING)
+    // Blocks Snapshot dispatch on the worker thread until the hook returns.
+    void (*BeforeSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
+    // Next SnapshotLocal throws once (allocation/build failure injection).
+    bool FailNextSnapshotLocalForTest{false};
+#endif
 #endif
 };
 
@@ -249,6 +257,9 @@ struct TqDarwinBindingPublishIdentitySnapshot {
 #endif
 
 struct TqDarwinRelayWorkerSnapshot {
+    uint32_t WorkerIndex{0};
+    uint64_t EventQueueCapacity{0};
+    bool SnapshotComplete{false};
     uint64_t EventsProcessed{0};
     uint64_t Wakeups{0};
     uint64_t PendingEvents{0};
@@ -331,6 +342,7 @@ public:
 
     bool Start();
     void Stop();
+    uint32_t WorkerIndex() const noexcept { return Config.WorkerIndex; }
 #if defined(TCPQUIC_TESTING)
     bool StartForTest();
     bool EnqueueForTest(TqDarwinRelayEvent event);
@@ -408,6 +420,9 @@ public:
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
     TqDarwinRelayWorkerSnapshot Snapshot() const;
+    TqDarwinRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline,
+        TqRelayRuntimeSnapshotExecutionGate::Permit permit = {}) const;
 
     static QUIC_STATUS QUIC_API StreamCallback(
         _In_ MsQuicStream* stream,
@@ -439,11 +454,18 @@ private:
         std::condition_variable Cv;
         bool Done{false};
     };
+    enum class SnapshotCommandState : uint8_t {
+        Pending = 0,
+        Completed,
+        Cancelled,
+        Detached,
+    };
     struct SnapshotCommand {
         TqDarwinRelayWorkerSnapshot Result;
         std::mutex Mutex;
         std::condition_variable Cv;
-        bool Done{false};
+        SnapshotCommandState State{SnapshotCommandState::Pending};
+        TqRelayRuntimeSnapshotExecutionGate::Permit Permit;
     };
     enum class ControlEnqueueResult {
         Failed,
@@ -463,13 +485,17 @@ private:
         const TqDarwinRelayRegistration& registration);
     void UnregisterRelayLocal(uint64_t relayId);
     TqDarwinRelayWorkerSnapshot SnapshotLocal() const;
+    TqDarwinRelayWorkerSnapshot MakeIncompleteSnapshot() const;
     static void CompleteRegisterCommand(
         RegisterRelayCommand* command,
         TqDarwinRelayRegistrationResult result);
     static void CompleteUnregisterCommand(UnregisterRelayCommand* command);
     static void CompleteSnapshotCommand(
-        SnapshotCommand* command,
+        const std::shared_ptr<SnapshotCommand>& command,
         TqDarwinRelayWorkerSnapshot result);
+    static void CancelSnapshotCommand(const std::shared_ptr<SnapshotCommand>& command);
+    static std::shared_ptr<SnapshotCommand> SnapshotCommandFromEvent(
+        const TqDarwinRelayEvent& event);
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool InstallInactiveTcpFilters(const std::shared_ptr<RelayState>& relay);
