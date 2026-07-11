@@ -90,13 +90,18 @@ std::atomic<uint64_t> g_watchdogTimeout{0};
 std::atomic<uint64_t> g_connectionEscalation{0};
 std::atomic<uint64_t> g_terminalTimeoutPending{0};
 std::atomic<uint64_t> g_schedulerFailure{0};
+struct RetentionDiagnosticState {
+    std::atomic<uint8_t> Bits{0};
+};
 std::mutex g_retentionDiagnosticLock;
-std::unordered_map<std::string, uint8_t> g_retentionDiagnosticStates;
+std::unordered_map<std::string, std::shared_ptr<RetentionDiagnosticState>>
+    g_retentionDiagnosticStates;
 std::atomic<uint64_t> g_retentionWarningLogs{0};
 std::atomic<uint64_t> g_retentionCriticalLogs{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextTerminalSinkControlBlock{false};
 std::atomic<uint8_t> g_failNextDiagnosticAllocation{0};
+std::atomic<uint8_t> g_failNextDiagnosticEmit{0};
 #endif
 
 void ReleaseTerminalSinkPending() noexcept {
@@ -146,6 +151,45 @@ void PollTerminalRetentionDiagnostics(
             uint8_t CommittedBit;
             uint8_t ReservedBit;
         };
+        struct ReservationTicket {
+            std::shared_ptr<RetentionDiagnosticState> State;
+            uint8_t CommittedBit{0};
+            uint8_t ReservedBit{0};
+            size_t CandidateIndex{0};
+            bool Committed{false};
+            ReservationTicket(
+                std::shared_ptr<RetentionDiagnosticState> state,
+                uint8_t committedBit,
+                uint8_t reservedBit,
+                size_t candidateIndex) noexcept
+                : State(std::move(state)),
+                  CommittedBit(committedBit),
+                  ReservedBit(reservedBit),
+                  CandidateIndex(candidateIndex) {}
+            ReservationTicket(const ReservationTicket&) = delete;
+            ReservationTicket& operator=(const ReservationTicket&) = delete;
+            ReservationTicket(ReservationTicket&& other) noexcept
+                : State(std::move(other.State)),
+                  CommittedBit(other.CommittedBit),
+                  ReservedBit(other.ReservedBit),
+                  CandidateIndex(other.CandidateIndex),
+                  Committed(other.Committed) {
+                other.Committed = true;
+            }
+            ReservationTicket& operator=(ReservationTicket&&) = delete;
+            ~ReservationTicket() noexcept {
+                if (!Committed && State) {
+                    State->Bits.fetch_and(
+                        static_cast<uint8_t>(~ReservedBit), std::memory_order_release);
+                }
+            }
+            void Commit() noexcept {
+                State->Bits.fetch_or(CommittedBit, std::memory_order_release);
+                State->Bits.fetch_and(
+                    static_cast<uint8_t>(~ReservedBit), std::memory_order_release);
+                Committed = true;
+            }
+        };
         inject(TqTerminalScheduler::DiagnosticAllocationStage::Log);
         std::vector<DiagnosticLog> candidates;
         candidates.reserve(ages.size() * 2);
@@ -161,8 +205,10 @@ void PollTerminalRetentionDiagnostics(
                      "critical", 2u, 8u});
             }
         }
-        std::vector<size_t> emit;
-        emit.reserve(candidates.size());
+        std::vector<std::shared_ptr<RetentionDiagnosticState>> candidateStates;
+        candidateStates.reserve(candidates.size());
+        std::vector<ReservationTicket> tickets;
+        tickets.reserve(candidates.size());
         {
             std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
             for (auto it = g_retentionDiagnosticStates.begin();
@@ -177,38 +223,60 @@ void PollTerminalRetentionDiagnostics(
             g_retentionDiagnosticStates.reserve(
                 g_retentionDiagnosticStates.size() + ages.size());
             for (const auto& item : ages) {
-                (void)g_retentionDiagnosticStates.try_emplace(item.first, 0u);
+                auto found = g_retentionDiagnosticStates.find(item.first);
+                if (found == g_retentionDiagnosticStates.end()) {
+                    found = g_retentionDiagnosticStates.emplace(
+                        item.first, std::make_shared<RetentionDiagnosticState>()).first;
+                }
             }
-            for (size_t i = 0; i != candidates.size(); ++i) {
-                auto& candidate = candidates[i];
-                uint8_t& state = g_retentionDiagnosticStates.find(candidate.Key)->second;
-                if ((state & (candidate.CommittedBit | candidate.ReservedBit)) == 0) {
-                    state |= candidate.ReservedBit;
-                    emit.push_back(i); // capacity was reserved before taking the lock.
+            for (const auto& candidate : candidates) {
+                candidateStates.push_back(
+                    g_retentionDiagnosticStates.find(candidate.Key)->second);
+            }
+        }
+        for (size_t i = 0; i != candidates.size(); ++i) {
+            const auto& candidate = candidates[i];
+            const auto& state = candidateStates[i];
+            uint8_t bits = state->Bits.load(std::memory_order_acquire);
+            while ((bits & (candidate.CommittedBit | candidate.ReservedBit)) == 0) {
+                if (state->Bits.compare_exchange_weak(
+                        bits, static_cast<uint8_t>(bits | candidate.ReservedBit),
+                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    tickets.emplace_back(
+                        state, candidate.CommittedBit, candidate.ReservedBit, i);
+                    break;
                 }
             }
         }
-        for (const size_t index : emit) {
-            const auto& item = candidates[index];
-            std::fprintf(stderr,
+        bool emitFailed = false;
+        for (auto& ticket : tickets) {
+            const auto& item = candidates[ticket.CandidateIndex];
+            int emitResult = 0;
+#if defined(TQ_UNIT_TESTING)
+            const uint8_t mode = g_failNextDiagnosticEmit.exchange(
+                0, std::memory_order_relaxed);
+            if (mode == 2) throw std::bad_alloc();
+            if (mode == 1) {
+                emitResult = -1;
+            } else
+#endif
+            emitResult = std::fprintf(stderr,
                 "tcpquic-proxy: terminal retention %s stream_id=%llu oldest_age_ms=%llu\n",
                 item.Severity, static_cast<unsigned long long>(item.StreamId),
                 static_cast<unsigned long long>(item.AgeMs));
-        }
-        {
-            std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
-            for (const size_t index : emit) {
-                const auto& item = candidates[index];
-                const auto found = g_retentionDiagnosticStates.find(item.Key);
-                if (found == g_retentionDiagnosticStates.end()) continue;
-                found->second = static_cast<uint8_t>(
-                    (found->second & ~item.ReservedBit) | item.CommittedBit);
-                if (item.CommittedBit == 1u) {
-                    g_retentionWarningLogs.fetch_add(1, std::memory_order_relaxed);
-                } else {
-                    g_retentionCriticalLogs.fetch_add(1, std::memory_order_relaxed);
-                }
+            if (emitResult < 0) {
+                emitFailed = true;
+                continue;
             }
+            ticket.Commit();
+            if (ticket.CommittedBit == 1u) {
+                g_retentionWarningLogs.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                g_retentionCriticalLogs.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        if (emitFailed) {
+            g_schedulerFailure.fetch_add(1, std::memory_order_relaxed);
         }
     } catch (...) {
         g_schedulerFailure.fetch_add(1, std::memory_order_relaxed);
@@ -828,6 +896,12 @@ void TqTerminalScheduler::FailNextDiagnosticAllocationForTest(
     g_failNextDiagnosticAllocation.store(
         static_cast<uint8_t>(stage) + 1, std::memory_order_relaxed);
 }
+
+void TqTerminalScheduler::FailNextDiagnosticEmitForTest(
+    bool throwException) noexcept {
+    g_failNextDiagnosticEmit.store(
+        throwException ? 2u : 1u, std::memory_order_relaxed);
+}
 #endif
 
 TqTerminalLedger::TqTerminalLedger(TqTerminalIdentity identity) noexcept {
@@ -1218,6 +1292,7 @@ void TqResetTerminalMetricsForTest() noexcept {
     g_schedulerFailure.store(0, std::memory_order_relaxed);
     g_failNextTerminalSinkControlBlock.store(false, std::memory_order_relaxed);
     g_failNextDiagnosticAllocation.store(0, std::memory_order_relaxed);
+    g_failNextDiagnosticEmit.store(0, std::memory_order_relaxed);
     g_retentionWarningLogs.store(0, std::memory_order_relaxed);
     g_retentionCriticalLogs.store(0, std::memory_order_relaxed);
     std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);

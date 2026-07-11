@@ -153,6 +153,7 @@ public:
     static void SetDiagnosticNowForTest(std::chrono::steady_clock::time_point now);
     static void FailNextDiagnosticAllocationForTest(
         DiagnosticAllocationStage stage) noexcept;
+    static void FailNextDiagnosticEmitForTest(bool throwException) noexcept;
 #endif
 };
 

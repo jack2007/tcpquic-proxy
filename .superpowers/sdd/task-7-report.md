@@ -50,3 +50,9 @@ rtk build/bin/Release/tcpquic_router_runtime_test
 - retention diagnostics poll 的 snapshot、identity key/age map、state entry、log collection 分配均由最外层异常边界保护；任何异常只精确增加一次 `SchedulerFailure`，不会逃出 `noexcept`。
 - once-only 告警采用 reservation→锁外 emit→commit 协议：所有可能分配的对象和 state entry 在 reservation 前完成；并发 poll 看到 reservation 会跳过，日志形成/emit 前失败不会消费 warning/critical bit。
 - 测试分别注入 snapshot、state、log 三个分配失败点，验证不终止、failure +1、bit 未消费，下一次 poll 仍能正常各发一次且后续不重复。
+
+## Emit 失败复审修订（2026-07-12）
+
+- diagnostic map 保存稳定的 shared atomic state；reservation ticket 即使在 terminal cleanup 移除 map entry 后仍可用纯 atomic、noexcept 析构回滚。
+- emitter 仅在返回成功后 commit 对应 once bit/counter；`fprintf` 等价失败只回滚失败 item，并让本次 poll 的 `SchedulerFailure` 精确加一。reservation 后抛异常会由 ticket scope 回滚全部未 commit reservation。
+- emit 返回失败与抛异常均有注入测试：失败 poll 不提交日志计数，下一次 poll 可重试成功一次，并发 reservation 仍抑制重复日志。

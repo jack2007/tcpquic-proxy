@@ -827,6 +827,32 @@ void TestRetentionDiagnosticsAllocationFailuresDoNotConsumeOnceBits() {
     }
 }
 
+void TestRetentionDiagnosticEmitFailureRollsBackReservation() {
+    for (const bool throwException : {false, true}) {
+        Reset();
+        auto owner = MakeStartedOwner(830 + static_cast<uint64_t>(throwException));
+        TqTerminalScheduler::FailNextDiagnosticEmitForTest(throwException);
+        TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(6));
+        auto metrics = TqTerminalMetricsSnapshot();
+        auto diagnostics = TqTerminalRetentionDiagnosticsForTest();
+        CHECK(metrics.SchedulerFailure == 1);
+        CHECK(diagnostics.WarningLogs == 0);
+        CHECK(diagnostics.CriticalLogs == 0);
+
+        TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+        metrics = TqTerminalMetricsSnapshot();
+        diagnostics = TqTerminalRetentionDiagnosticsForTest();
+        CHECK(metrics.SchedulerFailure == 1);
+        CHECK(diagnostics.WarningLogs == 1);
+        CHECK(diagnostics.CriticalLogs == 0);
+        TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+        CHECK(TqTerminalRetentionDiagnosticsForTest().WarningLogs == 1);
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    }
+}
+
 void TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity() {
     Reset();
     TqTerminalScheduler::UseRealClockForTest();
@@ -939,6 +965,7 @@ int main() {
     TestRetentionAdminFilterIsStrictAndSchemaIsCanonical();
     TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal();
     TestRetentionDiagnosticsAllocationFailuresDoNotConsumeOnceBits();
+    TestRetentionDiagnosticEmitFailureRollsBackReservation();
     TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity();
     TestShutdownStatusNamesAreStable();
     TestRetentionJsonUsesActualStatusAndUnixWallClock();
