@@ -337,6 +337,12 @@ int main() {
             ::close(relayFds[1]);
             return 3105;
         }
+        worker.SetNextRelayIdForTest(registered.RelayId);
+        if (worker.AllocateRelayIdForTest() == registered.RelayId) {
+            worker.Stop();
+            ::close(relayFds[1]);
+            return 31051;
+        }
 
         const uint64_t encodedRelay = worker.EncodeEpollRelayForTest(registered.RelayId);
         if (worker.IsEpollWakeForTest(encodedRelay)) {
@@ -422,6 +428,14 @@ int main() {
         } else {
             ::close(fds[0]);
         }
+        const TqLinuxRelayWorkerSnapshot callbackSnapshot = worker.Snapshot();
+        if (callbackSnapshot.FatalRelayResets != 0 || callbackSnapshot.ClosingRelays != 0) {
+            std::fprintf(stderr, "fake FIN callback must not mutate worker-local relay state\n");
+            worker.Stop();
+            ::close(fds[1]);
+            return 3741;
+        }
+        (void)worker.DrainForTest(16);
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (snapshot.ControlLockAcquireCount == 0) {
             std::fprintf(stderr, "expected ControlLock acquisitions to be recorded\n");
@@ -3992,8 +4006,8 @@ int main() {
             return 4119;
         }
 
-        if (ReadFakeStreamShutdownCalls() != 1) {
-            std::fprintf(stderr, "active stream hard TCP error must abort stream exactly once\n");
+        if (ReadFakeStreamShutdownCalls() != 0) {
+            std::fprintf(stderr, "legacy relay without owner must not retain raw shutdown capability\n");
             worker.Stop();
             if (fds[1] >= 0) {
                 ::close(fds[1]);
@@ -4570,9 +4584,65 @@ int main() {
         MsQuic = nullptr;
     }
 
-    // A full normal event queue uses the intrusive terminal fallback lane.
-    // This case uses a normally constructed CleanUpManual wrapper and verifies
-    // that callback/context remain the stable router until wrapper close.
+    // A full callback queue uses the typed fatal handoff fallback lane.
+    {
+        const uint64_t retentionBaseline =
+            TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount;
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        TqLinuxRelayWorkerConfig config{};
+        config.EventQueueCapacity = 2;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 5050;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5051;
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+        auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+        if (!owner->InstallDetachedStreamForTest(stream)) return 5052;
+        std::atomic<uint64_t> shutdownCalls{0};
+        owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+            shutdownCalls.fetch_add(1, std::memory_order_relaxed);
+            return QUIC_STATUS_PENDING;
+        });
+        auto control = std::make_shared<TqRelayStopControl>();
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = stream;
+        registration.StreamOwner = owner;
+        registration.StopControl = control;
+        registration.ControlGeneration = control->Generation;
+        if (!worker.RegisterRelayWithId(registration).Ok) return 5053;
+        for (int i = 0; i < 2; ++i) {
+            TqLinuxRelayEvent marker{};
+            marker.Type = TqLinuxRelayEventType::TestMarker;
+            if (!worker.EnqueueForTest(std::move(marker))) return 5054;
+        }
+        QUIC_STREAM_EVENT fakeFin{};
+        fakeFin.Type = QUIC_STREAM_EVENT_RECEIVE;
+        fakeFin.RECEIVE.AbsoluteOffset = UINT64_MAX;
+        fakeFin.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+        if (QUIC_FAILED(owner->DispatchForTest(&fakeFin))) return 5055;
+        if (QUIC_FAILED(owner->DispatchForTest(&fakeFin))) return 5059;
+        const auto beforeDrain = std::atomic_load(&control->TerminalHandoff);
+        if (beforeDrain == nullptr || TqTerminalReleaseReady(beforeDrain->Snapshot())) return 5056;
+        (void)worker.DrainForTest(16);
+        const auto handoff = std::atomic_load(&control->TerminalHandoff);
+        if (handoff == nullptr || !TqTerminalReleaseReady(handoff->Snapshot()) ||
+            shutdownCalls.load(std::memory_order_relaxed) != 1 ||
+            ::fcntl(fds[0], F_GETFD) != -1 || errno != EBADF) return 5057;
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(owner->DispatchForTest(&terminal)) ||
+            TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount != retentionBaseline) return 5058;
+        worker.Stop();
+        registration.StreamOwner.reset();
+        owner.reset();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
+    // A full terminal callback queue uses the intrusive terminal fallback lane.
     {
         QUIC_API_TABLE fakeApi{};
         InstallFakeMsQuicForSend(fakeApi);

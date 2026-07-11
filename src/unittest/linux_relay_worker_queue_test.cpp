@@ -48,11 +48,11 @@ int main() {
         worker.SetNextRelayIdForTest(0);
         if (worker.AllocateRelayIdForTest() != 1) return 137;
 
-        worker.SetNextRelayIdForTest(1ull << 63);
+        worker.SetNextRelayIdForTest(1ull << 31);
         if (worker.AllocateRelayIdForTest() != 1) return 138;
 
-        worker.SetNextRelayIdForTest((1ull << 63) - 1);
-        if (worker.AllocateRelayIdForTest() != ((1ull << 63) - 1)) return 139;
+        worker.SetNextRelayIdForTest((1ull << 31) - 1);
+        if (worker.AllocateRelayIdForTest() != ((1ull << 31) - 1)) return 139;
         if (worker.AllocateRelayIdForTest() != 1) return 140;
     }
 

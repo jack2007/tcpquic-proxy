@@ -32,3 +32,21 @@
 handoff 回归。测试现已在 close-count 断言前释放该引用。fatal barrier 也在验证
 `PENDING` handoff 后注入晚到 `SHUTDOWN_COMPLETE`，并断言 terminal retention registry
 回到进入用例前的基线，避免污染后续用例。
+
+## Review changes
+
+- callback fatal 统一 seal `binding->Closing` 后投递 typed handoff request；request 只强持
+  owner、stop/handoff control、relay id、generation 与 terminal intent，不保存 stream、fd、
+  tunnel 或 `RelayState` capability。正常队列与 intrusive queue-full fallback 复用同一 request。
+- callback 线程不再执行 epoll/fd/vector/binding cleanup；worker drain 校验 generation/control/
+  owner 后串行 freeze 与 cleanup。`RelayState::Closing` 为 atomic admission 状态；worker stop 在
+  terminal down-call 前释放 control lock。锁序为 control lock（仅生命周期切换）→释放→
+  owner terminal control；worker-local relay 状态只由 worker/已 join 的 stop 线程修改。
+- Linux reaper 严格读取三事实；Windows、Darwin 及尚未发布 Linux backend 的 context 暂时保留
+  legacy stopped predicate，避免跨平台 terminal convergence 尚未落地时泄漏。
+- Linux epoll id 容量明确为 31-bit 非零；allocator 在边界 wrap，并扫描 active/retired relay
+  防止 collision。tag 的另一 32-bit 保存完整 control generation，不再静默截断高位 relay id。
+- epoll commit failure 使用同 ledger handoff；missing-owner legacy 路径只做 worker-local cleanup，
+  不调用 raw stream shutdown，也不发布伪造的三事实，因此不能满足 Linux reaper 门禁。
+- queue-full fake-FIN 测试覆盖 callback 阶段非 ready、重复 callback、worker drain 后 shutdown/
+  fd close once、三事实 111，以及晚到 terminal callback 后 retention 回基线。

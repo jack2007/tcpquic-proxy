@@ -41,6 +41,13 @@ int main() {
     if (TqTerminalReleaseReady({true, false, true})) return 91;
     if (TqTerminalReleaseReady({true, true, false})) return 92;
     if (!TqTerminalReleaseReady({true, true, true})) return 93;
+    const TqTerminalHandoffFacts notReady{true, false, true};
+    const TqTerminalHandoffFacts ready{true, true, true};
+    if (TqRelayBackendReleaseReady(TqRelayBackendType::LinuxWorker, true, nullptr)) return 94;
+    if (TqRelayBackendReleaseReady(TqRelayBackendType::LinuxWorker, true, &notReady)) return 95;
+    if (!TqRelayBackendReleaseReady(TqRelayBackendType::LinuxWorker, false, &ready)) return 96;
+    if (!TqRelayBackendReleaseReady(TqRelayBackendType::WindowsWorker, true, nullptr)) return 97;
+    if (!TqRelayBackendReleaseReady(TqRelayBackendType::DarwinWorker, true, &notReady)) return 98;
 
     TqTunnelReaper& reaper = TqTunnelReaper::Instance();
     reaper.Start();

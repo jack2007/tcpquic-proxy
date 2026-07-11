@@ -2048,7 +2048,13 @@ bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx) {
         return false;
     }
     const auto handoff = std::atomic_load(&control->TerminalHandoff);
-    return handoff != nullptr && TqTerminalReleaseReady(handoff->Snapshot());
+    const auto facts = handoff != nullptr
+        ? handoff->Snapshot()
+        : TqTerminalHandoffFacts{};
+    return TqRelayBackendReleaseReady(
+        ctx->RelayHandle.Backend,
+        TqTunnelRelayStopped(ctx),
+        handoff != nullptr ? &facts : nullptr);
 }
 
 void TqReapTunnelContext(TqTunnelContext* ctx) {

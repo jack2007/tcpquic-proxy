@@ -53,6 +53,16 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+inline bool TqRelayBackendReleaseReady(
+    TqRelayBackendType backend,
+    bool legacyStopped,
+    const TqTerminalHandoffFacts* facts) noexcept {
+    if (backend == TqRelayBackendType::LinuxWorker) {
+        return facts != nullptr && TqTerminalReleaseReady(*facts);
+    }
+    return legacyStopped;
+}
+
 using TqRelayBackend = TqRelayBackendType;
 
 // Application error code for QUIC_STREAM_EVENT_CANCEL_ON_LOSS (62-bit wire range).

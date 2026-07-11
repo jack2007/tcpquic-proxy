@@ -366,6 +366,7 @@ private:
 
     struct RelayState;
     struct StreamRelayBinding;
+    struct TerminalHandoffRequest;
     struct CallbackEndpoint;
     struct RegisterRelayCommand {
         TqLinuxRelayRegistration Registration;
@@ -520,10 +521,6 @@ private:
         const char* reason,
         uint64_t errorCode) noexcept;
     void AbortRelayAndRelease(RelayState* relay, const char* trigger, bool abortStream);
-    void RequestRelayShutdown(
-        RelayState* relay,
-        MsQuicStream* callbackStream,
-        TqStreamLifetime::ShutdownIntent intent);
     bool CanAbortCallbackStream(
         uint64_t relayId,
         StreamRelayBinding* binding,
@@ -564,8 +561,11 @@ private:
     void CompleteQuicSend(void* context);
     bool QueueQuicSendCompletionFallback(void* context) noexcept;
     void DrainQuicSendCompletionFallbacks();
-    bool QueueQuicTerminalFallback(StreamRelayBinding* binding) noexcept;
+    bool QueueTerminalHandoffFallback(
+        TerminalHandoffRequest* request,
+        bool terminalObserved = false) noexcept;
     void DrainQuicTerminalFallbacks();
+    void ProcessTerminalHandoffRequest(TerminalHandoffRequest* request) noexcept;
     void PurgeRetiredStreamBindings();
     std::shared_ptr<RelayState> FindRelayById(uint64_t relayId);
     std::shared_ptr<RelayState> FindRelayByFd(int tcpFd);
@@ -759,7 +759,7 @@ private:
     std::atomic<int64_t> LastQuicSendStatus{0};
     mutable std::mutex RetiredBindingLock;
     std::atomic<TqLinuxRelaySendOperation*> SendCompletionFallbackHead{nullptr};
-    std::atomic<StreamRelayBinding*> TerminalFallbackHead{nullptr};
+    std::atomic<TerminalHandoffRequest*> TerminalFallbackHead{nullptr};
     std::vector<std::unique_ptr<StreamRelayBinding>> RetiredStreamBindings;
     std::vector<std::shared_ptr<StreamRelayBinding>> RetiredManagedStreamBindings;
 };
