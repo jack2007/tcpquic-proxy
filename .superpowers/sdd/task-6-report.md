@@ -60,3 +60,11 @@ Review 后追加以下修订：
 - legacy handle side table 仅在 pick 返回后重新锁定并确认 slot incarnation 仍完全一致时发布，迟到 pick 不能覆盖 reconnect 后的新 incarnation。
 - production terminal binding 不再生成 counter fallback。client raw lookup 或 server accepted record lookup 失败时，factory 在 callback 安装、stream start 或 retention handoff 前直接失败。
 - 新增测试覆盖迟到 picked token 在 reconnect 后被 generation gate 拒绝、lookup failure 不安装 accepted callback、client/server owner erase/down-call lifetime barrier，以及既有 handle reuse/weak expiry。
+
+## 复审修订：server callback trampoline 与 side-table TOCTOU
+
+- server `SHUTDOWN_COMPLETE` 应用 callback 不再调用 `Close()` 或释放最后 owner。callback 只 erase record、清 context owner，并把 local pin 投递到专用 cleanup queue；后台线程等待 `ShutdownCompleteEvent`（由 MsQuic 外层 trampoline 在应用 callback 返回后设置）后才释放 wrapper。
+- cleanup queue 使用嵌入 `serverContext` 的 intrusive node，callback push 不分配且无容量上限。worker 早运行时等待 trampoline、晚运行时直接消费已完成 signal；线程启动失败时节点仍留在同一 intrusive queue，`QuicServerSession::Stop()` 会 stop/drain queue。
+- test hook 使用 outer-return barrier 验证 worker 早运行不会提前析构，并覆盖 delayed release、stop/drain，以及禁用 worker 后连续 retention 256 个 owner 再全部 drain；不存在固定 emergency 槽耗尽后的孤儿 context。
+- 删除 client legacy handle side-table 的存储、发布与 lookup；`TqLookupClientTerminalConnection()` 对 raw legacy 路径固定失败。production client runtime 继续通过 `TqClientPickedConnection` 直接传 immutable key/token/owner，因此不存在 old pick 校验后覆盖 new incarnation 的发布窗口。
+- reconnect 与 handle reuse 后 legacy lookup 同样保持失败；server accepted record 仍在 registry lock 内直接取得 immutable key/token。

@@ -229,6 +229,49 @@ static int TestServerTerminalEscalationPinsOwnerAcrossRecordErase() {
     return 0;
 }
 
+static int TestServerDeferredCleanupWaitsForOuterTrampolineAndDrainsFailures() {
+    std::mutex lock;
+    std::condition_variable cv;
+    bool outerReturned = false;
+    bool waitEntered = false;
+    std::atomic<bool> destroyed{false};
+    auto owner = std::shared_ptr<MsQuicConnection>(
+        reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6461)),
+        [&](MsQuicConnection*) { destroyed.store(true, std::memory_order_release); });
+    if (!TqDeferServerConnectionOwnerForTest(owner, [&] {
+            std::unique_lock<std::mutex> guard(lock);
+            waitEntered = true;
+            cv.notify_all();
+            cv.wait(guard, [&] { return outerReturned; });
+        })) return 6461;
+    owner.reset();
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return waitEntered; });
+    }
+    if (destroyed.load(std::memory_order_acquire)) return 6462;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        outerReturned = true;
+    }
+    cv.notify_all();
+    TqDrainServerConnectionCleanupForTest();
+    if (!destroyed.load(std::memory_order_acquire)) return 6463;
+
+    std::atomic<uint32_t> failedDestroyed{0};
+    TqFailNextServerCleanupEnqueueForTest();
+    for (uintptr_t i = 0; i < 256; ++i) {
+        auto failedOwner = std::shared_ptr<MsQuicConnection>(
+            reinterpret_cast<MsQuicConnection*>(0x6500 + i),
+            [&](MsQuicConnection*) { failedDestroyed.fetch_add(1); });
+        if (!TqDeferServerConnectionOwnerForTest(failedOwner, [] {})) return 6464;
+    }
+    if (failedDestroyed.load() != 0) return 6465;
+    TqDrainServerConnectionCleanupForTest();
+    if (failedDestroyed.load() != 256) return 6466;
+    return 0;
+}
+
 static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
@@ -467,8 +510,14 @@ static int TestPickConnectionWithIdReturnsSlotId() {
     if (picked.Connection == first && picked.ConnectionId != "conn-0") return 131;
     if (picked.Connection == second && picked.ConnectionId != "conn-1") return 132;
     if (picked.NumericConnectionId == 0 || picked.TerminalEscalation == nullptr) return 133;
+    TqTerminalConnectionKey legacyKey{};
+    std::shared_ptr<TqTerminalEscalation> legacyEscalation;
+    if (TqLookupClientTerminalConnection(
+            picked.Connection, legacyKey, legacyEscalation)) return 136;
     std::string err;
     if (!session.ReconnectConnection(picked.ConnectionId, err)) return 134;
+    if (TqLookupClientTerminalConnection(
+            picked.Connection, legacyKey, legacyEscalation)) return 137;
     picked.TerminalEscalation->RequestConnectionShutdown(
         picked.NumericConnectionId, 25, QUIC_STATUS_INVALID_STATE, 99);
     if (session.TerminalEscalationGenerationMismatchForTest() != 1) return 135;
@@ -1029,6 +1078,7 @@ int main() {
     if (int rc = TestQueuedTerminalOperationRejectsReconnectedSlot()) return rc;
     if (int rc = TestServerTerminalEscalationRegistrySafety()) return rc;
     if (int rc = TestServerTerminalEscalationPinsOwnerAcrossRecordErase()) return rc;
+    if (int rc = TestServerDeferredCleanupWaitsForOuterTrampolineAndDrainsFailures()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;

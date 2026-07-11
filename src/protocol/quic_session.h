@@ -110,6 +110,11 @@ uint32_t TqRegisterServerConnectionForTest(
 uint32_t TqRegisterServerConnectionOwnerForTest(
     HQUIC handle, std::shared_ptr<MsQuicConnection> connection);
 void TqSetBeforeServerTerminalShutdownForTest(std::function<void()> hook);
+bool TqDeferServerConnectionOwnerForTest(
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn);
+void TqFailNextServerCleanupEnqueueForTest();
+void TqDrainServerConnectionCleanupForTest();
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
 void TqUnregisterServerConnectionForTest(HQUIC handle);
 void TqMarkServerConnectionClosingForTest(HQUIC handle);

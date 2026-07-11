@@ -17,18 +17,13 @@
 #include <memory>
 #include <new>
 #include <unordered_map>
+#include <thread>
 
 extern const MsQuicApi* MsQuic;
 
 namespace {
 
 std::atomic<uint64_t> g_nextNumericConnectionId{1};
-std::mutex g_clientTerminalRegistryLock;
-struct TqClientTerminalRegistryEntry {
-    TqTerminalConnectionKey Key;
-    std::shared_ptr<TqTerminalEscalation> Escalation;
-};
-std::unordered_map<HQUIC, TqClientTerminalRegistryEntry> g_clientTerminalRegistry;
 
 class TqTerminalController final : public TqTerminalConnectionController {
 public:
@@ -359,7 +354,131 @@ struct TqServerConnectionContext {
     QuicServerSession* Session{nullptr};
     std::shared_ptr<MsQuicConnection> ConnectionOwner;
     std::string Encryption{"enabled"};
+    TqServerConnectionContext* CleanupNext{nullptr};
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> WaitForOuterReturnForTest;
+#endif
 };
+
+class TqServerConnectionCleanupQueue final {
+public:
+    ~TqServerConnectionCleanupQueue() { StopAndDrain(); }
+
+    void Enqueue(TqServerConnectionContext* context) noexcept {
+        if (context == nullptr) return;
+        std::lock_guard<std::mutex> guard(Lock_);
+        context->CleanupNext = nullptr;
+        if (Tail_ != nullptr) {
+            Tail_->CleanupNext = context;
+        } else {
+            Head_ = context;
+        }
+        Tail_ = context;
+        StartWorkerLocked();
+        Changed_.notify_one();
+    }
+
+    void StopAndDrain() noexcept {
+        std::thread worker;
+        {
+            std::lock_guard<std::mutex> guard(Lock_);
+            Stopping_ = true;
+            Changed_.notify_all();
+            worker = std::move(Worker_);
+        }
+        if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
+        for (;;) {
+            auto* context = Pop();
+            if (context == nullptr) break;
+            ReleaseAfterTrampoline(context);
+        }
+        std::lock_guard<std::mutex> guard(Lock_);
+        Running_ = false;
+        Stopping_ = false;
+    }
+
+#if defined(TQ_UNIT_TESTING)
+    void DisableWorkerStartForTest(bool disabled) noexcept {
+        std::lock_guard<std::mutex> guard(Lock_);
+        DisableWorkerStart_ = disabled;
+    }
+#endif
+
+private:
+    static void ReleaseAfterTrampoline(TqServerConnectionContext* context) noexcept {
+        if (context == nullptr) return;
+        if (!context->ConnectionOwner) {
+            delete context;
+            return;
+        }
+#if defined(TQ_UNIT_TESTING)
+        if (context->WaitForOuterReturnForTest) {
+            context->WaitForOuterReturnForTest();
+        } else {
+#ifdef CX_PLATFORM_TYPE
+            context->ConnectionOwner->ShutdownCompleteEvent.WaitForever();
+#endif
+        }
+#else
+#ifdef CX_PLATFORM_TYPE
+        context->ConnectionOwner->ShutdownCompleteEvent.WaitForever();
+#endif
+#endif
+        context->ConnectionOwner.reset();
+        delete context;
+    }
+
+    void StartWorkerLocked() {
+        if (Running_) return;
+#if defined(TQ_UNIT_TESTING)
+        if (DisableWorkerStart_) return;
+#endif
+        Running_ = true;
+        try {
+            Worker_ = std::thread([this] { Run(); });
+        } catch (...) {
+            Running_ = false;
+        }
+    }
+
+    void Run() noexcept {
+        for (;;) {
+            TqServerConnectionContext* context = nullptr;
+            {
+                std::unique_lock<std::mutex> guard(Lock_);
+                Changed_.wait(guard, [this] { return Stopping_ || Head_ != nullptr; });
+                if (Stopping_ && Head_ == nullptr) break;
+                context = Head_;
+                Head_ = context->CleanupNext;
+                if (Head_ == nullptr) Tail_ = nullptr;
+            }
+            ReleaseAfterTrampoline(context);
+        }
+    }
+
+    TqServerConnectionContext* Pop() noexcept {
+        std::lock_guard<std::mutex> guard(Lock_);
+        auto* context = Head_;
+        if (context != nullptr) {
+            Head_ = context->CleanupNext;
+            if (Head_ == nullptr) Tail_ = nullptr;
+        }
+        return context;
+    }
+
+    std::mutex Lock_;
+    std::condition_variable Changed_;
+    TqServerConnectionContext* Head_{nullptr};
+    TqServerConnectionContext* Tail_{nullptr};
+    std::thread Worker_;
+    bool Running_{false};
+    bool Stopping_{false};
+#if defined(TQ_UNIT_TESTING)
+    bool DisableWorkerStart_{false};
+#endif
+};
+
+TqServerConnectionCleanupQueue g_serverConnectionCleanupQueue;
 
 std::mutex g_clientTraceConnLock;
 std::unordered_map<HQUIC, uint32_t> g_clientTraceConnIds;
@@ -507,16 +626,10 @@ std::shared_ptr<TqTerminalEscalation> TqMakeServerTerminalEscalation(
 }
 
 bool TqLookupClientTerminalConnection(
-    MsQuicConnection* connection,
-    TqTerminalConnectionKey& key,
-    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
-    if (connection == nullptr || connection->Handle == nullptr) return false;
-    std::lock_guard<std::mutex> guard(g_clientTerminalRegistryLock);
-    const auto it = g_clientTerminalRegistry.find(connection->Handle);
-    if (it == g_clientTerminalRegistry.end()) return false;
-    key = it->second.Key;
-    escalation = it->second.Escalation;
-    return escalation != nullptr;
+    MsQuicConnection*,
+    TqTerminalConnectionKey&,
+    std::shared_ptr<TqTerminalEscalation>&) noexcept {
+    return false;
 }
 
 bool TqLookupServerTerminalConnection(
@@ -607,6 +720,26 @@ uint32_t TqRegisterServerConnectionOwnerForTest(
 void TqSetBeforeServerTerminalShutdownForTest(std::function<void()> hook) {
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     g_beforeServerTerminalShutdown = std::move(hook);
+}
+
+bool TqDeferServerConnectionOwnerForTest(
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn) {
+    auto* context = new (std::nothrow) TqServerConnectionContext();
+    if (context == nullptr) return false;
+    context->ConnectionOwner = std::move(owner);
+    context->WaitForOuterReturnForTest = std::move(waitForOuterReturn);
+    g_serverConnectionCleanupQueue.Enqueue(context);
+    return true;
+}
+
+void TqFailNextServerCleanupEnqueueForTest() {
+    g_serverConnectionCleanupQueue.DisableWorkerStartForTest(true);
+}
+
+void TqDrainServerConnectionCleanupForTest() {
+    g_serverConnectionCleanupQueue.StopAndDrain();
+    g_serverConnectionCleanupQueue.DisableWorkerStartForTest(false);
 }
 
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
@@ -1042,21 +1175,6 @@ TqClientPickedConnection QuicClientSession::PickConnectionWithId() {
     auto escalation = MakeTerminalEscalation(
         picked.SlotIndex, picked.NumericConnectionId, picked.Generation);
     picked.TerminalEscalation = escalation;
-#if !defined(TQ_UNIT_TESTING)
-    bool stillCurrent = false;
-    {
-        std::lock_guard<std::mutex> guard(State->Lock);
-        stillCurrent = picked.SlotIndex < State->Slots.size() &&
-            State->Slots[picked.SlotIndex].NumericConnectionId == picked.NumericConnectionId &&
-            State->Slots[picked.SlotIndex].Generation == picked.Generation &&
-            State->Slots[picked.SlotIndex].Connection.get() == picked.Connection;
-    }
-    if (stillCurrent && escalation && picked.Connection->Handle != nullptr) {
-        std::lock_guard<std::mutex> guard(g_clientTerminalRegistryLock);
-        g_clientTerminalRegistry[picked.Connection->Handle] = {
-            {picked.NumericConnectionId, picked.Generation}, escalation};
-    }
-#endif
     return picked;
 }
 
@@ -2383,6 +2501,7 @@ void QuicServerSession::Stop() {
     }
 
     StateChanged.notify_all();
+    g_serverConnectionCleanupQueue.StopAndDrain();
 }
 
 void QuicServerSession::Run() {
@@ -2627,9 +2746,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
             TqTraceQuicDisconnected(connection, connId, "server");
         }
         TqUnregisterServerConnection(connection);
-        connection->Close();
-        serverContext->ConnectionOwner.reset();
-        delete serverContext;
+        g_serverConnectionCleanupQueue.Enqueue(serverContext);
         break;
     }
     default:
