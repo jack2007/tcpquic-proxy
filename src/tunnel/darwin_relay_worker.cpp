@@ -127,7 +127,8 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
-    // Immutable after PublishTarget: never assign/reset the same weak_ptr instance.
+    // Immutable after initialize-before-PublishTarget: never assign/reset the
+    // same weak_ptr instance, and never rewrite RouteGeneration after publish.
     std::weak_ptr<RelayState> Relay;
     std::weak_ptr<TqStreamLifetime> StreamOwner;
     uint64_t RouteGeneration{0};
@@ -2794,8 +2795,16 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
     receive->BindingOwner = binding;
     receive->ReceiveCompleteStream = effectiveStream;
     receive->StreamOwner = binding->StreamOwner.lock();
-    if (receive->StreamOwner == nullptr && relay != nullptr) {
-        receive->StreamOwner = relay->StreamOwner;
+    if (receive->StreamOwner == nullptr) {
+        if (binding->Endpoint != nullptr) {
+            // Managed path: owner must come from binding weak, never from the
+            // relay-map strong pointer (Task 2 / P1-3 identity contract).
+            Errors.fetch_add(1, std::memory_order_relaxed);
+            return {};
+        }
+        if (relay != nullptr) {
+            receive->StreamOwner = relay->StreamOwner;
+        }
     }
     receive->Fin = fin;
     receive->Slices.reserve(bufferCount);
@@ -3936,7 +3945,12 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         binding->Relay = relay;
         if (registration.StreamOwner != nullptr) {
             binding->StreamOwner = registration.StreamOwner;
-            binding->RouteGeneration = registration.StreamOwner->RouteGeneration();
+            // PublishTarget increments owner RouteGeneration after Target_ is
+            // published. Precompute the final generation here so callbacks never
+            // observe a stale/half-updated binding->RouteGeneration.
+            const uint64_t expectedGeneration =
+                registration.StreamOwner->RouteGeneration();
+            binding->RouteGeneration = expectedGeneration + 1;
             binding->Endpoint = StreamCallbackEndpoint;
         } else {
             binding->ActivationState.store(
@@ -3951,19 +3965,19 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     }
 
     if (registration.StreamOwner != nullptr) {
-        const uint64_t expectedGeneration = binding->RouteGeneration;
+        // expected = final - 1; binding already holds the post-publish generation.
+        const uint64_t expectedGeneration = binding->RouteGeneration - 1;
         uint64_t publishedGeneration = 0;
         if (!registration.StreamOwner->PublishTarget(
                 expectedGeneration,
                 binding,
-                &publishedGeneration)) {
+                &publishedGeneration) ||
+            (publishedGeneration != 0 &&
+             publishedGeneration != binding->RouteGeneration)) {
             RollbackPreparedRelay(token, TqStreamLifetime::ShutdownIntent::AbortBoth);
             return result;
         }
-        // Immutable callback-visible generation is the post-publish route id.
-        binding->RouteGeneration = publishedGeneration != 0
-            ? publishedGeneration
-            : registration.StreamOwner->RouteGeneration();
+        // Do not write RouteGeneration after PublishTarget — it is already final.
         relay->ManagedBinding = binding;
         // Publish success irreversibly transfers FD ownership to the token.
         token.OwnsFd = true;
@@ -4045,8 +4059,8 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
 #endif
 
     // Commit already linearized Prepared->Active. A terminal that arrives after
-    // that point must not roll registration back; normal terminal cleanup owns
-    // filter/FD disposition from here.
+    // that point must not roll registration back; keep filters inactive and let
+    // terminal cleanup own filter/FD disposition.
     const bool terminalAfterCommit =
         binding->Terminal.load(std::memory_order_acquire) ||
         binding->ActivationState.load(std::memory_order_acquire) ==
@@ -4059,8 +4073,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
             result.RelayId = 0;
             return result;
         }
-    } else {
-        (void)EnableTcpFilters(relay);
     }
 
     relay->Committed = true;
