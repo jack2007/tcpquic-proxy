@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <unordered_map>
+#include <utility>
 
 namespace {
 
@@ -75,9 +76,9 @@ TqStreamLifetime::~TqStreamLifetime() noexcept {
     bool detachedStreamForTest = false;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
-        stream = Stream_;
+        stream = std::exchange(Stream_, nullptr);
         detachedStreamForTest = DetachedStreamForTest_;
-        Stream_ = nullptr;
+        TerminalPhase_ = TerminalPhase::Closed;
         Phase_ = Phase::Closed;
         Target_.reset();
         completionKeys.reserve(SendKeyEnvelopes_.size());
@@ -236,6 +237,11 @@ bool TqStreamLifetime::SendDirectionCompleteForTest() const noexcept {
 uint64_t TqStreamLifetime::CancelOnLossErrorCodeForTest() const noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     return CancelOnLossErrorCode_;
+}
+
+void TqStreamLifetime::SetShutdownHookForTest(ShutdownHookForTest hook) noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    ShutdownHookForTest_ = std::move(hook);
 }
 #endif
 
@@ -508,6 +514,7 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
     MsQuicStream* stream = nullptr;
     uint8_t sendRequest = 0;
     bool receiveRequest = false;
+    bool immediateRequest = false;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         if (Stream_ == nullptr ||
@@ -524,8 +531,12 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
         case ShutdownIntent::AbortReceive:
             DesiredReceiveAbort_ = true;
             break;
-        case ShutdownIntent::AbortBoth:
         case ShutdownIntent::AbortBothImmediate:
+            DesiredSendShutdown_ = 2;
+            DesiredReceiveAbort_ = true;
+            immediateRequest = true;
+            break;
+        case ShutdownIntent::AbortBoth:
             DesiredSendShutdown_ = 2;
             DesiredReceiveAbort_ = true;
             break;
@@ -561,6 +572,11 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
             static_cast<uint32_t>(flags) |
             static_cast<uint32_t>(QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE));
     }
+    if (immediateRequest) {
+        flags = static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
+            static_cast<uint32_t>(flags) |
+            static_cast<uint32_t>(QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE));
+    }
     QUIC_STATUS status = QUIC_STATUS_SUCCESS;
     bool detachedStreamForTest = false;
     {
@@ -586,6 +602,100 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
         }
     }
     return status;
+}
+
+TerminalPhase TqStreamLifetime::GetTerminalPhase() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return TerminalPhase_;
+}
+
+QUIC_STATUS TqStreamLifetime::CallTerminalShutdown(
+    MsQuicStream* stream,
+    uint64_t errorCode,
+    QUIC_STREAM_SHUTDOWN_FLAGS flags) noexcept {
+#if defined(TQ_UNIT_TESTING)
+    ShutdownHookForTest hook;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        hook = ShutdownHookForTest_;
+    }
+    if (hook) {
+        return hook(errorCode, flags);
+    }
+#endif
+    return stream->Shutdown(errorCode, flags);
+}
+
+TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
+    uint64_t errorCode,
+    std::shared_ptr<Target> terminalSink,
+    std::shared_ptr<TqTerminalEscalation> escalation) noexcept {
+    TqTerminalShutdownResult result{};
+    std::shared_ptr<TqStreamLifetime> lease;
+    std::shared_ptr<TqTerminalLedger> ledger;
+    MsQuicStream* stream = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        if (TerminalPhase_ == TerminalPhase::TerminalObserved ||
+            Phase_ == Phase::TerminalPublished) {
+            result.AlreadyTerminal = true;
+            return result;
+        }
+        if (TerminalPhase_ == TerminalPhase::ShutdownSubmitted) {
+            result.Submitted = true;
+            result.Attempt = TerminalShutdownAttempt_;
+            return result;
+        }
+        if (TerminalPhase_ == TerminalPhase::ShutdownReserved) {
+            result.Attempt = TerminalShutdownAttempt_;
+            return result;
+        }
+        if (Stream_ == nullptr || TerminalLedger_ == nullptr ||
+            (Phase_ != Phase::Starting && Phase_ != Phase::Started) ||
+            terminalSink == nullptr) {
+            result.Status = QUIC_STATUS_INVALID_STATE;
+            return result;
+        }
+        Target_ = std::move(terminalSink);
+        TerminalSink_ = Target_;
+        ++RouteGeneration_;
+        TerminalEscalation_ = std::move(escalation);
+        TerminalErrorCode_ = errorCode;
+        TerminalPhase_ = TerminalPhase::ShutdownReserved;
+        ++TerminalShutdownAttempt_;
+        result.Attempt = TerminalShutdownAttempt_;
+        {
+            std::lock_guard<std::mutex> ledgerGuard(TerminalLedger_->Mutex_);
+            TerminalLedger_->State_.Phase = TerminalPhase::ShutdownReserved;
+            TerminalLedger_->State_.ErrorCode = errorCode;
+            TerminalLedger_->State_.ShutdownAttempt = TerminalShutdownAttempt_;
+        }
+        lease = shared_from_this();
+        ledger = TerminalLedger_;
+        stream = Stream_;
+    }
+
+    const auto flags = static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
+        QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE);
+    result.Status = CallTerminalShutdown(stream, errorCode, flags);
+
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        if (TerminalPhase_ == TerminalPhase::TerminalObserved ||
+            Phase_ == Phase::TerminalPublished) {
+            result.AlreadyTerminal = true;
+            return result;
+        }
+        if (QUIC_SUCCEEDED(result.Status)) {
+            TerminalPhase_ = TerminalPhase::ShutdownSubmitted;
+            result.Submitted = true;
+        } else if (TerminalPhase_ == TerminalPhase::ShutdownReserved) {
+            TerminalPhase_ = TerminalPhase::Active;
+            TerminalRetryOwned_ = true;
+        }
+    }
+    ledger->RecordShutdown(result.Status, result.Attempt, result.Submitted);
+    return result;
 }
 
 TqStreamCallbackTarget::TqStreamCallbackTarget(
@@ -686,7 +796,11 @@ TqStreamLifetime::RouteSnapshot TqStreamLifetime::PublishTerminalAndTakeTarget()
             Phase_ == Phase::StartFailed || Phase_ == Phase::CreatedNotStarted) {
             return snapshot;
         }
+        TerminalPhase_ = TerminalPhase::TerminalObserved;
         Phase_ = Phase::TerminalPublished;
+        if (TerminalLedger_ != nullptr) {
+            TerminalLedger_->RecordEvent(TqTerminalEvent::ShutdownComplete);
+        }
         snapshot.TargetOwner = std::move(Target_);
         snapshot.Generation = RouteGeneration_;
     }
@@ -695,6 +809,11 @@ TqStreamLifetime::RouteSnapshot TqStreamLifetime::PublishTerminalAndTakeTarget()
 }
 
 void TqStreamLifetime::RetainUntilTerminal() {
+    std::lock_guard<std::mutex> controlGuard(ControlMutex_);
+    RetainUntilTerminalLocked();
+}
+
+void TqStreamLifetime::RetainUntilTerminalLocked() {
     std::lock_guard<std::mutex> guard(g_terminalRetentionLock);
     if (!TerminalRetained_) {
         if (TerminalLedger_ == nullptr) {

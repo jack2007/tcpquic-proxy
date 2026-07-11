@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <mutex>
+#include <new>
 #include <thread>
 
 #define CHECK(condition) do { if (!(condition)) std::abort(); } while (false)
@@ -76,7 +77,128 @@ public:
     uint64_t LastGeneration{0};
 };
 
+class CallbackGuardTarget final : public TqStreamLifetime::Target {
+public:
+    QUIC_STATUS OnStreamEvent(
+        MsQuicStream*, QUIC_STREAM_EVENT*, uint64_t) noexcept override {
+        CHECK(TqStreamLifetime::TestDetachedOwnerDestroyCountForTest() == 0);
+        return QUIC_STATUS_SUCCESS;
+    }
+};
+
+std::shared_ptr<TqStreamLifetime> MakeDetachedStartedOwner(
+    std::shared_ptr<TqStreamLifetime::Target> target) {
+    static QUIC_API_TABLE fakeApi{};
+    static bool initialized = false;
+    if (!initialized) {
+        fakeApi.SetCallbackHandler = FakeSetCallbackHandler;
+        fakeApi.StreamClose = FakeStreamClose;
+        fakeApi.StreamShutdown = FakeStreamShutdown;
+        initialized = true;
+    }
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    static uintptr_t nextHandle = 100;
+    return TqStreamLifetime::AdoptAccepted(
+        reinterpret_cast<HQUIC>(nextHandle++), std::move(target),
+        TqTerminalIdentity{
+            nextHandle, nextHandle, 2, 7,
+            TqTunnelRole::ClientOpen, TqRelayBackendType::LinuxWorker},
+        5);
+}
+
 } // namespace
+
+void TestBeginTerminalShutdownPendingIsSubmittedOnce() {
+    auto target = std::make_shared<CountingTarget>();
+    auto sink = std::make_shared<CountingTarget>();
+    auto owner = MakeDetachedStartedOwner(target);
+    QUIC_STREAM_SHUTDOWN_FLAGS seen = QUIC_STREAM_SHUTDOWN_FLAG_NONE;
+    uint32_t calls = 0;
+    owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS flags) {
+        ++calls;
+        seen = flags;
+        CHECK(owner->TerminalLedger()->Snapshot(std::chrono::steady_clock::now()).Phase ==
+              TerminalPhase::ShutdownReserved);
+        return QUIC_STATUS_PENDING;
+    });
+    const auto first = owner->BeginTerminalShutdown(91, sink, nullptr);
+    const auto duplicate = owner->BeginTerminalShutdown(91, sink, nullptr);
+    CHECK(first.Status == QUIC_STATUS_PENDING);
+    CHECK(first.Submitted && first.Attempt == 1);
+    CHECK(duplicate.Submitted && duplicate.Attempt == 1);
+    CHECK(calls == 1);
+    CHECK((seen & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
+    CHECK((seen & QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE) != 0);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::ShutdownSubmitted);
+    CHECK(owner->TerminalLedger()->Snapshot(std::chrono::steady_clock::now()).Phase ==
+          TerminalPhase::ShutdownSubmitted);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+}
+
+void TestBeginTerminalShutdownFailureReturnsToActive() {
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    owner->SetShutdownHookForTest([](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+        return QUIC_STATUS_INVALID_STATE;
+    });
+    const auto result = owner->BeginTerminalShutdown(
+        92, std::make_shared<CountingTarget>(), nullptr);
+    CHECK(QUIC_FAILED(result.Status));
+    CHECK(!result.Submitted && result.Attempt == 1);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::Active);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+}
+
+void TestTerminalReentryWinsShutdownReturn() {
+    auto sink = std::make_shared<CountingTarget>();
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(owner->DispatchForTest(&event) == QUIC_STATUS_SUCCESS);
+        return QUIC_STATUS_INVALID_STATE;
+    });
+    const auto result = owner->BeginTerminalShutdown(5, sink, nullptr);
+    CHECK(result.AlreadyTerminal);
+    CHECK(!result.RetryScheduled);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
+}
+
+void TestAbortBothImmediateAddsImmediateFlag() {
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    g_shutdownCount = 0;
+    g_lastShutdownFlags = QUIC_STREAM_SHUTDOWN_FLAG_NONE;
+    CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 93)));
+    CHECK(g_shutdownCount == 1);
+    CHECK((g_lastShutdownFlags & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
+    CHECK((g_lastShutdownFlags & QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE) != 0);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+}
+
+void TestTerminalCallbackGuardDefersOwnerDestructionUntilReturn() {
+    TqStreamLifetime::ResetTestDetachedOwnerDestroyCountForTest();
+    auto owner = TqStreamLifetime::CreateForTest(
+        TqStreamLifetime::Phase::Started,
+        std::make_shared<CallbackGuardTarget>());
+    alignas(MsQuicStream) static unsigned char streamStorage[sizeof(MsQuicStream)];
+    auto* stream = new (streamStorage) MsQuicStream(
+        reinterpret_cast<HQUIC>(static_cast<uintptr_t>(999)),
+        CleanUpManual, TqStreamLifetime::Callback, owner.get());
+    CHECK(owner->InstallDetachedStreamForTest(stream));
+    auto* callbackContext = owner.get();
+    owner.reset();
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(TqStreamLifetime::Callback(stream, callbackContext, &terminal) ==
+          QUIC_STATUS_SUCCESS);
+    CHECK(TqStreamLifetime::TestDetachedOwnerDestroyCountForTest() == 1);
+}
 
 void TestTerminalPublicInterfaceDefaults() {
     TqTerminalIdentity identity{};
@@ -116,6 +238,11 @@ void TestBindTerminalIdentityCreatesExactlyOneLedger() {
 int main() {
     TestTerminalPublicInterfaceDefaults();
     TestBindTerminalIdentityCreatesExactlyOneLedger();
+    TestBeginTerminalShutdownPendingIsSubmittedOnce();
+    TestBeginTerminalShutdownFailureReturnsToActive();
+    TestTerminalReentryWinsShutdownReturn();
+    TestAbortBothImmediateAddsImmediateFlag();
+    TestTerminalCallbackGuardDefersOwnerDestructionUntilReturn();
     {
         int context = 1;
         auto target = std::make_shared<TqStreamCallbackTarget>(BlockingCallback, &context);
@@ -158,6 +285,7 @@ int main() {
         complete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
         complete.SEND_COMPLETE.ClientContext = first;
         (void)owner->DispatchForTest(&complete);
+        complete.SEND_COMPLETE.ClientContext = first;
         (void)owner->DispatchForTest(&complete);
         if (cleanups != 1 || target->Calls != 1) return 36;
         if (TqStreamLifetime::SnapshotSendCompletions().DuplicateClaims !=

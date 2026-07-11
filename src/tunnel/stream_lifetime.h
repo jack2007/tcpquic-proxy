@@ -31,6 +31,10 @@ public:
         AbortBoth,
         AbortBothImmediate,
     };
+#if defined(TQ_UNIT_TESTING)
+    using ShutdownHookForTest = std::function<QUIC_STATUS(
+        uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS)>;
+#endif
 
     class Target {
     public:
@@ -134,6 +138,7 @@ public:
     static uint64_t TestDetachedOwnerDestroyCountForTest() noexcept;
     bool SendDirectionCompleteForTest() const noexcept;
     uint64_t CancelOnLossErrorCodeForTest() const noexcept;
+    void SetShutdownHookForTest(ShutdownHookForTest hook) noexcept;
 #endif
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
@@ -210,7 +215,12 @@ private:
     TqStreamLifetime(Phase phase, std::shared_ptr<Target> initialTarget) noexcept;
     bool InstallStream(MsQuicStream* stream) noexcept;
     void RetainUntilTerminal();
+    void RetainUntilTerminalLocked();
     void ReleaseTerminalRetention();
+    QUIC_STATUS CallTerminalShutdown(
+        MsQuicStream* stream,
+        uint64_t errorCode,
+        QUIC_STREAM_SHUTDOWN_FLAGS flags) noexcept;
     QUIC_STATUS Dispatch(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
 
     mutable std::mutex ControlMutex_;
@@ -240,6 +250,7 @@ private:
     std::vector<std::unique_ptr<uint64_t>> SendKeyEnvelopes_;
 #if defined(TQ_UNIT_TESTING)
     uint32_t DenyReceiveApiLeasesForTest_{0};
+    ShutdownHookForTest ShutdownHookForTest_;
 #endif
 };
 

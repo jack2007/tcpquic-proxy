@@ -24,6 +24,32 @@ const TqTerminalIdentity& TqTerminalLedger::Identity() const noexcept {
     return State_.Identity;
 }
 
+void TqTerminalLedger::RecordEvent(TqTerminalEvent event) noexcept {
+    std::lock_guard<std::mutex> guard(Mutex_);
+    State_.LastStreamEvent = event;
+    if (event == TqTerminalEvent::ShutdownComplete) {
+        State_.Phase = TerminalPhase::TerminalObserved;
+        State_.TerminalObservedAtMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+}
+
+void TqTerminalLedger::RecordShutdown(
+    QUIC_STATUS status,
+    uint32_t attempt,
+    bool submitted) noexcept {
+    std::lock_guard<std::mutex> guard(Mutex_);
+    State_.ShutdownStatus = status;
+    State_.ShutdownAttempt = attempt;
+    State_.Phase = submitted ? TerminalPhase::ShutdownSubmitted : TerminalPhase::Active;
+    if (submitted) {
+        State_.ShutdownSubmittedAtMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+}
+
 const char* TqTerminalPhaseName(TerminalPhase phase) noexcept {
     switch (phase) {
     case TerminalPhase::Active: return "active";
