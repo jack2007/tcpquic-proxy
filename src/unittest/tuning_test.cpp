@@ -110,6 +110,15 @@ static bool WriteTextFile(const std::filesystem::path& path, const char* text) {
 
 int main() {
     {
+        TqConfig cfg{};
+        TqTuningConfig tuning{};
+        TqComputeTuning(cfg, tuning);
+        assert(tuning.TerminalWatchdogSeconds == 5);
+        cfg.TuningOverrideTerminalWatchdogSeconds = 30;
+        TqComputeTuning(cfg, tuning);
+        assert(tuning.TerminalWatchdogSeconds == 30);
+    }
+    {
         TQ_TEST_REQUIRE(TqValidationRelaySendBufferCapBytes == 512ull * 1024 * 1024);
     }
 

@@ -84,6 +84,27 @@ struct TqRelayMetricsSnapshot {
     uint64_t LinuxRelayTerminalRetainedOwnerCount{0};
     uint64_t LinuxRelayTerminalRetainedOldestAgeMs{0};
     uint64_t LinuxRelayStopRemaining{0};
+    uint64_t TerminalHandoffStarted{0};
+    uint64_t TerminalHandoffCompleted{0};
+    uint64_t TerminalHandoffFailed{0};
+    uint64_t TerminalShutdownSubmitted{0};
+    uint64_t TerminalShutdownPending{0};
+    uint64_t TerminalShutdownSyncFailure{0};
+    uint64_t TerminalShutdownRetry{0};
+    uint64_t TerminalObserved{0};
+    uint64_t TerminalWatchdogArmed{0};
+    uint64_t TerminalWatchdogCanceled{0};
+    uint64_t TerminalWatchdogTimeout{0};
+    uint64_t TerminalConnectionEscalation{0};
+    uint64_t TerminalTimeoutPending{0};
+    uint64_t TerminalSinkPending{0};
+    uint64_t TerminalDuplicateStopSuppressed{0};
+    uint64_t TerminalDuplicateShutdownSuppressed{0};
+    uint64_t TerminalDuplicateTerminalSuppressed{0};
+    uint64_t TerminalExactlyOnceViolation{0};
+    uint64_t TerminalSchedulerFailure{0};
+    uint64_t TerminalRetainedOwnerCount{0};
+    uint64_t TerminalRetainedOldestAgeMs{0};
     // Neutral release-gate metrics (Darwin remediation Task 6; additive).
     uint64_t RelayActiveControls{0};
     uint64_t RelayControlStopSignaled{0};

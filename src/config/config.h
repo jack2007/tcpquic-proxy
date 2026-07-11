@@ -102,6 +102,7 @@ struct TqConfig {
     uint32_t TuningOverrideWindowsRelayWorkerCount{0};
     uint32_t TuningOverrideQuicIw{0};
     uint32_t TuningOverrideQuicInitRttMs{0};
+    uint32_t TuningOverrideTerminalWatchdogSeconds{0};
     TqTuningConfig Tuning{};
 
     enum class TraceLevel {

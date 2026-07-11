@@ -8,10 +8,12 @@
 #include "server_runtime_config.h"
 #include "tunnel_registry.h"
 #include "trace.h"
+#include "terminal_convergence.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <functional>
 #include <mutex>
 #include <sstream>
@@ -55,6 +57,104 @@ std::string RelayMetricsJson() {
     };
     MergeObject(body, RelayMetricsJsonValue(metrics));
     return body.dump();
+}
+
+const char* TerminalBackendName(TqRelayBackend backend) {
+    switch (backend) {
+    case TqRelayBackendType::LinuxWorker: return "linux";
+    case TqRelayBackendType::WindowsWorker: return "windows";
+    case TqRelayBackendType::DarwinWorker: return "darwin";
+    case TqRelayBackendType::None: return "none";
+    }
+    return "none";
+}
+
+bool ParseDecimalId(const std::string& text, uint64_t& value) {
+    if (text.empty()) return false;
+    value = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    return result.ec == std::errc{} && result.ptr == text.data() + text.size() && value != 0;
+}
+
+bool ParseTerminalRetentionPath(
+    const std::string& path,
+    TqTerminalRetentionFilter& filter) {
+    constexpr const char* base = "/relay/terminal-retentions";
+    const size_t baseLength = std::char_traits<char>::length(base);
+    if (path.compare(0, baseLength, base) != 0) return false;
+    if (path.size() == baseLength) return true;
+    if (path[baseLength] != '?') return false;
+    size_t offset = baseLength + 1;
+    if (offset == path.size()) return false;
+    while (offset < path.size()) {
+        const size_t end = path.find('&', offset);
+        const std::string item = path.substr(offset, end - offset);
+        const size_t equal = item.find('=');
+        if (equal == std::string::npos || equal == 0 || equal + 1 == item.size()) return false;
+        const std::string key = item.substr(0, equal);
+        const std::string value = item.substr(equal + 1);
+        if (key == "backend") {
+            if (filter.Backend != TqRelayBackendType::None) return false;
+            if (value == "linux") filter.Backend = TqRelayBackendType::LinuxWorker;
+            else if (value == "windows") filter.Backend = TqRelayBackendType::WindowsWorker;
+            else if (value == "darwin") filter.Backend = TqRelayBackendType::DarwinWorker;
+            else return false;
+        } else if (key == "connection_id") {
+            if (filter.ConnectionId != 0 || !ParseDecimalId(value, filter.ConnectionId)) return false;
+        } else if (key == "tunnel_id") {
+            if (filter.TunnelId != 0 || !ParseDecimalId(value, filter.TunnelId)) return false;
+        } else if (key == "terminal_phase") {
+            if (filter.HasPhase) return false;
+            filter.HasPhase = true;
+            if (value == "active") filter.Phase = TerminalPhase::Active;
+            else if (value == "shutdown_reserved") filter.Phase = TerminalPhase::ShutdownReserved;
+            else if (value == "shutdown_submitted") filter.Phase = TerminalPhase::ShutdownSubmitted;
+            else if (value == "terminal_observed") filter.Phase = TerminalPhase::TerminalObserved;
+            else if (value == "closed") filter.Phase = TerminalPhase::Closed;
+            else return false;
+        } else {
+            return false;
+        }
+        if (end == std::string::npos) break;
+        offset = end + 1;
+        if (offset == path.size()) return false;
+    }
+    return true;
+}
+
+std::string TerminalRetentionsJson(const TqTerminalRetentionFilter& filter) {
+    const auto snapshots = TqSnapshotTerminalRetentions(filter);
+    nlohmann::json retentions = nlohmann::json::array();
+    uint64_t oldestAgeMs = 0;
+    for (const auto& snapshot : snapshots) {
+        oldestAgeMs = std::max(oldestAgeMs, snapshot.RetainedAgeMs);
+        retentions.push_back({
+            {"stream_id", snapshot.Identity.StreamId},
+            {"tunnel_id", snapshot.Identity.TunnelId},
+            {"connection_id", snapshot.Identity.ConnectionId},
+            {"connection_generation", snapshot.Identity.ConnectionGeneration},
+            {"role", snapshot.Identity.Role == TqTunnelRole::ClientOpen ? "client" : "server"},
+            {"backend", TerminalBackendName(snapshot.Identity.Backend)},
+            {"terminal_phase", TqTerminalPhaseName(snapshot.Phase)},
+            {"retained_age_ms", snapshot.RetainedAgeMs},
+            {"shutdown_intent", TqTerminalShutdownIntentName(snapshot.ShutdownIntent)},
+            {"shutdown_status", snapshot.Phase == TerminalPhase::ShutdownSubmitted ? "pending" : "none"},
+            {"shutdown_attempt", snapshot.ShutdownAttempt},
+            {"shutdown_submitted_at_ms", snapshot.ShutdownSubmittedAtMs},
+            {"terminal_observed_at_ms", snapshot.TerminalObservedAtMs},
+            {"last_stream_event", TqTerminalEventName(snapshot.LastStreamEvent)},
+            {"in_tunnel_registry", snapshot.InTunnelRegistry},
+            {"relay_active", snapshot.RelayActive},
+            {"tcp_valid", snapshot.TcpValid},
+            {"watchdog_state", TqTerminalWatchdogStateName(snapshot.Watchdog)},
+            {"connection_escalated", snapshot.ConnectionEscalated},
+        });
+    }
+    return nlohmann::json{
+        {"retentions", std::move(retentions)},
+        {"count", snapshots.size()},
+        {"oldest_age_ms", oldestAgeMs},
+    }.dump();
 }
 
 nlohmann::json ServerConnectionJsonValue(const TqServerConnectionSnapshot& connection) {
@@ -288,6 +388,14 @@ std::string HandleServerAdmin(
     }
     if (req.Method == "GET" && req.Path == "/relay/metrics") {
         return TqJsonResponse(200, RelayMetricsJson());
+    }
+    if (req.Method == "GET" &&
+        req.Path.compare(0, 26, "/relay/terminal-retentions") == 0) {
+        TqTerminalRetentionFilter filter{};
+        if (!ParseTerminalRetentionPath(req.Path, filter)) {
+            return TqJsonResponse(400, ErrorJson("invalid_filter"));
+        }
+        return TqJsonResponse(200, TerminalRetentionsJson(filter));
     }
     if (req.Method == "GET" && req.Path == "/relay/active-relays") {
         return TqJsonResponse(200, TqRelayActiveRelaysJson());

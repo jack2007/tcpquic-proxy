@@ -166,6 +166,9 @@ void SyncLinuxRelayLegacyFields(TqTuningConfig& out) {
 }
 
 void ApplyCustomOverrides(const TqConfig& cfg, TqTuningConfig& out) {
+    if (cfg.TuningOverrideTerminalWatchdogSeconds > 0) {
+        out.TerminalWatchdogSeconds = cfg.TuningOverrideTerminalWatchdogSeconds;
+    }
     if (cfg.TuningOverrideRelayIoSize > 0) {
         out.RelayIoSize = cfg.TuningOverrideRelayIoSize;
     }

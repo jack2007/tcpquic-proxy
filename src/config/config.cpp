@@ -707,6 +707,12 @@ private:
                 if (!ReadString(item.value(), value)) return Error("invalid tuning.mode");
                 cfg.TuningMode = TqParseTuningMode(value.c_str());
                 if (value != "auto" && value != "lan" && value != "wan") return Error("invalid tuning.mode");
+            } else if (key == "terminal_watchdog_seconds") {
+                if (!ReadUint32InRange(
+                        item.value(), 5, 30,
+                        cfg.TuningOverrideTerminalWatchdogSeconds)) {
+                    return Error("invalid tuning.terminal_watchdog_seconds");
+                }
             } else {
                 return Error("unknown tuning key: " + key);
             }
@@ -1136,6 +1142,10 @@ std::string RuntimeConfigJson(const TqConfig& cfg) {
         {"level", cfg.CompressLevel},
     };
     root["tuning"] = {{"mode", TuningModeName(cfg.TuningMode)}};
+    if (cfg.TuningOverrideTerminalWatchdogSeconds != 0) {
+        root["tuning"]["terminal_watchdog_seconds"] =
+            cfg.TuningOverrideTerminalWatchdogSeconds;
+    }
 
     nlohmann::json relay = nlohmann::json::object();
     if (cfg.TuningOverrideRelayIoSize != 0) relay["io_size"] = cfg.TuningOverrideRelayIoSize;

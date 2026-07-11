@@ -93,6 +93,25 @@ static std::string CaptureUsage() {
 }
 
 int main() {
+    for (uint32_t value : {5u, 30u}) {
+        TqConfig cfg;
+        std::string err;
+        const std::string body = std::string(R"json({"tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},"tuning":{"terminal_watchdog_seconds":)json") +
+            std::to_string(value) +
+            R"json(},"peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]})json";
+        if (!ParseRuntimeConfig(body, cfg, err)) return 501;
+        if (cfg.TuningOverrideTerminalWatchdogSeconds != value ||
+            cfg.Tuning.TerminalWatchdogSeconds != value) return 502;
+    }
+    for (uint32_t value : {4u, 31u}) {
+        TqConfig cfg;
+        std::string err;
+        const std::string body = std::string(R"json({"tls":{"cert":"client.crt","key":"client.key","ca":"ca.crt"},"tuning":{"terminal_watchdog_seconds":)json") +
+            std::to_string(value) +
+            R"json(},"peers":[{"id":"primary","proto_peer":"127.0.0.1:4433","socks_listen":"127.0.0.1:11080"}]})json";
+        if (ParseRuntimeConfig(body, cfg, err)) return 503;
+        if (err.find("tuning.terminal_watchdog_seconds") == std::string::npos) return 504;
+    }
     const std::string removedAdminFlag = std::string("--admin-allow-unauthenticated-") + "legacy";
     const std::string removedAdminKey = std::string("allow_") + "unauthenticated_" + "legacy";
     {

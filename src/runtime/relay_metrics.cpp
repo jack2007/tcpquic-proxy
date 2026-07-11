@@ -11,6 +11,8 @@
 #endif
 
 #include "relay.h"
+#include "stream_lifetime.h"
+#include "terminal_convergence.h"
 #include "tuning.h"
 
 #include <nlohmann/json.hpp>
@@ -307,6 +309,29 @@ std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
 
 TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     TqRelayMetricsSnapshot metrics;
+    const auto terminal = TqTerminalMetricsSnapshot();
+    const auto retained = TqStreamLifetime::SnapshotTerminalRetentions();
+    metrics.TerminalHandoffStarted = terminal.HandoffStarted;
+    metrics.TerminalHandoffCompleted = terminal.HandoffCompleted;
+    metrics.TerminalHandoffFailed = terminal.HandoffFailed;
+    metrics.TerminalShutdownSubmitted = terminal.ShutdownSubmitted;
+    metrics.TerminalShutdownPending = terminal.ShutdownPending;
+    metrics.TerminalShutdownSyncFailure = terminal.ShutdownSyncFailure;
+    metrics.TerminalShutdownRetry = terminal.ShutdownRetry;
+    metrics.TerminalObserved = terminal.TerminalObserved;
+    metrics.TerminalWatchdogArmed = terminal.WatchdogArmed;
+    metrics.TerminalWatchdogCanceled = terminal.WatchdogCanceled;
+    metrics.TerminalWatchdogTimeout = terminal.WatchdogTimeout;
+    metrics.TerminalConnectionEscalation = terminal.ConnectionEscalation;
+    metrics.TerminalTimeoutPending = terminal.TerminalTimeoutPending;
+    metrics.TerminalSinkPending = terminal.TerminalSinkPending;
+    metrics.TerminalDuplicateStopSuppressed = terminal.DuplicateStopSuppressed;
+    metrics.TerminalDuplicateShutdownSuppressed = terminal.DuplicateShutdownSuppressed;
+    metrics.TerminalDuplicateTerminalSuppressed = terminal.DuplicateTerminalSuppressed;
+    metrics.TerminalExactlyOnceViolation = terminal.ExactlyOnceViolation;
+    metrics.TerminalSchedulerFailure = terminal.SchedulerFailure;
+    metrics.TerminalRetainedOwnerCount = retained.OwnerCount;
+    metrics.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
 #if defined(__linux__)
     const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
     metrics.SnapshotComplete = snapshot.SnapshotComplete;
@@ -788,6 +813,27 @@ std::string TqRelayWorkerDetailJson(
 }
 
 static void TqAppendNeutralRelayMetricsJson(std::ostringstream& out, const TqRelayMetricsSnapshot& metrics) {
+    out << ",\"terminal_handoff_started\":" << metrics.TerminalHandoffStarted;
+    out << ",\"terminal_handoff_completed\":" << metrics.TerminalHandoffCompleted;
+    out << ",\"terminal_handoff_failed\":" << metrics.TerminalHandoffFailed;
+    out << ",\"terminal_shutdown_submitted\":" << metrics.TerminalShutdownSubmitted;
+    out << ",\"terminal_shutdown_pending\":" << metrics.TerminalShutdownPending;
+    out << ",\"terminal_shutdown_sync_failure\":" << metrics.TerminalShutdownSyncFailure;
+    out << ",\"terminal_shutdown_retry\":" << metrics.TerminalShutdownRetry;
+    out << ",\"terminal_observed\":" << metrics.TerminalObserved;
+    out << ",\"terminal_watchdog_armed\":" << metrics.TerminalWatchdogArmed;
+    out << ",\"terminal_watchdog_canceled\":" << metrics.TerminalWatchdogCanceled;
+    out << ",\"terminal_watchdog_timeout\":" << metrics.TerminalWatchdogTimeout;
+    out << ",\"terminal_connection_escalation\":" << metrics.TerminalConnectionEscalation;
+    out << ",\"terminal_timeout_pending\":" << metrics.TerminalTimeoutPending;
+    out << ",\"terminal_sink_pending\":" << metrics.TerminalSinkPending;
+    out << ",\"terminal_duplicate_stop_suppressed\":" << metrics.TerminalDuplicateStopSuppressed;
+    out << ",\"terminal_duplicate_shutdown_suppressed\":" << metrics.TerminalDuplicateShutdownSuppressed;
+    out << ",\"terminal_duplicate_terminal_suppressed\":" << metrics.TerminalDuplicateTerminalSuppressed;
+    out << ",\"terminal_exactly_once_violation\":" << metrics.TerminalExactlyOnceViolation;
+    out << ",\"terminal_scheduler_failure\":" << metrics.TerminalSchedulerFailure;
+    out << ",\"terminal_retained_owner_count\":" << metrics.TerminalRetainedOwnerCount;
+    out << ",\"terminal_retained_oldest_age_ms\":" << metrics.TerminalRetainedOldestAgeMs;
     out << ",\"relay_wakeups\":" << metrics.Wakeups;
     out << ",\"relay_events_processed\":" << metrics.EventsProcessed;
     out << ",\"relay_pending_events\":" << metrics.PendingEvents;

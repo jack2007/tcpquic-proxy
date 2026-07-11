@@ -19,6 +19,7 @@ enum class TqTuningMode {
 };
 
 struct TqTuningConfig {
+    uint32_t TerminalWatchdogSeconds{5};
     uint32_t StreamRecvWindow{536870912u};
     uint32_t ConnFlowControlWindow{500000000u};
     uint32_t InitialWindowPackets{2000};

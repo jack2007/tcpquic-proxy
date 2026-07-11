@@ -30,6 +30,11 @@ enum class TqTerminalWatchdogState : uint8_t {
     TerminalTimeout,
 };
 
+enum class TqTerminalShutdownIntent : uint8_t {
+    None,
+    AbortBothImmediate,
+};
+
 enum class TqTerminalEvent : uint8_t {
     None,
     StartComplete,
@@ -58,6 +63,7 @@ struct TqTerminalLedgerSnapshot {
     uint64_t RetainedAgeMs{0};
     uint64_t ErrorCode{0};
     QUIC_STATUS ShutdownStatus{QUIC_STATUS_SUCCESS};
+    TqTerminalShutdownIntent ShutdownIntent{TqTerminalShutdownIntent::None};
     uint32_t ShutdownAttempt{0};
     uint64_t ShutdownSubmittedAtMs{0};
     uint64_t TerminalObservedAtMs{0};
@@ -76,7 +82,11 @@ public:
     TqTerminalLedgerSnapshot Snapshot(std::chrono::steady_clock::time_point now) const;
     const TqTerminalIdentity& Identity() const noexcept;
     void RecordEvent(TqTerminalEvent event) noexcept;
-    void RecordShutdown(QUIC_STATUS status, uint32_t attempt, bool submitted) noexcept;
+    void RecordShutdown(
+        QUIC_STATUS status,
+        uint32_t attempt,
+        bool submitted,
+        TqTerminalShutdownIntent intent = TqTerminalShutdownIntent::None) noexcept;
     void MarkHandoffFacts(bool inTunnelRegistry, bool relayActive, bool tcpValid) noexcept;
     bool CompleteAccountingOnce() noexcept;
 private:
@@ -183,6 +193,7 @@ std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
     const TqTerminalRetentionFilter& filter = {});
 const char* TqTerminalPhaseName(TerminalPhase phase) noexcept;
 const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept;
+const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexcept;
 const char* TqTerminalEventName(TqTerminalEvent event) noexcept;
 void TqRecordTerminalExactlyOnceViolation() noexcept;
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept;

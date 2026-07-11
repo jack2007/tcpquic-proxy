@@ -1167,6 +1167,7 @@ add_executable(tcpquic_server_admin_test
     tunnel/relay_alloc.cpp
     ${TCPQUIC_PLATFORM_SOURCES}
 )
+target_compile_definitions(tcpquic_server_admin_test PRIVATE TQ_UNIT_TESTING)
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
 target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic nlohmann_json::nlohmann_json)
 tcpquic_link_mimalloc(tcpquic_server_admin_test)

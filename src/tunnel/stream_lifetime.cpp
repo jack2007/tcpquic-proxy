@@ -761,7 +761,11 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         beforeLedgerRecord();
     }
 #endif
-    ledger->RecordShutdown(result.Status, result.Attempt, result.Submitted);
+    ledger->RecordShutdown(
+        result.Status,
+        result.Attempt,
+        result.Submitted,
+        TqTerminalShutdownIntent::AbortBothImmediate);
     std::shared_ptr<TqTerminalEscalation> schedulerEscalation;
     uint64_t schedulerErrorCode = 0;
     uint32_t schedulerWatchdogSeconds = 5;

@@ -690,7 +690,8 @@ void TqTerminalLedger::RecordEvent(TqTerminalEvent event) noexcept {
 void TqTerminalLedger::RecordShutdown(
     QUIC_STATUS status,
     uint32_t attempt,
-    bool submitted) noexcept {
+    bool submitted,
+    TqTerminalShutdownIntent intent) noexcept {
     if (submitted) {
         g_shutdownSubmitted.fetch_add(1, std::memory_order_relaxed);
         if (status == QUIC_STATUS_PENDING) {
@@ -705,6 +706,7 @@ void TqTerminalLedger::RecordShutdown(
         return;
     }
     State_.ShutdownStatus = status;
+    State_.ShutdownIntent = intent;
     State_.ShutdownAttempt = attempt;
     if (State_.Phase != TerminalPhase::TerminalObserved &&
         State_.Phase != TerminalPhase::Closed) {
@@ -862,6 +864,14 @@ const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept 
     case TqTerminalWatchdogState::Canceled: return "canceled";
     case TqTerminalWatchdogState::Escalated: return "escalated";
     case TqTerminalWatchdogState::TerminalTimeout: return "terminal_timeout";
+    }
+    return "unknown";
+}
+
+const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexcept {
+    switch (intent) {
+    case TqTerminalShutdownIntent::None: return "none";
+    case TqTerminalShutdownIntent::AbortBothImmediate: return "abort_both_immediate";
     }
     return "unknown";
 }

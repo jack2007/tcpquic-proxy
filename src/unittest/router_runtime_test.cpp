@@ -1344,6 +1344,22 @@ int main() {
         if (relayMetricsResp.find("\"linux_relay_event_queue_pop_cas_retries\"") == std::string::npos) return 356;
         if (relayMetricsResp.find("\"linux_relay_event_producer_threads_observed\"") == std::string::npos) return 357;
         if (relayMetricsResp.find("\"linux_relay_multiple_event_producer_threads_observed\"") == std::string::npos) return 358;
+        if (relayMetricsResp.find("\"terminal_exactly_once_violation\":") == std::string::npos ||
+            relayMetricsResp.find("\"terminal_timeout_pending\":") == std::string::npos ||
+            relayMetricsResp.find("\"terminal_sink_pending\":") == std::string::npos ||
+            relayMetricsResp.find("\"terminal_retained_owner_count\":") == std::string::npos ||
+            relayMetricsResp.find("\"terminal_retained_oldest_age_ms\":") == std::string::npos) return 507;
+
+        const std::string retentions = adminRuntime.HandleAdmin(
+            Request("GET", "/relay/terminal-retentions?backend=linux", ""));
+        if (retentions.find("HTTP/1.1 200 OK") == std::string::npos ||
+            retentions.find("\"retentions\":[") == std::string::npos ||
+            retentions.find("\"count\":") == std::string::npos ||
+            retentions.find("\"oldest_age_ms\":") == std::string::npos) return 505;
+        const std::string invalidRetentions = adminRuntime.HandleAdmin(
+            Request("GET", "/relay/terminal-retentions?terminal_phase=closing", ""));
+        if (invalidRetentions.find("HTTP/1.1 400") == std::string::npos ||
+            invalidRetentions.find("invalid_filter") == std::string::npos) return 506;
 
         TqHttpRequest relayWorkers = Request("GET", "/relay/workers", "");
         std::string relayWorkersResp = adminRuntime.HandleAdmin(relayWorkers);
