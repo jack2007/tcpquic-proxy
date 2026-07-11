@@ -1241,6 +1241,14 @@ bool TqDarwinRelayWorker::PeerSendShutdownStickyForTest(uint64_t relayId) {
     return relay->Binding->PeerSendShutdownSticky.load(std::memory_order_acquire);
 }
 
+bool TqDarwinRelayWorker::ConvergenceCheckStickyForTest(uint64_t relayId) {
+    const auto relay = FindRelayLocal(relayId);
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return false;
+    }
+    return relay->Binding->ConvergenceCheckSticky.load(std::memory_order_acquire);
+}
+
 bool TqDarwinRelayWorker::TcpWriteShutdownQueuedOrClosedForTest(uint64_t relayId) {
     const auto relay = FindRelayLocal(relayId);
     if (relay == nullptr) {
@@ -3128,21 +3136,27 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
         if (info.Fin && !completionCanceled) {
             if (workerThread && !bindingRelayFallback) {
                 MaybePublishFullyClosedStopLocal(relay, "quic_fin_buffer_released");
-            } else if (TqTraceEnabled()) {
-                // Off-worker fallback: do not scan worker-owned queues (§8.3).
-                TqTraceLinuxRelayStreamState state{};
-                state.WorkerIndex = Config.WorkerIndex;
-                state.RelayId = info.RelayId;
-                state.QuicSendFinSubmitted = true;
-                state.QuicSendFinCompleted = true;
-                TqTraceRelayHalfClose(
-                    "darwin",
-                    Config.WorkerIndex,
-                    "quic_fin_buffer_released_off_worker",
-                    state,
-                    "off_worker_no_queue_scan",
-                    false,
-                    false);
+            } else {
+                if (auto binding = relay->Binding) {
+                    binding->ConvergenceCheckSticky.store(true, std::memory_order_release);
+                    (void)Wake();
+                }
+                if (TqTraceEnabled()) {
+                    // Off-worker fallback: do not scan worker-owned queues (§8.3).
+                    TqTraceLinuxRelayStreamState state{};
+                    state.WorkerIndex = Config.WorkerIndex;
+                    state.RelayId = info.RelayId;
+                    state.QuicSendFinSubmitted = true;
+                    state.QuicSendFinCompleted = true;
+                    TqTraceRelayHalfClose(
+                        "darwin",
+                        Config.WorkerIndex,
+                        "quic_fin_buffer_released_off_worker",
+                        state,
+                        "off_worker_no_queue_scan",
+                        false,
+                        false);
+                }
             }
         }
         if (workerThread && !bindingRelayFallback && !closing && !info.Submitting) {

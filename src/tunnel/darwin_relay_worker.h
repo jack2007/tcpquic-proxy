@@ -437,6 +437,7 @@ public:
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
     uint32_t BindingCallbackRefsForTest(uint64_t relayId);
     bool PeerSendShutdownStickyForTest(uint64_t relayId);
+    bool ConvergenceCheckStickyForTest(uint64_t relayId);
     bool TcpWriteShutdownQueuedOrClosedForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
