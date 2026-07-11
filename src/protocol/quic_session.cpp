@@ -1264,6 +1264,7 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
             State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+            State->Slots[i].Generation = 1;
         }
 #if defined(TQ_UNIT_TESTING)
         State->ConnectionShutdownCalls.assign(slotCount, 0);
@@ -1592,6 +1593,7 @@ bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string&
         for (size_t i = oldSize; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
             State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+            State->Slots[i].Generation = 1;
         }
     }
 
@@ -1802,6 +1804,7 @@ void QuicClientSession::MarkReconnectStartedForTest(size_t slots, const TqConfig
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
             State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+            State->Slots[i].Generation = 1;
         }
         State->ConnectionShutdownCalls.assign(slots, 0);
         if (!State->SessionGate) {

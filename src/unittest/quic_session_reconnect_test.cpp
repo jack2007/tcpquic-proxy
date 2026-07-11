@@ -603,7 +603,7 @@ static int TestShutdownCompleteSchedulesSlotRestart() {
             return true;
         });
 
-    session.RestartSlotAfterShutdownCompleteForTest(0, 0);
+    session.RestartSlotAfterShutdownCompleteForTest(0, 1);
     if (scheduled.load(std::memory_order_relaxed) != 1 || !retryTask) {
         return 75;
     }
@@ -633,7 +633,7 @@ static int TestConnectionSnapshotAndSlotControls() {
     if (snapshots[0].ConnectionId != "conn-0") return 81;
     if (snapshots[1].ConnectionId != "conn-1") return 82;
     if (snapshots[0].SlotIndex != 0 || snapshots[1].SlotIndex != 1) return 83;
-    if (snapshots[0].Generation != 0) return 84;
+    if (snapshots[0].Generation != 1) return 84;
     if (snapshots[0].State != "connecting") return 85;
 
     std::string err;
@@ -649,7 +649,7 @@ static int TestConnectionSnapshotAndSlotControls() {
     if (!session.ReconnectConnection("conn-1", err)) return 91;
     if (startCalls.load(std::memory_order_relaxed) != 2) return 97;
     snapshots = session.SnapshotConnections();
-    if (snapshots[1].Generation != 1) return 92;
+    if (snapshots[1].Generation != 2) return 92;
 
     if (!session.StopHighestConnection("conn-2", err)) return 93;
     snapshots = session.SnapshotConnections();
@@ -673,7 +673,8 @@ static int TestPickConnectionWithIdReturnsSlotId() {
     if (picked.Connection != first && picked.Connection != second) return 130;
     if (picked.Connection == first && picked.ConnectionId != "conn-0") return 131;
     if (picked.Connection == second && picked.ConnectionId != "conn-1") return 132;
-    if (picked.NumericConnectionId == 0 || picked.TerminalEscalation == nullptr) return 133;
+    if (picked.NumericConnectionId == 0 || picked.Generation == 0 ||
+        picked.TerminalEscalation == nullptr) return 133;
     TqTerminalConnectionKey legacyKey{};
     std::shared_ptr<TqTerminalEscalation> legacyEscalation;
     if (TqLookupClientTerminalConnection(

@@ -303,6 +303,7 @@ bool TqIsV1AdminPath(const std::string& path) {
         path == "/api/v1/memory/allocator:dump" ||
         path.compare(0, 16, "/api/v1/tunnels/") == 0 ||
         path == "/api/v1/relay/metrics" ||
+        path == "/api/v1/relay/terminal-retentions" ||
         TqIsV1RelayActiveRelaysPath(path) ||
         TqIsV1RelayWorkersPath(path) ||
         path == "/api/v1/server" ||
@@ -329,7 +330,7 @@ std::string TqV1ToLegacyPath(const std::string& path) {
 TqHttpRequest TqMakeAdminRequest(const httplib::Request& req) {
     TqHttpRequest out;
     out.Method = req.method;
-    out.Path = TqV1ToLegacyPath(req.path);
+    out.Path = TqV1ToLegacyPath(req.target.empty() ? req.path : req.target);
     out.Body = req.body;
     for (const auto& header : req.headers) {
         out.Headers[TqLowerHeaderName(header.first)] = header.second;

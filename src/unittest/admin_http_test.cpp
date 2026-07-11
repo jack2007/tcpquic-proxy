@@ -1193,6 +1193,10 @@ int main() {
             if (req.Method == "GET" && req.Path == "/relay/workers/aggregate") {
                 return TqJsonResponse(200, "{\"worker_id\":\"aggregate\"}");
             }
+            if (req.Method == "GET" &&
+                req.Path == "/relay/terminal-retentions?backend=linux") {
+                return TqJsonResponse(200, "{\"retentions\":[],\"count\":0}");
+            }
             if (req.Method == "GET" && req.Path == "/relay/workers/") {
                 return TqJsonResponse(500, "{\"bad_worker_empty\":true}");
             }
@@ -1381,6 +1385,13 @@ int main() {
         if (const int code = sendAuthorized("GET", "/api/v1/relay/workers/aggregate", relayWorkerAggregateResponse)) return code;
         if (!TqHttpStatusIs(relayWorkerAggregateResponse, 200)) return 203;
         if (relayWorkerAggregateResponse.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 204;
+
+        std::string terminalRetentionsResponse;
+        if (const int code = sendAuthorized(
+                "GET", "/api/v1/relay/terminal-retentions?backend=linux",
+                terminalRetentionsResponse)) return code;
+        if (!TqHttpStatusIs(terminalRetentionsResponse, 200)) return 224;
+        if (terminalRetentionsResponse.find("\"retentions\":[]") == std::string::npos) return 225;
 
         std::string relayWorkerEmptyResponse;
         if (const int code = sendAuthorized("GET", "/api/v1/relay/workers/", relayWorkerEmptyResponse)) return code;

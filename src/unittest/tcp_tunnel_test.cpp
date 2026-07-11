@@ -123,7 +123,7 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
 bool TqLookupClientTerminalConnection(
     MsQuicConnection* connection, TqTerminalConnectionKey& key,
     std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
-    if (connection == nullptr) return false;
+    (void)connection;
     if (g_fail_next_terminal_lookup.exchange(false)) return false;
     const uint64_t id = g_next_test_terminal_connection_id.fetch_add(1);
     key = {id, 1};
@@ -636,6 +636,8 @@ bool DispatchFakeStreamEvent(HQUIC handle, QUIC_STREAM_EVENT& event) {
 }
 
 bool DispatchFakeShutdownComplete(HQUIC handle);
+unsigned FakeShutdownCount(HQUIC handle);
+QUIC_STREAM_SHUTDOWN_FLAGS FakeLastShutdownFlags(HQUIC handle);
 
 int TestTerminalLookupFailureRejectsBeforeCallbackInstall() {
     QUIC_API_TABLE fakeApi{};
@@ -646,9 +648,17 @@ int TestTerminalLookupFailureRejectsBeforeCallbackInstall() {
     TqAcl acl;
     TqConfig cfg{};
     TqHandleServerIncomingStream(connection, rawStream, acl, cfg, nullptr);
+    {
+        std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+        const auto it = g_fake_quic_streams.find(rawStream);
+        if (it == g_fake_quic_streams.end() || it->second.Handler == nullptr ||
+            it->second.Context != nullptr) return 7061;
+    }
+    if (FakeShutdownCount(rawStream) != 1 ||
+        FakeLastShutdownFlags(rawStream) != QUIC_STREAM_SHUTDOWN_FLAG_ABORT) return 7062;
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_RECEIVE;
-    if (DispatchFakeStreamEvent(rawStream, event)) return 7061;
+    if (!DispatchFakeStreamEvent(rawStream, event)) return 7063;
     return 0;
 }
 

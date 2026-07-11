@@ -842,6 +842,10 @@ bool TestGracefulHalfCloseReverseFlow() {
     const char request[] = "request";
     CHECK(::write(tcp.Peer, request, sizeof(request)) == static_cast<ssize_t>(sizeof(request)));
     CHECK(worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLIN));
+    void* dataContext = nullptr;
+    { std::lock_guard<std::mutex> guard(g_sendLock);
+      CHECK(!g_sendContexts.empty());
+      dataContext = g_sendContexts.back(); }
     CHECK(::shutdown(tcp.Peer, SHUT_WR) == 0);
     CHECK(worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLRDHUP));
     void* finContext = nullptr;
@@ -851,8 +855,12 @@ bool TestGracefulHalfCloseReverseFlow() {
       finContext = g_sendContexts.back(); }
     QUIC_STREAM_EVENT sent{};
     sent.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    sent.SEND_COMPLETE.ClientContext = dataContext;
+    CHECK(QUIC_SUCCEEDED(worker.DispatchStreamEventForTest(stream, &sent)));
     sent.SEND_COMPLETE.ClientContext = finContext;
     CHECK(QUIC_SUCCEEDED(worker.DispatchStreamEventForTest(stream, &sent)));
+    (void)worker.DrainForTest(128);
+    CHECK(worker.Snapshot().OutstandingQuicSends == 0);
 
     const char response[] = "reverse-payload";
     QUIC_BUFFER buffer{static_cast<uint32_t>(sizeof(response)),

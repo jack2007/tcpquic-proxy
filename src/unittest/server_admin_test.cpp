@@ -861,13 +861,9 @@ int main() {
         if (badDiag.find("HTTP/1.1 400") == std::string::npos) return 151;
     }
     {
-        auto owner = TqStreamLifetime::CreateForTest(
-            TqStreamLifetime::Phase::CreatedNotStarted);
-        owner->BindTerminalIdentity(
-            {17, 133, 2, 7, TqTunnelRole::ClientOpen,
-             TqRelayBackendType::LinuxWorker},
-            5);
+        auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
         const auto ledger = owner->TerminalLedger();
+        const auto identity = ledger->Identity();
         ledger->RecordShutdown(
             QUIC_STATUS_PENDING, 1, true,
             TqTerminalShutdownIntent::AbortBothImmediate);
@@ -875,21 +871,26 @@ int main() {
         ledger->MarkHandoffFacts(false, false, false);
         TqTerminalScheduler::Instance().ArmWatchdog(
             owner, ledger, {}, 0, std::chrono::seconds(5));
+        const std::string path =
+            "/relay/terminal-retentions?backend=linux&connection_id=" +
+            std::to_string(identity.ConnectionId) + "&tunnel_id=" +
+            std::to_string(identity.TunnelId) +
+            "&terminal_phase=shutdown_submitted";
         const std::string response = TqHandleServerAdmin(
-            Request(
-                "GET",
-                "/relay/terminal-retentions?backend=linux&connection_id=2&tunnel_id=133&terminal_phase=shutdown_submitted"),
+            Request("GET", path),
             metrics,
             10);
         if (response.find("HTTP/1.1 200 OK") == std::string::npos) return 505;
-        if (response.find("\"stream_id\":17") == std::string::npos) return 506;
+        if (response.find("\"stream_id\":" + std::to_string(identity.StreamId)) ==
+            std::string::npos) return 506;
         if (response.find("\"shutdown_intent\":\"abort_both_immediate\"") == std::string::npos) return 507;
         if (response.find("\"watchdog_state\":\"armed\"") == std::string::npos) return 508;
         const std::string invalid = TqHandleServerAdmin(
             Request("GET", "/relay/terminal-retentions?backend=epoll"), metrics, 10);
         if (invalid.find("HTTP/1.1 400") == std::string::npos ||
             invalid.find("invalid_filter") == std::string::npos) return 509;
-        TqTerminalScheduler::Instance().Cancel(17);
+        TqTerminalScheduler::Instance().Cancel(identity.StreamId);
+        owner->PublishTerminalAndTakeTarget();
     }
     return 0;
 }
