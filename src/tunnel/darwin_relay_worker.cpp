@@ -304,6 +304,11 @@ bool TqDarwinRelayWorker::FullyClosedPredicateReady(const RelayState& relay) {
         return false;
     }
     if (relay.Binding != nullptr) {
+        if (relay.Binding->PeerSendShutdownSticky.load(std::memory_order_acquire) ||
+            relay.Binding->SendShutdownCompleteSticky.load(std::memory_order_acquire) ||
+            relay.Binding->ConvergenceCheckSticky.load(std::memory_order_acquire)) {
+            return false;
+        }
         if (relay.Binding->CallbackPendingReceiveEvents.load(std::memory_order_acquire) != 0 ||
             relay.Binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire) != 0) {
             return false;
@@ -312,6 +317,23 @@ bool TqDarwinRelayWorker::FullyClosedPredicateReady(const RelayState& relay) {
         // RelayMutex and must not nest the callback queue lock (lock-order / lifetime).
     }
     return true;
+}
+
+void TqDarwinRelayWorker::MaybePublishFullyClosedStopLocal(
+    const std::shared_ptr<RelayState>& relay,
+    const char* trigger) {
+    AssertWorkerThreadForRelayState();
+    if (relay == nullptr || relay->Closing || relay->StopControl == nullptr) {
+        return;
+    }
+    if (!FullyClosedPredicateReady(*relay)) {
+        TraceHalfClose(*relay, trigger);
+        return;
+    }
+    const bool signaled = relay->StopControl->SignalStop(relay->ControlGeneration);
+    TraceHalfClose(
+        *relay,
+        signaled ? "fully_closed_stop" : "fully_closed_stop_generation_mismatch");
 }
 
 void TqDarwinRelayWorker::TraceHalfClose(const RelayState& relay, const char* trigger) const {
@@ -369,7 +391,12 @@ void TqDarwinRelayWorker::TraceHalfClose(const RelayState& relay, const char* tr
         }
     }
     if (FullyClosedPredicateReady(relay)) {
-        blockers = "predicate_ready_no_signal_stop";
+        if (relay.StopControl != nullptr &&
+            relay.StopControl->Stop.load(std::memory_order_acquire)) {
+            blockers = "already_stopped";
+        } else {
+            blockers = "predicate_ready_no_signal_stop";
+        }
     } else if (blockers.empty()) {
         blockers = "none";
     }
@@ -459,7 +486,7 @@ struct TqDarwinRelayWorker::ShutdownSink final : TqStreamLifetime::Target {
                         relay->InFlightQuicSendBytes >= info.TotalBytes
                             ? relay->InFlightQuicSendBytes - info.TotalBytes
                             : 0;
-                    if (info.Fin) {
+                    if (info.Fin && !event->SEND_COMPLETE.Canceled) {
                         relay->QuicSendFinCompleted = true;
                         relay->QuicSendClosed = true;
                     }
@@ -2337,7 +2364,7 @@ bool TqDarwinRelayWorker::CompleteDetachedQuicSend(StreamBinding* binding, TqDar
         relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= info.TotalBytes
             ? relay->InFlightQuicSendBytes - info.TotalBytes
             : 0;
-        if (info.Fin) {
+        if (info.Fin && !operation->CompletionCanceled) {
             relay->QuicSendFinCompleted = true;
             relay->QuicSendClosed = true;
         }
@@ -2631,7 +2658,7 @@ bool TqDarwinRelayWorker::DrainTcpReadable(const std::shared_ptr<RelayState>& re
             }
             const bool submitted = SubmitTcpBatchToQuic(relay, std::move(finViews), true);
             if (submitted) {
-                TraceHalfClose(*relay, "tcp_eof");
+                MaybePublishFullyClosedStopLocal(relay, "tcp_eof");
             }
             return submitted;
         }
@@ -3067,6 +3094,7 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
                 completionMayReleaseRetiredStorage || bindingRelayFallback;
         }
     }
+    const bool completionCanceled = operation->CompletionCanceled;
     delete operation;
     if (relay != nullptr) {
         bool closing = false;
@@ -3078,7 +3106,7 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
             relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= info.TotalBytes
                 ? relay->InFlightQuicSendBytes - info.TotalBytes
                 : 0;
-            if (info.Fin) {
+            if (info.Fin && !completionCanceled) {
                 relay->QuicSendFinCompleted = true;
                 relay->QuicSendClosed = true;
             }
@@ -3091,15 +3119,15 @@ void TqDarwinRelayWorker::CompleteQuicSend(TqDarwinRelaySendOperation* operation
             relay->InFlightQuicSendBytes = relay->InFlightQuicSendBytes >= info.TotalBytes
                 ? relay->InFlightQuicSendBytes - info.TotalBytes
                 : 0;
-            if (info.Fin) {
+            if (info.Fin && !completionCanceled) {
                 relay->QuicSendFinCompleted = true;
                 relay->QuicSendClosed = true;
             }
             closing = relay->Closing;
         }
-        if (info.Fin) {
+        if (info.Fin && !completionCanceled) {
             if (workerThread && !bindingRelayFallback) {
-                TraceHalfClose(*relay, "quic_fin_buffer_released");
+                MaybePublishFullyClosedStopLocal(relay, "quic_fin_buffer_released");
             } else if (TqTraceEnabled()) {
                 // Off-worker fallback: do not scan worker-owned queues (§8.3).
                 TqTraceLinuxRelayStreamState state{};
@@ -3174,9 +3202,11 @@ bool TqDarwinRelayWorker::SetTcpReadBackpressure(const std::shared_ptr<RelayStat
     relay->TcpReadPausedByQuicBacklog = paused;
     relay->TcpReadArmed = !paused && !relay->TcpReadClosed;
     if (UpdateTcpInterestLocal(relay)) {
-        TraceHalfClose(
-            *relay,
-            paused ? "tcp_read_backpressure_on" : "tcp_read_backpressure_off");
+        if (!paused) {
+            MaybePublishFullyClosedStopLocal(relay, "tcp_read_backpressure_off");
+        } else {
+            TraceHalfClose(*relay, "tcp_read_backpressure_on");
+        }
         return true;
     }
     relay->TcpReadPausedByQuicBacklog = oldPaused;
@@ -3580,6 +3610,7 @@ void TqDarwinRelayWorker::ConsumeHalfCloseStickies(
         ProcessSendShutdownComplete(relay);
     }
     (void)binding.ConvergenceCheckSticky.exchange(false, std::memory_order_acq_rel);
+    MaybePublishFullyClosedStopLocal(relay, "half_close_sticky");
 }
 
 void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
@@ -3789,6 +3820,15 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
         return true;
     }
 
+    auto publishPendingDrainedIfEmpty = [&]() {
+        if (relay->PendingTcpWrites.empty() &&
+            relay->PendingTcpWriteBytes == 0 &&
+            relay->PendingQuicReceives.empty() &&
+            relay->PendingQuicReceiveBytes == 0) {
+            MaybePublishFullyClosedStopLocal(relay, "pending_drained");
+        }
+    };
+
     uint64_t burstBytes = 0;
     for (;;) {
         std::vector<iovec> iov;
@@ -3802,6 +3842,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
         }
         if (Config.TcpWriteBurstBytes != 0 && burstBytes >= Config.TcpWriteBurstBytes) {
             relay->TcpWriteArmed = true;
+            publishPendingDrainedIfEmpty();
             return true;
         }
         uint64_t maxWriteBytes = Config.TcpWriteMaxBytes;
@@ -3851,14 +3892,16 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
             relay->TcpWriteShutdownQueued = false;
             relay->TcpWriteArmed = false;
             relay->TcpWriteClosed = true;
-            TraceHalfClose(*relay, "tcp_shut_wr");
+            MaybePublishFullyClosedStopLocal(relay, "tcp_shut_wr");
             return true;
         } else {
             relay->TcpWriteArmed = false;
+            publishPendingDrainedIfEmpty();
             return true;
         }
 
         if (iov.empty()) {
+            publishPendingDrainedIfEmpty();
             return true;
         }
         msghdr message{};
@@ -3933,6 +3976,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
                 CompleteDeferredQuicReceive(relay, receive);
             }
             MaybeResumeQuicReceive(relay);
+            publishPendingDrainedIfEmpty();
             continue;
         }
         if (sent < 0 && errno == EINTR) {
@@ -3942,6 +3986,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
             AssertWorkerThreadForRelayState();
             relay->TcpWriteArmed = true;
             (void)UpdateTcpInterestLocal(relay);
+            publishPendingDrainedIfEmpty();
             return true;
         }
         Errors.fetch_add(1, std::memory_order_relaxed);
@@ -4336,7 +4381,7 @@ void TqDarwinRelayWorker::ProcessPeerSendShutdown(
         relay->TcpWriteArmed = true;
         (void)UpdateTcpInterestLocal(relay);
     }
-    TraceHalfClose(*relay, "peer_send_shutdown");
+    MaybePublishFullyClosedStopLocal(relay, "peer_send_shutdown");
 }
 
 void TqDarwinRelayWorker::ProcessSendShutdownComplete(
@@ -4354,7 +4399,7 @@ void TqDarwinRelayWorker::ProcessSendShutdownComplete(
     }
     relay->QuicSendClosed = true;
     relay->QuicSendShutdownCompleteObserved = true;
-    TraceHalfClose(*relay, "send_shutdown_complete");
+    MaybePublishFullyClosedStopLocal(relay, "send_shutdown_complete");
 }
 
 struct TqDarwinRelayWorker::PreparedRelayToken {
@@ -5045,6 +5090,9 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
     if (event->Type == QUIC_STREAM_EVENT_SEND_COMPLETE) {
         TqDarwinRelaySendOperation* operation =
             reinterpret_cast<TqDarwinRelaySendOperation*>(event->SEND_COMPLETE.ClientContext);
+        if (operation != nullptr && event->SEND_COMPLETE.Canceled) {
+            operation->CompletionCanceled = true;
+        }
         TqDarwinRelayWorker* worker = binding->Worker.load(std::memory_order_acquire);
         KnownSendOperationInfo info{};
         if (worker != nullptr && worker->TryClaimKnownSendCompletionEvent(operation, &info)) {

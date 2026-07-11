@@ -5910,6 +5910,29 @@ void ManagedReceiveAllocationFailureUsesActiveShutdownNotTerminal() {
     CHECK(weakOwner.expired());
 }
 
+void FullyClosedStopAfterEofAndPeerFinWithoutShutdownComplete() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register(/*enableQuicSends=*/false));
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+
+    CHECK(::shutdown(harness.Fds[0], SHUT_WR) == 0);
+    CHECK(harness.Worker.InvokeTcpEventForTest(
+        harness.Result.RelayId, EVFILT_READ, 0, 0));
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    CHECK(TqRelayControlStopSignaledCount().load(std::memory_order_relaxed) >= 1);
+    harness.StopAndClosePeer();
+}
+
 void FullyClosedPeerSendShutdownStickySurvivesQueueFull() {
     TqDarwinRelayWorkerConfig config{};
     config.EventQueueCapacity = 2;
@@ -7252,6 +7275,7 @@ int main() {
     ManagedDuplicateTerminalEventIsIdempotent();
     ManagedQueuedPeerAbortBeforeTerminalPreservesOwnerUntilTerminal();
     ManagedNonTerminalHalfCloseEventsDoNotPublishTerminal();
+    FullyClosedStopAfterEofAndPeerFinWithoutShutdownComplete();
     FullyClosedPeerSendShutdownStickySurvivesQueueFull();
     ManagedStopRetentionMetricsSurfaceTerminalRetainedOwners();
     ManagedStopPurgeProcessesPeerAbortBeforeTerminal();

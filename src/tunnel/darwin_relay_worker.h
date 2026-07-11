@@ -78,6 +78,7 @@ struct TqDarwinRelaySendOperation {
     uint64_t CompletionRelayId{0};
     uint64_t CompletionTotalBytes{0};
     bool CompletionFin{false};
+    bool CompletionCanceled{false};
     std::shared_ptr<void> CompletionBindingOwner;
 #if defined(TCPQUIC_TESTING)
     inline static std::atomic<uint64_t> DestructorCount{0};
@@ -645,9 +646,12 @@ private:
     void InstallShutdownSinksForStop();
     void ProcessPeerSendShutdown(const std::shared_ptr<RelayState>& relay);
     void ProcessSendShutdownComplete(const std::shared_ptr<RelayState>& relay);
-    // Half-close diagnostics only — never SignalStop.
+    // Read-only predicate; stop is published only via MaybePublishFullyClosedStopLocal.
     static bool FullyClosedPredicateReady(const RelayState& relay);
     void TraceHalfClose(const RelayState& relay, const char* trigger) const;
+    void MaybePublishFullyClosedStopLocal(
+        const std::shared_ptr<RelayState>& relay,
+        const char* trigger);
     void RequestRelayShutdown(
         const std::shared_ptr<RelayState>& relay,
         TqStreamLifetime::ShutdownIntent intent);
