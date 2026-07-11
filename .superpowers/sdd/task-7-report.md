@@ -28,3 +28,11 @@ rtk build/bin/Release/tcpquic_router_runtime_test
 - `shutdown_intent` 已进入 ledger snapshot，Admin 只通过 `TqTerminalShutdownIntentName()` 序列化真实事实；`last_stream_event` 只通过 `TqTerminalEventName()` 序列化。
 - 为让 server Admin 测试使用现有 `CreateForTest()` 安全构造 retention，给该测试目标增加了 `TQ_UNIT_TESTING`。
 - 工作区原有文档、脚本和临时文件改动未暂存、未修改。
+- 发布 runner 对 timeout/violation 的失败门禁按计划延后到 Task 9；Task 7 仅保证字段与覆盖测试存在。
+
+## 接续补充（2026-07-12）
+
+- 将 server admin 与 router runtime 的 retention filter parser 和 schema serializer 抽取为 `terminal_convergence` 公共 helper；严格拒绝重复/未知 filter、零值、带符号及溢出 ID，两端共享同一 JSON schema 实现。
+- production 的三处 client/server owner factory 均传播 `Config.Tuning.TerminalWatchdogSeconds`；ledger snapshot 记录实际 watchdog 秒数，测试确定性覆盖 5/30。
+- scheduler 使用 fake clock 覆盖 retention oldest age `>5s` warning、`>30s` critical 各一次；扫描先复制 registry ledger，状态计算与日志均在 registry 锁外，terminal release 后清除 per-stream once 状态。
+- Task 9 runner failure gate 仍按计划 defer；Task 7 未修改 runner。

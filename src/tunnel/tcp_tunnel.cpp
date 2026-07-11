@@ -2149,7 +2149,7 @@ namespace {
         QUIC_STREAM_OPEN_FLAG_NONE,
         callbackTarget,
         terminalBinding.Identity,
-        5);
+        cfg.Tuning.TerminalWatchdogSeconds);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
         delete context;
@@ -2296,7 +2296,7 @@ static TqClientTunnelOpenHandle* TqStartClientTunnelAsyncBound(
         QUIC_STREAM_OPEN_FLAG_NONE,
         callbackTarget,
         terminalBinding.Identity,
-        5);
+        cfg.Tuning.TerminalWatchdogSeconds);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
         delete context;
@@ -2865,7 +2865,7 @@ void TqHandleServerIncomingStreamInternal(
         rawStream,
         target,
         terminalBinding.Identity,
-        5);
+        cfg.Tuning.TerminalWatchdogSeconds);
     if (streamOwner == nullptr) {
         target->Detach();
         delete dispatcher;

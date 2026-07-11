@@ -743,6 +743,62 @@ void TestRetentionSnapshotCopiesLedgerBeforeReadingIt() {
     TqStreamLifetime::SetBeforeTerminalRetentionSnapshotForTest({});
 }
 
+void TestRetentionAdminFilterIsStrictAndSchemaIsCanonical() {
+    TqTerminalRetentionFilter filter{};
+    CHECK(TqParseTerminalRetentionPath(
+        "/relay/terminal-retentions?backend=linux&connection_id=2&tunnel_id=133&terminal_phase=active",
+        filter));
+    CHECK(filter.Backend == TqRelayBackendType::LinuxWorker);
+    CHECK(filter.ConnectionId == 2);
+    CHECK(filter.TunnelId == 133);
+    CHECK(filter.HasPhase && filter.Phase == TerminalPhase::Active);
+
+    const char* invalid[] = {
+        "/relay/terminal-retentions?backend=linux&backend=darwin",
+        "/relay/terminal-retentions?unknown=x",
+        "/relay/terminal-retentions?connection_id=0",
+        "/relay/terminal-retentions?connection_id=+2",
+        "/relay/terminal-retentions?connection_id=18446744073709551616",
+        "/relay/terminal-retentions?terminal_phase=closing",
+        "/relay/terminal-retentions?",
+        "/relay/terminal-retentions?backend=linux&",
+    };
+    for (const char* path : invalid) {
+        TqTerminalRetentionFilter rejected{};
+        CHECK(!TqParseTerminalRetentionPath(path, rejected));
+    }
+
+    const std::string json = TqTerminalRetentionsJson({});
+    for (const char* field : {"\"retentions\"", "\"count\"", "\"oldest_age_ms\""}) {
+        CHECK(json.find(field) != std::string::npos);
+    }
+}
+
+void TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal() {
+    Reset();
+    auto owner = MakeStartedOwner(811);
+    CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 0);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(5100));
+    auto diagnostics = TqTerminalRetentionDiagnosticsForTest();
+    CHECK(diagnostics.WarningLogs == 1);
+    CHECK(diagnostics.CriticalLogs == 0);
+    CHECK(diagnostics.TrackedStreams == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(10));
+    CHECK(TqTerminalRetentionDiagnosticsForTest().WarningLogs == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(15001));
+    diagnostics = TqTerminalRetentionDiagnosticsForTest();
+    CHECK(diagnostics.WarningLogs == 1);
+    CHECK(diagnostics.CriticalLogs == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(10));
+    CHECK(TqTerminalRetentionDiagnosticsForTest().CriticalLogs == 1);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+    CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 0);
+}
+
 } // namespace
 
 int main() {
@@ -768,5 +824,7 @@ int main() {
     TestSinkRecordsNonTerminalEvents();
     TestRetentionSnapshotFiltersFinalLedger();
     TestRetentionSnapshotCopiesLedgerBeforeReadingIt();
+    TestRetentionAdminFilterIsStrictAndSchemaIsCanonical();
+    TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal();
     return 0;
 }

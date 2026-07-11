@@ -2,8 +2,11 @@
 
 #include <atomic>
 #include <algorithm>
+#include <charconv>
 #include <condition_variable>
+#include <cstdio>
 #include <queue>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <new>
@@ -87,6 +90,10 @@ std::atomic<uint64_t> g_watchdogTimeout{0};
 std::atomic<uint64_t> g_connectionEscalation{0};
 std::atomic<uint64_t> g_terminalTimeoutPending{0};
 std::atomic<uint64_t> g_schedulerFailure{0};
+std::mutex g_retentionDiagnosticLock;
+std::unordered_map<uint64_t, uint8_t> g_retentionDiagnosticStates;
+std::atomic<uint64_t> g_retentionWarningLogs{0};
+std::atomic<uint64_t> g_retentionCriticalLogs{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextTerminalSinkControlBlock{false};
 #endif
@@ -98,6 +105,49 @@ void ReleaseTerminalSinkPending() noexcept {
                pending, pending - 1,
                std::memory_order_relaxed,
                std::memory_order_relaxed)) {
+    }
+}
+
+void PollTerminalRetentionDiagnostics(
+    std::chrono::steady_clock::time_point now) noexcept {
+    const auto snapshots = TqSnapshotTerminalRetentionsAt({}, now);
+    std::unordered_map<uint64_t, uint64_t> ages;
+    try {
+        ages.reserve(snapshots.size());
+        for (const auto& snapshot : snapshots) {
+            ages[snapshot.Identity.StreamId] = snapshot.RetainedAgeMs;
+        }
+    } catch (...) {
+        g_schedulerFailure.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::vector<std::pair<uint64_t, const char*>> logs;
+    {
+        std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
+        for (auto it = g_retentionDiagnosticStates.begin();
+             it != g_retentionDiagnosticStates.end();) {
+            if (ages.find(it->first) == ages.end()) it = g_retentionDiagnosticStates.erase(it);
+            else ++it;
+        }
+        for (const auto& item : ages) {
+            uint8_t& state = g_retentionDiagnosticStates[item.first];
+            if (item.second > 5000 && (state & 1u) == 0) {
+                state |= 1u;
+                logs.emplace_back(item.first, "warning");
+                g_retentionWarningLogs.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (item.second > 30000 && (state & 2u) == 0) {
+                state |= 2u;
+                logs.emplace_back(item.first, "critical");
+                g_retentionCriticalLogs.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+    for (const auto& item : logs) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: terminal retention %s stream_id=%llu oldest_age_ms=%llu\n",
+            item.second, static_cast<unsigned long long>(item.first),
+            static_cast<unsigned long long>(ages[item.first]));
     }
 }
 
@@ -370,11 +420,20 @@ bool StartWorkerWithLifecycleLocked() noexcept {
                 continue;
             }
             const auto due = g_scheduler.Tasks.top().Due;
-            if (g_scheduler.Wake.wait_until(lock, due) != std::cv_status::timeout) continue;
+            const auto diagnosticDue = std::min(
+                due, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+            if (g_scheduler.Wake.wait_until(lock, diagnosticDue) != std::cv_status::timeout) continue;
+            if (std::chrono::steady_clock::now() < due) {
+                lock.unlock();
+                PollTerminalRetentionDiagnostics(std::chrono::steady_clock::now());
+                lock.lock();
+                continue;
+            }
             ScheduledTask task = g_scheduler.Tasks.top();
             g_scheduler.Tasks.pop();
             lock.unlock();
             ExecuteTask(std::move(task));
+            PollTerminalRetentionDiagnostics(std::chrono::steady_clock::now());
             lock.lock();
         }
         g_scheduler.Running = false;
@@ -577,6 +636,12 @@ void TqTerminalScheduler::Cancel(uint64_t streamId) noexcept {
 #if defined(TQ_UNIT_TESTING)
 void TqTerminalScheduler::ResetForTest() {
     Instance().Stop();
+    g_retentionWarningLogs.store(0, std::memory_order_relaxed);
+    g_retentionCriticalLogs.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> diagnosticGuard(g_retentionDiagnosticLock);
+        g_retentionDiagnosticStates.clear();
+    }
     std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
     g_scheduler.Tasks = {};
     g_scheduler.Ledgers.clear();
@@ -602,6 +667,7 @@ void TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds delta) {
         }
     }
     RunDueTasksForTest();
+    PollTerminalRetentionDiagnostics(NowForTest());
 }
 
 std::chrono::steady_clock::time_point TqTerminalScheduler::NowForTest() {
@@ -892,6 +958,97 @@ const char* TqTerminalEventName(TqTerminalEvent event) noexcept {
     return "unknown";
 }
 
+bool TqParseTerminalRetentionPath(
+    const std::string& path, TqTerminalRetentionFilter& filter) {
+    constexpr const char* base = "/relay/terminal-retentions";
+    constexpr size_t baseLength = 26;
+    if (path.compare(0, baseLength, base) != 0) return false;
+    if (path.size() == baseLength) return true;
+    if (path[baseLength] != '?' || path.size() == baseLength + 1) return false;
+    size_t offset = baseLength + 1;
+    while (offset < path.size()) {
+        const size_t end = path.find('&', offset);
+        const std::string item = path.substr(offset, end - offset);
+        const size_t equal = item.find('=');
+        if (equal == std::string::npos || equal == 0 || equal + 1 == item.size()) return false;
+        const std::string key = item.substr(0, equal);
+        const std::string value = item.substr(equal + 1);
+        auto parseId = [](const std::string& text, uint64_t& id) {
+            if (text.empty()) return false;
+            id = 0;
+            const auto parsed = std::from_chars(text.data(), text.data() + text.size(), id);
+            return parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size() && id != 0;
+        };
+        if (key == "backend") {
+            if (filter.Backend != TqRelayBackendType::None) return false;
+            if (value == "linux") filter.Backend = TqRelayBackendType::LinuxWorker;
+            else if (value == "windows") filter.Backend = TqRelayBackendType::WindowsWorker;
+            else if (value == "darwin") filter.Backend = TqRelayBackendType::DarwinWorker;
+            else return false;
+        } else if (key == "connection_id") {
+            if (filter.ConnectionId != 0 || !parseId(value, filter.ConnectionId)) return false;
+        } else if (key == "tunnel_id") {
+            if (filter.TunnelId != 0 || !parseId(value, filter.TunnelId)) return false;
+        } else if (key == "terminal_phase") {
+            if (filter.HasPhase) return false;
+            filter.HasPhase = true;
+            if (value == "active") filter.Phase = TerminalPhase::Active;
+            else if (value == "shutdown_reserved") filter.Phase = TerminalPhase::ShutdownReserved;
+            else if (value == "shutdown_submitted") filter.Phase = TerminalPhase::ShutdownSubmitted;
+            else if (value == "terminal_observed") filter.Phase = TerminalPhase::TerminalObserved;
+            else if (value == "closed") filter.Phase = TerminalPhase::Closed;
+            else return false;
+        } else return false;
+        if (end == std::string::npos) break;
+        offset = end + 1;
+        if (offset == path.size()) return false;
+    }
+    return true;
+}
+
+std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter) {
+    const auto snapshots = TqSnapshotTerminalRetentions(filter);
+    std::ostringstream out;
+    out << "{\"retentions\":[";
+    uint64_t oldest = 0;
+    bool first = true;
+    for (const auto& snapshot : snapshots) {
+        oldest = std::max(oldest, snapshot.RetainedAgeMs);
+        const char* backend = "none";
+        switch (snapshot.Identity.Backend) {
+        case TqRelayBackendType::LinuxWorker: backend = "linux"; break;
+        case TqRelayBackendType::WindowsWorker: backend = "windows"; break;
+        case TqRelayBackendType::DarwinWorker: backend = "darwin"; break;
+        case TqRelayBackendType::None: break;
+        }
+        if (!first) out << ',';
+        first = false;
+        out << "{\"stream_id\":" << snapshot.Identity.StreamId
+            << ",\"tunnel_id\":" << snapshot.Identity.TunnelId
+            << ",\"connection_id\":" << snapshot.Identity.ConnectionId
+            << ",\"connection_generation\":" << snapshot.Identity.ConnectionGeneration
+            << ",\"role\":\"" << (snapshot.Identity.Role == TqTunnelRole::ClientOpen ? "client" : "server")
+            << "\",\"backend\":\"" << backend
+            << "\",\"terminal_phase\":\"" << TqTerminalPhaseName(snapshot.Phase)
+            << "\",\"retained_age_ms\":" << snapshot.RetainedAgeMs
+            << ",\"shutdown_intent\":\"" << TqTerminalShutdownIntentName(snapshot.ShutdownIntent)
+            << "\",\"shutdown_status\":\"" << (snapshot.Phase == TerminalPhase::ShutdownSubmitted ? "pending" : "none")
+            << "\",\"shutdown_attempt\":" << snapshot.ShutdownAttempt
+            << ",\"shutdown_submitted_at_ms\":" << snapshot.ShutdownSubmittedAtMs
+            << ",\"terminal_observed_at_ms\":" << snapshot.TerminalObservedAtMs
+            << ",\"last_stream_event\":\"" << TqTerminalEventName(snapshot.LastStreamEvent)
+            << "\",\"in_tunnel_registry\":" << (snapshot.InTunnelRegistry ? "true" : "false")
+            << ",\"relay_active\":" << (snapshot.RelayActive ? "true" : "false")
+            << ",\"tcp_valid\":" << (snapshot.TcpValid ? "true" : "false")
+            << ",\"watchdog_state\":\"" << TqTerminalWatchdogStateName(snapshot.Watchdog)
+            << "\",\"connection_escalated\":" << (snapshot.ConnectionEscalated ? "true" : "false")
+            << '}';
+    }
+    out << "],\"count\":" << snapshots.size()
+        << ",\"oldest_age_ms\":" << oldest << '}';
+    return out.str();
+}
+
 void TqRecordTerminalExactlyOnceViolation() noexcept {
     g_terminalExactlyOnceViolations.fetch_add(1, std::memory_order_relaxed);
 }
@@ -941,5 +1098,19 @@ void TqResetTerminalMetricsForTest() noexcept {
     g_terminalTimeoutPending.store(0, std::memory_order_relaxed);
     g_schedulerFailure.store(0, std::memory_order_relaxed);
     g_failNextTerminalSinkControlBlock.store(false, std::memory_order_relaxed);
+    g_retentionWarningLogs.store(0, std::memory_order_relaxed);
+    g_retentionCriticalLogs.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
+    g_retentionDiagnosticStates.clear();
+}
+
+TqTerminalRetentionDiagnosticsTestSnapshot
+TqTerminalRetentionDiagnosticsForTest() noexcept {
+    TqTerminalRetentionDiagnosticsTestSnapshot snapshot{};
+    snapshot.WarningLogs = g_retentionWarningLogs.load(std::memory_order_relaxed);
+    snapshot.CriticalLogs = g_retentionCriticalLogs.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
+    snapshot.TrackedStreams = g_retentionDiagnosticStates.size();
+    return snapshot;
 }
 #endif

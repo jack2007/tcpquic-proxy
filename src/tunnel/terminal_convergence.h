@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -74,6 +75,7 @@ struct TqTerminalLedgerSnapshot {
     TqTerminalWatchdogState Watchdog{TqTerminalWatchdogState::Idle};
     bool ConnectionEscalated{false};
     bool AccountingCompleted{false};
+    uint32_t WatchdogSeconds{5};
 };
 
 class TqTerminalLedger final {
@@ -191,6 +193,12 @@ struct TqTerminalRetentionFilter {
 
 std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
     const TqTerminalRetentionFilter& filter = {});
+std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentionsAt(
+    const TqTerminalRetentionFilter& filter,
+    std::chrono::steady_clock::time_point now);
+bool TqParseTerminalRetentionPath(
+    const std::string& path, TqTerminalRetentionFilter& filter);
+std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter);
 const char* TqTerminalPhaseName(TerminalPhase phase) noexcept;
 const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept;
 const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexcept;
@@ -199,4 +207,11 @@ void TqRecordTerminalExactlyOnceViolation() noexcept;
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept;
 #if defined(TQ_UNIT_TESTING)
 void TqResetTerminalMetricsForTest() noexcept;
+struct TqTerminalRetentionDiagnosticsTestSnapshot {
+    uint64_t WarningLogs{0};
+    uint64_t CriticalLogs{0};
+    uint64_t TrackedStreams{0};
+};
+TqTerminalRetentionDiagnosticsTestSnapshot
+TqTerminalRetentionDiagnosticsForTest() noexcept;
 #endif

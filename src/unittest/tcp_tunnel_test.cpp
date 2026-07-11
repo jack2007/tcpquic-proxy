@@ -635,6 +635,8 @@ bool DispatchFakeStreamEvent(HQUIC handle, QUIC_STREAM_EVENT& event) {
     return callback(handle, context, &event) == QUIC_STATUS_SUCCESS;
 }
 
+bool DispatchFakeShutdownComplete(HQUIC handle);
+
 int TestTerminalLookupFailureRejectsBeforeCallbackInstall() {
     QUIC_API_TABLE fakeApi{};
     InstallFakeMsQuicForTcpTunnel(fakeApi);
@@ -647,6 +649,29 @@ int TestTerminalLookupFailureRejectsBeforeCallbackInstall() {
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_RECEIVE;
     if (DispatchFakeStreamEvent(rawStream, event)) return 7061;
+    return 0;
+}
+
+int TestServerIncomingPropagatesConfiguredTerminalWatchdog() {
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+    TqAcl acl;
+    auto* connection = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x7063));
+
+    for (const uint32_t seconds : {5u, 30u}) {
+        TqConfig cfg{};
+        cfg.Tuning.TerminalWatchdogSeconds = seconds;
+        const HQUIC rawStream = reinterpret_cast<HQUIC>(
+            static_cast<uintptr_t>(0x7064 + seconds));
+        TqHandleServerIncomingStream(connection, rawStream, acl, cfg, nullptr);
+        const auto snapshots = TqSnapshotTerminalRetentions({});
+        const auto found = std::find_if(
+            snapshots.begin(), snapshots.end(), [seconds](const auto& snapshot) {
+                return snapshot.WatchdogSeconds == seconds;
+            });
+        if (found == snapshots.end()) return 7064 + static_cast<int>(seconds);
+        if (!DispatchFakeShutdownComplete(rawStream)) return 7100 + static_cast<int>(seconds);
+    }
     return 0;
 }
 
@@ -2543,6 +2568,7 @@ static int TestDarwinRelayWorkerIndexPropagatesToHandleAndRegistry() {
 
 int main() {
     if (int rc = TestTerminalLookupFailureRejectsBeforeCallbackInstall()) return rc;
+    if (int rc = TestServerIncomingPropagatesConfiguredTerminalWatchdog()) return rc;
     if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;

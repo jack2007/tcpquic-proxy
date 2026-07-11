@@ -961,6 +961,7 @@ void TqStreamLifetime::BindTerminalIdentity(
     try {
         TerminalLedger_ = std::make_shared<TqTerminalLedger>(identity);
         TerminalWatchdogSeconds_ = watchdogSeconds;
+        TerminalLedger_->State_.WatchdogSeconds = watchdogSeconds;
     } catch (...) {
         TerminalLedger_.reset();
     }
@@ -1004,6 +1005,13 @@ TqStreamLifetime::SnapshotTerminalRetentions() noexcept {
 
 std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
     const TqTerminalRetentionFilter& filter) {
+    return TqSnapshotTerminalRetentionsAt(
+        filter, std::chrono::steady_clock::now());
+}
+
+std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentionsAt(
+    const TqTerminalRetentionFilter& filter,
+    std::chrono::steady_clock::time_point now) {
     std::vector<std::shared_ptr<TqTerminalLedger>> ledgers;
     {
         std::lock_guard<std::mutex> guard(g_terminalRetentionLock);
@@ -1026,7 +1034,6 @@ std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
 
     std::vector<TqTerminalLedgerSnapshot> snapshots;
     snapshots.reserve(ledgers.size());
-    const auto now = std::chrono::steady_clock::now();
     for (const auto& ledger : ledgers) {
         if (ledger == nullptr) {
             continue;
