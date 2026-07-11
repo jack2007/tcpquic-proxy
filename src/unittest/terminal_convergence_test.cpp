@@ -52,6 +52,9 @@ public:
 
 void Reset() {
     TqTerminalScheduler::ResetForTest();
+    const auto scheduler = TqTerminalScheduler::SnapshotForTest();
+    CHECK(!scheduler.Running);
+    CHECK(!scheduler.Joinable);
     TqStreamLifetime::ResetLifecycleRegistriesForTest();
 }
 
@@ -1000,7 +1003,9 @@ int main() {
     TestCompletedStreamsLeaveNoSchedulerIndexEntries();
     TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks();
     TestStopJoinRejectsScheduleAndEscalatesOnce();
-    TestStopCannotSplitEnqueueFromWorkerStart();
+    for (int iteration = 0; iteration != 64; ++iteration) {
+        TestStopCannotSplitEnqueueFromWorkerStart();
+    }
     TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce();
     TestIdentityRebindKeepsOriginalLedger();
     TestSinkRejectsMissingOrMismatchedOwnerLedger();

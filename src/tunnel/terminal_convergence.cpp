@@ -582,7 +582,9 @@ bool StartWorkerWithLifecycleLocked() noexcept {
             const auto diagnosticDue = std::min(
                 due, std::chrono::steady_clock::now() + DiagnosticPollIntervalLocked());
             if (g_scheduler.Wake.wait_until(lock, diagnosticDue) != std::cv_status::timeout) continue;
-            if (std::chrono::steady_clock::now() < due) {
+            if (g_scheduler.Stopping || g_scheduler.Tasks.empty()) continue;
+            const auto currentDue = g_scheduler.Tasks.top().Due;
+            if (std::chrono::steady_clock::now() < currentDue) {
                 lock.unlock();
                 PollTerminalRetentionDiagnostics(std::chrono::steady_clock::now());
                 lock.lock();
