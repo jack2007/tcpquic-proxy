@@ -864,10 +864,15 @@ void TqStreamLifetime::RetainUntilTerminalLocked() {
             TqRecordTerminalExactlyOnceViolation();
             return;
         }
-        g_terminalRetentions.emplace(
+        const auto inserted = g_terminalRetentions.emplace(
             this,
             TerminalRetention{
                 shared_from_this(), TerminalLedger_, std::chrono::steady_clock::now()});
+        if (!inserted.second ||
+            inserted.first->second.Ledger.get() != TerminalLedger_.get()) {
+            TqRecordTerminalExactlyOnceViolation();
+            return;
+        }
         TerminalRetained_ = true;
     }
 }
@@ -932,6 +937,44 @@ TqStreamLifetime::SnapshotTerminalRetentions() noexcept {
     return snapshot;
 }
 
+std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
+    const TqTerminalRetentionFilter& filter) {
+    std::vector<std::shared_ptr<TqTerminalLedger>> ledgers;
+    {
+        std::lock_guard<std::mutex> guard(g_terminalRetentionLock);
+        ledgers.reserve(g_terminalRetentions.size());
+        for (const auto& item : g_terminalRetentions) {
+            ledgers.push_back(item.second.Ledger);
+        }
+    }
+
+    std::vector<TqTerminalLedgerSnapshot> snapshots;
+    snapshots.reserve(ledgers.size());
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& ledger : ledgers) {
+        if (ledger == nullptr) {
+            continue;
+        }
+        auto snapshot = ledger->Snapshot(now);
+        if (filter.Backend != TqRelayBackendType::None &&
+            snapshot.Identity.Backend != filter.Backend) {
+            continue;
+        }
+        if (filter.ConnectionId != 0 &&
+            snapshot.Identity.ConnectionId != filter.ConnectionId) {
+            continue;
+        }
+        if (filter.TunnelId != 0 && snapshot.Identity.TunnelId != filter.TunnelId) {
+            continue;
+        }
+        if (filter.HasPhase && snapshot.Phase != filter.Phase) {
+            continue;
+        }
+        snapshots.push_back(snapshot);
+    }
+    return snapshots;
+}
+
 TqStreamLifetime::SendCompletionSnapshot
 TqStreamLifetime::SnapshotSendCompletions() noexcept {
     SendCompletionSnapshot snapshot{};
@@ -987,6 +1030,7 @@ void TqStreamLifetime::ResetLifecycleRegistriesForTest() noexcept {
         g_claimedSendCompletions.clear();
     }
     g_terminalApiSuppressedCount.store(0, std::memory_order_relaxed);
+    TqResetTerminalMetricsForTest();
 }
 #endif
 

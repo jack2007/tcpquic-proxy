@@ -313,6 +313,14 @@ tcpquic_target_include_dirs(tcpquic_stream_lifetime_test)
 target_link_libraries(tcpquic_stream_lifetime_test PRIVATE Threads::Threads)
 target_compile_definitions(tcpquic_stream_lifetime_test PRIVATE TQ_UNIT_TESTING=1)
 tcpquic_link_mimalloc(tcpquic_stream_lifetime_test)
+add_tcpquic_executable(tcpquic_terminal_convergence_test
+    unittest/terminal_convergence_test.cpp
+    tunnel/terminal_convergence.cpp
+    tunnel/stream_lifetime.cpp)
+tcpquic_target_include_dirs(tcpquic_terminal_convergence_test)
+target_link_libraries(tcpquic_terminal_convergence_test PRIVATE Threads::Threads)
+target_compile_definitions(tcpquic_terminal_convergence_test PRIVATE TQ_UNIT_TESTING=1)
+tcpquic_link_mimalloc(tcpquic_terminal_convergence_test)
 set(TCPQUIC_SERVER_TEST_SOURCES
     runtime/thread_pool.cpp
     tunnel/tcp_dialer.cpp

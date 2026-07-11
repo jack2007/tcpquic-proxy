@@ -104,6 +104,29 @@ struct TqTerminalShutdownResult {
     uint32_t Attempt{0};
 };
 
+struct TqTerminalMetrics {
+    uint64_t HandoffStarted{0};
+    uint64_t HandoffCompleted{0};
+    uint64_t HandoffFailed{0};
+    uint64_t ShutdownSubmitted{0};
+    uint64_t ShutdownPending{0};
+    uint64_t ShutdownSyncFailure{0};
+    uint64_t ShutdownRetry{0};
+    uint64_t TerminalObserved{0};
+    uint64_t WatchdogArmed{0};
+    uint64_t WatchdogCanceled{0};
+    uint64_t WatchdogTimeout{0};
+    uint64_t ConnectionEscalation{0};
+    uint64_t TerminalTimeoutPending{0};
+    uint64_t TerminalSinkPending{0};
+    uint64_t DuplicateStopSuppressed{0};
+    uint64_t DuplicateShutdownSuppressed{0};
+    uint64_t DuplicateTerminalSuppressed{0};
+    uint64_t ExactlyOnceViolation{0};
+};
+
+TqTerminalMetrics TqTerminalMetricsSnapshot() noexcept;
+
 struct TqTerminalRetentionFilter {
     TqRelayBackend Backend{TqRelayBackendType::None};
     uint64_t ConnectionId{0};
@@ -119,3 +142,6 @@ const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept;
 const char* TqTerminalEventName(TqTerminalEvent event) noexcept;
 void TqRecordTerminalExactlyOnceViolation() noexcept;
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept;
+#if defined(TQ_UNIT_TESTING)
+void TqResetTerminalMetricsForTest() noexcept;
+#endif

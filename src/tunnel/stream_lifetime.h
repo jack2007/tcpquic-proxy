@@ -262,6 +262,22 @@ private:
 #endif
 };
 
+class TqTerminalSink final : public TqStreamLifetime::Target {
+public:
+    static std::shared_ptr<TqTerminalSink> Create(
+        std::weak_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+    QUIC_STATUS OnStreamEvent(
+        MsQuicStream*, QUIC_STREAM_EVENT*, uint64_t) noexcept override;
+
+private:
+    TqTerminalSink(
+        std::weak_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+    std::weak_ptr<TqStreamLifetime> Owner_;
+    std::shared_ptr<TqTerminalLedger> Ledger_;
+};
+
 // callback-safe target adapter。Detach 从外部线程调用时等待已经进入的 callback；
 // callback 内自删除 context 时只关闭 admission，由当前 callback guard 自然退出。
 class TqStreamCallbackTarget final : public TqStreamLifetime::Target {
