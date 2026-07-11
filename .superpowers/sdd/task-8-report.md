@@ -119,3 +119,24 @@ tunnel reaper、tcp tunnel 三个测试进程，退出码均为 0。
   half-close 最终 EOF 作为 close-wait 替代观测；main 额外断言全局 active relay 为零。
 - 最终门禁：production target 构建成功；新 target 在 `timeout -k` 下连续三次均八项 PASS；
   Linux IO 与 tunnel reaper 均退出 0；`git diff --check` 无输出。
+
+## Reviewer 第四轮 RAII/并发安全返工（2026-07-12）
+
+- handoff boundary 的 fatal thread 在创建后立即安装 scope guard；任一后续 CHECK 早退都会
+  先把三个 boundary 全部 release、notify，再 join。正常路径显式 join 后 dismiss，不存在
+  joinable thread 析构或 hook 永久阻塞。
+- `TcpPair` 为 move-only RAII。精确链的两个 heap stream 先由 `unique_ptr` 持有，只有
+  `InstallStreamForTest` 成功后才把所有权交给 owner；client/server context、committed state
+  都以 nullable 状态进入 cleanup guard，guard 在第一次 context 创建之前已建立，可处理
+  client 成功/server 失败、registration 未 publish、单边 committed 等 partial failure。
+- fake transport 发布改为 atomic acquire/release。transport 本体由声明早于 cleanup guard 的
+  shared keepalive 持有；cleanup 先 unpublish，随后 terminal/unregister 并 Stop/join 两个 worker，
+  确认任何已 acquire 裸指针的 callback 已退出后，才 reset owner 与 transport keepalive。
+- C/D/G 的 cleanup guard 均移动到 context 创建返回后、第一个 CHECK 之前；committed state
+  可为空，cleanup 仅在已 publish 时 unregister，随后 Stop worker、actual reaper，并仅对仍未
+  析构的 context 执行 fallback。成功路径全部显式 dismiss，cleanup 幂等且析构顺序不会访问
+  已销毁的 worker/owner。
+- 对所有 CHECK 失败点做了 partial-state 审查：socket 创建由 `TcpPair` 回收；stream install
+  前由 `unique_ptr` 回收；context 创建/第二端创建/commit snapshot/async admission/transport
+  pump/terminal/reaper 任一点失败，均已有先于该 CHECK 建立的 owner/thread/context guard。
+- 修复后新 target 在 `timeout -k` 下再次连续运行三次，三次均八项 PASS。
