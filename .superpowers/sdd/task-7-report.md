@@ -44,3 +44,9 @@ rtk build/bin/Release/tcpquic_router_runtime_test
 - `shutdown_status` 直接序列化 ledger 的真实 `ShutdownStatus`，稳定名称覆盖 success、pending、out_of_memory、invalid_state 和 unknown numeric。
 - retention age/deadline 继续使用 steady clock；公开 submitted/terminal 时间戳改为 system clock Unix 毫秒，并验证 epoch 范围与先后顺序。
 - 独立 speed-control production handler 接收 `TqConfig` 并传播实际 watchdog；dispatcher speed-control 路径覆盖 override 30。补齐受 terminal convergence 影响的测试 target 源清单后，无 target 全量构建通过。
+
+## 异常安全复审修订（2026-07-12）
+
+- retention diagnostics poll 的 snapshot、identity key/age map、state entry、log collection 分配均由最外层异常边界保护；任何异常只精确增加一次 `SchedulerFailure`，不会逃出 `noexcept`。
+- once-only 告警采用 reservation→锁外 emit→commit 协议：所有可能分配的对象和 state entry 在 reservation 前完成；并发 poll 看到 reservation 会跳过，日志形成/emit 前失败不会消费 warning/critical bit。
+- 测试分别注入 snapshot、state、log 三个分配失败点，验证不终止、failure +1、bit 未消费，下一次 poll 仍能正常各发一次且后续不重复。

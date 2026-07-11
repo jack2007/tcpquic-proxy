@@ -112,6 +112,7 @@ public:
 
 class TqTerminalScheduler final {
 public:
+    enum class DiagnosticAllocationStage : uint8_t { Snapshot, State, Log };
     static TqTerminalScheduler& Instance();
     void Start();
     void Stop();
@@ -150,6 +151,8 @@ public:
     static void FailNextThreadStartForTest() noexcept;
     static void SetDiagnosticPollIntervalForTest(std::chrono::milliseconds interval);
     static void SetDiagnosticNowForTest(std::chrono::steady_clock::time_point now);
+    static void FailNextDiagnosticAllocationForTest(
+        DiagnosticAllocationStage stage) noexcept;
 #endif
 };
 

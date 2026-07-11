@@ -799,6 +799,34 @@ void TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal() {
     CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 0);
 }
 
+void TestRetentionDiagnosticsAllocationFailuresDoNotConsumeOnceBits() {
+    using Stage = TqTerminalScheduler::DiagnosticAllocationStage;
+    for (const Stage stage : {Stage::Snapshot, Stage::State, Stage::Log}) {
+        Reset();
+        auto owner = MakeStartedOwner(820 + static_cast<uint64_t>(stage));
+        TqTerminalScheduler::FailNextDiagnosticAllocationForTest(stage);
+        TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(31));
+        auto metrics = TqTerminalMetricsSnapshot();
+        auto diagnostics = TqTerminalRetentionDiagnosticsForTest();
+        CHECK(metrics.SchedulerFailure == 1);
+        CHECK(diagnostics.WarningLogs == 0);
+        CHECK(diagnostics.CriticalLogs == 0);
+
+        TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+        metrics = TqTerminalMetricsSnapshot();
+        diagnostics = TqTerminalRetentionDiagnosticsForTest();
+        CHECK(metrics.SchedulerFailure == 1);
+        CHECK(diagnostics.WarningLogs == 1);
+        CHECK(diagnostics.CriticalLogs == 1);
+        TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+        CHECK(TqTerminalRetentionDiagnosticsForTest().WarningLogs == 1);
+        CHECK(TqTerminalRetentionDiagnosticsForTest().CriticalLogs == 1);
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    }
+}
+
 void TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity() {
     Reset();
     TqTerminalScheduler::UseRealClockForTest();
@@ -910,6 +938,7 @@ int main() {
     TestRetentionSnapshotCopiesLedgerBeforeReadingIt();
     TestRetentionAdminFilterIsStrictAndSchemaIsCanonical();
     TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal();
+    TestRetentionDiagnosticsAllocationFailuresDoNotConsumeOnceBits();
     TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity();
     TestShutdownStatusNamesAreStable();
     TestRetentionJsonUsesActualStatusAndUnixWallClock();
