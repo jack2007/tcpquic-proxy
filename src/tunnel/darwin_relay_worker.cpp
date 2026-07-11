@@ -341,6 +341,9 @@ void TqDarwinRelayWorker::Stop() {
                 std::lock_guard<std::mutex> lock(RelayMutex);
                 relays.swap(Relays);
             }
+            // Settle PENDING receive views while relay->Stream is still reachable
+            // via binding weak locks. Do not depend on a bare ReceiveCompleteStream.
+            SettleQueuedReceiveViewsBeforeRetire();
             for (const auto& entry : relays) {
                 RequestRelayShutdown(
                     entry.second,
@@ -545,6 +548,19 @@ uint64_t TqDarwinRelayWorker::QuicReceiveEnqueueFailuresForTest() const {
 
 uint64_t TqDarwinRelayWorker::QuicReceiveViewBackpressureQueuedForTest() const {
     return QuicReceiveViewBackpressureQueued.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::QuicActiveShutdownEnqueuedForTest() const {
+    return QuicActiveShutdownEnqueued.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::QuicShutdownCompleteEnqueuedForTest() const {
+    return QuicShutdownCompleteEnqueued.load(std::memory_order_relaxed);
+}
+
+TqDarwinActiveShutdownReason TqDarwinRelayWorker::LastActiveShutdownReasonForTest() const {
+    return static_cast<TqDarwinActiveShutdownReason>(
+        LastActiveShutdownReason.load(std::memory_order_relaxed));
 }
 
 void TqDarwinRelayWorker::SetRegisterTcpFiltersFailureForTest(bool fail) {
@@ -1015,6 +1031,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
             break;
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+        case TqDarwinRelayEventType::QuicActiveShutdown:
             if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
                 CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
             }
@@ -1094,6 +1111,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
             break;
         case TqDarwinRelayEventType::QuicPeerSendAborted:
         case TqDarwinRelayEventType::QuicPeerReceiveAborted:
+        case TqDarwinRelayEventType::QuicActiveShutdown:
             if (auto relay = std::static_pointer_cast<RelayState>(event.RelayOwner)) {
                 CloseRelay(relay, TqDarwinRelayCloseDisposition::ActiveShutdown);
             }
@@ -1132,6 +1150,30 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
     }
     if (processed > 0) {
         EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
+    }
+}
+
+void TqDarwinRelayWorker::SettleQueuedReceiveViewsBeforeRetire() {
+    std::vector<TqDarwinRelayEvent> kept;
+    TqDarwinRelayEvent event{};
+    uint32_t settled = 0;
+    while (EventQueue.TryPop(event)) {
+        if (event.Type == TqDarwinRelayEventType::QuicReceiveView) {
+            // Discard releases callback budget and completes via BindingOwner→Relay
+            // while Stream is still live (before RetireRelay clears it).
+            (void)DiscardDeferredQuicReceive(nullptr, event.ReceiveView);
+            ++settled;
+            continue;
+        }
+        kept.push_back(std::move(event));
+    }
+    for (auto& keptEvent : kept) {
+        if (!EventQueue.TryPush(std::move(keptEvent))) {
+            Errors.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    if (settled > 0) {
+        EventsProcessed.fetch_add(settled, std::memory_order_relaxed);
     }
 }
 
@@ -1415,6 +1457,12 @@ void TqDarwinRelayWorker::RetireRelay(
         relay->PendingQuicReceiveBytes = 0;
         relay->PendingTcpWrites.clear();
         relay->PendingTcpWriteBytes = 0;
+        // Complete/discard while Stream is still set on relay. BindingOwner may
+        // already be cleared after ProcessQuicReceiveViewEvent, so pass relay.
+        for (const auto& receive : receivesToDiscard) {
+            (void)DiscardDeferredQuicReceive(relay, receive);
+        }
+        receivesToDiscard.clear();
         if (!terminalDetach && relay->StreamOwner == nullptr && relay->Stream != nullptr) {
             const auto completions = binding != nullptr ? binding->Completions : nullptr;
             const bool hasKnownOperations = completions != nullptr &&
@@ -2515,12 +2563,62 @@ bool TqDarwinRelayWorker::EnqueueRelayCloseFromCallback(
     if (relay == nullptr) {
         return false;
     }
+#if defined(TCPQUIC_TESTING) && !defined(NDEBUG)
+    // QuicShutdownComplete must only be produced by SHUTDOWN_COMPLETE via
+    // EnqueueQuicShutdownCompleteFromCallback (P1-5 invariant).
+    assert(type != TqDarwinRelayEventType::QuicShutdownComplete);
+#endif
 
     TqDarwinRelayEvent event{};
     event.Type = type;
     event.RelayId = relay->Id;
     event.RelayOwner = relay;
     if (EventQueue.TryPush(std::move(event))) {
+        (void)Wake();
+        return true;
+    }
+    return false;
+}
+
+bool TqDarwinRelayWorker::EnqueueQuicActiveShutdownFromCallback(
+    const std::shared_ptr<RelayState>& relay,
+    TqDarwinActiveShutdownReason reason) {
+    if (relay == nullptr) {
+        return false;
+    }
+#if defined(TCPQUIC_TESTING)
+    LastActiveShutdownReason.store(
+        static_cast<uint8_t>(reason),
+        std::memory_order_relaxed);
+#endif
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicActiveShutdown;
+    event.RelayId = relay->Id;
+    event.RelayOwner = relay;
+    event.Value = static_cast<uint64_t>(reason);
+    if (EventQueue.TryPush(std::move(event))) {
+#if defined(TCPQUIC_TESTING)
+        QuicActiveShutdownEnqueued.fetch_add(1, std::memory_order_relaxed);
+#endif
+        (void)Wake();
+        return true;
+    }
+    return false;
+}
+
+bool TqDarwinRelayWorker::EnqueueQuicShutdownCompleteFromCallback(
+    const std::shared_ptr<RelayState>& relay) {
+    if (relay == nullptr) {
+        return false;
+    }
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicShutdownComplete;
+    event.RelayId = relay->Id;
+    event.RelayOwner = relay;
+    if (EventQueue.TryPush(std::move(event))) {
+#if defined(TCPQUIC_TESTING)
+        QuicShutdownCompleteEnqueued.fetch_add(1, std::memory_order_relaxed);
+#endif
         (void)Wake();
         return true;
     }
@@ -2822,6 +2920,13 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
     if (binding == nullptr) {
         return {};
     }
+#if defined(TCPQUIC_TESTING)
+    if (Config.FailNextPendingReceiveAllocationForTest) {
+        Config.FailNextPendingReceiveAllocationForTest = false;
+        Errors.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
+#endif
     MsQuicStream* effectiveStream = stream;
     if (effectiveStream == nullptr && relay != nullptr) {
         effectiveStream = relay->Stream;
@@ -2843,7 +2948,6 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
     }
     receive->RelayId = binding->RelayId;
     receive->BindingOwner = binding;
-    receive->ReceiveCompleteStream = effectiveStream;
     receive->StreamOwner = binding->StreamOwner.lock();
     if (receive->StreamOwner == nullptr) {
         if (binding->Endpoint != nullptr) {
@@ -2992,7 +3096,8 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
             binding->CallbackPendingQuicReceives.push_back(receive);
         }
         binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
-        PauseMsQuicReceiveFromCallback(receive->ReceiveCompleteStream);
+        // Pause with the callback stream parameter only — never a saved bare pointer.
+        PauseMsQuicReceiveFromCallback(stream);
         (void)Wake();
         return TqDarwinQuicReceiveEnqueueResult::EventQueueFull;
     }
@@ -3228,10 +3333,22 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     if (receive == nullptr) {
         return false;
     }
+    // Capture stream-bearing relay before budget release clears BindingOwner
+    // (Task 4: no bare ReceiveCompleteStream fallback). ProcessQuicReceiveViewEvent
+    // may already have released BindingOwner — callers must pass relay then.
+    std::shared_ptr<RelayState> completeRelay = relay;
+    if (completeRelay == nullptr) {
+        if (auto binding = std::static_pointer_cast<StreamBinding>(receive->BindingOwner)) {
+            completeRelay = binding->Relay.lock();
+        }
+    }
     ReleaseCallbackReceiveBudget(receive);
     uint64_t bytesToComplete = 0;
     {
-        if (relay != nullptr) {
+        // Worker-thread bookkeeping touches PendingQuicReceive* under the
+        // worker-thread ownership rule. Stop-thread retire/settle uses the
+        // else branch and still completes via completeRelay->Stream.
+        if (relay != nullptr && IsWorkerThread()) {
             AssertWorkerThreadForRelayState();
             bytesToComplete = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
                 ? 0
@@ -3258,7 +3375,7 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
             receive->PendingCompleteBytes = bytesToComplete;
         }
     }
-    CompleteDeferredQuicReceive(relay, receive);
+    CompleteDeferredQuicReceive(completeRelay, receive);
     return true;
 }
 
@@ -3430,7 +3547,7 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
         relay->PendingTcpWriteBytes = 0;
         relay->PendingTcpWrites.clear();
         for (const auto& pending : receivesToDiscard) {
-            (void)DiscardDeferredQuicReceive(nullptr, pending);
+            (void)DiscardDeferredQuicReceive(relay, pending);
         }
         return false;
     }
@@ -3513,9 +3630,12 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         }
     }
     if (stream == nullptr) {
-        stream = receive->ReceiveCompleteStream;
-    }
-    if (stream == nullptr) {
+        // No owner lease and no live relay stream: discard without bare stream API.
+        if (!receive->TryClaimCompletionDispatch()) {
+            return;
+        }
+        receive->PendingCompleteBytes = 0;
+        DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (!receive->TryClaimCompletionDispatch()) {
@@ -4462,9 +4582,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
             if (relay->StreamOwner != nullptr) {
                 SealManagedBindingTerminal(relay.get(), binding);
-                if (!worker->EnqueueRelayCloseFromCallback(
-                        relay,
-                        TqDarwinRelayEventType::QuicShutdownComplete)) {
+                if (!worker->EnqueueQuicShutdownCompleteFromCallback(relay)) {
                     worker->HandoffTerminalCloseToShutdownSink(relay, binding);
                 }
             } else {
@@ -4474,9 +4592,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
                 } else if (relay->StopControl != nullptr) {
                     (void)relay->StopControl->SignalStop(relay->ControlGeneration);
                 }
-                if (!worker->EnqueueRelayCloseFromCallback(
-                        relay,
-                        TqDarwinRelayEventType::QuicShutdownComplete)) {
+                if (!worker->EnqueueQuicShutdownCompleteFromCallback(relay)) {
                     worker->HandoffTerminalCloseToShutdownSink(relay, binding);
                 }
             }
@@ -4604,17 +4720,22 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         case TqDarwinQuicReceiveEnqueueResult::NullBuffer:
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::AllocationFailed: {
+            // P1-5: resource failure stays on ActiveShutdown — never forge
+            // QuicShutdownComplete / TerminalLogicalDetach, and do not
+            // ReceiveComplete buffers we never took ownership of.
+            event->RECEIVE.TotalBufferLength = 0;
             if (std::shared_ptr<RelayState> relay = binding->Relay.lock()) {
-                if (!worker->EnqueueRelayCloseFromCallback(
+                if (relay->StreamOwner != nullptr) {
+                    (void)relay->StreamOwner->RequestShutdown(
+                        TqStreamLifetime::ShutdownIntent::AbortBoth);
+                }
+                if (!worker->EnqueueQuicActiveShutdownFromCallback(
                         relay,
-                        TqDarwinRelayEventType::QuicShutdownComplete)) {
-                    worker->HandoffTerminalCloseToShutdownSink(relay, binding);
+                        TqDarwinActiveShutdownReason::ReceiveAllocationFailed)) {
+                    worker->HandoffActiveShutdownFromCallback(relay, binding);
                 }
             }
-            if (totalLength > 0 || fin) {
-                worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
-            }
-            return QUIC_STATUS_SUCCESS;
+            return QUIC_STATUS_OUT_OF_MEMORY;
         }
         case TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected:
             binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);

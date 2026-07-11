@@ -5118,6 +5118,126 @@ void ManagedRegisterBindingAllocFailureRejectsAndTerminalClosesOnce() {
     harness.StopAndClosePeer();
 }
 
+void ManagedReceiveAllocationFailureUsesActiveShutdownNotTerminal() {
+    ResetFakeReceiveComplete();
+    TqDarwinRelayWorkerConfig config{};
+    config.FailNextPendingReceiveAllocationForTest = true;
+    config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
+    AdoptedManagedHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    harness.Worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    g_fakeShutdownCount = 0;
+    g_fakeLastShutdownFlags = QUIC_STREAM_SHUTDOWN_FLAG_NONE;
+    std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
+
+    const char payload[] = "alloc-fail";
+    QUIC_BUFFER quicBuffer{};
+    quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
+    quicBuffer.Length = static_cast<uint32_t>(sizeof(payload) - 1);
+
+    QUIC_STREAM_EVENT receiveEvent{};
+    receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receiveEvent.RECEIVE.BufferCount = 1;
+    receiveEvent.RECEIVE.Buffers = &quicBuffer;
+    receiveEvent.RECEIVE.TotalBufferLength = sizeof(payload) - 1;
+
+    CHECK(harness.DispatchViaRouter(receiveEvent) == QUIC_STATUS_OUT_OF_MEMORY);
+    CHECK(receiveEvent.RECEIVE.TotalBufferLength == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Started ||
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Starting);
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(harness.Worker.QuicShutdownCompleteEnqueuedForTest() == 0);
+    CHECK(harness.Worker.QuicActiveShutdownEnqueuedForTest() == 1);
+    CHECK(
+        harness.Worker.LastActiveShutdownReasonForTest() ==
+        TqDarwinActiveShutdownReason::ReceiveAllocationFailed);
+    CHECK(g_fakeShutdownCount == 1);
+    CHECK((g_fakeLastShutdownFlags & QUIC_STREAM_SHUTDOWN_FLAG_ABORT_SEND) != 0);
+    CHECK((g_fakeLastShutdownFlags & QUIC_STREAM_SHUTDOWN_FLAG_ABORT_RECEIVE) != 0);
+    CHECK(harness.Worker.PendingEventsForTest() == 1);
+
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(!harness.Worker.BindingTerminalForTest(harness.Result.RelayId));
+    CHECK(
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Started ||
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Starting);
+    CHECK(g_fakeShutdownCount == 1);
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    CHECK(harness.Worker.QuicShutdownCompleteEnqueuedForTest() == 1);
+    CHECK(harness.Worker.DrainOneEventForTest());
+
+    harness.Worker.SetReceiveCompleteForTest(nullptr);
+    harness.StopAndClosePeer();
+    CHECK(weakOwner.expired());
+}
+
+void ManagedReceiveAllocationFailureQueueFullKeepsOwnerViaSink() {
+    ResetFakeReceiveComplete();
+    TqDarwinRelayWorkerConfig config{};
+    config.FailNextPendingReceiveAllocationForTest = true;
+    config.EventQueueCapacity = 2;
+    config.MaxPendingQuicReceiveBytesPerRelay = 64 * 1024;
+    AdoptedManagedHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    harness.Worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    g_fakeShutdownCount = 0;
+    std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
+    std::shared_ptr<TqRelayStopControl> control = harness.Handle.Control;
+    CHECK(control != nullptr);
+
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(harness.Worker.PendingEventsForTest() == 2);
+
+    const char payload[] = "alloc-qfull";
+    QUIC_BUFFER quicBuffer{};
+    quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
+    quicBuffer.Length = static_cast<uint32_t>(sizeof(payload) - 1);
+
+    QUIC_STREAM_EVENT receiveEvent{};
+    receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receiveEvent.RECEIVE.BufferCount = 1;
+    receiveEvent.RECEIVE.Buffers = &quicBuffer;
+    receiveEvent.RECEIVE.TotalBufferLength = sizeof(payload) - 1;
+
+    CHECK(harness.DispatchViaRouter(receiveEvent) == QUIC_STATUS_OUT_OF_MEMORY);
+    CHECK(receiveEvent.RECEIVE.TotalBufferLength == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(harness.Worker.QuicActiveShutdownEnqueuedForTest() == 0);
+    CHECK(harness.Worker.QuicShutdownCompleteEnqueuedForTest() == 0);
+    CHECK(harness.Worker.PendingEventsForTest() == 2);
+    CHECK(g_fakeShutdownCount == 1);
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    CHECK(
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Started ||
+        harness.Owner->GetPhase() == TqStreamLifetime::Phase::Starting);
+    CHECK(harness.Worker.StreamOwnerForTest(harness.Result.RelayId) != nullptr);
+    CHECK(!weakOwner.expired());
+
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.DrainOneEventForTest());
+    harness.Worker.MarkWorkerThreadExitedForTest();
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Owner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+
+    harness.Worker.SetReceiveCompleteForTest(nullptr);
+    harness.StopAndClosePeer();
+    CHECK(weakOwner.expired());
+    CHECK(control->Stop.load(std::memory_order_acquire));
+}
+
 void ManagedLateKqueueEventAfterFdReuseMissesNewRelay() {
     ManagedRelayHarness harness;
     CHECK(harness.OpenSocketPair());
@@ -6374,6 +6494,8 @@ int main() {
     ManagedRegisterRejectsTerminalOwnerBeforePublish();
     ManagedRegisterStartFailedPublishRejectsAndTerminalClosesOnce();
     ManagedRegisterBindingAllocFailureRejectsAndTerminalClosesOnce();
+    ManagedReceiveAllocationFailureUsesActiveShutdownNotTerminal();
+    ManagedReceiveAllocationFailureQueueFullKeepsOwnerViaSink();
     ManagedSendRegisterThenTerminalBeforeActiveRecheckRollsBack();
     ManagedSendRegisterExitPointsRollBackRegistry();
     ManagedPublishHookTerminalRejectsCommitAfterTask3();

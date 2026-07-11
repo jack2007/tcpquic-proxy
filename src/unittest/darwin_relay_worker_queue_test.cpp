@@ -205,6 +205,30 @@ void PendingReceiveStreamOwnerIsIndependentOfRelayMap() {
     CHECK(weakBinding.expired());
 }
 
+void ActiveShutdownEventMovePreservesReasonAndOwner() {
+    TqDarwinRelayEventQueue queue(2);
+    auto relayOwner = std::make_shared<int>(99);
+
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicActiveShutdown;
+    event.RelayId = 11;
+    event.RelayOwner = relayOwner;
+    event.Value = static_cast<uint64_t>(TqDarwinActiveShutdownReason::ReceiveAllocationFailed);
+
+    CHECK(queue.TryPush(std::move(event)));
+    CHECK(relayOwner.use_count() == 2);
+
+    TqDarwinRelayEvent popped{};
+    CHECK(queue.TryPop(popped));
+    CHECK(popped.Type == TqDarwinRelayEventType::QuicActiveShutdown);
+    CHECK(popped.RelayId == 11);
+    CHECK(popped.RelayOwner == relayOwner);
+    CHECK(
+        popped.Value ==
+        static_cast<uint64_t>(TqDarwinActiveShutdownReason::ReceiveAllocationFailed));
+    CHECK(relayOwner.use_count() == 2);
+}
+
 void DrainWakeProcessesPastBudgetAndShutdown() {
     TqDarwinRelayWorkerConfig config{};
     config.EventBudget = 2;
@@ -240,6 +264,7 @@ int main() {
     MultiProducerPushSingleConsumerPop();
     EventMovePreservesOwnedMembers();
     PendingReceiveStreamOwnerIsIndependentOfRelayMap();
+    ActiveShutdownEventMovePreservesReasonAndOwner();
     DrainWakeProcessesPastBudgetAndShutdown();
     return 0;
 }

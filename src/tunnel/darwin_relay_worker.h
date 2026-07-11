@@ -228,6 +228,8 @@ struct TqDarwinRelayWorkerConfig {
         TqDarwinRelaySendOperation*){nullptr};
     // Next ReserveSendCompletion / RegisterSendCompletion returns nullptr once.
     bool FailNextSendCompletionRegisterForTest{false};
+    // Next BuildPendingQuicReceive allocation fails once (P1-5 / Task 4).
+    bool FailNextPendingReceiveAllocationForTest{false};
 #endif
 };
 
@@ -346,6 +348,9 @@ public:
     uint64_t CallbackReceiveBudgetRejectsForTest() const;
     uint64_t QuicReceiveEnqueueFailuresForTest() const;
     uint64_t QuicReceiveViewBackpressureQueuedForTest() const;
+    uint64_t QuicActiveShutdownEnqueuedForTest() const;
+    uint64_t QuicShutdownCompleteEnqueuedForTest() const;
+    TqDarwinActiveShutdownReason LastActiveShutdownReasonForTest() const;
     void SetRunningForTest(bool running);
     void MarkWorkerThreadExitedForTest();
     bool BindingActiveForTest(uint64_t relayId);
@@ -485,6 +490,12 @@ private:
     bool EnqueueRelayCloseFromCallback(
         const std::shared_ptr<RelayState>& relay,
         TqDarwinRelayEventType type);
+    bool EnqueueQuicActiveShutdownFromCallback(
+        const std::shared_ptr<RelayState>& relay,
+        TqDarwinActiveShutdownReason reason);
+    bool EnqueueQuicShutdownCompleteFromCallback(
+        const std::shared_ptr<RelayState>& relay);
+    void SettleQueuedReceiveViewsBeforeRetire();
     void CompleteQuicSend(TqDarwinRelaySendOperation* operation);
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
@@ -641,6 +652,9 @@ private:
     mutable std::atomic<uint64_t> MapPublicationCount{0};
     mutable std::atomic<uint64_t> StreamBindingDestructorCount{0};
     mutable std::atomic<uint64_t> RelayStateDestructorCount{0};
+    mutable std::atomic<uint64_t> QuicActiveShutdownEnqueued{0};
+    mutable std::atomic<uint64_t> QuicShutdownCompleteEnqueued{0};
+    mutable std::atomic<uint8_t> LastActiveShutdownReason{0};
     mutable TqDarwinBindingPublishIdentitySnapshot LastPublishIdentity{};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
