@@ -100,6 +100,20 @@ jobs:
                 -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
                 -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++"
               cmake --build "${{ matrix.build-dir }}" --target tcpquic-proxy --parallel "$(nproc)"
+              cmake --build "${{ matrix.build-dir }}" --target \
+                tcpquic_relay_runtime_snapshot_test \
+                tcpquic_linux_relay_worker_io_test \
+                tcpquic_router_runtime_test \
+                tcpquic_server_admin_test \
+                tcpquic_admin_http_test --parallel "$(nproc)"
+              bin="${{ matrix.build-dir }}/bin/Release"
+              "$bin/tcpquic_relay_runtime_snapshot_test"
+              "$bin/tcpquic_linux_relay_worker_io_test"
+              "$bin/tcpquic_router_runtime_test"
+              "$bin/tcpquic_server_admin_test"
+              "$bin/tcpquic_admin_http_test"
+              python3 -m py_compile /work/tests/scripts/run_relay_runtime_snapshot_recovery.py
+              python3 /work/tests/scripts/test_run_relay_runtime_snapshot_recovery.py
               ccache --show-stats || true
             '
 
@@ -248,6 +262,25 @@ jobs:
           }
           ccache --show-stats
 
+      - name: Build and run Windows relay snapshot feature tests
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          cmake --build "${{ matrix.build-dir }}" --config Release --target `
+            tcpquic_relay_runtime_snapshot_test `
+            tcpquic_windows_relay_worker_test `
+            tcpquic_router_runtime_test `
+            tcpquic_server_admin_test `
+            tcpquic_admin_http_test --parallel $env:NUMBER_OF_PROCESSORS
+          $bin = Join-Path "${{ matrix.build-dir }}" "bin\Release"
+          & "$bin\tcpquic_relay_runtime_snapshot_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_windows_relay_worker_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_router_runtime_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_server_admin_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_admin_http_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m py_compile tests/scripts/run_relay_runtime_snapshot_recovery.py
+          python tests/scripts/test_run_relay_runtime_snapshot_recovery.py
+
       - name: Install macOS build tools
         if: matrix.platform == 'macos'
         shell: bash
@@ -280,6 +313,32 @@ jobs:
             cmake --build "${{ matrix.build-dir }}-${arch}" --target tcpquic-proxy --parallel "$(sysctl -n hw.logicalcpu)"
           done
           ccache --show-stats || true
+
+      - name: Build and run macOS relay snapshot feature tests
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Run native tests on the arm64 build tree (runner is Apple Silicon).
+          build_dir="${{ matrix.build-dir }}-arm64"
+          cmake --build "${build_dir}" --target \
+            tcpquic_relay_runtime_snapshot_test \
+            tcpquic_darwin_relay_worker_queue_test \
+            tcpquic_darwin_relay_worker_io_test \
+            tcpquic_darwin_relay_metrics_test \
+            tcpquic_router_runtime_test \
+            tcpquic_server_admin_test \
+            tcpquic_admin_http_test --parallel "$(sysctl -n hw.logicalcpu)"
+          bin="${build_dir}/bin/Release"
+          "$bin/tcpquic_relay_runtime_snapshot_test"
+          "$bin/tcpquic_darwin_relay_worker_queue_test"
+          "$bin/tcpquic_darwin_relay_worker_io_test"
+          "$bin/tcpquic_darwin_relay_metrics_test"
+          "$bin/tcpquic_router_runtime_test"
+          "$bin/tcpquic_server_admin_test"
+          "$bin/tcpquic_admin_http_test"
+          python3 -m py_compile tests/scripts/run_relay_runtime_snapshot_recovery.py
+          python3 tests/scripts/test_run_relay_runtime_snapshot_recovery.py
 
       - name: Stage Linux artifact
         if: matrix.platform == 'linux'

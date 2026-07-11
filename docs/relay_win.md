@@ -193,10 +193,10 @@ QUIC receive 背压：
 | 热点级别 | 锁 | 位置 | 保护对象 | 主要路径 | 热点判断 |
 |---|---|---|---|---|---|
 | P0 | `TqWindowsRelayWorker::Lock_` | `windows_relay_worker.cpp` | `Relays_`、`RetiredCallbacks_` | register、snapshot、callback operation 在 worker 内按 id/generation 解析 relay、retire、trace context 查找 | 单 worker 内所有 relay 共享，是最核心的生产锁。当前有 `WorkerLockAcquireCount`、`WorkerLockWaitNanos`、`FindRelayByIdCount` 可观测。callback 已改为先按 id 投递，降低了 MsQuic callback 线程直接抢锁的概率，但 worker 仍要在多个路径查 `Relays_`。 |
-| P1 | `TqWindowsRelayRuntime::Lock_` | `windows_relay_worker.cpp` | worker vector、runtime start/stop、round-robin 注册 | runtime start/stop、`RegisterRelay()`、`Snapshot()` | 不在包级转发路径，但会串行化 Windows relay 注册和 snapshot 取 worker 列表。高连接建立速率或高频 metrics snapshot 下可能影响控制面延迟。 |
-| P1 | `RuntimeWorkerLifetimeLock()` | `windows_relay_worker.cpp` | runtime stop 与 snapshot 生命周期 | `TqWindowsRelayRuntime::Stop()`、`Snapshot()` | 主要防止 snapshot 遍历 worker 时 runtime 被销毁。只影响观测/停止，不影响稳定转发吞吐。**现状仍在生产路径**；跨平台计划中的 Task 5/6 才会改为公共 snapshot lease + execution permit，并删除该 lifetime lock。当前 Admin `/relay/workers` 在 Windows 上仍只返回 legacy 单行 `aggregate`，**尚未**落地 per-worker `windows-N` / `SnapshotWorkers`。 |
+| P1 | `TqWindowsRelayRuntime::Lock_` | `windows_relay_worker.cpp` | worker vector、runtime state、round-robin 注册 | runtime Start/Stop、`RegisterRelay()`、`SnapshotWorkers()` 取 lease | 不在包级转发路径，但会串行化 Windows relay 注册和 snapshot 取 worker 列表。高连接建立速率或高频 metrics snapshot 下可能影响控制面延迟。 |
+| P1 | `TqRelayRuntimeSnapshotSupport` / `TqRelayRuntimeSnapshotExecutionGate` | `relay_runtime_snapshot.h` | snapshot lease in-flight、execution permit | `SnapshotWorkers()`、`Stop()` WaitForIdle、跨请求 snapshot 串行 | 取代已删除的 `RuntimeWorkerLifetimeLock()`。lease 保证 Stop 在 in-flight snapshot 归零前不析构 worker；execution gate 保证 Windows outstanding late snapshot command `<=1`。Timeout 后 request 可 detach，permit 由 late command 持有直至 Completed/Cancelled。 |
 | P2 | `TqWindowsRelayWorker::ControlCommandLock_` | `windows_relay_worker.cpp` | 同步 command 投递和等待 | `RegisterRelay()`、`Snapshot()` | 控制面锁。外部线程通过 IOCP 同步命令让 worker 执行注册或 snapshot，期间用 command mutex/cv 等待完成。连接建立和 admin snapshot 频繁时会体现为排队。 |
-| P2 | `RegisterRelayCommand::Mutex` / `SnapshotCommand::Mutex` | `windows_relay_worker.cpp` | command 完成标志 | `WaitWindowsRelayCommand()` / `CompleteWindowsRelayCommand()` | 每次同步注册或 snapshot 使用一次，热度取决于连接建立和观测频率。不是数据包级锁。 |
+| P2 | `RegisterRelayCommand::Mutex` / `SnapshotCommand::Mutex` | `windows_relay_worker.cpp` | command 完成标志、shared ControlOwner、permit token | `WaitSnapshotCommand()` / `CompleteSnapshotCommand()` | 每次同步注册或 snapshot 使用一次；Snapshot 使用 `shared_ptr` command + `ControlOwner`，timeout detach 后迟到 completion 不访问调用方栈。热度取决于连接建立和观测频率。 |
 | P3 | `TqTunnelContext::Lock` | `tcp_tunnel.cpp` | tunnel 生命周期、TCP fd、stream、relay started、pending relay receive | OPEN、StartRelay、Stop、early data 保存/释放 | relay 接管前后的控制面锁。对持续转发影响低，但影响 OPEN 完成、server dial 和异常关闭路径。 |
 | P3 | `TqTunnelContext::StreamOpLock` | `tcp_tunnel.cpp` | pre-relay stream send/shutdown 顺序 | OPEN response、失败响应、shutdown | relay 接管后数据面 `Stream::Send()` 不走这把锁。 |
 | P3 | `TqServerDialReactor::Lock` | `server_dial_reactor.cpp` | server dial 任务队列和状态 | server OPEN 后 DNS/connect | 影响 server 建链速率，不影响已接管 relay 的 TCP/QUIC forwarding。 |
@@ -393,6 +393,12 @@ Per-relay 队列（`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFre
 - worker/runtime `Stop()` 先切 shutdown sink 并 cancel 本地 TCP，再 drain IOCP ownership（`InFlightTcp*`、`QueuedWorkerOps`、terminal pending、shutdown sink）到零后才关闭 IOCP。
 
 ### 8.1 可观测性字段（admin metrics / snapshot）
+
+`/api/v1/relay/workers` 在 Windows 上通过 `SnapshotWorkers(deadline)` 单次采样返回 `aggregate + windows-N`。
+`tcp_read_bytes` / `tcp_write_bytes` / `pending_bytes` 为 **active-only**（对 `ActiveRelayStates` 求和；
+`pending_bytes = PendingQuicReceiveBytes + RelayBufferBytesInUse`），禁止把累计 `TcpSendBytes` 映射为
+Admin `tcp_write_bytes`。`snapshot_complete` 反映 bounded deadline / partial；worker detail 在 incomplete
+时返回 503 `snapshot_unavailable`。
 
 | 字段 | 含义 |
 |------|------|

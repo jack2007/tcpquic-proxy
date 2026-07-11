@@ -4,6 +4,7 @@
 #include "msquic.hpp"
 #include "platform_socket.h"
 #include "relay.h"
+#include "relay_runtime_snapshot.h"
 #include "relay_error.h"
 #include "stream_lifetime.h"
 #include "trace.h"
@@ -20,6 +21,7 @@
 #endif
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -98,6 +100,11 @@ struct TqWindowsRelayActiveSnapshot {
 };
 
 struct TqWindowsRelayWorkerSnapshot {
+    uint32_t WorkerIndex{0};
+    uint64_t TcpReadBytes{0};
+    uint64_t TcpWriteBytes{0};
+    uint64_t PendingBytes{0};
+    bool SnapshotComplete{false};
     uint64_t DeferredReceiveQueued{0};
     uint64_t DeferredReceiveBytesQueued{0};
     uint64_t DeferredReceiveCompleteBytes{0};
@@ -240,6 +247,9 @@ public:
     bool Start();
     void Stop();
     TqWindowsRelayWorkerSnapshot Snapshot() const;
+    TqWindowsRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline,
+        TqRelayRuntimeSnapshotExecutionGate::Permit permit = {}) const;
 
     bool RegisterRelay(const TqWindowsRelayRegistration& registration);
     TqWindowsRelayRegistrationResult RegisterRelayWithId(
@@ -326,6 +336,12 @@ public:
         TqWindowsRelayWorkerQueueBlockForTest& block,
         uint32_t timeoutMs) const;
     void TestReleaseWorkerQueueBlockForTest(TqWindowsRelayWorkerQueueBlockForTest& block) const;
+    void TestForceNextSnapshotIocpPostFailureForTest();
+    void TestForceNextSnapshotBuildThrowForTest();
+    void TestForceNextStartFailureForTest();
+    uint64_t TestSnapshotCommandsPostedForTest() const;
+    bool TestSnapshotCommandOutstandingForTest() const;
+    static uint64_t TestLiveWorkerCountForTest();
     bool TestArmStopDrainForTest();
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestArmRelayClosingOnRelayOnlyForTest(uint64_t relayId);
@@ -461,6 +477,14 @@ private:
     TqStreamLifetime::ApiLease TryRelayStreamLease(const RelayContext& relay) const;
     uint64_t MaxPendingQuicReceiveBytesPerRelay(const RelayContext& relay) const;
     TqWindowsRelayWorkerSnapshot BuildSnapshotLocal() const;
+    TqWindowsRelayWorkerSnapshot MakeIncompleteSnapshot() const;
+    void CompleteSnapshotCommand(
+        SnapshotCommand* command,
+        TqWindowsRelayWorkerSnapshot snapshot) const;
+    bool WaitSnapshotCommand(
+        SnapshotCommand& command,
+        std::chrono::steady_clock::time_point deadline) const;
+    void ClearSnapshotOutstanding() const;
     void DrainPerRelayMaintenance();
     void ScheduleRelayMaintenance(const std::shared_ptr<RelayContext>& relay);
     bool RelayNeedsMaintenance(const std::shared_ptr<RelayContext>& relay) const;
@@ -732,6 +756,12 @@ private:
     std::atomic<uint64_t> CallbackReceiveCopyNanos_{0};
     mutable std::atomic<uint64_t> SnapshotBuildNanos_{0};
     mutable std::atomic<uint64_t> SnapshotActiveRelaysScanned_{0};
+    mutable std::atomic<bool> SnapshotOutstanding_{false};
+    mutable std::mutex SnapshotOutstandingMutex_;
+    mutable std::condition_variable SnapshotOutstandingCv_;
+#if defined(TQ_UNIT_TESTING)
+    mutable std::atomic<uint64_t> SnapshotCommandsPostedForTest_{0};
+#endif
     std::atomic<uint64_t> MaintenanceDrainCount_{0};
     std::atomic<uint64_t> MaintenanceDrainNanos_{0};
     std::atomic<uint64_t> MaintenanceRelaysProcessed_{0};
@@ -743,6 +773,10 @@ private:
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
     std::atomic<bool> ForceTerminalIocpPostFailureForTest_{false};
+    mutable std::atomic<bool> ForceSnapshotIocpPostFailureForTest_{false};
+    mutable std::atomic<bool> ForceSnapshotBuildThrowForTest_{false};
+    std::atomic<bool> ForceStartFailureForTest_{false};
+    static std::atomic<uint64_t> LiveWorkerCountForTest_;
     std::atomic<bool> QuicReceiveViewDrainEnabledForTest_{true};
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     mutable std::mutex PendingTerminalCleanupLock_;
@@ -775,6 +809,11 @@ public:
     TqWindowsRelayRegistrationResult RegisterRelay(
         const TqWindowsRelayRegistration& registration);
     TqWindowsRelayWorkerSnapshot Snapshot() const;
+    TqWindowsRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotResult<TqWindowsRelayWorkerSnapshot> SnapshotWorkers() const;
+    TqRelayRuntimeSnapshotResult<TqWindowsRelayWorkerSnapshot> SnapshotWorkers(
+        std::chrono::steady_clock::time_point deadline) const;
     void StopRelay(
         const std::shared_ptr<TqRelayStopControl>& control,
         uint32_t workerIndex,
@@ -790,10 +829,32 @@ public:
         uint64_t tunnelId,
         const char* target);
 
+#if defined(TQ_UNIT_TESTING)
+    void SetFailStartWorkerIndexForTest(int32_t workerIndex);
+    TqRelayRuntimeState StateForTest() const;
+    TqRelayRuntimeSnapshotStats SnapshotSupportStatsForTest() const;
+    TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStatsForTest() const;
+    uint64_t RuntimeLockAcquireCountForTest() const;
+    TqWindowsRelayWorker* WorkerForTest(uint32_t index);
+#endif
+
 private:
+    TqWindowsRelayRuntime() = default;
+    std::unique_lock<std::mutex> AcquireRuntimeLockForMetrics() const;
+    std::unique_lock<std::mutex> AcquireRuntimeLockForSnapshot(
+        std::chrono::steady_clock::time_point deadline) const;
+
     mutable std::mutex Lock_;
+    mutable TqRelayRuntimeSnapshotSupport SnapshotSupport_;
+    mutable TqRelayRuntimeSnapshotExecutionGate SnapshotExecutionGate_;
+    TqRelayRuntimeState State_{TqRelayRuntimeState::Stopped};
+    mutable std::atomic<uint64_t> RuntimeLockWaitNanos_{0};
+    mutable std::atomic<uint64_t> RuntimeLockAcquireCount_{0};
     std::vector<std::unique_ptr<TqWindowsRelayWorker>> Workers_;
     std::atomic<uint64_t> NextWorker_{0};
+#if defined(TQ_UNIT_TESTING)
+    int32_t FailStartWorkerIndexForTest_{-1};
+#endif
 };
 
 #if defined(TQ_UNIT_TESTING)

@@ -17,6 +17,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <spdlog/spdlog.h>
@@ -31,11 +32,6 @@ uint64_t NowSteadyNanos() {
     return static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
-}
-
-std::mutex& RuntimeWorkerLifetimeLock() {
-    static std::mutex lock;
-    return lock;
 }
 
 uint64_t CurrentThreadToken() {
@@ -58,21 +54,14 @@ void WaitWindowsRelayCommand(Command& command) {
     command.Cv.wait(guard, [&command] { return command.Done; });
 }
 
-std::atomic<uint64_t> g_NextRelayControlGeneration{1};
-
 std::shared_ptr<TqRelayStopControl> AllocateRelayStopControl() {
-    auto control = std::make_shared<TqRelayStopControl>();
-    control->Generation.store(
-        g_NextRelayControlGeneration.fetch_add(1, std::memory_order_relaxed),
-        std::memory_order_release);
-    return control;
+    return std::make_shared<TqRelayStopControl>(TqRelayNextControlGeneration());
 }
 
 bool ControlGenerationMatches(
     const std::shared_ptr<TqRelayStopControl>& control,
     uint64_t expectedGeneration) {
-    return control != nullptr &&
-        control->Generation.load(std::memory_order_acquire) == expectedGeneration;
+    return control != nullptr && control->Generation == expectedGeneration;
 }
 
 void PublishStopToControl(
@@ -378,6 +367,7 @@ struct TqWindowsRelayWorker::IoOperation {
     uint64_t PostedLength{0};
     QUIC_SEND_FLAGS QuicSendFlags{QUIC_SEND_FLAG_NONE};
     void* Control{nullptr};
+    std::shared_ptr<void> ControlOwner;
     std::shared_ptr<TerminalCleanupRecord> TerminalCleanup;
 #if defined(TQ_UNIT_TESTING)
     DWORD InjectedCompletionError{ERROR_SUCCESS};
@@ -449,7 +439,10 @@ struct TqWindowsRelayWorker::SnapshotCommand {
     TqWindowsRelayWorkerSnapshot Result{};
     std::mutex Mutex;
     std::condition_variable Cv;
+    TqRelayRuntimeSnapshotExecutionGate::Permit Permit;
     bool Done{false};
+    bool Cancelled{false};
+    bool Terminalized{false};
 };
 
 struct TqWindowsRelayWorker::RelayContext : TqRelayBufferBudget {
@@ -519,12 +512,23 @@ TqWindowsRelayWorker::TqWindowsRelayWorker(uint32_t workerIndex)
     : WorkerIndex_(workerIndex),
       StreamCallbackEndpoint_(std::make_shared<CallbackEndpoint>(this)) {
     (void)TerminalCleanupRecordNoStreamPointerCheck();
+#if defined(TQ_UNIT_TESTING)
+    LiveWorkerCountForTest_.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 TqWindowsRelayWorker::~TqWindowsRelayWorker() {
     Stop();
+#if defined(TQ_UNIT_TESTING)
+    LiveWorkerCountForTest_.fetch_sub(1, std::memory_order_relaxed);
+#endif
 }
 
 bool TqWindowsRelayWorker::Start() {
+#if defined(TQ_UNIT_TESTING)
+    if (ForceStartFailureForTest_.exchange(false, std::memory_order_acq_rel)) {
+        return false;
+    }
+#endif
     Iocp_ = ::CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 1);
     if (Iocp_ == nullptr) {
         Errors_.fetch_add(1, std::memory_order_relaxed);
@@ -552,35 +556,146 @@ void TqWindowsRelayWorker::Stop() {
     }
 }
 
+TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::MakeIncompleteSnapshot() const {
+    TqWindowsRelayWorkerSnapshot snapshot{};
+    snapshot.WorkerIndex = WorkerIndex_;
+    snapshot.SnapshotComplete = false;
+    return snapshot;
+}
+
+void TqWindowsRelayWorker::ClearSnapshotOutstanding() const {
+    SnapshotOutstanding_.store(false, std::memory_order_release);
+    SnapshotOutstandingCv_.notify_all();
+}
+
+void TqWindowsRelayWorker::CompleteSnapshotCommand(
+    SnapshotCommand* command,
+    TqWindowsRelayWorkerSnapshot snapshot) const {
+    if (command == nullptr) {
+        return;
+    }
+    TqRelayRuntimeSnapshotExecutionGate::Permit permit;
+    {
+        std::lock_guard<std::mutex> guard(command->Mutex);
+        if (command->Terminalized) {
+            return;
+        }
+        command->Terminalized = true;
+        if (!command->Cancelled) {
+            try {
+                command->Result = std::move(snapshot);
+            } catch (...) {
+                command->Result = MakeIncompleteSnapshot();
+            }
+        }
+        command->Done = true;
+        permit = std::move(command->Permit);
+    }
+    command->Cv.notify_one();
+    ClearSnapshotOutstanding();
+}
+
+bool TqWindowsRelayWorker::WaitSnapshotCommand(
+    SnapshotCommand& command,
+    std::chrono::steady_clock::time_point deadline) const {
+    std::unique_lock<std::mutex> lock(command.Mutex);
+    const bool done = command.Cv.wait_until(lock, deadline, [&command]() {
+        return command.Done;
+    });
+    if (!done) {
+        command.Cancelled = true;
+    }
+    return done;
+}
+
 TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot() const {
+    return Snapshot(
+        std::chrono::steady_clock::now() + std::chrono::seconds(5),
+        {});
+}
+
+TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::Snapshot(
+    std::chrono::steady_clock::time_point deadline,
+    TqRelayRuntimeSnapshotExecutionGate::Permit permit) const {
     if (Iocp_ == nullptr || Stopping_.load(std::memory_order_acquire) ||
         WorkerThreadToken_.load(std::memory_order_acquire) == CurrentThreadToken()) {
         return BuildSnapshotLocal();
     }
 
-    SnapshotCommand command{};
+    if (std::chrono::steady_clock::now() >= deadline) {
+        return MakeIncompleteSnapshot();
+    }
+
+    // Worker-local outstanding guard: at most one posted Snapshot command.
+    bool expected = false;
+    if (!SnapshotOutstanding_.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> waitLock(SnapshotOutstandingMutex_);
+        const bool cleared = SnapshotOutstandingCv_.wait_until(
+            waitLock,
+            deadline,
+            [this]() {
+                return !SnapshotOutstanding_.load(std::memory_order_acquire);
+            });
+        if (!cleared) {
+            return MakeIncompleteSnapshot();
+        }
+        expected = false;
+        if (!SnapshotOutstanding_.compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return MakeIncompleteSnapshot();
+        }
+    }
+
+    auto command = std::make_shared<SnapshotCommand>();
+    command->Permit = std::move(permit);
+
     {
         std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
         if (Iocp_ == nullptr || !Thread_.joinable() || Stopping_.load(std::memory_order_acquire) ||
             WorkerThreadToken_.load(std::memory_order_acquire) == CurrentThreadToken()) {
+            ClearSnapshotOutstanding();
             return BuildSnapshotLocal();
         }
         auto op = std::make_unique<IoOperation>();
         op->Event = TqWindowsIocpOperationType::Snapshot;
-        op->Control = &command;
+        op->Control = command.get();
+        op->ControlOwner = command;
         IoOperation* raw = op.release();
-        if (!::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
+#if defined(TQ_UNIT_TESTING)
+        const bool forcePostFailure =
+            ForceSnapshotIocpPostFailureForTest_.exchange(false, std::memory_order_acq_rel);
+#else
+        const bool forcePostFailure = false;
+#endif
+        if (forcePostFailure ||
+            !::PostQueuedCompletionStatus(static_cast<HANDLE>(Iocp_), 0, 0, &raw->Overlapped)) {
             delete raw;
-            return BuildSnapshotLocal();
+            ClearSnapshotOutstanding();
+            return MakeIncompleteSnapshot();
         }
+#if defined(TQ_UNIT_TESTING)
+        SnapshotCommandsPostedForTest_.fetch_add(1, std::memory_order_relaxed);
+#endif
     }
-    WaitWindowsRelayCommand(command);
-    return command.Result;
+
+    if (!WaitSnapshotCommand(*command, deadline)) {
+        // Detach: late IOCP completion keeps command alive via ControlOwner.
+        return MakeIncompleteSnapshot();
+    }
+    return command->Result;
 }
 
 TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
     const uint64_t snapshotStartNanos = NowSteadyNanos();
     TqWindowsRelayWorkerSnapshot snapshot{};
+    snapshot.WorkerIndex = WorkerIndex_;
     snapshot.DeferredReceiveQueued = DeferredReceiveQueued_.load(std::memory_order_relaxed);
     snapshot.DeferredReceiveBytesQueued = DeferredReceiveBytesQueued_.load(std::memory_order_relaxed);
     snapshot.DeferredReceiveCompleteBytes = DeferredReceiveCompleteBytes_.load(std::memory_order_relaxed);
@@ -711,6 +826,11 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         active.PendingQuicReceiveQueueDepth = pendingQuicReceiveQueueDepth;
         active.TcpReadBytes = relay->TcpReadBytes.load(std::memory_order_relaxed);
         active.TcpWriteBytes = relay->TcpWriteBytes.load(std::memory_order_relaxed);
+        snapshot.PendingOverlappedTcpRecvs += active.InFlightTcpRecvs;
+        snapshot.PendingOverlappedTcpSends += active.InFlightTcpSends;
+        snapshot.PendingOverlappedWorkerOps += active.QueuedWorkerOps;
+        snapshot.TcpReadBytes += active.TcpReadBytes;
+        snapshot.TcpWriteBytes += active.TcpWriteBytes;
         active.LastTcpWriteErrno = relay->LastTcpWriteErrno.load(std::memory_order_relaxed);
         active.LastTcpRecvErrno = relay->LastTcpRecvErrno.load(std::memory_order_relaxed);
         active.LastTcpSendErrno = relay->LastTcpSendErrno.load(std::memory_order_relaxed);
@@ -737,9 +857,6 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         active.MaxOutstandingQuicSendBytes =
             relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
         active.CallbackPendingQuicReceiveDepth = 0;
-        snapshot.PendingOverlappedTcpRecvs += active.InFlightTcpRecvs;
-        snapshot.PendingOverlappedTcpSends += active.InFlightTcpSends;
-        snapshot.PendingOverlappedWorkerOps += active.QueuedWorkerOps;
         snapshot.ActiveRelayStates.push_back(active);
     }
 
@@ -781,6 +898,9 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         ReceiveViewFinishLinearSearchNanos_.load(std::memory_order_relaxed);
     snapshot.ReceiveViewFinishNotFrontCount =
         ReceiveViewFinishNotFrontCount_.load(std::memory_order_relaxed);
+    snapshot.PendingBytes =
+        snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
+    snapshot.SnapshotComplete = true;
     return snapshot;
 }
 
@@ -816,7 +936,7 @@ void TqWindowsRelayWorker::SwitchRelayTargetToShutdownSink(
     sinkContext->StopControl = relay->StopControl;
     sinkContext->ControlGeneration =
         relay->StopControl != nullptr
-            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            ? relay->StopControl->Generation
             : 0;
     auto sink = std::make_shared<WindowsShutdownSinkTarget>(std::move(sinkContext));
     const uint64_t routeGeneration = relay->StreamOwner->RouteGeneration();
@@ -1680,12 +1800,42 @@ void TqWindowsRelayWorker::Run() {
             continue;
         }
         if (op->Event == TqWindowsIocpOperationType::Snapshot) {
-            auto* command = static_cast<SnapshotCommand*>(op->Control);
+            std::shared_ptr<SnapshotCommand> commandOwner;
+            if (op->ControlOwner) {
+                commandOwner = std::static_pointer_cast<SnapshotCommand>(op->ControlOwner);
+            }
+            SnapshotCommand* command =
+                commandOwner ? commandOwner.get() : static_cast<SnapshotCommand*>(op->Control);
             if (command != nullptr) {
-                command->Result = BuildSnapshotLocal();
-                CompleteWindowsRelayCommand(*command);
+                bool cancelled = false;
+                {
+                    std::lock_guard<std::mutex> guard(command->Mutex);
+                    cancelled = command->Cancelled;
+                }
+                if (cancelled) {
+                    CompleteSnapshotCommand(command, MakeIncompleteSnapshot());
+                } else {
+                    try {
+#if defined(TQ_UNIT_TESTING)
+                        if (ForceSnapshotBuildThrowForTest_.exchange(
+                                false, std::memory_order_acq_rel)) {
+                            throw std::runtime_error("forced snapshot build throw");
+                        }
+#endif
+                        if (Stopping_.load(std::memory_order_acquire)) {
+                            CompleteSnapshotCommand(command, MakeIncompleteSnapshot());
+                        } else {
+                            CompleteSnapshotCommand(command, BuildSnapshotLocal());
+                        }
+                    } catch (...) {
+                        CompleteSnapshotCommand(command, MakeIncompleteSnapshot());
+                    }
+                }
+            } else {
+                ClearSnapshotOutstanding();
             }
             op->Control = nullptr;
+            op->ControlOwner.reset();
             continue;
         }
 #if defined(TQ_UNIT_TESTING)
@@ -2278,7 +2428,7 @@ void TqWindowsRelayWorker::FailManagedBinding(
     binding->RelayHint.store(nullptr, std::memory_order_release);
     const uint64_t controlGeneration =
         binding->StopControl != nullptr
-            ? binding->StopControl->Generation.load(std::memory_order_acquire)
+            ? binding->StopControl->Generation
             : 0;
     auto control = std::atomic_load(&binding->StopControl);
     PublishStopToControl(control, controlGeneration);
@@ -2327,7 +2477,7 @@ bool TqWindowsRelayWorker::PostTerminalShutdownComplete(
     record->StopControl = binding->StopControl;
     record->ControlGeneration =
         binding->StopControl != nullptr
-            ? binding->StopControl->Generation.load(std::memory_order_acquire)
+            ? binding->StopControl->Generation
             : 0;
     record->ConnectionErrorCode = connectionErrorCode;
     record->ConnectionCloseStatus = connectionCloseStatus;
@@ -2744,7 +2894,7 @@ bool TqWindowsRelayWorker::TestPostTraceContextForTest(
     op->Generation = generation;
     op->ControlGeneration =
         relay->StopControl != nullptr
-            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            ? relay->StopControl->Generation
             : 0;
     op->StopControl = relay->StopControl;
     op->Value = tunnelId;
@@ -2811,6 +2961,35 @@ void TqWindowsRelayWorker::TestReleaseWorkerQueueBlockForTest(
     }
     block.Cv.notify_all();
 }
+
+#if defined(TQ_UNIT_TESTING)
+void TqWindowsRelayWorker::TestForceNextSnapshotIocpPostFailureForTest() {
+    ForceSnapshotIocpPostFailureForTest_.store(true, std::memory_order_release);
+}
+
+void TqWindowsRelayWorker::TestForceNextSnapshotBuildThrowForTest() {
+    ForceSnapshotBuildThrowForTest_.store(true, std::memory_order_release);
+}
+
+void TqWindowsRelayWorker::TestForceNextStartFailureForTest() {
+    ForceStartFailureForTest_.store(true, std::memory_order_release);
+}
+
+uint64_t TqWindowsRelayWorker::TestSnapshotCommandsPostedForTest() const {
+    return SnapshotCommandsPostedForTest_.load(std::memory_order_relaxed);
+}
+
+bool TqWindowsRelayWorker::TestSnapshotCommandOutstandingForTest() const {
+    return SnapshotOutstanding_.load(std::memory_order_acquire);
+}
+
+std::atomic<uint64_t> TqWindowsRelayWorker::LiveWorkerCountForTest_{0};
+
+uint64_t TqWindowsRelayWorker::TestLiveWorkerCountForTest() {
+    return LiveWorkerCountForTest_.load(std::memory_order_relaxed);
+}
+#endif
+
 
 bool TqWindowsRelayWorker::TestArmStopDrainForTest() {
     std::lock_guard<std::mutex> controlGuard(ControlCommandLock_);
@@ -3753,6 +3932,8 @@ bool TqWindowsRelayWorker::PostTcpRecv(const std::shared_ptr<RelayContext>& rela
     op->Overlapped = OVERLAPPED{};
     op->Event = TqWindowsIocpOperationType::TcpRecv;
     op->Relay = relay;
+    op->Control = nullptr;
+    op->ControlOwner.reset();
     op->BufferOwner.reset();
     op->Buffer.clear();
     op->QuicBuffer = QUIC_BUFFER{};
@@ -4323,7 +4504,7 @@ void TqWindowsRelayWorker::TryRetireRelay(
     }
     auto control = std::atomic_load(&relay->StopControl);
     const uint64_t controlGeneration =
-        control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+        control != nullptr ? control->Generation : 0;
     PublishStopToControl(control, controlGeneration);
     if (traceState && TqTraceEnabled()) {
         TqTraceRelayUnregister("windows", BuildRelayTraceState(relay));
@@ -5702,7 +5883,7 @@ void TqWindowsRelayWorker::StopRelay(uint64_t relayId) {
     }
     const uint64_t controlGeneration =
         relay->StopControl != nullptr
-            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            ? relay->StopControl->Generation
             : 0;
     StopRelay(relay->StopControl, relayId, relay->Generation, controlGeneration);
 }
@@ -5717,7 +5898,7 @@ void TqWindowsRelayWorker::SetRelayTraceContext(
     }
     const uint64_t controlGeneration =
         relay->StopControl != nullptr
-            ? relay->StopControl->Generation.load(std::memory_order_acquire)
+            ? relay->StopControl->Generation
             : 0;
     SetRelayTraceContext(
         relay->StopControl,
@@ -6042,63 +6223,204 @@ TqWindowsRelayRuntime& TqWindowsRelayRuntime::Instance() {
     return runtime;
 }
 
+std::unique_lock<std::mutex> TqWindowsRelayRuntime::AcquireRuntimeLockForMetrics() const {
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(Lock_);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    RuntimeLockWaitNanos_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+        std::memory_order_relaxed);
+    RuntimeLockAcquireCount_.fetch_add(1, std::memory_order_relaxed);
+    return lock;
+}
+
+std::unique_lock<std::mutex> TqWindowsRelayRuntime::AcquireRuntimeLockForSnapshot(
+    std::chrono::steady_clock::time_point deadline) const {
+    const auto start = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(Lock_, std::defer_lock);
+    while (!lock.try_lock()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            const auto elapsed = std::chrono::steady_clock::now() - start;
+            RuntimeLockWaitNanos_.fetch_add(
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+                std::memory_order_relaxed);
+            return lock;
+        }
+        std::this_thread::yield();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    RuntimeLockWaitNanos_.fetch_add(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()),
+        std::memory_order_relaxed);
+    RuntimeLockAcquireCount_.fetch_add(1, std::memory_order_relaxed);
+    return lock;
+}
+
 bool TqWindowsRelayRuntime::Start(const TqTuningConfig& tuning) {
-    std::lock_guard<std::mutex> guard(Lock_);
-    if (!Workers_.empty()) {
+    auto guard = AcquireRuntimeLockForMetrics();
+    if (State_ == TqRelayRuntimeState::Running) {
         return true;
     }
-    uint32_t workerCount = tuning.WindowsRelayWorkerCount;
-    if (workerCount == 0) {
-        workerCount = TqRelayWorkerCountMin;
+    if (State_ != TqRelayRuntimeState::Stopped || !Workers_.empty()) {
+        return false;
     }
-    workerCount = std::max(TqRelayWorkerCountMin, std::min(workerCount, TqRelayWorkerCountMax));
-    for (uint32_t i = 0; i < workerCount; ++i) {
-        auto worker = std::make_unique<TqWindowsRelayWorker>(i);
-        if (!worker->Start()) {
-            Workers_.clear();
-            return false;
+
+    State_ = TqRelayRuntimeState::Starting;
+    std::vector<std::unique_ptr<TqWindowsRelayWorker>> stagedWorkers;
+    try {
+        uint32_t workerCount = tuning.WindowsRelayWorkerCount;
+        if (workerCount == 0) {
+            workerCount = TqRelayWorkerCountMin;
         }
-        Workers_.push_back(std::move(worker));
+        workerCount = std::max(TqRelayWorkerCountMin, std::min(workerCount, TqRelayWorkerCountMax));
+        stagedWorkers.reserve(workerCount);
+        for (uint32_t i = 0; i < workerCount; ++i) {
+            auto worker = std::make_unique<TqWindowsRelayWorker>(i);
+#if defined(TQ_UNIT_TESTING)
+            if (static_cast<int32_t>(i) == FailStartWorkerIndexForTest_) {
+                worker->TestForceNextStartFailureForTest();
+            }
+#endif
+            if (!worker->Start()) {
+                for (auto& started : stagedWorkers) {
+                    if (started) {
+                        started->Stop();
+                    }
+                }
+                stagedWorkers.clear();
+                State_ = TqRelayRuntimeState::Stopped;
+                return false;
+            }
+            stagedWorkers.push_back(std::move(worker));
+        }
+        Workers_.swap(stagedWorkers);
+        NextWorker_.store(0, std::memory_order_relaxed);
+        State_ = TqRelayRuntimeState::Running;
+        return true;
+    } catch (...) {
+        for (auto& started : stagedWorkers) {
+            if (started) {
+                started->Stop();
+            }
+        }
+        Workers_.clear();
+        State_ = TqRelayRuntimeState::Stopped;
+        return false;
     }
-    return true;
 }
 
 void TqWindowsRelayRuntime::Stop() {
-    std::vector<std::unique_ptr<TqWindowsRelayWorker>> workers;
-    {
-        std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
-        std::lock_guard<std::mutex> guard(Lock_);
-        workers.swap(Workers_);
+    auto guard = AcquireRuntimeLockForMetrics();
+    if (State_ == TqRelayRuntimeState::Stopped) {
+        return;
     }
-    for (auto& worker : workers) {
+    State_ = TqRelayRuntimeState::Stopping;
+    SnapshotSupport_.WaitForIdleLocked(guard);
+    for (auto& worker : Workers_) {
         if (worker) {
             worker->Stop();
         }
     }
+    Workers_.clear();
+    NextWorker_.store(0, std::memory_order_relaxed);
+    State_ = TqRelayRuntimeState::Stopped;
+}
+
+TqRelayRuntimeSnapshotResult<TqWindowsRelayWorkerSnapshot>
+TqWindowsRelayRuntime::SnapshotWorkers() const {
+    return SnapshotWorkers(std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
+
+TqRelayRuntimeSnapshotResult<TqWindowsRelayWorkerSnapshot>
+TqWindowsRelayRuntime::SnapshotWorkers(
+    std::chrono::steady_clock::time_point deadline) const {
+    TqRelayRuntimeSnapshotResult<TqWindowsRelayWorkerSnapshot> result{};
+
+    auto permit = SnapshotExecutionGate_.TryAcquire(deadline);
+    if (!permit) {
+        SnapshotSupport_.RecordFailure();
+        return result;
+    }
+
+    auto runtimeGuard = AcquireRuntimeLockForSnapshot(deadline);
+    if (!runtimeGuard.owns_lock()) {
+        SnapshotSupport_.RecordFailure();
+        return result;
+    }
+
+    if (State_ != TqRelayRuntimeState::Stopped && State_ != TqRelayRuntimeState::Running) {
+        SnapshotSupport_.RecordFailure();
+        return result;
+    }
+
+    try {
+        auto lease = SnapshotSupport_.AcquireWorkersLocked(runtimeGuard, Workers_);
+        const bool stopped = State_ == TqRelayRuntimeState::Stopped;
+        runtimeGuard.unlock();
+
+        result.IdentitiesComplete = true;
+        result.SnapshotComplete = true;
+        result.Workers.reserve(lease.Workers().size());
+        for (const auto& workerRef : lease.Workers()) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                result.SnapshotComplete = false;
+                break;
+            }
+            TqWindowsRelayWorkerSnapshot snapshot{};
+            try {
+                auto workerPermit = permit;
+                snapshot = workerRef.Worker->Snapshot(deadline, std::move(workerPermit));
+            } catch (...) {
+                SnapshotSupport_.RecordFailure();
+                snapshot = {};
+                snapshot.SnapshotComplete = false;
+            }
+            snapshot.WorkerIndex = workerRef.WorkerIndex;
+            result.SnapshotComplete = result.SnapshotComplete && snapshot.SnapshotComplete;
+            result.Workers.push_back(std::move(snapshot));
+            if (!result.Workers.back().SnapshotComplete) {
+                // Detached late command may still hold a permit copy; do not enqueue more.
+                break;
+            }
+        }
+        if (stopped) {
+            result.SnapshotComplete = true;
+        }
+    } catch (...) {
+        SnapshotSupport_.RecordFailure();
+        result.SnapshotComplete = false;
+        result.IdentitiesComplete = false;
+    }
+    return result;
 }
 
 TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
+    return Snapshot(std::chrono::steady_clock::now() + std::chrono::seconds(5));
+}
+
+TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot(
+    std::chrono::steady_clock::time_point deadline) const {
+    const auto result = SnapshotWorkers(deadline);
+    const auto& workers = result.Workers;
+
     TqWindowsRelayWorkerSnapshot total{};
-    std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
-    std::vector<TqWindowsRelayWorker*> workers;
-    {
-        std::lock_guard<std::mutex> guard(Lock_);
-        workers.reserve(Workers_.size());
-        for (const auto& worker : Workers_) {
-            if (worker) {
-                workers.push_back(worker.get());
-            }
-        }
-    }
-    for (const auto* worker : workers) {
-        const auto snapshot = worker->Snapshot();
+    total.SnapshotComplete = result.SnapshotComplete && result.IdentitiesComplete;
+    total.ActiveRelayStates.reserve(workers.size());
+    for (const auto& snapshot : workers) {
+        total.TcpReadBytes += snapshot.TcpReadBytes;
+        total.TcpWriteBytes += snapshot.TcpWriteBytes;
+        total.PendingBytes += snapshot.PendingBytes;
         total.DeferredReceiveQueued += snapshot.DeferredReceiveQueued;
         total.DeferredReceiveBytesQueued += snapshot.DeferredReceiveBytesQueued;
         total.DeferredReceiveCompleteBytes += snapshot.DeferredReceiveCompleteBytes;
         total.DeferredReceiveCompletes += snapshot.DeferredReceiveCompletes;
         total.DeferredReceiveCompletionFlushes += snapshot.DeferredReceiveCompletionFlushes;
         total.PendingQuicReceiveBytes += snapshot.PendingQuicReceiveBytes;
-        total.MaxPendingQuicReceiveBytes = std::max(total.MaxPendingQuicReceiveBytes, snapshot.MaxPendingQuicReceiveBytes);
+        total.MaxPendingQuicReceiveBytes =
+            std::max(total.MaxPendingQuicReceiveBytes, snapshot.MaxPendingQuicReceiveBytes);
         total.PendingQuicReceiveQueueDepth += snapshot.PendingQuicReceiveQueueDepth;
         total.MaxPendingQuicReceiveQueueDepth = std::max(
             total.MaxPendingQuicReceiveQueueDepth,
@@ -6199,7 +6521,7 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
 TqWindowsRelayRegistrationResult TqWindowsRelayRuntime::RegisterRelay(
     const TqWindowsRelayRegistration& registration) {
     std::lock_guard<std::mutex> guard(Lock_);
-    if (Workers_.empty()) {
+    if (State_ != TqRelayRuntimeState::Running || Workers_.empty()) {
         return {};
     }
     const uint64_t index = NextWorker_.fetch_add(1) % Workers_.size();
@@ -6216,11 +6538,12 @@ void TqWindowsRelayRuntime::StopRelay(
         PublishStopToControl(control, controlGeneration);
         return;
     }
-    std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
     TqWindowsRelayWorker* worker = nullptr;
     {
         std::lock_guard<std::mutex> guard(Lock_);
-        if (workerIndex >= Workers_.size() || !Workers_[workerIndex]) {
+        if (State_ != TqRelayRuntimeState::Running ||
+            workerIndex >= Workers_.size() ||
+            !Workers_[workerIndex]) {
             PublishStopToControl(control, controlGeneration);
             return;
         }
@@ -6244,11 +6567,12 @@ void TqWindowsRelayRuntime::SetRelayTraceContext(
     if (!ControlGenerationMatches(control, controlGeneration)) {
         return;
     }
-    std::lock_guard<std::mutex> lifetimeGuard(RuntimeWorkerLifetimeLock());
     TqWindowsRelayWorker* worker = nullptr;
     {
         std::lock_guard<std::mutex> guard(Lock_);
-        if (workerIndex >= Workers_.size() || !Workers_[workerIndex]) {
+        if (State_ != TqRelayRuntimeState::Running ||
+            workerIndex >= Workers_.size() ||
+            !Workers_[workerIndex]) {
             return;
         }
         worker = Workers_[workerIndex].get();
@@ -6258,5 +6582,39 @@ void TqWindowsRelayRuntime::SetRelayTraceContext(
             control, relayId, relayGeneration, controlGeneration, tunnelId, target);
     }
 }
+
+#if defined(TQ_UNIT_TESTING)
+void TqWindowsRelayRuntime::SetFailStartWorkerIndexForTest(int32_t workerIndex) {
+    auto guard = AcquireRuntimeLockForMetrics();
+    assert(State_ == TqRelayRuntimeState::Stopped);
+    FailStartWorkerIndexForTest_ = workerIndex;
+}
+
+TqRelayRuntimeState TqWindowsRelayRuntime::StateForTest() const {
+    auto guard = AcquireRuntimeLockForMetrics();
+    return State_;
+}
+
+TqRelayRuntimeSnapshotStats TqWindowsRelayRuntime::SnapshotSupportStatsForTest() const {
+    return SnapshotSupport_.Stats();
+}
+
+TqRelayRuntimeSnapshotExecutionGateStats
+TqWindowsRelayRuntime::SnapshotExecutionGateStatsForTest() const {
+    return SnapshotExecutionGate_.Stats();
+}
+
+uint64_t TqWindowsRelayRuntime::RuntimeLockAcquireCountForTest() const {
+    return RuntimeLockAcquireCount_.load(std::memory_order_relaxed);
+}
+
+TqWindowsRelayWorker* TqWindowsRelayRuntime::WorkerForTest(uint32_t index) {
+    auto guard = AcquireRuntimeLockForMetrics();
+    if (index >= Workers_.size()) {
+        return nullptr;
+    }
+    return Workers_[index].get();
+}
+#endif
 
 #endif
