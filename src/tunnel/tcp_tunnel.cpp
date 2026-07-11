@@ -2096,7 +2096,7 @@ void TqReapTunnelContext(TqTunnelContext* ctx) {
 
 namespace {
 
-TqTunnelStartResult TqStartClientTunnelInternal(
+[[maybe_unused]] TqTunnelStartResult TqStartClientTunnelInternal(
     MsQuicConnection* conn,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
@@ -2208,14 +2208,6 @@ TqTunnelStartResult TqStartClientTunnelInternal(
 
 void TqSetServerDialReactor(TqServerDialReactor* reactor) {
     g_serverDialReactor.store(reactor, std::memory_order_release);
-}
-
-TqTunnelStartResult TqStartClientTunnel(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    TqSocketHandle clientTcpFd,
-    const TqConfig& cfg) {
-    return TqStartClientTunnelInternal(conn, req, clientTcpFd, cfg, false, nullptr);
 }
 
 static TqClientTunnelOpenHandle* TqStartClientTunnelAsyncBound(
@@ -2364,17 +2356,6 @@ static TqClientTunnelOpenHandle* TqStartClientTunnelAsyncBound(
 }
 
 TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    TqSocketHandle clientTcpFd,
-    const TqConfig& cfg,
-    TqClientTunnelOpenComplete onComplete,
-    TqClientTunnelMetadata metadata) {
-    return TqStartClientTunnelAsyncBound(
-        conn, req, clientTcpFd, cfg, std::move(onComplete), std::move(metadata), nullptr);
-}
-
-TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     const TqClientPickedConnection& picked,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
@@ -2387,13 +2368,13 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
 }
 
 TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
-    MsQuicConnection* conn,
+    const TqClientPickedConnection& picked,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
     TqClientTunnelOpenComplete onComplete) {
     return TqStartClientTunnelAsync(
-        conn,
+        picked,
         req,
         clientTcpFd,
         cfg,
@@ -2496,17 +2477,6 @@ void TqRejectClientTunnelOpen(TqClientTunnelOpenHandle* handle) {
     if (releaseUser) {
         TqReleaseClientTunnelOpenHandle(handle);
     }
-}
-
-TqTunnelStartResult TqStartClientTunnelReceiveSink(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    const TqConfig& cfg,
-    std::atomic<uint64_t>* receiveBytes) {
-    if (receiveBytes == nullptr) {
-        return {false, TqOpenError::Internal};
-    }
-    return TqStartClientTunnelInternal(conn, req, TqInvalidSocket, cfg, true, receiveBytes);
 }
 
 namespace {

@@ -68,3 +68,13 @@ Review 后追加以下修订：
 - test hook 使用 outer-return barrier 验证 worker 早运行不会提前析构，并覆盖 delayed release、stop/drain，以及禁用 worker 后连续 retention 256 个 owner 再全部 drain；不存在固定 emergency 槽耗尽后的孤儿 context。
 - 删除 client legacy handle side-table 的存储、发布与 lookup；`TqLookupClientTerminalConnection()` 对 raw legacy 路径固定失败。production client runtime 继续通过 `TqClientPickedConnection` 直接传 immutable key/token/owner，因此不存在 old pick 校验后覆盖 new incarnation 的发布窗口。
 - reconnect 与 handle reuse 后 legacy lookup 同样保持失败；server accepted record 仍在 registry lock 内直接取得 immutable key/token。
+
+## 第三次复审：进程级 cleanup service 与显式 client binding
+
+- cleanup worker 改为进程级常驻服务。每个 `QuicServerSession` 持独立 shared tracker；node enqueue 时取得该 tracker 的单调 ordinal，session Stop 只快照自身 watermark 并 `DrainThrough`，不再停止全局 worker。
+- 单 worker FIFO 使 tracker completed ordinal 可安全表示 watermark 完成。late callback enqueue 获得更高 ordinal，可在本次 session Stop 返回后继续由 worker 处理；tracker 由 node shared 持有，不依赖 session 对象寿命。
+- 测试覆盖 node 已完成最后 pop 后的 late enqueue（旧 watermark 可返回、新 node 随后 drain）、两个 session 并发 drain 互不 stop worker，以及 worker 启动失败时 256 个 intrusive node 的 retention/drain。
+- cleanup node 增加 atomic `CleanupQueued` ownership gate；重复 shutdown enqueue 被拒绝并计数，不会形成重复链或 double delete。
+- 进程最终 `FinalStop` 使用 `Running → Closing → Stopped` 状态机；并发/重复 stop 串行等待。close admission 后 test producer 被拒绝；production contract 要求仅在所有 MsQuic callback producer 已关闭后 final stop。
+- 删除公开 raw client tunnel factory API。production runtime 和 `tcpquic_client_tunnel_open_test` 全部使用 `TqClientPickedConnection` 显式传递 immutable connection key、generation、escalation token 与 owner；无 binding 的正常输入不再以恒定 `Internal` 形式暴露。
+- `tcpquic_client_tunnel_open_test` 补齐 terminal convergence 链接对象并验证 picked overload API surface。

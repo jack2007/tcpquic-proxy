@@ -925,6 +925,7 @@ set(TCPQUIC_CLIENT_TUNNEL_OPEN_TEST_SOURCES
     tunnel/client_tunnel_open.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
     tunnel/tunnel_reaper.cpp

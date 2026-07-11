@@ -1,4 +1,5 @@
 #include "client_tunnel_open.h"
+#include "quic_session.h"
 #include "stream_lifetime.h"
 #include "tunnel_reaper.h"
 #include "msquic.hpp"
@@ -20,6 +21,23 @@
 const MsQuicApi* MsQuic = nullptr;
 
 namespace {
+
+class TestConnectionEscalation final : public TqTerminalEscalation {
+public:
+    void RequestConnectionShutdown(
+        uint64_t, uint64_t, QUIC_STATUS, uint64_t) noexcept override {}
+};
+
+TqClientPickedConnection MakePicked(MsQuicConnection* connection) {
+    TqClientPickedConnection picked;
+    picked.Connection = connection;
+    picked.ConnectionId = "test-connection";
+    picked.SlotIndex = 0;
+    picked.NumericConnectionId = 1;
+    picked.Generation = 1;
+    picked.TerminalEscalation = std::make_shared<TestConnectionEscalation>();
+    return picked;
+}
 
 struct FakeQuicSendRecord {
     std::vector<uint8_t> Bytes;
@@ -289,6 +307,18 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection*) {
     return 0;
 }
 
+bool TqLookupClientTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey&,
+    std::shared_ptr<TqTerminalEscalation>&) noexcept {
+    return false;
+}
+
+bool TqLookupServerTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey&,
+    std::shared_ptr<TqTerminalEscalation>&) noexcept {
+    return false;
+}
+
 bool TqTraceEnabled() {
     return false;
 }
@@ -547,14 +577,14 @@ bool TqRelayLinuxFastPathEnabled(const TqRelayHandle*) {
 namespace {
 
 using StartAsyncSignature = TqClientTunnelOpenHandle* (*)(
-    MsQuicConnection*,
+    const TqClientPickedConnection&,
     const TunnelRequest&,
     TqSocketHandle,
     const TqConfig&,
     TqClientTunnelOpenComplete);
 
 using StartAsyncWithMetadataSignature = TqClientTunnelOpenHandle* (*)(
-    MsQuicConnection*,
+    const TqClientPickedConnection&,
     const TunnelRequest&,
     TqSocketHandle,
     const TqConfig&,
@@ -599,7 +629,7 @@ int TestInvalidInputsReturnNullAndDoNotComplete() {
     TqConfig cfg{};
     bool completed = false;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        nullptr,
+        MakePicked(nullptr),
         req,
         TqInvalidSocket,
         cfg,
@@ -629,7 +659,7 @@ int TestOpenSuccessWaitsForExplicitAcceptBeforeRelay() {
     TqTunnelStartResult completedResult{};
     unsigned completions = 0;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -661,7 +691,7 @@ int TestOpenResponsePayloadIsDeliveredToRelayAfterAccept() {
     FakeClientOpen fake;
     TqConfig cfg{};
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -692,7 +722,7 @@ int TestRejectInsideCompletionDoesNotStartRelay() {
     TqConfig cfg{};
     unsigned completions = 0;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -721,7 +751,7 @@ int TestCancelInsideCompletionDoesNotDoubleDeleteOrStartRelay() {
     TqConfig cfg{};
     unsigned completions = 0;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -752,7 +782,7 @@ int TestFailureResponseCompletesAndCleansUpWithoutRelay() {
     TqTunnelStartResult completedResult{};
     TqClientTunnelOpenHandle* completedHandle = nullptr;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -789,7 +819,7 @@ int TestSendOpenFailureReturnsNullWithoutTakingClientFd() {
     TqConfig cfg{};
     bool completed = false;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -815,7 +845,7 @@ int TestAcceptBeforeSendCompleteThenShutdownCleansUpContext() {
     TqConfig cfg{};
     unsigned completions = 0;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,
@@ -848,7 +878,7 @@ int TestAcceptReturnsFalseAndCleansUpWhenRelayStartFails() {
     TqConfig cfg{};
     TqClientTunnelOpenHandle* completedHandle = nullptr;
     TqClientTunnelOpenHandle* handle = TqStartClientTunnelAsync(
-        fake.Conn.get(),
+        MakePicked(fake.Conn.get()),
         MakeRequest(),
         fake.ClientFd(),
         cfg,

@@ -41,18 +41,6 @@ using TunnelStartFn =
 using TqTunnelCompletionFn = std::function<void()>;
 using TqTunnelAclDeniedFn = std::function<void()>;
 
-TqTunnelStartResult TqStartClientTunnel(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    TqSocketHandle clientTcpFd,
-    const TqConfig& cfg);
-
-TqTunnelStartResult TqStartClientTunnelReceiveSink(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    const TqConfig& cfg,
-    std::atomic<uint64_t>* receiveBytes);
-
 void TqSetServerDialReactor(TqServerDialReactor* reactor);
 
 void TqHandleServerPeerStream(

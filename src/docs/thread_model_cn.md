@@ -107,7 +107,7 @@ TqClientIngressReactor worker
   ├─ non-blocking 读取 SOCKS5 greeting/request 或 HTTP CONNECT header
   ├─ TqTuneTcpForThroughput(clientFd)
   ├─ runtime->Quic->PickConnection()
-  ├─ TqStartClientTunnelAsync(conn, req, clientFd, cfg)
+  ├─ TqStartClientTunnelAsync(picked, req, clientFd, cfg)
   ├─ OPEN completion 由 EnqueueAsync() 回投本 reactor
   └─ 成功后返回 SOCKS5 reply 或 HTTP 200
 ```

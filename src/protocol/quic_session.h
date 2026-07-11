@@ -18,6 +18,8 @@
 #include <string>
 #include <vector>
 
+struct TqServerCleanupTracker;
+
 struct TqTerminalConnectionKey {
     uint64_t ConnectionId{0};
     uint64_t Generation{0};
@@ -113,6 +115,23 @@ void TqSetBeforeServerTerminalShutdownForTest(std::function<void()> hook);
 bool TqDeferServerConnectionOwnerForTest(
     std::shared_ptr<MsQuicConnection> owner,
     std::function<void()> waitForOuterReturn);
+std::shared_ptr<TqServerCleanupTracker> TqMakeServerCleanupTrackerForTest();
+bool TqDeferServerConnectionOwnerForTrackerForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker,
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn);
+void TqDrainServerConnectionCleanupTrackerForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker);
+uint64_t TqServerConnectionCleanupWatermarkForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker);
+void TqDrainServerConnectionCleanupThroughForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker,
+    uint64_t watermark);
+bool TqDuplicateServerConnectionCleanupEnqueueForTest(
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn);
+uint64_t TqServerConnectionCleanupDuplicateCountForTest();
+void TqFinalStopServerConnectionCleanupForTest();
 void TqFailNextServerCleanupEnqueueForTest();
 void TqDrainServerConnectionCleanupForTest();
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
@@ -338,4 +357,5 @@ private:
     std::vector<std::unique_ptr<MsQuicListener>> Listeners;
     std::vector<TqResolvedListen> AllowedListens;
     std::vector<std::string> ResolvedListens;
+    std::shared_ptr<TqServerCleanupTracker> CleanupTracker;
 };

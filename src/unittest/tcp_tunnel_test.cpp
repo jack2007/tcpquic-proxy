@@ -2589,9 +2589,6 @@ int main() {
 
     TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
     if (!TqSocketPair(fds)) return 1;
-    const TqTunnelStartResult badConn = TqStartClientTunnel(nullptr, req, fds[0], cfg);
-    if (badConn.Ok) return 2;
-    if (badConn.Error != TqOpenError::Internal) return 3;
     TqCloseSocket(fds[0]);
     TqCloseSocket(fds[1]);
 

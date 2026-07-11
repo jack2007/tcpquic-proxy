@@ -38,14 +38,7 @@ struct TqClientTunnelMetadata {
 // - The handle pointer passed to onComplete is valid for the duration of that
 //   callback and remains valid afterward until the caller invokes a terminal API.
 TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
-    MsQuicConnection* conn,
-    const TunnelRequest& req,
-    TqSocketHandle clientTcpFd,
-    const TqConfig& cfg,
-    TqClientTunnelOpenComplete onComplete);
-
-TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
-    MsQuicConnection* conn,
+    const TqClientPickedConnection& picked,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
@@ -57,8 +50,7 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,
-    TqClientTunnelOpenComplete onComplete,
-    TqClientTunnelMetadata metadata);
+    TqClientTunnelOpenComplete onComplete);
 
 void TqCancelClientTunnelOpen(TqClientTunnelOpenHandle* handle);
 // Returns true only if the successful OPEN was accepted and relay was either

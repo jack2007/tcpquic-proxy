@@ -272,6 +272,136 @@ static int TestServerDeferredCleanupWaitsForOuterTrampolineAndDrainsFailures() {
     return 0;
 }
 
+static int TestServerCleanupSessionWatermarkAllowsLateEnqueue() {
+    auto tracker = TqMakeServerCleanupTrackerForTest();
+    std::mutex lock;
+    std::condition_variable cv;
+    bool firstEntered = false;
+    bool releaseFirst = false;
+    bool releaseLate = false;
+    auto makeOwner = [](uintptr_t value) {
+        return std::shared_ptr<MsQuicConnection>(
+            reinterpret_cast<MsQuicConnection*>(value), [](MsQuicConnection*) {});
+    };
+    if (!TqDeferServerConnectionOwnerForTrackerForTest(
+            tracker, makeOwner(0x6471), [&] {
+                std::unique_lock<std::mutex> guard(lock);
+                firstEntered = true;
+                cv.notify_all();
+                cv.wait(guard, [&] { return releaseFirst; });
+            })) return 6471;
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return firstEntered; });
+    }
+    const uint64_t watermark = TqServerConnectionCleanupWatermarkForTest(tracker);
+    bool drained = false;
+    std::thread drain([&] {
+        TqDrainServerConnectionCleanupThroughForTest(tracker, watermark);
+        std::lock_guard<std::mutex> guard(lock);
+        drained = true;
+        cv.notify_all();
+    });
+    if (!TqDeferServerConnectionOwnerForTrackerForTest(
+            tracker, makeOwner(0x6472), [&] {
+                std::unique_lock<std::mutex> guard(lock);
+                cv.wait(guard, [&] { return releaseLate; });
+            })) return 6472;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseFirst = true;
+    }
+    cv.notify_all();
+    bool drainedBeforeLate = false;
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        drainedBeforeLate = cv.wait_for(
+            guard, std::chrono::seconds(2), [&] { return drained; });
+    }
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseLate = true;
+    }
+    cv.notify_all();
+    drain.join();
+    if (!drainedBeforeLate) return 6473;
+    TqDrainServerConnectionCleanupTrackerForTest(tracker);
+    return 0;
+}
+
+static int TestServerCleanupConcurrentSessionDrains() {
+    auto firstTracker = TqMakeServerCleanupTrackerForTest();
+    auto secondTracker = TqMakeServerCleanupTrackerForTest();
+    std::mutex lock;
+    std::condition_variable cv;
+    bool release = false;
+    auto wait = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return release; });
+    };
+    auto owner = [](uintptr_t value) {
+        return std::shared_ptr<MsQuicConnection>(
+            reinterpret_cast<MsQuicConnection*>(value), [](MsQuicConnection*) {});
+    };
+    if (!TqDeferServerConnectionOwnerForTrackerForTest(
+            firstTracker, owner(0x6481), wait)) return 6481;
+    if (!TqDeferServerConnectionOwnerForTrackerForTest(
+            secondTracker, owner(0x6482), wait)) return 6482;
+    std::atomic<uint32_t> drained{0};
+    std::thread first([&] {
+        TqDrainServerConnectionCleanupTrackerForTest(firstTracker);
+        drained.fetch_add(1);
+    });
+    std::thread second([&] {
+        TqDrainServerConnectionCleanupTrackerForTest(secondTracker);
+        drained.fetch_add(1);
+    });
+    if (drained.load() != 0) return 6483;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    first.join();
+    second.join();
+    return drained.load() == 2 ? 0 : 6484;
+}
+
+static int TestServerCleanupDuplicateEnqueueIsSuppressed() {
+    std::mutex lock;
+    std::condition_variable cv;
+    bool release = false;
+    const uint64_t before = TqServerConnectionCleanupDuplicateCountForTest();
+    auto owner = std::shared_ptr<MsQuicConnection>(
+        reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6491)),
+        [](MsQuicConnection*) {});
+    if (!TqDuplicateServerConnectionCleanupEnqueueForTest(owner, [&] {
+            std::unique_lock<std::mutex> guard(lock);
+            cv.wait(guard, [&] { return release; });
+        })) return 6491;
+    if (TqServerConnectionCleanupDuplicateCountForTest() != before + 1) return 6492;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    TqDrainServerConnectionCleanupForTest();
+    return 0;
+}
+
+static int TestServerCleanupFinalStopIsSerializedAndClosesAdmission() {
+    std::thread first([] { TqFinalStopServerConnectionCleanupForTest(); });
+    std::thread second([] { TqFinalStopServerConnectionCleanupForTest(); });
+    first.join();
+    second.join();
+    TqFinalStopServerConnectionCleanupForTest();
+    auto owner = std::shared_ptr<MsQuicConnection>(
+        reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6492)),
+        [](MsQuicConnection*) {});
+    if (TqDeferServerConnectionOwnerForTest(owner, [] {})) return 6493;
+    return 0;
+}
+
 static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
@@ -1079,6 +1209,9 @@ int main() {
     if (int rc = TestServerTerminalEscalationRegistrySafety()) return rc;
     if (int rc = TestServerTerminalEscalationPinsOwnerAcrossRecordErase()) return rc;
     if (int rc = TestServerDeferredCleanupWaitsForOuterTrampolineAndDrainsFailures()) return rc;
+    if (int rc = TestServerCleanupSessionWatermarkAllowsLateEnqueue()) return rc;
+    if (int rc = TestServerCleanupConcurrentSessionDrains()) return rc;
+    if (int rc = TestServerCleanupDuplicateEnqueueIsSuppressed()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
@@ -1101,5 +1234,6 @@ int main() {
     if (int rc = TestScheme2CredentialConfig()) return rc;
     if (int rc = TestServerConnectionSnapshotIncludesClientName()) return rc;
     if (int rc = TestClientHelloSentAfterConnected()) return rc;
+    if (int rc = TestServerCleanupFinalStopIsSerializedAndClosesAdmission()) return rc;
     return 0;
 }
