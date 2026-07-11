@@ -389,16 +389,50 @@ static int TestServerCleanupDuplicateEnqueueIsSuppressed() {
     return 0;
 }
 
+static int TestServerCallbackAdmissionDrainsEnteredCallback() {
+    auto tracker = TqMakeServerCleanupTrackerForTest();
+    if (!TqEnterServerCallbackForTest(tracker)) return 6490;
+    std::atomic<bool> stopped{false};
+    std::thread stop([&] {
+        TqCloseServerCallbackAdmissionForTest(tracker);
+        stopped.store(true, std::memory_order_release);
+    });
+    while (!stopped.load(std::memory_order_acquire)) {
+        if (!TqEnterServerCallbackForTest(tracker)) break;
+        TqLeaveServerCallbackForTest(tracker);
+        std::this_thread::yield();
+    }
+    if (stopped.load(std::memory_order_acquire)) return 6491;
+    TqLeaveServerCallbackForTest(tracker);
+    stop.join();
+    if (!stopped.load(std::memory_order_acquire)) return 6492;
+    if (TqEnterServerCallbackForTest(tracker)) return 6493;
+    return 0;
+}
+
 static int TestServerCleanupFinalStopIsSerializedAndClosesAdmission() {
-    std::thread first([] { TqFinalStopServerConnectionCleanupForTest(); });
-    std::thread second([] { TqFinalStopServerConnectionCleanupForTest(); });
-    first.join();
-    second.join();
-    TqFinalStopServerConnectionCleanupForTest();
     auto owner = std::shared_ptr<MsQuicConnection>(
         reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6492)),
         [](MsQuicConnection*) {});
-    if (TqDeferServerConnectionOwnerForTest(owner, [] {})) return 6493;
+    void* producer = TqRegisterServerCleanupProducerForTest(owner, [] {});
+    if (producer == nullptr) return 6493;
+    std::atomic<uint32_t> stopped{0};
+    std::thread first([&] {
+        TqFinalStopServerConnectionCleanupForTest();
+        stopped.fetch_add(1);
+    });
+    std::thread second([&] {
+        TqFinalStopServerConnectionCleanupForTest();
+        stopped.fetch_add(1);
+    });
+    while (TqServerCleanupProducerAdmissionOpenForTest()) std::this_thread::yield();
+    if (stopped.load() != 0) return 6494;
+    if (!TqEnqueueRegisteredServerCleanupProducerForTest(producer)) return 6495;
+    first.join();
+    second.join();
+    TqFinalStopServerConnectionCleanupForTest();
+    if (stopped.load() != 2) return 6496;
+    if (TqRegisterServerCleanupProducerForTest(owner, [] {}) != nullptr) return 6497;
     return 0;
 }
 
@@ -1212,6 +1246,7 @@ int main() {
     if (int rc = TestServerCleanupSessionWatermarkAllowsLateEnqueue()) return rc;
     if (int rc = TestServerCleanupConcurrentSessionDrains()) return rc;
     if (int rc = TestServerCleanupDuplicateEnqueueIsSuppressed()) return rc;
+    if (int rc = TestServerCallbackAdmissionDrainsEnteredCallback()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;

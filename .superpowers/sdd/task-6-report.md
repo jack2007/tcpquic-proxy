@@ -78,3 +78,11 @@ Review 后追加以下修订：
 - 进程最终 `FinalStop` 使用 `Running → Closing → Stopped` 状态机；并发/重复 stop 串行等待。close admission 后 test producer 被拒绝；production contract 要求仅在所有 MsQuic callback producer 已关闭后 final stop。
 - 删除公开 raw client tunnel factory API。production runtime 和 `tcpquic_client_tunnel_open_test` 全部使用 `TqClientPickedConnection` 显式传递 immutable connection key、generation、escalation token 与 owner；无 binding 的正常输入不再以恒定 `Internal` 形式暴露。
 - `tcpquic_client_tunnel_open_test` 补齐 terminal convergence 链接对象并验证 picked overload API surface。
+
+## 第四次复审：callback 与 producer admission 协议
+
+- per-session cleanup tracker 增加 callback admission 与 in-flight 计数。connection callback 在读取 raw `Session` 前必须 TryEnter；session Stop 先关闭 admission 并等待此前入场 callback 完成 session-dependent detach/enqueue，再执行 watermark drain。
+- admission 关闭后到达的 shutdown-complete 走 session-free 路径：只访问 context 的 shared tracker/owner、全局 registry helper 与 cleanup service，不读取 raw session；其他 late event 直接忽略。
+- cleanup service 增加 producer admission/count。accepted context 创建时先注册 producer；context 由 deferred worker 删除后 unregister。FinalStop 先关闭新 producer admission并等待已有 producer 全部完成，等待期间 lifecycle 仍为 Running，已有 producer 的 late enqueue 不会被拒绝。
+- cleanup service 改为 intentional process-lifetime singleton，不依赖静态析构顺序。`main` 在 server session/listener Stop 后显式调用 final cleanup；test teardown 使用同一显式入口。
+- 测试覆盖 callback 入场后 Stop 关闭 admission 并等待、closed admission 拒绝新 callback、FinalStop 等待 late registered producer enqueue、关闭后拒绝新 producer，以及重复/并发 final stop。

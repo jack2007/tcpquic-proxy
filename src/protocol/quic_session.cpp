@@ -26,6 +26,25 @@ struct TqServerCleanupTracker {
     std::atomic<uint64_t> Completed{0};
     std::mutex Lock;
     std::condition_variable Changed;
+    bool CallbackAdmissionOpen{true};
+    uint64_t CallbackInFlight{0};
+
+    bool TryEnterCallback() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (!CallbackAdmissionOpen) return false;
+        ++CallbackInFlight;
+        return true;
+    }
+    void LeaveCallback() {
+        std::lock_guard<std::mutex> guard(Lock);
+        if (CallbackInFlight > 0) --CallbackInFlight;
+        Changed.notify_all();
+    }
+    void CloseCallbackAdmissionAndDrain() {
+        std::unique_lock<std::mutex> guard(Lock);
+        CallbackAdmissionOpen = false;
+        Changed.wait(guard, [this] { return CallbackInFlight == 0; });
+    }
 };
 
 namespace {
@@ -365,6 +384,7 @@ struct TqServerConnectionContext {
     std::shared_ptr<TqServerCleanupTracker> CleanupTracker;
     uint64_t CleanupOrdinal{0};
     std::atomic<bool> CleanupQueued{false};
+    bool ProducerRegistered{false};
 #if defined(TQ_UNIT_TESTING)
     std::function<void()> WaitForOuterReturnForTest;
 #endif
@@ -372,7 +392,24 @@ struct TqServerConnectionContext {
 
 class TqServerConnectionCleanupQueue final {
 public:
-    ~TqServerConnectionCleanupQueue() { FinalStop(); }
+    bool RegisterProducer() noexcept {
+        std::lock_guard<std::mutex> guard(Lock_);
+        if (!ProducerAdmissionOpen_) return false;
+        ++ProducerCount_;
+        return true;
+    }
+
+    void UnregisterProducer() noexcept {
+        std::lock_guard<std::mutex> guard(Lock_);
+        if (ProducerCount_ > 0) --ProducerCount_;
+        ProducerChanged_.notify_all();
+    }
+#if defined(TQ_UNIT_TESTING)
+    bool ProducerAdmissionOpenForTest() const noexcept {
+        std::lock_guard<std::mutex> guard(Lock_);
+        return ProducerAdmissionOpen_;
+    }
+#endif
 
     bool Enqueue(TqServerConnectionContext* context) noexcept {
         if (context == nullptr) return false;
@@ -424,6 +461,8 @@ public:
                 });
                 return;
             }
+            ProducerAdmissionOpen_ = false;
+            ProducerChanged_.wait(guard, [this] { return ProducerCount_ == 0; });
             Lifecycle_ = Lifecycle::Closing;
             Changed_.notify_all();
             worker = std::move(Worker_);
@@ -467,10 +506,12 @@ public:
 #endif
 
 private:
-    static void ReleaseAfterTrampoline(TqServerConnectionContext* context) noexcept {
+    void ReleaseAfterTrampoline(TqServerConnectionContext* context) noexcept {
         if (context == nullptr) return;
         if (!context->ConnectionOwner) {
+            const bool producerRegistered = context->ProducerRegistered;
             delete context;
+            if (producerRegistered) UnregisterProducer();
             return;
         }
 #if defined(TQ_UNIT_TESTING)
@@ -491,7 +532,9 @@ private:
             context->CleanupTracker->Completed.fetch_add(1, std::memory_order_acq_rel);
             context->CleanupTracker->Changed.notify_all();
         }
+        const bool producerRegistered = context->ProducerRegistered;
         delete context;
+        if (producerRegistered) UnregisterProducer();
     }
 
     void StartWorkerLocked() {
@@ -534,15 +577,18 @@ private:
         return context;
     }
 
-    std::mutex Lock_;
+    mutable std::mutex Lock_;
     std::condition_variable Changed_;
     std::condition_variable StoppedChanged_;
+    std::condition_variable ProducerChanged_;
     TqServerConnectionContext* Head_{nullptr};
     TqServerConnectionContext* Tail_{nullptr};
     std::thread Worker_;
     bool Running_{false};
     enum class Lifecycle { Running, Closing, Stopped };
     Lifecycle Lifecycle_{Lifecycle::Running};
+    bool ProducerAdmissionOpen_{true};
+    uint64_t ProducerCount_{0};
 #if defined(TQ_UNIT_TESTING)
     bool DisableWorkerStart_{false};
     std::atomic<uint64_t> DuplicateEnqueue_{0};
@@ -550,7 +596,10 @@ private:
     bool PauseWorker_{false};
 };
 
-TqServerConnectionCleanupQueue g_serverConnectionCleanupQueue;
+TqServerConnectionCleanupQueue& TqServerCleanupService() {
+    static auto* service = new TqServerConnectionCleanupQueue();
+    return *service;
+}
 #if defined(TQ_UNIT_TESTING)
 std::shared_ptr<TqServerCleanupTracker> g_testServerCleanupTracker =
     std::make_shared<TqServerCleanupTracker>();
@@ -685,6 +734,10 @@ void TqUnregisterServerConnectionByHandle(HQUIC handle) {
 
 } // namespace
 
+void TqFinalStopServerConnectionCleanup() noexcept {
+    TqServerCleanupService().FinalStop();
+}
+
 std::shared_ptr<TqTerminalEscalation> TqMakeServerTerminalEscalation(
     TqTerminalConnectionKey key) noexcept {
     std::shared_ptr<TqTerminalConnectionController> controller;
@@ -818,7 +871,7 @@ bool TqDeferServerConnectionOwnerForTrackerForTest(
     context->ConnectionOwner = std::move(owner);
     context->CleanupTracker = tracker;
     context->WaitForOuterReturnForTest = std::move(waitForOuterReturn);
-    if (!g_serverConnectionCleanupQueue.Enqueue(context)) {
+    if (!TqServerCleanupService().Enqueue(context)) {
         delete context;
         return false;
     }
@@ -828,7 +881,7 @@ bool TqDeferServerConnectionOwnerForTrackerForTest(
 void TqDrainServerConnectionCleanupTrackerForTest(
     const std::shared_ptr<TqServerCleanupTracker>& tracker) {
     const uint64_t watermark = tracker ? tracker->Enqueued.load() : 0;
-    g_serverConnectionCleanupQueue.DrainThrough(tracker, watermark);
+    TqServerCleanupService().DrainThrough(tracker, watermark);
 }
 
 uint64_t TqServerConnectionCleanupWatermarkForTest(
@@ -839,7 +892,7 @@ uint64_t TqServerConnectionCleanupWatermarkForTest(
 void TqDrainServerConnectionCleanupThroughForTest(
     const std::shared_ptr<TqServerCleanupTracker>& tracker,
     uint64_t watermark) {
-    g_serverConnectionCleanupQueue.DrainThrough(tracker, watermark);
+    TqServerCleanupService().DrainThrough(tracker, watermark);
 }
 
 bool TqDuplicateServerConnectionCleanupEnqueueForTest(
@@ -850,27 +903,67 @@ bool TqDuplicateServerConnectionCleanupEnqueueForTest(
     context->ConnectionOwner = std::move(owner);
     context->CleanupTracker = g_testServerCleanupTracker;
     context->WaitForOuterReturnForTest = std::move(waitForOuterReturn);
-    const bool first = g_serverConnectionCleanupQueue.Enqueue(context);
-    const bool duplicate = g_serverConnectionCleanupQueue.Enqueue(context);
+    const bool first = TqServerCleanupService().Enqueue(context);
+    const bool duplicate = TqServerCleanupService().Enqueue(context);
     return first && !duplicate;
 }
 
 uint64_t TqServerConnectionCleanupDuplicateCountForTest() {
-    return g_serverConnectionCleanupQueue.DuplicateEnqueueForTest();
+    return TqServerCleanupService().DuplicateEnqueueForTest();
 }
 
 void TqFinalStopServerConnectionCleanupForTest() {
-    g_serverConnectionCleanupQueue.FinalStop();
+    TqFinalStopServerConnectionCleanup();
+}
+
+void* TqRegisterServerCleanupProducerForTest(
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn) {
+    if (!TqServerCleanupService().RegisterProducer()) return nullptr;
+    auto* context = new (std::nothrow) TqServerConnectionContext();
+    if (!context) {
+        TqServerCleanupService().UnregisterProducer();
+        return nullptr;
+    }
+    context->ProducerRegistered = true;
+    context->ConnectionOwner = std::move(owner);
+    context->CleanupTracker = g_testServerCleanupTracker;
+    context->WaitForOuterReturnForTest = std::move(waitForOuterReturn);
+    return context;
+}
+
+bool TqEnqueueRegisteredServerCleanupProducerForTest(void* producer) {
+    return TqServerCleanupService().Enqueue(
+        static_cast<TqServerConnectionContext*>(producer));
+}
+
+bool TqServerCleanupProducerAdmissionOpenForTest() {
+    return TqServerCleanupService().ProducerAdmissionOpenForTest();
+}
+
+bool TqEnterServerCallbackForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker) {
+    return tracker && tracker->TryEnterCallback();
+}
+
+void TqLeaveServerCallbackForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker) {
+    if (tracker) tracker->LeaveCallback();
+}
+
+void TqCloseServerCallbackAdmissionForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker) {
+    if (tracker) tracker->CloseCallbackAdmissionAndDrain();
 }
 
 void TqFailNextServerCleanupEnqueueForTest() {
-    g_serverConnectionCleanupQueue.DisableWorkerStartForTest(true);
+    TqServerCleanupService().DisableWorkerStartForTest(true);
 }
 
 void TqDrainServerConnectionCleanupForTest() {
     const uint64_t watermark = g_testServerCleanupTracker->Enqueued.load();
-    g_serverConnectionCleanupQueue.DisableWorkerStartForTest(false);
-    g_serverConnectionCleanupQueue.DrainThrough(g_testServerCleanupTracker, watermark);
+    TqServerCleanupService().DisableWorkerStartForTest(false);
+    TqServerCleanupService().DrainThrough(g_testServerCleanupTracker, watermark);
 }
 
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
@@ -2614,6 +2707,7 @@ void QuicServerSession::Stop() {
     std::unique_ptr<MsQuicRegistration> registrationLocal;
     std::unique_ptr<MsQuicConfiguration> configurationLocal;
     std::vector<std::unique_ptr<MsQuicListener>> listenersLocal;
+    auto cleanupTracker = CleanupTracker;
 
     {
         std::lock_guard<std::mutex> guard(Lock);
@@ -2632,11 +2726,11 @@ void QuicServerSession::Stop() {
         ResolvedListens.clear();
     }
 
+    if (cleanupTracker) cleanupTracker->CloseCallbackAdmissionAndDrain();
     StateChanged.notify_all();
-    auto cleanupTracker = CleanupTracker;
     const uint64_t cleanupWatermark = cleanupTracker
         ? cleanupTracker->Enqueued.load(std::memory_order_acquire) : 0;
-    g_serverConnectionCleanupQueue.DrainThrough(cleanupTracker, cleanupWatermark);
+    TqServerCleanupService().DrainThrough(cleanupTracker, cleanupWatermark);
 }
 
 void QuicServerSession::Run() {
@@ -2690,6 +2784,11 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
     if (serverContext == nullptr) {
         return QUIC_STATUS_OUT_OF_MEMORY;
     }
+    if (!TqServerCleanupService().RegisterProducer()) {
+        delete serverContext;
+        return QUIC_STATUS_INVALID_STATE;
+    }
+    serverContext->ProducerRegistered = true;
     serverContext->Session = session;
     serverContext->CleanupTracker = session->CleanupTracker;
 
@@ -2704,6 +2803,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
     }
     auto* connection = connectionOwner.get();
     if (connection == nullptr) {
+        TqServerCleanupService().UnregisterProducer();
         delete serverContext;
         return QUIC_STATUS_OUT_OF_MEMORY;
     }
@@ -2721,6 +2821,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
             disableStatus);
         connection->Handle = nullptr;
         serverContext->ConnectionOwner.reset();
+        TqServerCleanupService().UnregisterProducer();
         delete serverContext;
         connectionOwner.reset();
         return disableStatus;
@@ -2735,6 +2836,7 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         if (session->Stopping || !session->Configuration || QUIC_FAILED(configStatus)) {
             connection->Handle = nullptr;
             serverContext->ConnectionOwner.reset();
+            TqServerCleanupService().UnregisterProducer();
             delete serverContext;
             connectionOwner.reset();
             return QUIC_FAILED(configStatus) ? configStatus : QUIC_STATUS_INVALID_STATE;
@@ -2757,8 +2859,20 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
     void* context,
     QUIC_CONNECTION_EVENT* event) noexcept {
     auto* serverContext = static_cast<TqServerConnectionContext*>(context);
-    QuicServerSession* session = serverContext != nullptr ? serverContext->Session : nullptr;
-    if (session == nullptr) {
+    if (serverContext == nullptr || event == nullptr) {
+        return QUIC_STATUS_SUCCESS;
+    }
+    auto tracker = serverContext->CleanupTracker;
+    const bool entered = tracker && tracker->TryEnterCallback();
+    auto leave = [&] { if (entered) tracker->LeaveCallback(); };
+    QuicServerSession* session = entered ? serverContext->Session : nullptr;
+    if (!entered) {
+        if (event->Type == QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE) {
+            (void)TqAbortConnectionTunnels(connection);
+            TqUnregisterServerConnection(connection);
+            serverContext->Session = nullptr;
+            (void)TqServerCleanupService().Enqueue(serverContext);
+        }
         return QUIC_STATUS_SUCCESS;
     }
 
@@ -2882,12 +2996,14 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
             TqTraceQuicDisconnected(connection, connId, "server");
         }
         TqUnregisterServerConnection(connection);
-        g_serverConnectionCleanupQueue.Enqueue(serverContext);
+        serverContext->Session = nullptr;
+        (void)TqServerCleanupService().Enqueue(serverContext);
         break;
     }
     default:
         break;
     }
 
+    leave();
     return QUIC_STATUS_SUCCESS;
 }

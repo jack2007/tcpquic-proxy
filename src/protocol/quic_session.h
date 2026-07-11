@@ -103,6 +103,7 @@ bool TqAbortServerConnectionTunnels(const std::string& connectionId);
 void TqServerConnectionStreamStarted(MsQuicConnection* connection);
 void TqServerConnectionStreamFinished(MsQuicConnection* connection);
 void TqServerConnectionStreamFinishedById(uint32_t connectionId);
+void TqFinalStopServerConnectionCleanup() noexcept;
 
 #if defined(TQ_UNIT_TESTING)
 uint32_t TqRegisterServerConnectionForTest(
@@ -132,6 +133,17 @@ bool TqDuplicateServerConnectionCleanupEnqueueForTest(
     std::function<void()> waitForOuterReturn);
 uint64_t TqServerConnectionCleanupDuplicateCountForTest();
 void TqFinalStopServerConnectionCleanupForTest();
+void* TqRegisterServerCleanupProducerForTest(
+    std::shared_ptr<MsQuicConnection> owner,
+    std::function<void()> waitForOuterReturn);
+bool TqEnqueueRegisteredServerCleanupProducerForTest(void* producer);
+bool TqServerCleanupProducerAdmissionOpenForTest();
+bool TqEnterServerCallbackForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker);
+void TqLeaveServerCallbackForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker);
+void TqCloseServerCallbackAdmissionForTest(
+    const std::shared_ptr<TqServerCleanupTracker>& tracker);
 void TqFailNextServerCleanupEnqueueForTest();
 void TqDrainServerConnectionCleanupForTest();
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);

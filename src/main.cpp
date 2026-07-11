@@ -383,6 +383,7 @@ int RunServer(const TqConfig& cfg) {
     std::thread quicThread([&quic] { quic.Run(); });
     TqWaitForInterrupt();
     quic.Stop();
+    TqFinalStopServerConnectionCleanup();
     if (quicThread.joinable()) {
         quicThread.join();
     }
