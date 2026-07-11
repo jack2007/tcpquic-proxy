@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -116,9 +117,22 @@ public:
         std::chrono::seconds deadline) noexcept;
     void Cancel(uint64_t streamId) noexcept;
 #if defined(TQ_UNIT_TESTING)
+    struct TestSnapshot {
+        uint64_t PendingTasks{0};
+        uint64_t IndexedStreams{0};
+        uint64_t CanceledStreams{0};
+        bool Running{false};
+        bool Joinable{false};
+    };
     static void ResetForTest();
     static void AdvanceForTest(std::chrono::milliseconds delta);
     static std::chrono::steady_clock::time_point NowForTest();
+    static TestSnapshot SnapshotForTest();
+    static void SetBeforeExecuteForTest(std::function<void()> hook);
+    static void SetBeforeWorkerReturnForTest(std::function<void()> hook);
+    static void UseRealClockForTest();
+    static void FailNextAllocationForTest(uint32_t count) noexcept;
+    static void FailNextThreadStartForTest() noexcept;
 #endif
 };
 
@@ -149,6 +163,7 @@ struct TqTerminalMetrics {
     uint64_t DuplicateShutdownSuppressed{0};
     uint64_t DuplicateTerminalSuppressed{0};
     uint64_t ExactlyOnceViolation{0};
+    uint64_t SchedulerFailure{0};
 };
 
 TqTerminalMetrics TqTerminalMetricsSnapshot() noexcept;

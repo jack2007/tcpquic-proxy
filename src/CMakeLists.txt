@@ -1153,6 +1153,7 @@ set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$O
 
 add_executable(tcpquic_server_admin_test
     unittest/server_admin_test.cpp
+    unittest/msquic_api_stub.cpp
     tunnel/terminal_convergence.cpp
     tunnel/stream_lifetime.cpp
     runtime/admin_memory.cpp
@@ -1166,7 +1167,6 @@ add_executable(tcpquic_server_admin_test
     ${TCPQUIC_PLATFORM_SOURCES}
 )
 tcpquic_target_include_dirs(tcpquic_server_admin_test)
-target_compile_definitions(tcpquic_server_admin_test PRIVATE TQ_DEFINE_MSQUIC_API=1)
 target_link_libraries(tcpquic_server_admin_test PRIVATE Threads::Threads inc warnings msquic nlohmann_json::nlohmann_json)
 tcpquic_link_mimalloc(tcpquic_server_admin_test)
 set_property(TARGET tcpquic_server_admin_test PROPERTY FOLDER "tools")

@@ -7,9 +7,6 @@
 #include <unordered_map>
 #include <utility>
 
-#if defined(TQ_DEFINE_MSQUIC_API)
-const MsQuicApi* MsQuic = nullptr;
-#endif
 
 namespace {
 
@@ -782,6 +779,10 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         result.RetryScheduled = TqTerminalScheduler::Instance().ScheduleRetry(
             weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode,
             result.Attempt);
+        if (!result.RetryScheduled) {
+            (void)TqTerminalScheduler::Instance().ScheduleRetry(
+                weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode, 4);
+        }
     }
     return result;
 }

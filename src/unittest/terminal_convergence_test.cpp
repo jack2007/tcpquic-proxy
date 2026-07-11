@@ -137,6 +137,228 @@ void TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut() {
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
 }
 
+void TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible() {
+    Reset();
+    auto owner = MakeStartedOwner(20);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    std::mutex lock;
+    std::condition_variable cv;
+    bool entered = false;
+    bool terminalDone = false;
+    owner->SetBeforeTerminalLedgerRecordHookForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        entered = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return terminalDone; });
+    });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    TqTerminalShutdownResult result{};
+    std::thread shutdown([&] {
+        result = owner->BeginTerminalShutdown(91, sink, escalation);
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return entered; });
+    }
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        terminalDone = true;
+    }
+    cv.notify_all();
+    shutdown.join();
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(40));
+    CHECK(escalation->Calls == 0);
+    const auto ledger = owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest());
+    CHECK(ledger.Phase == TerminalPhase::TerminalObserved);
+    CHECK(ledger.Watchdog == TqTerminalWatchdogState::Canceled);
+    CHECK(TqTerminalScheduler::SnapshotForTest().PendingTasks == 0);
+}
+
+void TestTerminalBetweenOwnerCommitAndRetryScheduleIsIrreversible() {
+    Reset();
+    auto owner = MakeStartedOwner(26);
+    uint32_t shutdownCalls = 0;
+    owner->SetShutdownHookForTest(
+        [&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+            ++shutdownCalls;
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        });
+    owner->SetBeforeTerminalLedgerRecordHookForTest([&] {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    });
+    auto escalation = std::make_shared<CountingEscalation>();
+    const auto result = owner->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(owner, owner->TerminalLedger()), escalation);
+    CHECK(!result.RetryScheduled);
+    CHECK(shutdownCalls == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(40));
+    CHECK(escalation->Calls == 0);
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::Canceled);
+    CHECK(TqTerminalScheduler::SnapshotForTest().PendingTasks == 0);
+}
+
+void TestCancelWinsAgainstTaskAlreadyRemovedFromHeap() {
+    Reset();
+    auto owner = MakeStartedOwner(21);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(91, sink, escalation).Submitted);
+    std::mutex lock;
+    std::condition_variable cv;
+    bool popped = false;
+    bool release = false;
+    TqTerminalScheduler::SetBeforeExecuteForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        popped = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    });
+    std::thread advance([] {
+        TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(5));
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return popped; });
+    }
+    TqTerminalScheduler::Instance().Cancel(21);
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    advance.join();
+    TqTerminalScheduler::SetBeforeExecuteForTest({});
+    CHECK(escalation->Calls == 0);
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::Canceled);
+}
+
+void TestSchedulerAllocationFailuresEscalateWithoutDamagingExistingTasks() {
+    Reset();
+    auto first = MakeStartedOwner(22);
+    first->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto firstEscalation = std::make_shared<CountingEscalation>();
+    CHECK(first->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(first, first->TerminalLedger()),
+        firstEscalation).Submitted);
+    const auto before = TqTerminalScheduler::SnapshotForTest();
+    TqTerminalScheduler::FailNextAllocationForTest(1);
+    auto second = MakeStartedOwner(23);
+    second->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto secondEscalation = std::make_shared<CountingEscalation>();
+    CHECK(second->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(second, second->TerminalLedger()),
+        secondEscalation).Submitted);
+    CHECK(secondEscalation->Calls == 1);
+    const auto after = TqTerminalScheduler::SnapshotForTest();
+    CHECK(after.PendingTasks == before.PendingTasks + 1);
+    CHECK(after.IndexedStreams == before.IndexedStreams + 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(5));
+    CHECK(firstEscalation->Calls == 1);
+}
+
+void TestRetryAndThreadStartFailuresEscalateOnce() {
+    Reset();
+    TqTerminalScheduler::FailNextAllocationForTest(1);
+    auto retryOwner = MakeStartedOwner(24);
+    retryOwner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_OUT_OF_MEMORY; });
+    auto retryEscalation = std::make_shared<CountingEscalation>();
+    const auto retry = retryOwner->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(retryOwner, retryOwner->TerminalLedger()),
+        retryEscalation);
+    CHECK(!retry.RetryScheduled);
+    CHECK(retryEscalation->Calls == 1);
+
+    Reset();
+    TqTerminalScheduler::UseRealClockForTest();
+    TqTerminalScheduler::FailNextThreadStartForTest();
+    auto armOwner = MakeStartedOwner(25);
+    armOwner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto armEscalation = std::make_shared<CountingEscalation>();
+    CHECK(armOwner->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(armOwner, armOwner->TerminalLedger()),
+        armEscalation).Submitted);
+    CHECK(armEscalation->Calls == 1);
+    CHECK(TqTerminalMetricsSnapshot().SchedulerFailure != 0);
+    TqTerminalScheduler::Instance().Stop();
+}
+
+void TestCompletedStreamsLeaveNoSchedulerIndexEntries() {
+    Reset();
+    for (uint64_t id = 30; id != 34; ++id) {
+        auto owner = MakeStartedOwner(id);
+        owner->SetShutdownHookForTest(
+            [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+        auto escalation = std::make_shared<CountingEscalation>();
+        CHECK(owner->BeginTerminalShutdown(
+            91, TqTerminalSink::Create(owner, owner->TerminalLedger()),
+            escalation).Submitted);
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    }
+    const auto snapshot = TqTerminalScheduler::SnapshotForTest();
+    CHECK(snapshot.PendingTasks == 0);
+    CHECK(snapshot.IndexedStreams == 0);
+    CHECK(snapshot.CanceledStreams == 0);
+}
+
+void TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks() {
+    Reset();
+    TqTerminalScheduler::UseRealClockForTest();
+    std::mutex lock;
+    std::condition_variable cv;
+    bool oldWorkerReturning = false;
+    bool releaseOldWorker = false;
+    TqTerminalScheduler::SetBeforeWorkerReturnForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        oldWorkerReturning = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return releaseOldWorker; });
+    });
+    TqTerminalScheduler::Instance().Start();
+    std::thread stopper([] { TqTerminalScheduler::Instance().Stop(); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return oldWorkerReturning; });
+    }
+    std::atomic<bool> startReturned{false};
+    std::thread starter([&] {
+        TqTerminalScheduler::Instance().Start();
+        startReturned.store(true, std::memory_order_release);
+    });
+    CHECK(!startReturned.load(std::memory_order_acquire));
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseOldWorker = true;
+    }
+    cv.notify_all();
+    stopper.join();
+    starter.join();
+    CHECK(startReturned.load(std::memory_order_acquire));
+    const auto running = TqTerminalScheduler::SnapshotForTest();
+    CHECK(running.Running && running.Joinable);
+    TqTerminalScheduler::SetBeforeWorkerReturnForTest({});
+    TqTerminalScheduler::Instance().Stop();
+    const auto stopped = TqTerminalScheduler::SnapshotForTest();
+    CHECK(!stopped.Running && !stopped.Joinable);
+    CHECK(stopped.PendingTasks == 0 && stopped.IndexedStreams == 0);
+}
+
 void TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce() {
     Reset();
     auto owner = TqStreamLifetime::CreateForTest(
@@ -427,6 +649,13 @@ int main() {
     TestRetryBackoffAndWatchdogBoundaries();
     TestTerminalCancelsRetryAndWatchdog();
     TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut();
+    TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible();
+    TestTerminalBetweenOwnerCommitAndRetryScheduleIsIrreversible();
+    TestCancelWinsAgainstTaskAlreadyRemovedFromHeap();
+    TestSchedulerAllocationFailuresEscalateWithoutDamagingExistingTasks();
+    TestRetryAndThreadStartFailuresEscalateOnce();
+    TestCompletedStreamsLeaveNoSchedulerIndexEntries();
+    TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks();
     TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce();
     TestIdentityRebindKeepsOriginalLedger();
     TestSinkRejectsMissingOrMismatchedOwnerLedger();

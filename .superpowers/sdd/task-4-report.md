@@ -28,4 +28,27 @@
 ## 疑虑
 
 - `Start()` 当前由首次 Schedule/Arm 懒启动；后续若 Task 5 在进程生命周期显式 Start/Stop，语义兼容。
-- server admin 本身不初始化 MsQuic，仅为链接 scheduler 依赖的 stream helper 提供空 API 指针；该测试不执行 stream API。
+- server admin 本身不初始化 MsQuic；专用测试 stub 仅满足 stream helper 链接，该测试不执行 stream API。
+
+## Review FAIL 修复（2026-07-11）
+
+### RED / GREEN
+
+- RED：先加入 terminal 位于 owner commit 与 scheduler arm/schedule 之间、task 已出堆后 Cancel、allocation failure、索引归零等测试；首次构建因新增 scheduler test API 未实现而链接失败。
+- GREEN：上述测试以及 retry allocation failure、thread-start failure、旧 worker 已 `Running=false` 但仍 joinable 的 Start/Stop 交错测试全部通过。
+
+### 不可逆屏障与锁序
+
+- ledger 的 `TerminalObserved/Closed` phase 与 `Canceled` watchdog 是唯一不可逆屏障。terminal event 在同一个 ledger 临界区内写 phase 和 Canceled；Arm、retry enqueue、attempt-4 escalation 均在 ledger 锁下复核。
+- schedule 的顺序为 `ledger -> scheduler task mutex`；Cancel 先取得 ledger 引用、释放 task mutex，再标记 ledger Canceled，最后持 task mutex 原地删 heap/index。外部 escalation 不持 owner、ledger、task 或 lifecycle 锁。
+- task 出堆后仍保留 stream index，执行完成/owner expired/watchdog timeout 后自然清理；Cancel 因而可以标记已出堆 task 的 ledger，执行侧 CAS/gate 会拒绝 escalation。
+
+### Start/Stop 与异常策略
+
+- 独立 lifecycle mutex 串行化旧 thread join 与新 thread create；join 时不持 scheduler task mutex。Stop join 后清空 heap/index，Start 在复用 thread 对象前必先 join 旧 joinable worker。
+- heap 使用可原地 erase/re-heapify 的 vector-backed min-heap，Cancel 不分配。heap/map 入队是事务式操作；所有容器分配与 thread 创建均在 `noexcept` 边界内捕获。
+- retry 入队失败返回 false，由 owner 走 attempt-4 ledger gate 做一次锁外 escalation；watchdog 入队/thread-start 失败由 scheduler 锁外 escalation，并累计 `SchedulerFailure`。测试注入验证旧任务不受损且进程不终止。
+
+### CMake 修复
+
+- 移除 `TQ_DEFINE_MSQUIC_API` target-wide compile define；新增专用 `src/unittest/msquic_api_stub.cpp`，只为需要链接 `stream_lifetime.cpp` 的 server admin 测试提供单一 `MsQuic` 定义，避免重复符号。
