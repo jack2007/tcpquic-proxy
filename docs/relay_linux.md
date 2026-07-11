@@ -344,7 +344,7 @@ admin API 行为：
 - 关注 `linux_relay_runtime_lock_wait_nanos`、`linux_relay_runtime_lock_acquire_count` 和 `linux_relay_runtime_snapshot_inflight_max`，确认 admin snapshot 不再放大建链路径 runtime lock 等待。
 - 结合 `linux_relay_snapshot_command_wait_nanos`、`linux_relay_snapshot_command_wait_count` 和 `linux_relay_snapshot_command_timeouts` 判断是否存在 worker 忙导致的 snapshot 降级。
 
-推进状态：本轮已落地 runtime state、staged Start 回滚、snapshot lease/Stop barrier、共享 deadline、稳定 slot identity 和对应 metrics；后续只保留现场观测与细节优化。
+推进状态：本轮已落地 runtime state、staged Start 回滚、snapshot lease/Stop barrier、共享 deadline、稳定 slot identity 和对应 metrics；Acquire/Release 已迁到公共 header-only `TqRelayRuntimeSnapshotSupport`（行为不变，Linux 仍允许并发 snapshot，无 Darwin 式 execution permit）。后续只保留现场观测与细节优化。macOS 侧对等实现与 Admin `darwin-N` 行见 `docs/relay_macos.md`「Admin SnapshotWorkers」一节。
 
 ### 3.5 `ControlLock` 持锁等待 worker command 已收敛
 
