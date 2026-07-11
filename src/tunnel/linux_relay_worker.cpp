@@ -3239,6 +3239,10 @@ void TqLinuxRelayWorker::ProcessQuicShutdownComplete(
         terminalHandoff->LocalOperationOwnershipTransferredOrDrained.store(
             true, std::memory_order_release);
         terminalHandoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+        if (!terminalHandoff->HandoffCompletedCounted.exchange(
+                true, std::memory_order_acq_rel)) {
+            TqRecordTerminalHandoffCompleted();
+        }
     }
 }
 
