@@ -110,6 +110,7 @@ struct TqRelayHandle {
     uint32_t WindowsWorkerIndex{0};
     TqDarwinRelayWorker* DarwinWorker{nullptr};
     uint64_t DarwinRelayId{0};
+    uint32_t DarwinWorkerIndex{0};
 };
 
 inline std::shared_ptr<const TqRelayLinuxCommittedState>

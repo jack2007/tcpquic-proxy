@@ -263,6 +263,24 @@ void DrainWakeProcessesPastBudgetAndShutdown() {
     CHECK(!worker.RunningForTest());
 }
 
+void SnapshotReportsNormalizedEventQueueCapacity() {
+    TqDarwinRelayWorkerConfig config{};
+    config.WorkerIndex = 7;
+    config.EventQueueCapacity = 3; // normalizes to 4
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    const TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
+    CHECK(snapshot.SnapshotComplete);
+    CHECK(snapshot.WorkerIndex == 7);
+    CHECK(snapshot.EventQueueCapacity == 4);
+    CHECK(
+        snapshot.EventQueueCapacity ==
+        TqDarwinRelayEventQueue::NormalizeCapacityForTest(3));
+
+    worker.Stop();
+}
+
 struct RealStopPurgeHalfCloseHookState {
     std::atomic<uint64_t> RelayId{0};
     std::shared_ptr<void> RelayOwner;
@@ -339,6 +357,7 @@ int main() {
     PendingReceiveStreamOwnerIsIndependentOfRelayMap();
     ActiveShutdownEventMovePreservesReasonAndOwner();
     DrainWakeProcessesPastBudgetAndShutdown();
+    SnapshotReportsNormalizedEventQueueCapacity();
     RealWorkerStopPurgeIgnoresHalfCloseHints();
     return 0;
 }

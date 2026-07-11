@@ -8,10 +8,12 @@
 #include "platform_socket.h"
 #include "relay.h"
 #include "relay_buffer.h"
+#include "relay_runtime_snapshot.h"
 #include "stream_lifetime.h"
 #include "tuning.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -235,6 +237,14 @@ struct TqDarwinRelayWorkerConfig {
     // Used to enqueue mixed events that Stop must purge off-thread (P2-8).
     void (*BeforeWorkerExitHookForTest)(TqDarwinRelayWorker*){nullptr};
 #endif
+#if defined(TQ_UNIT_TESTING)
+    // Blocks Snapshot dispatch on the worker thread until the hook returns.
+    void (*BeforeSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
+    // Next SnapshotLocal throws once (allocation/build failure injection).
+    bool FailNextSnapshotLocalForTest{false};
+    // Start() returns false once for staged-runtime failure injection.
+    bool FailStartForTest{false};
+#endif
 };
 
 #if defined(TCPQUIC_TESTING)
@@ -249,6 +259,9 @@ struct TqDarwinBindingPublishIdentitySnapshot {
 #endif
 
 struct TqDarwinRelayWorkerSnapshot {
+    uint32_t WorkerIndex{0};
+    uint64_t EventQueueCapacity{0};
+    bool SnapshotComplete{false};
     uint64_t EventsProcessed{0};
     uint64_t Wakeups{0};
     uint64_t PendingEvents{0};
@@ -331,6 +344,7 @@ public:
 
     bool Start();
     void Stop();
+    uint32_t WorkerIndex() const noexcept { return Config.WorkerIndex; }
 #if defined(TCPQUIC_TESTING)
     bool StartForTest();
     bool EnqueueForTest(TqDarwinRelayEvent event);
@@ -402,12 +416,21 @@ public:
         const std::shared_ptr<void>& relayOwner,
         TqDarwinRelayEventType type,
         uint64_t relayId);
+#if defined(TQ_UNIT_TESTING)
+    // Enqueues a Snapshot command that holds `permit` so Stop/purge can prove
+    // cancel releases the execution gate without needing a live worker thread.
+    bool EnqueueDetachedSnapshotCommandForTest(
+        TqRelayRuntimeSnapshotExecutionGate::Permit permit);
+#endif
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
     uint32_t BindingCallbackRefsForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
     TqDarwinRelayWorkerSnapshot Snapshot() const;
+    TqDarwinRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline,
+        TqRelayRuntimeSnapshotExecutionGate::Permit permit = {}) const;
 
     static QUIC_STATUS QUIC_API StreamCallback(
         _In_ MsQuicStream* stream,
@@ -439,11 +462,18 @@ private:
         std::condition_variable Cv;
         bool Done{false};
     };
+    enum class SnapshotCommandState : uint8_t {
+        Pending = 0,
+        Completed,
+        Cancelled,
+        Detached,
+    };
     struct SnapshotCommand {
         TqDarwinRelayWorkerSnapshot Result;
         std::mutex Mutex;
         std::condition_variable Cv;
-        bool Done{false};
+        SnapshotCommandState State{SnapshotCommandState::Pending};
+        TqRelayRuntimeSnapshotExecutionGate::Permit Permit;
     };
     enum class ControlEnqueueResult {
         Failed,
@@ -463,13 +493,17 @@ private:
         const TqDarwinRelayRegistration& registration);
     void UnregisterRelayLocal(uint64_t relayId);
     TqDarwinRelayWorkerSnapshot SnapshotLocal() const;
+    TqDarwinRelayWorkerSnapshot MakeIncompleteSnapshot() const;
     static void CompleteRegisterCommand(
         RegisterRelayCommand* command,
         TqDarwinRelayRegistrationResult result);
     static void CompleteUnregisterCommand(UnregisterRelayCommand* command);
     static void CompleteSnapshotCommand(
-        SnapshotCommand* command,
+        const std::shared_ptr<SnapshotCommand>& command,
         TqDarwinRelayWorkerSnapshot result);
+    static void CancelSnapshotCommand(const std::shared_ptr<SnapshotCommand>& command);
+    static std::shared_ptr<SnapshotCommand> SnapshotCommandFromEvent(
+        const TqDarwinRelayEvent& event);
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool InstallInactiveTcpFilters(const std::shared_ptr<RelayState>& relay);
@@ -721,16 +755,40 @@ public:
 
     bool Start(const TqTuningConfig& tuning);
     void Stop();
-    TqDarwinRelayWorkerSnapshot Snapshot() const;
     TqDarwinRelayWorker* PickWorker();
+    TqDarwinRelayWorkerSnapshot Snapshot() const;
+    TqDarwinRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers() const;
+    TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers(
+        std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotStats SnapshotSupportStats() const;
+    TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStats() const;
+
+#if defined(TQ_UNIT_TESTING)
+    void SetFailStartWorkerIndexForTest(int32_t workerIndex);
+    void SetBeforeWorkerSnapshotHookForTest(
+        void (*hook)(TqDarwinRelayWorker*));
+    void FailNextWorkerRefMaterializationForTest() const;
+    TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStatsForTest() const;
+#endif
 
 private:
     TqDarwinRelayRuntime() = default;
+    std::unique_lock<std::mutex> AcquireRuntimeLock() const;
+    std::unique_lock<std::mutex> TryAcquireRuntimeLockForSnapshot(
+        std::chrono::steady_clock::time_point deadline) const;
 
     mutable std::mutex Mutex;
-    bool Started{false};
+    mutable TqRelayRuntimeSnapshotSupport SnapshotSupport;
+    mutable TqRelayRuntimeSnapshotExecutionGate SnapshotExecutionGate;
+    TqRelayRuntimeState State{TqRelayRuntimeState::Stopped};
     uint32_t NextWorker{0};
     std::vector<std::unique_ptr<TqDarwinRelayWorker>> Workers;
+#if defined(TQ_UNIT_TESTING)
+    int32_t FailStartWorkerIndexForTest{-1};
+    void (*BeforeWorkerSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
+#endif
 };
 
 #endif

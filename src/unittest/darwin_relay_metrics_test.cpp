@@ -1,5 +1,6 @@
 #if defined(__APPLE__)
 
+#include "darwin_relay_event_queue.h"
 #include "darwin_relay_worker.h"
 #include "relay.h"
 #include "relay_metrics.h"
@@ -8,6 +9,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <sstream>
@@ -61,6 +64,157 @@ void AssertReleaseGateGaugesZero(const char* where) {
             static_cast<unsigned long long>(metrics.RelayStopRemaining));
         std::abort();
     }
+}
+
+std::atomic<uint32_t> g_workerSnapshotHookCalls{0};
+
+void CountWorkerSnapshotHook(TqDarwinRelayWorker*) {
+    g_workerSnapshotHookCalls.fetch_add(1, std::memory_order_relaxed);
+}
+
+void SnapshotWorkersRunningAndStopped() {
+    auto& runtime = TqDarwinRelayRuntime::Instance();
+    runtime.Stop();
+
+    TqTuningConfig tuning{};
+    tuning.RelayWorkerCount = 3;
+    tuning.RelayEventQueueCapacity = 1000; // → normalized 1024
+    Check(runtime.Start(tuning), "runtime.Start(3)");
+
+    const auto running = TqSnapshotRelayWorkers();
+    Check(running.SnapshotComplete, "running.SnapshotComplete");
+    Check(running.IdentitiesComplete, "running.IdentitiesComplete");
+    Check(running.Workers.size() == 4, "aggregate + 3 darwin rows");
+    Check(running.Workers[0].WorkerId == "aggregate", "workers[0] aggregate");
+    Check(std::string(running.Workers[0].Backend) == "kqueue", "aggregate backend kqueue");
+    Check(running.Workers[0].SnapshotComplete, "aggregate complete");
+
+    const uint64_t expectedCapacity =
+        TqDarwinRelayEventQueue::NormalizeCapacityForTest(1000);
+    Check(expectedCapacity == 1024, "normalized capacity 1024");
+    Check(running.Workers[0].EventQueueCapacity == expectedCapacity, "aggregate capacity max");
+
+    uint64_t sumActive = 0;
+    uint64_t sumPending = 0;
+    uint64_t sumRead = 0;
+    uint64_t sumWrite = 0;
+    uint64_t sumErrors = 0;
+    uint64_t maxCapacity = 0;
+    for (size_t i = 1; i < running.Workers.size(); ++i) {
+        const auto& row = running.Workers[i];
+        const uint32_t index = static_cast<uint32_t>(i - 1);
+        Check(row.WorkerIndex == index, "per-row worker_index matches slot");
+        Check(row.WorkerId == ("darwin-" + std::to_string(index)), "darwin-N id");
+        Check(std::string(row.Backend) == "darwin", "per-row backend darwin");
+        Check(row.SnapshotComplete, "per-row complete");
+        Check(row.EventQueueCapacity == expectedCapacity, "per-row normalized capacity");
+        sumActive += row.ActiveRelays;
+        sumPending += row.PendingBytes;
+        sumRead += row.TcpReadBytes;
+        sumWrite += row.TcpWriteBytes;
+        sumErrors += row.Errors;
+        maxCapacity = std::max(maxCapacity, row.EventQueueCapacity);
+    }
+    Check(running.Workers[0].ActiveRelays == sumActive, "aggregate ActiveRelays sum");
+    Check(running.Workers[0].PendingBytes == sumPending, "aggregate PendingBytes sum");
+    Check(running.Workers[0].TcpReadBytes == sumRead, "aggregate TcpReadBytes sum");
+    Check(running.Workers[0].TcpWriteBytes == sumWrite, "aggregate TcpWriteBytes sum");
+    Check(running.Workers[0].Errors == sumErrors, "aggregate Errors sum");
+    Check(running.Workers[0].EventQueueCapacity == maxCapacity, "aggregate capacity max");
+
+    const std::string listJson = TqRelayWorkersJson();
+    CheckContains(listJson, "\"snapshot_complete\":true");
+    CheckContains(listJson, "\"worker_id\":\"aggregate\"");
+    CheckContains(listJson, "\"worker_id\":\"darwin-0\"");
+    CheckContains(listJson, "\"worker_id\":\"darwin-1\"");
+    CheckContains(listJson, "\"worker_id\":\"darwin-2\"");
+
+    TqRelayWorkerLookupStatus detailStatus = TqRelayWorkerLookupStatus::SnapshotUnavailable;
+    const std::string detail = TqRelayWorkerDetailJson("darwin-1", detailStatus);
+    Check(detailStatus == TqRelayWorkerLookupStatus::Ok, "darwin-1 detail Ok");
+    CheckContains(detail, "\"worker_id\":\"darwin-1\"");
+    CheckContains(detail, "\"worker_index\":1");
+
+    runtime.Stop();
+    const auto stopped = TqSnapshotRelayWorkers();
+    Check(stopped.SnapshotComplete, "stopped.SnapshotComplete");
+    Check(stopped.IdentitiesComplete, "stopped.IdentitiesComplete");
+    Check(stopped.Workers.size() == 1, "stopped only aggregate");
+    Check(stopped.Workers[0].WorkerId == "aggregate", "stopped aggregate id");
+    Check(stopped.Workers[0].SnapshotComplete, "stopped aggregate complete");
+}
+
+void WorkersJsonSingleSamplesEachWorkerOnce() {
+    auto& runtime = TqDarwinRelayRuntime::Instance();
+    runtime.Stop();
+
+    TqTuningConfig tuning{};
+    tuning.RelayWorkerCount = 2;
+    tuning.RelayEventQueueCapacity = 64;
+    runtime.SetBeforeWorkerSnapshotHookForTest(CountWorkerSnapshotHook);
+    Check(runtime.Start(tuning), "runtime.Start(2) for single-sample");
+
+    g_workerSnapshotHookCalls.store(0, std::memory_order_relaxed);
+    const std::string json = TqRelayWorkersJson();
+    CheckContains(json, "\"worker_id\":\"darwin-0\"");
+    CheckContains(json, "\"worker_id\":\"darwin-1\"");
+    Check(
+        g_workerSnapshotHookCalls.load(std::memory_order_relaxed) == 2,
+        "each worker Snapshot once per /relay/workers");
+
+    runtime.Stop();
+    runtime.SetBeforeWorkerSnapshotHookForTest(nullptr);
+}
+
+void MetricsSnapshotCompleteCapacityAndGateStats() {
+    auto& runtime = TqDarwinRelayRuntime::Instance();
+    runtime.Stop();
+
+    TqTuningConfig tuning{};
+    tuning.RelayWorkerCount = 2;
+    tuning.RelayEventQueueCapacity = 1000;
+    Check(runtime.Start(tuning), "runtime.Start for metrics");
+
+    const auto metrics = TqSnapshotRelayMetrics();
+    Check(metrics.SnapshotComplete, "metrics.SnapshotComplete");
+    Check(std::string(metrics.Backend) == "kqueue", "metrics backend");
+    const uint64_t expectedCapacity =
+        TqDarwinRelayEventQueue::NormalizeCapacityForTest(1000);
+    Check(metrics.RelayEventQueueCapacity == expectedCapacity, "metrics capacity");
+    Check(metrics.RelayRuntimeSnapshotAcquireCount >= 1, "support acquire counted");
+
+    const std::string json = TqRelayMetricsFieldsJson(metrics);
+    CheckContains(json, "\"relay_snapshot_complete\":true");
+    CheckContains(json, "\"relay_event_queue_capacity\":1024");
+    CheckContains(json, "\"relay_runtime_snapshot_inflight\"");
+    CheckContains(json, "\"relay_runtime_snapshot_inflight_max\"");
+    CheckContains(json, "\"relay_runtime_snapshot_acquire_count\"");
+    CheckContains(json, "\"relay_runtime_snapshot_failure_count\"");
+    CheckContains(json, "\"relay_runtime_snapshot_stop_wait_count\"");
+    CheckContains(json, "\"relay_snapshot_execution_busy\"");
+    CheckContains(json, "\"relay_snapshot_execution_deadline_timeouts\"");
+    CheckContains(json, "\"relay_snapshot_execution_detached_late_commands\"");
+
+    runtime.Stop();
+}
+
+void IncompleteIdentityDoesNotVacuousCompleteAggregate() {
+    auto& runtime = TqDarwinRelayRuntime::Instance();
+    runtime.Stop();
+
+    TqTuningConfig tuning{};
+    tuning.RelayWorkerCount = 2;
+    Check(runtime.Start(tuning), "runtime.Start before incomplete");
+    runtime.FailNextWorkerRefMaterializationForTest();
+
+    const auto result = TqSnapshotRelayWorkers();
+    Check(!result.IdentitiesComplete, "IdentitiesComplete=false on acquire failure");
+    Check(!result.SnapshotComplete, "SnapshotComplete=false on acquire failure");
+    Check(result.Workers.size() == 1, "still emit aggregate row");
+    Check(result.Workers[0].WorkerId == "aggregate", "aggregate present");
+    Check(!result.Workers[0].SnapshotComplete, "empty aggregate not vacuous true");
+
+    runtime.Stop();
 }
 
 void EventizedSnapshotCountsActiveRelay() {
@@ -295,13 +449,20 @@ void FocusedCaseEndsWithZeroReleaseGateGauges() {
 } // namespace
 
 int main() {
+    TqDarwinRelayRuntime::Instance().Stop();
+
     TqRelayMetricsSnapshot runtimeSnapshot = TqSnapshotRelayMetrics();
     Check(std::string(runtimeSnapshot.Backend) == "kqueue", "runtimeSnapshot.Backend == kqueue");
+    Check(runtimeSnapshot.SnapshotComplete, "stopped metrics complete");
 
     ControlMetricsAndReleaseGateJson();
     MultiWorkerAggregationUsesMaxForGlobalGauges();
     EventizedSnapshotCountsActiveRelay();
     FocusedCaseEndsWithZeroReleaseGateGauges();
+    SnapshotWorkersRunningAndStopped();
+    WorkersJsonSingleSamplesEachWorkerOnce();
+    MetricsSnapshotCompleteCapacityAndGateStats();
+    IncompleteIdentityDoesNotVacuousCompleteAggregate();
     AssertReleaseGateGaugesZero("after focused metrics cases");
     return 0;
 }

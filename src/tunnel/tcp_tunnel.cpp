@@ -455,7 +455,9 @@ public:
         unsigned* destroyCount,
         TqSocketHandle tcpFd,
         std::shared_ptr<TqStreamLifetime> streamOwner,
-        std::shared_ptr<TqRelayStopControl>* outControl);
+        std::shared_ptr<TqRelayStopControl>* outControl,
+        MsQuicConnection* quicConn,
+        const TqConfig* configOverride);
     friend bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
     friend TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context);
 #endif
@@ -661,6 +663,7 @@ public:
             relayWorker = RelayHandle.WindowsWorker;
         } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
             relayId = RelayHandle.DarwinRelayId;
+            relayWorkerIndex = RelayHandle.DarwinWorkerIndex;
             relayWorker = RelayHandle.DarwinWorker;
         }
         if (TraceTunnelId != 0) {
@@ -784,6 +787,10 @@ public:
             backend = "windows";
             workerIndex = RelayHandle.WindowsWorkerIndex;
             relayId = RelayHandle.WindowsRelayId;
+        } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
+            backend = "darwin";
+            workerIndex = RelayHandle.DarwinWorkerIndex;
+            relayId = RelayHandle.DarwinRelayId;
         }
         TqTraceRelayStopping(
             TraceTunnelId,
@@ -1124,6 +1131,8 @@ public:
             metadata.WorkerIndex = linuxCommitted->WorkerIndex;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             metadata.WorkerIndex = RelayHandle.WindowsWorkerIndex;
+        } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
+            metadata.WorkerIndex = RelayHandle.DarwinWorkerIndex;
         }
         TqUpdateConnectionTunnelMetadata(QuicConn, this, metadata);
     }
@@ -2924,11 +2933,13 @@ TqTunnelContext* TqCreateTestDarwinRelayTunnel(
     unsigned* destroyCount,
     TqSocketHandle tcpFd,
     std::shared_ptr<TqStreamLifetime> streamOwner,
-    std::shared_ptr<TqRelayStopControl>* outControl) {
+    std::shared_ptr<TqRelayStopControl>* outControl,
+    MsQuicConnection* quicConn,
+    const TqConfig* configOverride) {
     if (!TqSocketValid(tcpFd) || streamOwner == nullptr) {
         return nullptr;
     }
-    TqConfig cfg;
+    TqConfig cfg = configOverride != nullptr ? *configOverride : TqConfig{};
     auto onComplete = [destroyCount]() {
         if (destroyCount != nullptr) {
             ++(*destroyCount);
@@ -2941,7 +2952,7 @@ TqTunnelContext* TqCreateTestDarwinRelayTunnel(
         cfg,
         nullptr,
         nullptr,
-        nullptr,
+        quicConn,
         false,
         nullptr,
         std::move(onComplete));
@@ -2951,6 +2962,9 @@ TqTunnelContext* TqCreateTestDarwinRelayTunnel(
     auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
         TqTunnelContext::Callback, context);
     context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
+    if (quicConn != nullptr) {
+        context->RegisterWithConnectionIfNeeded();
+    }
     if (!context->StartRelay(0)) {
         delete context;
         return nullptr;

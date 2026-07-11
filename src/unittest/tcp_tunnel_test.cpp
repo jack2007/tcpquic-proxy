@@ -54,7 +54,9 @@ TqTunnelContext* TqCreateTestDarwinRelayTunnel(
     unsigned* destroyCount,
     TqSocketHandle tcpFd,
     std::shared_ptr<TqStreamLifetime> streamOwner,
-    std::shared_ptr<TqRelayStopControl>* outControl);
+    std::shared_ptr<TqRelayStopControl>* outControl,
+    MsQuicConnection* quicConn = nullptr,
+    const TqConfig* configOverride = nullptr);
 bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
 bool TqTestWaitDarwinRelayInactive(
     TqDarwinRelayWorker* worker,
@@ -2347,6 +2349,156 @@ static int TestDarwinLostTerminalControlStillReaps() {
     return 0;
 }
 
+static int TestDarwinRelayWorkerIndexPropagatesToHandleAndRegistry() {
+    // Production path: StartRelay → TqRelayStartManaged sets DarwinWorkerIndex,
+    // UpdateRegistryMetadata copies it into tunnel registry (feeds /tunnels).
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 280;
+
+    TqDarwinRelayRuntime::Instance().Stop();
+
+    const MsQuicApi* previousMsQuic = MsQuic;
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+
+    TqConfig cfg{};
+    cfg.Tuning.RelayWorkerCount = 2;
+    cfg.Tuning.RelayEventQueueCapacity = 1000;
+
+    TqSocketHandle fds0[2]{TqInvalidSocket, TqInvalidSocket};
+    TqSocketHandle fds1[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(fds0) || !TqSocketPair(fds1)) {
+        MsQuic = previousMsQuic;
+        TqCloseSocket(fds0[0]);
+        TqCloseSocket(fds0[1]);
+        TqCloseSocket(fds1[0]);
+        TqCloseSocket(fds1[1]);
+        return 281;
+    }
+
+    alignas(MsQuicStream) unsigned char streamStorage0[sizeof(MsQuicStream)]{};
+    alignas(MsQuicStream) unsigned char streamStorage1[sizeof(MsQuicStream)]{};
+    auto* stream0 = reinterpret_cast<MsQuicStream*>(streamStorage0);
+    auto* stream1 = reinterpret_cast<MsQuicStream*>(streamStorage1);
+    std::memset(stream0, 0, sizeof(MsQuicStream));
+    std::memset(stream1, 0, sizeof(MsQuicStream));
+    stream0->Callback = MsQuicStream::NoOpCallback;
+    stream1->Callback = MsQuicStream::NoOpCallback;
+    stream0->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0xE310));
+    stream1->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0xE311));
+
+    auto owner0 = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    auto owner1 = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    if (owner0 == nullptr || owner1 == nullptr ||
+        !owner0->InstallStreamForTest(stream0) ||
+        !owner1->InstallStreamForTest(stream1)) {
+        MsQuic = previousMsQuic;
+        TqCloseSocket(fds0[0]);
+        TqCloseSocket(fds0[1]);
+        TqCloseSocket(fds1[0]);
+        TqCloseSocket(fds1[1]);
+        return 282;
+    }
+
+    auto* conn0 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0xD100));
+    auto* conn1 = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0xD101));
+    unsigned destroy0 = 0;
+    unsigned destroy1 = 0;
+    std::shared_ptr<TqRelayStopControl> control0;
+    std::shared_ptr<TqRelayStopControl> control1;
+
+    auto* ctx0 = TqCreateTestDarwinRelayTunnel(
+        &destroy0, fds0[1], owner0, &control0, conn0, &cfg);
+    auto* ctx1 = TqCreateTestDarwinRelayTunnel(
+        &destroy1, fds1[1], owner1, &control1, conn1, &cfg);
+    if (ctx0 == nullptr || ctx1 == nullptr) {
+        if (ctx0 != nullptr) {
+            TqTunnelReaper::Instance().Unregister(ctx0);
+            TqDestroyTestRegisteredTunnel(ctx0);
+        }
+        if (ctx1 != nullptr) {
+            TqTunnelReaper::Instance().Unregister(ctx1);
+            TqDestroyTestRegisteredTunnel(ctx1);
+        }
+        owner0->ReleaseStreamForTest();
+        owner1->ReleaseStreamForTest();
+        MsQuic = previousMsQuic;
+        TqCloseSocket(fds0[0]);
+        TqCloseSocket(fds1[0]);
+        TqDarwinRelayRuntime::Instance().Stop();
+        return 283;
+    }
+
+    TqRelayHandle* handle0 = TqTestTunnelRelayHandle(ctx0);
+    TqRelayHandle* handle1 = TqTestTunnelRelayHandle(ctx1);
+    auto cleanup = [&]() {
+        TqTunnelReaper::Instance().Unregister(ctx0);
+        TqTunnelReaper::Instance().Unregister(ctx1);
+        if (handle0 != nullptr) {
+            (void)TqTestDispatchDarwinOwnerShutdownComplete(ctx0);
+            TqRelayStop(handle0);
+        }
+        if (handle1 != nullptr) {
+            (void)TqTestDispatchDarwinOwnerShutdownComplete(ctx1);
+            TqRelayStop(handle1);
+        }
+        TqDestroyTestRegisteredTunnel(ctx0);
+        TqDestroyTestRegisteredTunnel(ctx1);
+        owner0->ReleaseStreamForTest();
+        owner1->ReleaseStreamForTest();
+        MsQuic = previousMsQuic;
+        TqCloseSocket(fds0[0]);
+        TqCloseSocket(fds1[0]);
+        TqDarwinRelayRuntime::Instance().Stop();
+    };
+
+    if (handle0 == nullptr || handle1 == nullptr ||
+        handle0->Backend != TqRelayBackendType::DarwinWorker ||
+        handle1->Backend != TqRelayBackendType::DarwinWorker ||
+        handle0->DarwinWorker == nullptr || handle1->DarwinWorker == nullptr) {
+        cleanup();
+        return 284;
+    }
+
+    // Production TqRelayStartManaged must publish the accepting worker slot.
+    if (handle0->DarwinWorkerIndex != handle0->DarwinWorker->WorkerIndex() ||
+        handle1->DarwinWorkerIndex != handle1->DarwinWorker->WorkerIndex()) {
+        cleanup();
+        return 285;
+    }
+    if (handle0->DarwinWorkerIndex == handle1->DarwinWorkerIndex) {
+        cleanup();
+        return 286;
+    }
+    if (!((handle0->DarwinWorkerIndex == 0 && handle1->DarwinWorkerIndex == 1) ||
+          (handle0->DarwinWorkerIndex == 1 && handle1->DarwinWorkerIndex == 0))) {
+        cleanup();
+        return 287;
+    }
+
+    auto tunnels = TqSnapshotTunnels();
+    auto findByWorker = [&](uint32_t workerIndex) {
+        return std::find_if(tunnels.begin(), tunnels.end(), [&](const TqTunnelSnapshot& tunnel) {
+            return tunnel.RelayBackend == "darwin" && tunnel.WorkerIndex == workerIndex;
+        });
+    };
+    if (findByWorker(handle0->DarwinWorkerIndex) == tunnels.end() ||
+        findByWorker(handle1->DarwinWorkerIndex) == tunnels.end()) {
+        cleanup();
+        return 288;
+    }
+
+    const auto workers = TqDarwinRelayRuntime::Instance().SnapshotWorkers();
+    if (!workers.SnapshotComplete || workers.Workers.size() != 2 ||
+        workers.Workers[0].EventQueueCapacity != 1024) {
+        cleanup();
+        return 289;
+    }
+
+    cleanup();
+    return 0;
+}
+
 #endif
 
 int main() {
@@ -2363,6 +2515,7 @@ int main() {
 #if defined(__APPLE__) && defined(TCPQUIC_TUNNEL_TESTING)
     if (int rc = TestDarwinNormalTerminalWakesReaper()) return rc;
     if (int rc = TestDarwinLostTerminalControlStillReaps()) return rc;
+    if (int rc = TestDarwinRelayWorkerIndexPropagatesToHandleAndRegistry()) return rc;
 #endif
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingClientHelloUpdatesConnectionNameOnly()) return rc;

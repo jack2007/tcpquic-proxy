@@ -647,7 +647,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_darwin_relay_metrics_test)
-    target_compile_definitions(tcpquic_darwin_relay_metrics_test PRIVATE TCPQUIC_TESTING=1)
+    target_compile_definitions(tcpquic_darwin_relay_metrics_test PRIVATE TCPQUIC_TESTING=1 TQ_UNIT_TESTING=1)
     target_link_libraries(tcpquic_darwin_relay_metrics_test PRIVATE Threads::Threads libzstd spdlog::spdlog msquic logging base_link inc warnings nlohmann_json::nlohmann_json)
     tcpquic_link_mimalloc(tcpquic_darwin_relay_metrics_test)
     set_property(TARGET tcpquic_darwin_relay_metrics_test PROPERTY FOLDER "tools")
