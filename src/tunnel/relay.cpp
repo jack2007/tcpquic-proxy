@@ -25,8 +25,11 @@ bool TqRelayStartImpl(
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
     TqCompressAlgo compressAlgo,
-    bool* tcpFdConsumed,
-    TqLinuxRelayWorker* linuxWorkerOverride = nullptr) {
+    bool* tcpFdConsumed
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
+    , TqLinuxRelayWorker* linuxWorkerOverride = nullptr
+#endif
+    ) {
     if (tcpFdConsumed != nullptr) {
         *tcpFdConsumed = false;
     }
@@ -73,6 +76,9 @@ bool TqRelayStartImpl(
     TqRelayRegisterActive();
     return true;
 #elif defined(__linux__)
+#if !defined(TQ_UNIT_TESTING)
+    TqLinuxRelayWorker* const linuxWorkerOverride = nullptr;
+#endif
     const uint32_t activeRelays = TqRelayRegisterActive();
     TqTuningConfig tuning = profileTuning;
     TqApplyRelayPoolBudget(tuning, activeRelays);

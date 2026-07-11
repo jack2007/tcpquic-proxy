@@ -352,8 +352,12 @@ public:
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
     bool FlushTcpWritableForTest(int tcpFd);
     bool DispatchTcpEventsForTest(uint64_t relayId, uint32_t events);
+#if defined(TQ_UNIT_TESTING)
     std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
     PostTcpEventsForTestAsync(uint64_t relayId, uint32_t events);
+    std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
+    PostUnregisterRelayForTestAsync(uint64_t relayId);
+#endif
     bool DispatchEncodedEpollEventForTest(uint64_t epollData, uint32_t events);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
     size_t RetiredBindingCountForTest() const;
@@ -474,11 +478,17 @@ private:
         bool Done{false};
     };
 
+#if defined(TQ_UNIT_TESTING)
     struct DispatchTcpEventsAsyncForTestCommand {
         uint64_t RelayId{0};
         uint32_t Events{0};
         std::shared_ptr<TqLinuxRelayAsyncTestCompletion> Completion;
     };
+    struct UnregisterRelayAsyncForTestCommand {
+        uint64_t RelayId{0};
+        std::shared_ptr<TqLinuxRelayAsyncTestCompletion> Completion;
+    };
+#endif
 
     struct ControlState {
         bool Running{false};

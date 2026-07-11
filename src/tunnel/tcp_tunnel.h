@@ -21,7 +21,9 @@ class TqStreamLifetime;
 struct TqRelayStopControl;
 struct TqRelayHandle;
 struct TqTunnelContext;
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
 class TqLinuxRelayWorker;
+#endif
 
 enum class TqTunnelRole {
     ClientOpen,
@@ -75,7 +77,7 @@ void TqHandleServerIncomingStreamForTest(
     const TqEphemeralTargetAuthorizer* authorizer,
     TqTunnelCompletionFn onComplete = {},
     TqTunnelAclDeniedFn onAclDenied = {});
-#if defined(__linux__)
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
 TqTunnelContext* TqCreateTestLinuxRelayTunnel(
     std::atomic<unsigned>* destroyCount,
     TqTunnelRole role,
@@ -87,6 +89,7 @@ TqTunnelContext* TqCreateTestLinuxRelayTunnel(
 bool TqTestDispatchLinuxOwnerEvent(
     TqTunnelContext* context, QUIC_STREAM_EVENT_TYPE type);
 TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext* context);
+bool TqTestLinuxTunnelDrainFromAdmin(TqTunnelContext* context);
 #endif
 #endif
 

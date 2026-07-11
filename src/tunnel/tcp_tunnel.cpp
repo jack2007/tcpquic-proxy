@@ -493,7 +493,7 @@ public:
     friend bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
     friend TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context);
 #endif
-#if defined(TCPQUIC_TUNNEL_TESTING) && defined(__linux__)
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(TQ_UNIT_TESTING) && defined(__linux__)
     friend TqTunnelContext* TqCreateTestLinuxRelayTunnel(
         std::atomic<unsigned>*, TqTunnelRole, TqSocketHandle,
         std::shared_ptr<TqStreamLifetime>, std::shared_ptr<TqRelayStopControl>*,
@@ -501,6 +501,7 @@ public:
     friend bool TqTestDispatchLinuxOwnerEvent(
         TqTunnelContext*, QUIC_STREAM_EVENT_TYPE);
     friend TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext*);
+    friend bool TqTestLinuxTunnelDrainFromAdmin(TqTunnelContext*);
 #endif
 
 public:
@@ -622,7 +623,11 @@ public:
         return OpenOk;
     }
 
-    bool StartRelay(uint8_t flags, TqLinuxRelayWorker* linuxWorkerOverride = nullptr) {
+    bool StartRelay(uint8_t flags
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(TQ_UNIT_TESTING) && defined(__linux__)
+        , TqLinuxRelayWorker* linuxWorkerOverride = nullptr
+#endif
+        ) {
         const TqCompressAlgo algo = TqAlgoFromFlags(flags);
         if (algo != TqCompressAlgo::None) {
             Compressor = TqCreateCompressor(algo, Config.CompressLevel);
@@ -653,10 +658,12 @@ public:
         const bool relayStarted = ReceiveSink
             ? TqRelayStartQuicReceiveSinkManaged(
                   stream, StreamOwner, &RelayHandle, Config.Tuning, ReceiveSinkBytes)
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(TQ_UNIT_TESTING) && defined(__linux__)
             : linuxWorkerOverride != nullptr
             ? TqRelayStartManagedOnLinuxWorkerForTest(
                   tcpFd, stream, StreamOwner, Compressor.get(), Decompressor.get(),
                   &RelayHandle, Config.Tuning, algo, &tcpFdConsumed, linuxWorkerOverride)
+#endif
             : TqRelayStartManaged(
                   tcpFd,
                   stream,
@@ -2996,7 +3003,7 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount) {
         std::move(onComplete));
 }
 
-#if defined(__linux__)
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
 TqTunnelContext* TqCreateTestServerOpenLegacyPendingTunnel(unsigned* destroyCount) {
     TqConfig cfg;
     auto onComplete = [destroyCount]() {
@@ -3169,6 +3176,12 @@ bool TqTestDispatchLinuxOwnerEvent(
 
 TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext* context) {
     return context != nullptr ? &context->RelayHandle : nullptr;
+}
+
+bool TqTestLinuxTunnelDrainFromAdmin(TqTunnelContext* context) {
+    if (context == nullptr) return false;
+    context->DrainFromAdmin();
+    return true;
 }
 #endif
 #endif

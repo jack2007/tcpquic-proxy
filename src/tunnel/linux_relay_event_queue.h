@@ -50,7 +50,10 @@ enum class TqLinuxRelayEventType {
     FlushTcpWritableForTest,
     RelayIndexesConsistentForTest,
     DispatchTcpEventsForTest,
+#if defined(TQ_UNIT_TESTING)
     DispatchTcpEventsAsyncForTest,
+    UnregisterRelayAsyncForTest,
+#endif
     DispatchEncodedEpollEventForTest,
 };
 

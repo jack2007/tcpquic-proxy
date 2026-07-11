@@ -92,3 +92,30 @@ tunnel reaper、tcp tunnel 三个测试进程，退出码均为 0。
 - `tcpquic_tcp_tunnel_test` 当前退出码 149，定位为其首个既有
   `TestTerminalLookupFailureRejectsBeforeCallbackInstall` 返回 7061；本轮未完成基线 commit
   的独立构建验证，因此不把该非零退出归因于既有问题，也不将其记录为通过。
+
+## Reviewer 第三轮返工完成（2026-07-12）
+
+- 所有新增 worker override、async event/envelope/completion、tunnel helper 和函数测试参数均
+  完整置于 `TQ_UNIT_TESTING`（tunnel helper 额外要求 `TCPQUIC_TUNNEL_TESTING` 与 Linux）
+  门禁内；production `TqTunnelContext::StartRelay` 与 relay 内部签名不含测试参数。
+  `tcpquic-proxy` production target 已从头重编译成功。
+- 四方 fatal case 改为真实 context 的四个独立入口：已 admitted 的 async TCP fatal、直接
+  复用 production `DrainFromAdmin()` 核心的 admin 入口、production worker queue 上的
+  async unregister、以及不等待 fatal completion 的 owner terminal callback。四线程从同一
+  barrier 释放，completion 只在外部等待，actual reaper 删除 context 恰好一次。
+- suppression case 在 registration 前安装目标 connection escalation，并断言 5s watchdog
+  只 shutdown 目标 connection 一次，30s 后仍为一次；独立的另一 connection escalation
+  始终为零，stream close 始终为零。
+- 双端事故使用共享 fake transport：`CaptureSend` 自动接收 client FIN/key，transport pump
+  自动完成 client send 并投递 server receive FIN；fake `StreamShutdown` 自动观察 server
+  abort，transport pump 自动投递 client peer abort。测试只驱动 transport pump，并断言
+  `client_fin → client_fin_complete → server_peer_fin → server_abort → client_peer_abort`
+  因果序列，不再由测试主体分别伪造两端 QUIC 事件。
+- `TcpPair` 改为 move-only RAII；A/C/D/G 的真实 context 增加 scope guard，CHECK 早退时按
+  terminal owner、unregister/stop worker、reaper/delete、owner reset 的顺序幂等清理。
+  guard 均声明在 worker/owner 之后并在成功路径显式 dismiss，析构时不会访问已销毁对象。
+- 项目没有独立的全局 active-tunnel/close-wait test counter。本测试用每个真实 context 的
+  actual reaper/destructor 计数作为 active-tunnel 替代观测，用精确事故 target EOF 与
+  half-close 最终 EOF 作为 close-wait 替代观测；main 额外断言全局 active relay 为零。
+- 最终门禁：production target 构建成功；新 target 在 `timeout -k` 下连续三次均八项 PASS；
+  Linux IO 与 tunnel reaper 均退出 0；`git diff --check` 无输出。

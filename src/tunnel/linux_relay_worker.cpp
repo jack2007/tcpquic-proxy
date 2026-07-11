@@ -1549,6 +1549,7 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             CompleteDispatchTcpEventsForTestCommand(command, result);
             break;
         }
+#if defined(TQ_UNIT_TESTING)
         case TqLinuxRelayEventType::DispatchTcpEventsAsyncForTest: {
             auto* command = static_cast<DispatchTcpEventsAsyncForTestCommand*>(event.Control);
             if (command != nullptr && command->Completion != nullptr) {
@@ -1579,6 +1580,23 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             }
             break;
         }
+        case TqLinuxRelayEventType::UnregisterRelayAsyncForTest: {
+            auto* command = static_cast<UnregisterRelayAsyncForTestCommand*>(event.Control);
+            if (command != nullptr) {
+                UnregisterRelayLocal(command->RelayId);
+            }
+            if (command != nullptr && command->Completion != nullptr) {
+                std::lock_guard<std::mutex> lock(command->Completion->Mutex);
+                command->Completion->Result = true;
+                command->Completion->Done = true;
+                command->Completion->CurrentPhase.store(
+                    TqLinuxRelayAsyncTestCompletion::Phase::Done,
+                    std::memory_order_release);
+                command->Completion->Cv.notify_all();
+            }
+            break;
+        }
+#endif
         case TqLinuxRelayEventType::DispatchEncodedEpollEventForTest: {
             auto* command =
                 static_cast<DispatchEncodedEpollEventForTestCommand*>(event.Control);
@@ -3989,6 +4007,7 @@ bool TqLinuxRelayWorker::DispatchTcpEventsForTest(uint64_t relayId, uint32_t eve
     }
 }
 
+#if defined(TQ_UNIT_TESTING)
 std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
 TqLinuxRelayWorker::PostTcpEventsForTestAsync(uint64_t relayId, uint32_t events) {
     std::unique_lock<std::mutex> controlGuard(ControlLock);
@@ -4006,6 +4025,24 @@ TqLinuxRelayWorker::PostTcpEventsForTestAsync(uint64_t relayId, uint32_t events)
     controlGuard.unlock();
     return completion;
 }
+
+std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
+TqLinuxRelayWorker::PostUnregisterRelayForTestAsync(uint64_t relayId) {
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    if (!Running.load(std::memory_order_acquire)) return {};
+    auto completion = std::make_shared<TqLinuxRelayAsyncTestCompletion>();
+    completion->ProcessReleased = true;
+    auto command = std::make_shared<UnregisterRelayAsyncForTestCommand>();
+    command->RelayId = relayId;
+    command->Completion = completion;
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::UnregisterRelayAsyncForTest;
+    event.Control = command.get();
+    event.ControlOwner = command;
+    if (!Enqueue(std::move(event))) return {};
+    return completion;
+}
+#endif
 
 bool TqLinuxRelayWorker::DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_t events) {
     if (FindRelayById(relayId) == nullptr) {
