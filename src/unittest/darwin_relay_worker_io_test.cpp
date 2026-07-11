@@ -5910,6 +5910,29 @@ void ManagedReceiveAllocationFailureUsesActiveShutdownNotTerminal() {
     CHECK(weakOwner.expired());
 }
 
+void FullyClosedPeerSendShutdownStickySurvivesQueueFull() {
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    ManagedRelayHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register(/*enableQuicSends=*/false));
+
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(harness.Worker.PendingEventsForTest() >= 2);
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.PeerSendShutdownStickyForTest(harness.Result.RelayId));
+
+    while (harness.Worker.DrainOneEventForTest()) {
+    }
+    CHECK(harness.Worker.DrainWakeForTest() >= 0);
+    CHECK(harness.Worker.TcpWriteShutdownQueuedOrClosedForTest(harness.Result.RelayId));
+    harness.StopAndClosePeer();
+}
+
 void ManagedReceiveAllocationFailureQueueFullKeepsOwnerViaSink() {
     ResetFakeReceiveComplete();
     TqDarwinRelayWorkerConfig config{};
@@ -7229,6 +7252,7 @@ int main() {
     ManagedDuplicateTerminalEventIsIdempotent();
     ManagedQueuedPeerAbortBeforeTerminalPreservesOwnerUntilTerminal();
     ManagedNonTerminalHalfCloseEventsDoNotPublishTerminal();
+    FullyClosedPeerSendShutdownStickySurvivesQueueFull();
     ManagedStopRetentionMetricsSurfaceTerminalRetainedOwners();
     ManagedStopPurgeProcessesPeerAbortBeforeTerminal();
     ManagedPeerSendAbortedRequestsAbortReceiveFirst();

@@ -435,6 +435,8 @@ public:
 #endif
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
     uint32_t BindingCallbackRefsForTest(uint64_t relayId);
+    bool PeerSendShutdownStickyForTest(uint64_t relayId);
+    bool TcpWriteShutdownQueuedOrClosedForTest(uint64_t relayId);
 #endif
     TqDarwinRelayRegistrationResult RegisterRelayWithId(const TqDarwinRelayRegistration& registration);
     void UnregisterRelay(uint64_t relayId);
@@ -600,6 +602,11 @@ private:
     void ProcessQuicReceiveViewEvent(const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
     void FlushCallbackPendingQuicReceives(StreamBinding* binding);
     void FlushAllCallbackPendingQuicReceivesLocal();
+    void FlushHalfCloseStickiesLocal();
+    void ConsumeHalfCloseStickies(const std::shared_ptr<RelayState>& relay);
+    void ArmHalfCloseStickyFromCallback(
+        StreamBinding* binding,
+        std::atomic<bool> StreamBinding::* stickyFlag);
     bool EnqueueQuicReceiveForTcp(
         const std::shared_ptr<RelayState>& relay,
         const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);

@@ -133,6 +133,9 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::atomic<bool> CallbackQuicReceivePaused{false};
     std::atomic<uint64_t> CallbackPendingReceiveBytes{0};
     std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
+    std::atomic<bool> PeerSendShutdownSticky{false};
+    std::atomic<bool> SendShutdownCompleteSticky{false};
+    std::atomic<bool> ConvergenceCheckSticky{false};
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
     // Immutable after initialize-before-PublishTarget: never assign/reset the
@@ -1202,6 +1205,22 @@ uint32_t TqDarwinRelayWorker::BindingCallbackRefsForTest(uint64_t relayId) {
     }
     return 0;
 }
+
+bool TqDarwinRelayWorker::PeerSendShutdownStickyForTest(uint64_t relayId) {
+    const auto relay = FindRelayLocal(relayId);
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return false;
+    }
+    return relay->Binding->PeerSendShutdownSticky.load(std::memory_order_acquire);
+}
+
+bool TqDarwinRelayWorker::TcpWriteShutdownQueuedOrClosedForTest(uint64_t relayId) {
+    const auto relay = FindRelayLocal(relayId);
+    if (relay == nullptr) {
+        return false;
+    }
+    return relay->TcpWriteShutdownQueued || relay->TcpWriteClosed;
+}
 #endif
 
 void TqDarwinRelayWorker::CompleteRegisterCommand(
@@ -1391,6 +1410,7 @@ uint32_t TqDarwinRelayWorker::DrainEvents(uint32_t budget) {
         EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
     }
     FlushAllCallbackPendingQuicReceivesLocal();
+    FlushHalfCloseStickiesLocal();
     return processed;
 }
 
@@ -3526,6 +3546,42 @@ void TqDarwinRelayWorker::FlushAllCallbackPendingQuicReceivesLocal() {
     }
 }
 
+void TqDarwinRelayWorker::FlushHalfCloseStickiesLocal() {
+    AssertWorkerThreadForRelayState();
+    for (const auto& entry : Relays) {
+        const auto& relay = entry.second;
+        if (relay != nullptr) {
+            ConsumeHalfCloseStickies(relay);
+        }
+    }
+}
+
+void TqDarwinRelayWorker::ArmHalfCloseStickyFromCallback(
+    StreamBinding* binding,
+    std::atomic<bool> StreamBinding::* stickyFlag) {
+    if (binding == nullptr) {
+        return;
+    }
+    (binding->*stickyFlag).store(true, std::memory_order_release);
+    (void)Wake();
+}
+
+void TqDarwinRelayWorker::ConsumeHalfCloseStickies(
+    const std::shared_ptr<RelayState>& relay) {
+    AssertWorkerThreadForRelayState();
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return;
+    }
+    auto& binding = *relay->Binding;
+    if (binding.PeerSendShutdownSticky.exchange(false, std::memory_order_acq_rel)) {
+        ProcessPeerSendShutdown(relay);
+    }
+    if (binding.SendShutdownCompleteSticky.exchange(false, std::memory_order_acq_rel)) {
+        ProcessSendShutdownComplete(relay);
+    }
+    (void)binding.ConvergenceCheckSticky.exchange(false, std::memory_order_acq_rel);
+}
+
 void TqDarwinRelayWorker::ProcessQuicReceiveViewEvent(
     const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
     if (receive == nullptr) {
@@ -5025,9 +5081,13 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         if (relay == nullptr) {
             return QUIC_STATUS_SUCCESS;
         }
-        (void)worker->EnqueueRelayCloseFromCallback(
-            relay,
-            TqDarwinRelayEventType::QuicSendShutdownComplete);
+        if (!worker->EnqueueRelayCloseFromCallback(
+                relay,
+                TqDarwinRelayEventType::QuicSendShutdownComplete)) {
+            worker->ArmHalfCloseStickyFromCallback(
+                binding,
+                &StreamBinding::SendShutdownCompleteSticky);
+        }
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN) {
@@ -5056,6 +5116,9 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
                     false,
                     false);
             }
+            worker->ArmHalfCloseStickyFromCallback(
+                binding,
+                &StreamBinding::PeerSendShutdownSticky);
         }
         return QUIC_STATUS_SUCCESS;
     }
