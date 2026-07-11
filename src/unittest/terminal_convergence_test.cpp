@@ -114,6 +114,10 @@ void TestTerminalCancelsRetryAndWatchdog() {
     TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(40));
     CHECK(escalation->Calls == 0);
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
+    CHECK(TqTerminalMetricsSnapshot().WatchdogCanceled == 1);
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    TqTerminalScheduler::Instance().Cancel(9);
+    CHECK(TqTerminalMetricsSnapshot().WatchdogCanceled == 1);
 }
 
 void TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut() {
@@ -281,6 +285,7 @@ void TestRetryAndThreadStartFailuresEscalateOnce() {
         retryEscalation);
     CHECK(!retry.RetryScheduled);
     CHECK(retryEscalation->Calls == 1);
+    CHECK(TqTerminalMetricsSnapshot().SchedulerFailure == 1);
 
     Reset();
     TqTerminalScheduler::UseRealClockForTest();
@@ -293,8 +298,96 @@ void TestRetryAndThreadStartFailuresEscalateOnce() {
         91, TqTerminalSink::Create(armOwner, armOwner->TerminalLedger()),
         armEscalation).Submitted);
     CHECK(armEscalation->Calls == 1);
-    CHECK(TqTerminalMetricsSnapshot().SchedulerFailure != 0);
+    CHECK(TqTerminalMetricsSnapshot().SchedulerFailure == 1);
     TqTerminalScheduler::Instance().Stop();
+}
+
+void TestStopJoinRejectsScheduleAndEscalatesOnce() {
+    Reset();
+    TqTerminalScheduler::UseRealClockForTest();
+    std::mutex lock;
+    std::condition_variable cv;
+    bool workerReturning = false;
+    bool releaseWorker = false;
+    TqTerminalScheduler::SetBeforeWorkerReturnForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        workerReturning = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return releaseWorker; });
+    });
+    TqTerminalScheduler::Instance().Start();
+    std::thread stopper([] { TqTerminalScheduler::Instance().Stop(); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return workerReturning; });
+    }
+    auto owner = MakeStartedOwner(27);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_OUT_OF_MEMORY; });
+    auto escalation = std::make_shared<CountingEscalation>();
+    const auto result = owner->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(owner, owner->TerminalLedger()), escalation);
+    CHECK(!result.RetryScheduled);
+    CHECK(escalation->Calls == 1);
+    auto armOwner = MakeStartedOwner(29);
+    armOwner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto armEscalation = std::make_shared<CountingEscalation>();
+    CHECK(armOwner->BeginTerminalShutdown(
+        91, TqTerminalSink::Create(armOwner, armOwner->TerminalLedger()),
+        armEscalation).Submitted);
+    CHECK(armEscalation->Calls == 1);
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseWorker = true;
+    }
+    cv.notify_all();
+    stopper.join();
+    TqTerminalScheduler::SetBeforeWorkerReturnForTest({});
+}
+
+void TestStopCannotSplitEnqueueFromWorkerStart() {
+    Reset();
+    TqTerminalScheduler::UseRealClockForTest();
+    std::mutex lock;
+    std::condition_variable cv;
+    bool enqueued = false;
+    bool releaseEnqueue = false;
+    TqTerminalScheduler::SetAfterEnqueueForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        enqueued = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return releaseEnqueue; });
+    });
+    auto owner = MakeStartedOwner(28);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto escalation = std::make_shared<CountingEscalation>();
+    std::atomic<bool> submitted{false};
+    std::thread scheduler([&] {
+        submitted.store(owner->BeginTerminalShutdown(
+            91, TqTerminalSink::Create(owner, owner->TerminalLedger()),
+            escalation).Submitted, std::memory_order_release);
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return enqueued; });
+    }
+    std::atomic<bool> stopReturned{false};
+    std::thread stopper([&] {
+        TqTerminalScheduler::Instance().Stop();
+        stopReturned.store(true, std::memory_order_release);
+    });
+    CHECK(!stopReturned.load(std::memory_order_acquire));
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseEnqueue = true;
+    }
+    cv.notify_all();
+    scheduler.join();
+    CHECK(submitted.load(std::memory_order_acquire));
+    stopper.join();
+    TqTerminalScheduler::SetAfterEnqueueForTest({});
 }
 
 void TestCompletedStreamsLeaveNoSchedulerIndexEntries() {
@@ -341,7 +434,6 @@ void TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks() {
         TqTerminalScheduler::Instance().Start();
         startReturned.store(true, std::memory_order_release);
     });
-    CHECK(!startReturned.load(std::memory_order_acquire));
     {
         std::lock_guard<std::mutex> guard(lock);
         releaseOldWorker = true;
@@ -350,6 +442,9 @@ void TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks() {
     stopper.join();
     starter.join();
     CHECK(startReturned.load(std::memory_order_acquire));
+    const auto stoppedAfterRace = TqTerminalScheduler::SnapshotForTest();
+    CHECK(!stoppedAfterRace.Running && !stoppedAfterRace.Joinable);
+    TqTerminalScheduler::Instance().Start();
     const auto running = TqTerminalScheduler::SnapshotForTest();
     CHECK(running.Running && running.Joinable);
     TqTerminalScheduler::SetBeforeWorkerReturnForTest({});
@@ -656,6 +751,8 @@ int main() {
     TestRetryAndThreadStartFailuresEscalateOnce();
     TestCompletedStreamsLeaveNoSchedulerIndexEntries();
     TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks();
+    TestStopJoinRejectsScheduleAndEscalatesOnce();
+    TestStopCannotSplitEnqueueFromWorkerStart();
     TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce();
     TestIdentityRebindKeepsOriginalLedger();
     TestSinkRejectsMissingOrMismatchedOwnerLedger();

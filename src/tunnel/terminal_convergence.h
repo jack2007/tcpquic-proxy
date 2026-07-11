@@ -130,6 +130,7 @@ public:
     static TestSnapshot SnapshotForTest();
     static void SetBeforeExecuteForTest(std::function<void()> hook);
     static void SetBeforeWorkerReturnForTest(std::function<void()> hook);
+    static void SetAfterEnqueueForTest(std::function<void()> hook);
     static void UseRealClockForTest();
     static void FailNextAllocationForTest(uint32_t count) noexcept;
     static void FailNextThreadStartForTest() noexcept;

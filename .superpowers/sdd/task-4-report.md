@@ -52,3 +52,11 @@
 ### CMake 修复
 
 - 移除 `TQ_DEFINE_MSQUIC_API` target-wide compile define；新增专用 `src/unittest/msquic_api_stub.cpp`，只为需要链接 `stream_lifetime.cpp` 的 server admin 测试提供单一 `MsQuic` 定义，避免重复符号。
+
+## 第三轮复审修复（2026-07-11）
+
+- RED：新增 enqueue 与 worker start 之间并发 Stop、Stop join 期间 retry/arm、重复 terminal/cancel、container/thread failure 精确计数测试；新 lifecycle hook 首次构建因未实现而链接失败。
+- lifecycle 使用持久 `Ready/Running/Stopping/Stopped` 状态。schedule/arm 在同一个 lifecycle 临界区完成 ledger gate、入队和 worker start；Stop 原子切换到 Stopping 后释放 lifecycle 锁再 join，因此 join 期间的新 schedule/arm 明确失败并执行既定 escalation，不能进入随后 drain 的 heap。
+- Stop 由独立 Stop mutex 串行化；join 不持 task mutex。Stop drain 前把所有 indexed ledger 显式、once-only 转为 Canceled，成功入队的 task 不再被无声清除。
+- terminal event 首次把 watchdog 转为 Canceled 时直接累计 `WatchdogCanceled`；heap/index 清理不参与该 metric。重复 terminal、Cancel 或 Stop 不重复累计。
+- `SchedulerFailure` 只在 container allocation/injection、thread creation/injection 的底层失败点累计；调用方只做 rollback/escalation 策略。container 与 thread 两类注入测试均严格断言增量为 1。
