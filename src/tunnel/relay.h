@@ -26,6 +26,11 @@ inline uint64_t TqRelayNextControlGeneration() {
     return next.fetch_add(1, std::memory_order_relaxed);
 }
 
+inline std::atomic<uint64_t>& TqRelayControlGenerationMismatchCount() {
+    static std::atomic<uint64_t> mismatches{0};
+    return mismatches;
+}
+
 // Shared stop/accounting control observed by tunnel reaper and relay workers.
 // Does not own worker, relay, binding, tunnel context, or stream owner.
 struct TqRelayStopControl {
@@ -36,9 +41,10 @@ struct TqRelayStopControl {
     explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
     TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}
 
-    // Generation mismatch leaves state unchanged.
+    // Generation mismatch records a diagnostic and leaves state unchanged.
     bool SignalStop(uint64_t expectedGeneration) {
         if (expectedGeneration != Generation) {
+            TqRelayControlGenerationMismatchCount().fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         Stop.store(true, std::memory_order_release);

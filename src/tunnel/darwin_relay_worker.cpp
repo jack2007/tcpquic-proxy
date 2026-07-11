@@ -223,24 +223,11 @@ struct TqDarwinRelayWorker::RelayState {
               return registration.Stream;
           }()),
           StreamOwner(registration.StreamOwner),
-          StopControl([&]() -> std::shared_ptr<TqRelayStopControl> {
-              if (registration.Control != nullptr) {
-                  return registration.Control;
-              }
-              return registration.Handle != nullptr ? registration.Handle->Control : nullptr;
-          }()),
-          ControlGeneration([&]() -> uint64_t {
-              if (registration.ControlGeneration != 0) {
-                  return registration.ControlGeneration;
-              }
-              if (registration.Control != nullptr) {
-                  return registration.Control->Generation;
-              }
-              if (registration.Handle != nullptr && registration.Handle->Control != nullptr) {
-                  return registration.Handle->Control->Generation;
-              }
-              return 0;
-          }()),
+          StopControl(registration.Control),
+          ControlGeneration(
+              registration.ControlGeneration != 0
+                  ? registration.ControlGeneration
+                  : (registration.Control != nullptr ? registration.Control->Generation : 0)),
           Compressor(registration.Compressor),
           Decompressor(registration.Decompressor),
           CompressAlgo(registration.CompressAlgo),
@@ -3574,9 +3561,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         return result;
     }
     auto control = registration.Control;
-    if (control == nullptr && registration.Handle != nullptr) {
-        control = registration.Handle->Control;
-    }
     if (control == nullptr) {
         return result;
     }
@@ -3691,16 +3675,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     }
 
     relay->Committed = true;
-    // Optional test/local publish only. Production TqRelayStartImpl publishes
-    // after RegisterRelayWithId returns; the worker never retains Handle.
-    if (registration.Handle != nullptr) {
-        registration.Handle->Stop.store(false, std::memory_order_release);
-        registration.Handle->Control = control;
-        registration.Handle->ControlGeneration = controlGeneration;
-        registration.Handle->Backend = TqRelayBackendType::DarwinWorker;
-        registration.Handle->DarwinWorker = this;
-        registration.Handle->DarwinRelayId = relay->Id;
-    }
 
     if (registration.StreamOwner != nullptr) {
         ActivateManagedBinding(relay, relay->Binding.get());

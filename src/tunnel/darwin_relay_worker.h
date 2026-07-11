@@ -33,11 +33,9 @@ struct TqDarwinRelayRegistration {
     // target，不改写已经启动 wrapper 的 Callback/Context。
     std::shared_ptr<TqStreamLifetime> StreamOwner;
     // Shared control + generation only. Caller publishes Backend/worker/id onto
-    // the tunnel-owned handle after a successful commit. Handle may be set by
-    // unit tests for local publish helpers; the worker must not retain it.
+    // the tunnel-owned handle after a successful commit.
     std::shared_ptr<TqRelayStopControl> Control;
     uint64_t ControlGeneration{0};
-    TqRelayHandle* Handle{nullptr};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};

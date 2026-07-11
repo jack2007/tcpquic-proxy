@@ -47,10 +47,21 @@ void EventizedSnapshotCountsActiveRelay() {
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
     registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
-    registration.Handle = &handle;
+    if (handle.Control == nullptr) {
+        handle.Control = std::make_shared<TqRelayStopControl>();
+        handle.ControlGeneration = handle.Control->Generation;
+    }
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
 
     const TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
     Check(result.Ok, "RegisterRelayWithId ok");
+    handle.Stop.store(false, std::memory_order_release);
+    handle.Control = registration.Control;
+    handle.ControlGeneration = registration.Control->Generation;
+    handle.Backend = TqRelayBackendType::DarwinWorker;
+    handle.DarwinWorker = &worker;
+    handle.DarwinRelayId = result.RelayId;
 
     const TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
     Check(snapshot.Errors == 0, "snapshot.Errors == 0");
