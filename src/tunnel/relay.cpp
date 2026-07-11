@@ -145,6 +145,9 @@ bool TqRelayStartImpl(
     handle->Backend = TqRelayBackendType::LinuxWorker;
     return true;
 #elif defined(__APPLE__)
+    const uint32_t activeRelays = TqRelayRegisterActive();
+    TqTuningConfig tuning = profileTuning;
+    TqApplyRelayPoolBudget(tuning, activeRelays);
     if (streamOwner == nullptr) {
         TqRelayUnregisterActive();
         return false;
