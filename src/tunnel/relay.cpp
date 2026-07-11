@@ -104,11 +104,15 @@ bool TqRelayStartImpl(
         return false;
     }
 
+    auto control = std::make_shared<TqRelayStopControl>();
+    const uint64_t generation = control->Generation;
+
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = tcpFd;
     registration.Stream = stream;
     registration.StreamOwner = std::move(streamOwner);
-    registration.Handle = handle;
+    registration.Control = control;
+    registration.ControlGeneration = generation;
     registration.Compressor = compressor;
     registration.Decompressor = decompressor;
     registration.CompressAlgo = compressAlgo;
@@ -119,14 +123,27 @@ bool TqRelayStartImpl(
         *tcpFdConsumed = registered.TcpFdConsumed;
     }
     if (!registered.Ok) {
-        TqRelayUnregisterActive();
+        (void)control->ReleaseActiveAccountingOnce();
         return false;
     }
 
-    handle->Stop.store(false);
+    if (control->Stop.load(std::memory_order_acquire)) {
+        worker->UnregisterRelay(registered.RelayId);
+        (void)control->ReleaseActiveAccountingOnce();
+        return false;
+    }
+
+    handle->Stop.store(false, std::memory_order_release);
+    handle->Control = control;
+    handle->ControlGeneration = generation;
     handle->Backend = TqRelayBackendType::DarwinWorker;
     handle->DarwinWorker = worker;
     handle->DarwinRelayId = registered.RelayId;
+
+    if (control->Stop.load(std::memory_order_acquire)) {
+        TqRelayStop(handle);
+        return false;
+    }
     return true;
 #else
     (void)tcpFd;
@@ -310,21 +327,38 @@ void TqRelayStop(TqRelayHandle* handle) {
     if (handle->Backend == TqRelayBackendType::DarwinWorker) {
         TqDarwinRelayWorker* worker = handle->DarwinWorker;
         const uint64_t relayId = handle->DarwinRelayId;
+        auto control = handle->Control;
+        const uint64_t generation = handle->ControlGeneration != 0
+            ? handle->ControlGeneration
+            : (control != nullptr ? control->Generation : 0);
         handle->Backend = TqRelayBackendType::None;
         handle->DarwinWorker = nullptr;
         handle->DarwinRelayId = 0;
-        handle->Stop.store(true);
-        if (handle->Control != nullptr) handle->Control->Stop.store(true);
+        handle->Control.reset();
+        handle->ControlGeneration = 0;
+        handle->Stop.store(true, std::memory_order_release);
+        if (control != nullptr) {
+            (void)control->SignalStop(generation);
+        }
         if (worker != nullptr && relayId != 0) {
             worker->UnregisterRelay(relayId);
         }
-        TqRelayUnregisterActive();
+        if (control != nullptr) {
+            (void)control->ReleaseActiveAccountingOnce();
+        } else {
+            TqRelayUnregisterActive();
+        }
         return;
     }
 #endif
 
     handle->Stop.store(true);
-    if (handle->Control != nullptr) handle->Control->Stop.store(true);
+    if (handle->Control != nullptr) {
+        const uint64_t generation = handle->ControlGeneration != 0
+            ? handle->ControlGeneration
+            : handle->Control->Generation;
+        (void)handle->Control->SignalStop(generation);
+    }
 }
 
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle) {

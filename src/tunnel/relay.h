@@ -21,13 +21,73 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+// Application error code for QUIC_STREAM_EVENT_CANCEL_ON_LOSS (62-bit wire range).
+inline constexpr uint64_t TqRelayStreamErrorCancelOnLoss = 0x54510001ull;
+
+inline uint64_t TqRelayNextControlGeneration() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+inline std::atomic<uint64_t>& TqRelayControlGenerationMismatchCount() {
+    static std::atomic<uint64_t> mismatches{0};
+    return mismatches;
+}
+
+inline std::atomic<uint64_t>& TqRelayControlStopSignaledCount() {
+    static std::atomic<uint64_t> signaled{0};
+    return signaled;
+}
+
+inline std::atomic<uint64_t>& TqRelayAccountingDuplicateReleaseCount() {
+    static std::atomic<uint64_t> duplicates{0};
+    return duplicates;
+}
+
+// Shared stop/accounting control observed by tunnel reaper and relay workers.
+// Does not own worker, relay, binding, tunnel context, or stream owner.
 struct TqRelayStopControl {
+    const uint64_t Generation;
     std::atomic<bool> Stop{false};
+    std::atomic<bool> ActiveAccountingReleased{false};
+
+    explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
+    TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}
+
+    // Generation mismatch records a diagnostic and leaves state unchanged.
+    bool SignalStop(uint64_t expectedGeneration) {
+        if (expectedGeneration != Generation) {
+            TqRelayControlGenerationMismatchCount().fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        const bool wasStopped = Stop.exchange(true, std::memory_order_acq_rel);
+        if (!wasStopped) {
+            TqRelayControlStopSignaledCount().fetch_add(1, std::memory_order_relaxed);
+        }
+        return true;
+    }
+
+    bool ReleaseActiveAccountingOnce() {
+        bool expected = false;
+        if (!ActiveAccountingReleased.compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            TqRelayAccountingDuplicateReleaseCount().fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        TqRelayUnregisterActive();
+        return true;
+    }
 };
+
+using TqRelayControl = TqRelayStopControl;
 
 struct TqRelayHandle {
     std::atomic<bool> Stop{false};
     std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
+    uint64_t ControlGeneration{0};
     TqRelayBackendType Backend{TqRelayBackendType::None};
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};

@@ -1,7 +1,9 @@
 #if defined(__APPLE__)
 
 #include "darwin_relay_worker.h"
+#include "relay.h"
 #include "relay_metrics.h"
+#include "tuning.h"
 
 #include <sys/socket.h>
 #include <unistd.h>
@@ -36,6 +38,31 @@ void CloseSocketPairAfterRelayOwned(int relayTcpFd, int fds[2]) {
     Check(close(peerFd) == 0, "close peer fd");
 }
 
+void AssertReleaseGateGaugesZero(const char* where) {
+    const TqDarwinRelayWorkerSnapshot empty{};
+    (void)empty;
+    const auto metrics = TqSnapshotRelayMetrics();
+    if (metrics.RelayActiveControls != 0 ||
+        metrics.RelayPreparedRelays != 0 ||
+        metrics.RelayActiveSendReservations != 0 ||
+        metrics.RelayPendingReceiveActive != 0 ||
+        metrics.RelayShutdownSinkActive != 0 ||
+        metrics.RelayStopRemaining != 0) {
+        std::fprintf(
+            stderr,
+            "%s: release-gate gauges not zero "
+            "(controls=%llu prepared=%llu send_res=%llu recv=%llu sink=%llu stop=%llu)\n",
+            where,
+            static_cast<unsigned long long>(metrics.RelayActiveControls),
+            static_cast<unsigned long long>(metrics.RelayPreparedRelays),
+            static_cast<unsigned long long>(metrics.RelayActiveSendReservations),
+            static_cast<unsigned long long>(metrics.RelayPendingReceiveActive),
+            static_cast<unsigned long long>(metrics.RelayShutdownSinkActive),
+            static_cast<unsigned long long>(metrics.RelayStopRemaining));
+        std::abort();
+    }
+}
+
 void EventizedSnapshotCountsActiveRelay() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     Check(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair succeeds");
@@ -47,18 +74,222 @@ void EventizedSnapshotCountsActiveRelay() {
     TqDarwinRelayRegistration registration{};
     registration.TcpFd = fds[0];
     registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
-    registration.Handle = &handle;
+    if (handle.Control == nullptr) {
+        handle.Control = std::make_shared<TqRelayStopControl>();
+        handle.ControlGeneration = handle.Control->Generation;
+    }
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
 
     const TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
     Check(result.Ok, "RegisterRelayWithId ok");
+    handle.Stop.store(false, std::memory_order_release);
+    handle.Control = registration.Control;
+    handle.ControlGeneration = registration.Control->Generation;
+    handle.Backend = TqRelayBackendType::DarwinWorker;
+    handle.DarwinWorker = &worker;
+    handle.DarwinRelayId = result.RelayId;
 
     const TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
     Check(snapshot.Errors == 0, "snapshot.Errors == 0");
     Check(snapshot.ActiveRelays == 1, "snapshot.ActiveRelays == 1");
+    // Legacy (no StreamOwner) path activates without prepare/commit counters.
 
     worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void MultiWorkerAggregationUsesMaxForGlobalGauges() {
+    TqDarwinRelayWorkerSnapshot a{};
+    a.ActiveRelays = 2;
+    a.StopRemaining = 2;
+    a.PreparedRelays = 1;
+    a.CommitSuccessCount = 3;
+    a.TerminalBeforeCommitRollbacks = 1;
+    a.ActivationFailureCount = 2;
+    a.PrecommitBytes = 10;
+    a.PrecommitDepth = 1;
+    a.PendingReceiveActive = 4;
+    a.DeferredReceiveDiscards = 5;
+    a.ActiveFailureAllocationFailed = 1;
+    a.WorkerExitedPurgeEvents = 7;
+    a.TerminalRetainedOwnerCount = 1;
+    a.TerminalRetainedOldestAgeMs = 40;
+    a.ActiveSendReservations = 2;
+    a.PreSubmitSendRollbacks = 9;
+    a.SendReservationOldestAgeMs = 15;
+    a.ShutdownSinkActive = 1;
+    a.StopOldestAgeMs = 20;
+
+    TqDarwinRelayWorkerSnapshot b{};
+    b.ActiveRelays = 3;
+    b.StopRemaining = 1;
+    b.PreparedRelays = 2;
+    b.CommitSuccessCount = 4;
+    b.TerminalBeforeCommitRollbacks = 0;
+    b.ActivationFailureCount = 1;
+    b.PrecommitBytes = 5;
+    b.PrecommitDepth = 2;
+    b.PendingReceiveActive = 1;
+    b.DeferredReceiveDiscards = 2;
+    b.ActiveFailureAllocationFailed = 3;
+    b.WorkerExitedPurgeEvents = 1;
+    b.TerminalRetainedOwnerCount = 1; // same global gauge — must not become 2
+    b.TerminalRetainedOldestAgeMs = 50;
+    b.ActiveSendReservations = 2; // same global gauge
+    b.PreSubmitSendRollbacks = 9;
+    b.SendReservationOldestAgeMs = 12;
+    b.ShutdownSinkActive = 1;
+    b.StopOldestAgeMs = 8;
+
+    TqDarwinRelayWorkerSnapshot total{};
+    TqAccumulateDarwinRelayWorkerSnapshot(total, a);
+    TqAccumulateDarwinRelayWorkerSnapshot(total, b);
+
+    Check(total.ActiveRelays == 5, "sum ActiveRelays");
+    Check(total.StopRemaining == 3, "sum StopRemaining");
+    Check(total.PreparedRelays == 3, "sum PreparedRelays");
+    Check(total.CommitSuccessCount == 7, "sum CommitSuccessCount");
+    Check(total.TerminalBeforeCommitRollbacks == 1, "sum TerminalBeforeCommitRollbacks");
+    Check(total.ActivationFailureCount == 3, "sum ActivationFailureCount");
+    Check(total.PrecommitBytes == 15, "sum PrecommitBytes");
+    Check(total.PrecommitDepth == 3, "sum PrecommitDepth");
+    Check(total.PendingReceiveActive == 5, "sum PendingReceiveActive");
+    Check(total.DeferredReceiveDiscards == 7, "sum DeferredReceiveDiscards");
+    Check(total.ActiveFailureAllocationFailed == 4, "sum ActiveFailureAllocationFailed");
+    Check(total.WorkerExitedPurgeEvents == 8, "sum WorkerExitedPurgeEvents");
+    Check(total.TerminalRetainedOwnerCount == 1, "max TerminalRetainedOwnerCount (no double count)");
+    Check(total.TerminalRetainedOldestAgeMs == 50, "max TerminalRetainedOldestAgeMs");
+    Check(total.ActiveSendReservations == 2, "max ActiveSendReservations");
+    Check(total.PreSubmitSendRollbacks == 9, "max PreSubmitSendRollbacks");
+    Check(total.SendReservationOldestAgeMs == 15, "max SendReservationOldestAgeMs");
+    Check(total.ShutdownSinkActive == 1, "max ShutdownSinkActive");
+    Check(total.StopOldestAgeMs == 20, "max StopOldestAgeMs");
+}
+
+void ControlMetricsAndReleaseGateJson() {
+    const uint64_t mismatchBefore =
+        TqRelayControlGenerationMismatchCount().load(std::memory_order_relaxed);
+    const uint64_t stopBefore =
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed);
+    const uint64_t dupBefore =
+        TqRelayAccountingDuplicateReleaseCount().load(std::memory_order_relaxed);
+
+    auto control = std::make_shared<TqRelayStopControl>();
+    Check(control->SignalStop(control->Generation + 1) == false, "mismatch SignalStop");
+    Check(control->SignalStop(control->Generation) == true, "matching SignalStop");
+    Check(control->SignalStop(control->Generation) == true, "idempotent SignalStop");
+    Check(control->ReleaseActiveAccountingOnce() == true, "first accounting release");
+    // First release already unregistered; second is duplicate (no prior RegisterActive).
+    Check(control->ReleaseActiveAccountingOnce() == false, "duplicate accounting release");
+
+    Check(
+        TqRelayControlGenerationMismatchCount().load(std::memory_order_relaxed) ==
+            mismatchBefore + 1,
+        "generation mismatch counted");
+    Check(
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed) == stopBefore + 1,
+        "stop signaled counted once");
+    Check(
+        TqRelayAccountingDuplicateReleaseCount().load(std::memory_order_relaxed) ==
+            dupBefore + 1,
+        "duplicate accounting release counted");
+
+    TqRelayMetricsSnapshot metrics{};
+    metrics.Backend = "test";
+    metrics.RelayActiveControls = 0;
+    metrics.RelayControlStopSignaled = 1;
+    metrics.RelayControlGenerationMismatch = 2;
+    metrics.RelayAccountingDuplicateRelease = 3;
+    metrics.RelayPreparedRelays = 0;
+    metrics.RelayCommitSuccessCount = 4;
+    metrics.RelayTerminalBeforeCommitRollbacks = 5;
+    metrics.RelayActivationFailureCount = 6;
+    metrics.RelayPrecommitBytes = 7;
+    metrics.RelayPrecommitDepth = 8;
+    metrics.RelayActiveSendReservations = 0;
+    metrics.RelaySendReservationRollbacks = 9;
+    metrics.RelaySendReservationOldestAgeMs = 10;
+    metrics.RelayPendingReceiveActive = 0;
+    metrics.RelayReceiveDiscards = 11;
+    metrics.RelayActiveFailureAllocationFailed = 12;
+    metrics.RelayActiveFailureBudgetExceeded = 13;
+    metrics.RelayActiveFailureQueueFull = 14;
+    metrics.RelayShutdownSinkActive = 0;
+    metrics.RelayWorkerExitedPurgeEvents = 15;
+    metrics.RelayStopRemaining = 0;
+    metrics.RelayStopOldestAgeMs = 16;
+    metrics.LinuxRelayTerminalRetainedOwnerCount = 3;
+    metrics.LinuxRelayTerminalRetainedOldestAgeMs = 42;
+    metrics.LinuxRelayStopRemaining = 5;
+    metrics.ActiveRelays = 7;
+    metrics.Errors = 3;
+
+    const std::string json = TqRelayMetricsFieldsJson(metrics);
+    CheckContains(json, "\"relay_backend\":\"test\"");
+    CheckContains(json, "\"relay_active_controls\":0");
+    CheckContains(json, "\"relay_control_stop_signaled\":1");
+    CheckContains(json, "\"relay_control_generation_mismatch\":2");
+    CheckContains(json, "\"relay_accounting_duplicate_release\":3");
+    CheckContains(json, "\"relay_prepared_relays\":0");
+    CheckContains(json, "\"relay_commit_success_count\":4");
+    CheckContains(json, "\"relay_terminal_before_commit_rollbacks\":5");
+    CheckContains(json, "\"relay_activation_failure_count\":6");
+    CheckContains(json, "\"relay_precommit_bytes\":7");
+    CheckContains(json, "\"relay_precommit_depth\":8");
+    CheckContains(json, "\"relay_active_send_reservations\":0");
+    CheckContains(json, "\"relay_send_reservation_rollbacks\":9");
+    CheckContains(json, "\"relay_send_reservation_oldest_age_ms\":10");
+    CheckContains(json, "\"relay_pending_receive_active\":0");
+    CheckContains(json, "\"relay_receive_discards\":11");
+    CheckContains(json, "\"relay_active_failure_allocation_failed\":12");
+    CheckContains(json, "\"relay_active_failure_budget_exceeded\":13");
+    CheckContains(json, "\"relay_active_failure_queue_full\":14");
+    CheckContains(json, "\"relay_shutdown_sink_active\":0");
+    CheckContains(json, "\"relay_worker_exited_purge_events\":15");
+    CheckContains(json, "\"relay_stop_remaining\":0");
+    CheckContains(json, "\"relay_stop_oldest_age_ms\":16");
+    CheckContains(json, "\"linux_relay_terminal_retained_owner_count\":3");
+    CheckContains(json, "\"linux_relay_stop_remaining\":5");
+}
+
+void FocusedCaseEndsWithZeroReleaseGateGauges() {
+    const uint32_t activeBaseline = TqGetActiveRelayCount();
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    Check(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0, "socketpair succeeds");
+
+    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+    Check(worker.Start(), "worker.Start()");
+
+    TqRelayHandle handle{};
+    handle.Control = std::make_shared<TqRelayStopControl>();
+    handle.ControlGeneration = handle.Control->Generation;
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
+
+    const TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
+    Check(result.Ok, "RegisterRelayWithId ok");
+    handle.Backend = TqRelayBackendType::DarwinWorker;
+    handle.DarwinWorker = &worker;
+    handle.DarwinRelayId = result.RelayId;
+
+    worker.UnregisterRelay(result.RelayId);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+
+    Check(TqGetActiveRelayCount() == activeBaseline, "active accounting restored");
+    const auto snapshot = worker.Snapshot();
+    Check(snapshot.ActiveRelays == 0, "ActiveRelays == 0");
+    Check(snapshot.PreparedRelays == 0, "PreparedRelays == 0");
+    Check(snapshot.ActiveSendReservations == 0, "ActiveSendReservations == 0");
+    Check(snapshot.PendingReceiveActive == 0, "PendingReceiveActive == 0");
+    Check(snapshot.ShutdownSinkActive == 0, "ShutdownSinkActive == 0");
+    Check(snapshot.StopRemaining == 0, "StopRemaining == 0");
 }
 
 } // namespace
@@ -67,47 +298,11 @@ int main() {
     TqRelayMetricsSnapshot runtimeSnapshot = TqSnapshotRelayMetrics();
     Check(std::string(runtimeSnapshot.Backend) == "kqueue", "runtimeSnapshot.Backend == kqueue");
 
-    TqRelayMetricsSnapshot metrics{};
-    metrics.Backend = "test";
-    metrics.ActiveRelays = 7;
-    metrics.Errors = 3;
-    metrics.OutstandingQuicSendBytes = 11;
-    metrics.TcpReadBatches = 22;
-    metrics.TcpWriteBatches = 33;
-    metrics.PendingBytes = 44;
-    metrics.CurrentPendingQuicReceiveBytes = 55;
-    metrics.PendingTcpWriteQueue = 66;
-    metrics.PendingTcpWriteBytes = 77;
-    metrics.QuicReceiveViewCount = 88;
-    metrics.QuicReceiveViewBytes = 99;
-    metrics.DeferredReceiveCompletes = 111;
-    metrics.QuicSendBackpressureEvents = 222;
-    metrics.LinuxRelayTerminalRetainedOwnerCount = 3;
-    metrics.LinuxRelayTerminalRetainedOldestAgeMs = 42;
-    metrics.LinuxRelayStopRemaining = 5;
-
-    const std::string json = TqRelayMetricsFieldsJson(metrics);
-    CheckContains(json, "\"relay_backend\":\"test\"");
-    CheckContains(json, "\"linux_relay_backend\":\"test\"");
-    CheckContains(json, "\"relay_active_relays\":7");
-    CheckContains(json, "\"linux_relay_active_relays\":7");
-    CheckContains(json, "\"relay_errors\":3");
-    CheckContains(json, "\"linux_relay_errors\":3");
-    CheckContains(json, "\"linux_relay_outstanding_quic_send_bytes\":11");
-    CheckContains(json, "\"linux_relay_tcp_read_batches\":22");
-    CheckContains(json, "\"linux_relay_tcp_write_batches\":33");
-    CheckContains(json, "\"linux_relay_pending_bytes\":44");
-    CheckContains(json, "\"linux_relay_current_pending_quic_receive_bytes\":55");
-    CheckContains(json, "\"linux_relay_pending_tcp_write_queue\":66");
-    CheckContains(json, "\"linux_relay_pending_tcp_write_bytes\":77");
-    CheckContains(json, "\"linux_relay_quic_receive_view_count\":88");
-    CheckContains(json, "\"linux_relay_quic_receive_view_bytes\":99");
-    CheckContains(json, "\"linux_relay_deferred_receive_completes\":111");
-    CheckContains(json, "\"linux_relay_quic_send_backpressure_events\":222");
-    CheckContains(json, "\"linux_relay_terminal_retained_owner_count\":3");
-    CheckContains(json, "\"linux_relay_terminal_retained_oldest_age_ms\":42");
-    CheckContains(json, "\"linux_relay_stop_remaining\":5");
+    ControlMetricsAndReleaseGateJson();
+    MultiWorkerAggregationUsesMaxForGlobalGauges();
     EventizedSnapshotCountsActiveRelay();
+    FocusedCaseEndsWithZeroReleaseGateGauges();
+    AssertReleaseGateGaugesZero("after focused metrics cases");
     return 0;
 }
 

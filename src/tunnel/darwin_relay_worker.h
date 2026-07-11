@@ -32,7 +32,10 @@ struct TqDarwinRelayRegistration {
     // 新路径使用公共 manual-cleanup owner；非空时 worker 只发布 router
     // target，不改写已经启动 wrapper 的 Callback/Context。
     std::shared_ptr<TqStreamLifetime> StreamOwner;
-    TqRelayHandle* Handle{nullptr};
+    // Shared control + generation only. Caller publishes Backend/worker/id onto
+    // the tunnel-owned handle after a successful commit.
+    std::shared_ptr<TqRelayStopControl> Control;
+    uint64_t ControlGeneration{0};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
@@ -74,6 +77,12 @@ struct TqDarwinRelaySendOperation {
     uint64_t CompletionTotalBytes{0};
     bool CompletionFin{false};
     std::shared_ptr<void> CompletionBindingOwner;
+#if defined(TCPQUIC_TESTING)
+    inline static std::atomic<uint64_t> DestructorCount{0};
+    ~TqDarwinRelaySendOperation() {
+        DestructorCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
 
     bool TryTransition(TqDarwinSendOperationState expected, TqDarwinSendOperationState desired) {
         uint32_t value = static_cast<uint32_t>(expected);
@@ -198,9 +207,46 @@ struct TqDarwinRelayWorkerConfig {
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
     bool FailManagedBindingForTest{false};
+    // Fires immediately after PublishTarget returns (publish window), before the
+    // next registration statement. Identity fields must already be initialized.
     void (*AfterPublishHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after inactive filters are installed and immediately before the
+    // activation-mutex final commit check (barrier A).
+    void (*BeforeCommitFinalCheckHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after Prepared->Active wins under the activation mutex, before
+    // filter enable / precommit drain (barrier B).
+    void (*AfterCommitActivationHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Invoked at the start of queue-full terminal/active handoff so tests can
+    // destroy and reuse handle storage before the fallback touches control.
+    void (*BeforeTerminalHandoffHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after RegisterSendCompletion / ReserveSendCompletion succeeds and
+    // before the binding-active recheck that gates MsQuic Send (P1-2 barrier).
+    // operation is the in-flight send being submitted (non-null).
+    void (*AfterRegisterSendCompletionHookForTest)(
+        TqDarwinRelayWorker*,
+        uint64_t,
+        TqDarwinRelaySendOperation*){nullptr};
+    // Next ReserveSendCompletion / RegisterSendCompletion returns nullptr once.
+    bool FailNextSendCompletionRegisterForTest{false};
+    // Next BuildPendingQuicReceive allocation fails once (P1-5 / Task 4).
+    bool FailNextPendingReceiveAllocationForTest{false};
+    // Fires on the real kqueue thread after the Run loop exits and after
+    // DetachActiveSendOperationsForStop, before WorkerThreadId is cleared.
+    // Used to enqueue mixed events that Stop must purge off-thread (P2-8).
+    void (*BeforeWorkerExitHookForTest)(TqDarwinRelayWorker*){nullptr};
 #endif
 };
+
+#if defined(TCPQUIC_TESTING)
+struct TqDarwinBindingPublishIdentitySnapshot {
+    uint64_t RelayId{0};
+    uint64_t RouteGeneration{0};
+    uint64_t ControlGeneration{0};
+    bool RelayLockable{false};
+    bool StreamOwnerLockable{false};
+    size_t PrecommitDepth{0};
+};
+#endif
 
 struct TqDarwinRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
@@ -228,6 +274,7 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t ReceiveFailSafeCount{0};
     uint64_t LateTerminalReceiveCount{0};
     uint64_t QuicSendBackpressureEvents{0};
+    uint64_t CancelOnLossCount{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t WakeFailures{0};
@@ -236,8 +283,33 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t QuicReceiveViewBackpressureQueued{0};
     uint64_t TerminalRetainedOwnerCount{0};
     uint64_t TerminalRetainedOldestAgeMs{0};
+    uint64_t ActiveSendReservations{0};
+    uint64_t PreSubmitSendRollbacks{0};
+    uint64_t UnknownSendClaims{0};
+    uint64_t DuplicateSendClaims{0};
+    uint64_t SendReservationOldestAgeMs{0};
     uint64_t StopRemaining{0};
+    // Release-gate gauges / counters (Task 6 remediation).
+    uint64_t PreparedRelays{0};
+    uint64_t CommitSuccessCount{0};
+    uint64_t TerminalBeforeCommitRollbacks{0};
+    uint64_t ActivationFailureCount{0};
+    uint64_t PrecommitBytes{0};
+    uint64_t PrecommitDepth{0};
+    uint64_t PendingReceiveActive{0};
+    uint64_t ActiveFailureAllocationFailed{0};
+    uint64_t ActiveFailureBudgetExceeded{0};
+    uint64_t ActiveFailureQueueFull{0};
+    uint64_t ShutdownSinkActive{0};
+    uint64_t WorkerExitedPurgeEvents{0};
+    uint64_t StopOldestAgeMs{0};
 };
+
+// Merge one worker snapshot into an aggregate. Global owner/registry gauges use
+// max (never sum); per-worker counters and local gauges use sum.
+void TqAccumulateDarwinRelayWorkerSnapshot(
+    TqDarwinRelayWorkerSnapshot& total,
+    const TqDarwinRelayWorkerSnapshot& part);
 
 enum class TqDarwinQuicReceiveEnqueueResult : uint8_t {
     Ok = 0,
@@ -301,11 +373,27 @@ public:
     uint64_t CallbackReceiveBudgetRejectsForTest() const;
     uint64_t QuicReceiveEnqueueFailuresForTest() const;
     uint64_t QuicReceiveViewBackpressureQueuedForTest() const;
+    uint64_t QuicActiveShutdownEnqueuedForTest() const;
+    uint64_t QuicShutdownCompleteEnqueuedForTest() const;
+    TqDarwinActiveShutdownReason LastActiveShutdownReasonForTest() const;
     void SetRunningForTest(bool running);
     void MarkWorkerThreadExitedForTest();
     bool BindingActiveForTest(uint64_t relayId);
     bool BindingTerminalForTest(uint64_t relayId);
+    TqDarwinBindingPublishIdentitySnapshot BindingPublishIdentityForTest(uint64_t relayId) const;
+    TqDarwinBindingPublishIdentitySnapshot LastPublishIdentityForTest() const;
+    size_t PrecommitQueueDepthForTest(uint64_t relayId) const;
+    uint64_t TcpFilterInstallCountForTest() const;
+    uint64_t TcpFilterDeleteCountForTest() const;
+    uint64_t TcpFdCloseCountForTest() const;
+    uint64_t MapPublicationCountForTest() const;
+    uint64_t StreamBindingDestructorCountForTest() const;
+    uint64_t RelayStateDestructorCountForTest() const;
+    uint64_t SendOperationDestructorCountForTest() const;
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
+    void MarkRelayClosingForTest(uint64_t relayId);
+    void SetRelayStreamForTest(uint64_t relayId, MsQuicStream* stream);
+    uint64_t PendingQuicSendBufferBytesForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
     uint64_t RetiredRelayCountForTest();
     std::shared_ptr<void> RetiredRelayOwnerForTest(uint64_t relayId);
@@ -384,10 +472,25 @@ private:
         TqDarwinRelayWorkerSnapshot result);
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
+    bool InstallInactiveTcpFilters(const std::shared_ptr<RelayState>& relay);
+    bool EnableTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterestLocal(const std::shared_ptr<RelayState>& relay);
     void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
-    void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
+    void CloseRelayTcpFdOnce(const std::shared_ptr<RelayState>& relay);
+    enum class PreparedCommitDisposition : uint8_t {
+        CommitActive = 0,
+        RollbackTerminal,
+        RollbackFailed,
+    };
+    struct PreparedRelayToken;
+    PreparedCommitDisposition TryCommitPreparedActivation(
+        const std::shared_ptr<RelayState>& relay,
+        StreamBinding* binding,
+        const TqDarwinRelayRegistration& registration);
+    void RollbackPreparedRelay(
+        PreparedRelayToken& token,
+        TqStreamLifetime::ShutdownIntent intent);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
     // Raw worker-thread lookup; non-worker lifecycle access must use eventized commands.
@@ -412,6 +515,12 @@ private:
     bool EnqueueRelayCloseFromCallback(
         const std::shared_ptr<RelayState>& relay,
         TqDarwinRelayEventType type);
+    bool EnqueueQuicActiveShutdownFromCallback(
+        const std::shared_ptr<RelayState>& relay,
+        TqDarwinActiveShutdownReason reason);
+    bool EnqueueQuicShutdownCompleteFromCallback(
+        const std::shared_ptr<RelayState>& relay);
+    void SettleQueuedReceiveViewsBeforeRetire();
     void CompleteQuicSend(TqDarwinRelaySendOperation* operation);
     bool ShouldPauseTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
     bool ShouldResumeTcpReadForQuicBacklog(const std::shared_ptr<RelayState>& relay) const;
@@ -466,6 +575,13 @@ private:
         QUIC_STREAM_EVENT* event,
         StreamBinding* binding) noexcept;
     void ActivateManagedBinding(const std::shared_ptr<RelayState>& relay, StreamBinding* binding);
+    // Under ActivationMutex: take precommit once for drain or discard. Returns
+    // false if already settled (or empty after marking settled).
+    bool TakePrecommitForSettlementLocked(
+        StreamBinding* binding,
+        std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& out);
+    void DiscardPrecommitReceives(
+        std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& pending);
     void FailManagedBinding(RelayState* relay, StreamBinding* binding);
     void SealManagedBindingTerminal(RelayState* relay, StreamBinding* binding);
     void HandoffTerminalCloseToShutdownSink(
@@ -474,6 +590,7 @@ private:
     void HandoffActiveShutdownFromCallback(
         const std::shared_ptr<RelayState>& relay,
         StreamBinding* binding);
+    void InstallShutdownSinksForStop();
     void ProcessPeerSendShutdown(const std::shared_ptr<RelayState>& relay);
     void ProcessSendShutdownComplete(const std::shared_ptr<RelayState>& relay);
     void RequestRelayShutdown(
@@ -522,6 +639,7 @@ private:
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
 
     struct CallbackEndpoint;
+    struct ShutdownSink;
 
     TqDarwinRelayWorkerConfig Config;
     std::shared_ptr<CallbackEndpoint> StreamCallbackEndpoint;
@@ -555,6 +673,16 @@ private:
     mutable std::atomic<uint64_t> ActiveSendLocalCompleteCount{0};
     mutable std::atomic<uint64_t> ActiveSendOperationsSize{0};
     mutable std::atomic<uint64_t> FallbackSendCompletionCount{0};
+    mutable std::atomic<uint64_t> TcpFilterInstallCount{0};
+    mutable std::atomic<uint64_t> TcpFilterDeleteCount{0};
+    mutable std::atomic<uint64_t> TcpFdCloseCount{0};
+    mutable std::atomic<uint64_t> MapPublicationCount{0};
+    mutable std::atomic<uint64_t> StreamBindingDestructorCount{0};
+    mutable std::atomic<uint64_t> RelayStateDestructorCount{0};
+    mutable std::atomic<uint64_t> QuicActiveShutdownEnqueued{0};
+    mutable std::atomic<uint64_t> QuicShutdownCompleteEnqueued{0};
+    mutable std::atomic<uint8_t> LastActiveShutdownReason{0};
+    mutable TqDarwinBindingPublishIdentitySnapshot LastPublishIdentity{};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};
@@ -569,6 +697,7 @@ private:
     std::atomic<uint64_t> ReceiveFailSafeCount{0};
     std::atomic<uint64_t> LateTerminalReceiveCount{0};
     std::atomic<uint64_t> QuicSendBackpressureEvents{0};
+    std::atomic<uint64_t> CancelOnLossCount{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     mutable std::atomic<uint64_t> Errors{0};
@@ -577,6 +706,13 @@ private:
     mutable std::atomic<uint64_t> CallbackReceiveBudgetRejects{0};
     mutable std::atomic<uint64_t> QuicReceiveEnqueueFailures{0};
     mutable std::atomic<uint64_t> QuicReceiveViewBackpressureQueued{0};
+    std::atomic<uint64_t> CommitSuccessCount{0};
+    std::atomic<uint64_t> TerminalBeforeCommitRollbacks{0};
+    std::atomic<uint64_t> ActivationFailureCount{0};
+    std::atomic<uint64_t> ActiveFailureAllocationFailed{0};
+    std::atomic<uint64_t> ActiveFailureBudgetExceeded{0};
+    std::atomic<uint64_t> ActiveFailureQueueFull{0};
+    std::atomic<uint64_t> WorkerExitedPurgeEvents{0};
 };
 
 class TqDarwinRelayRuntime final {
@@ -587,7 +723,6 @@ public:
     void Stop();
     TqDarwinRelayWorkerSnapshot Snapshot() const;
     TqDarwinRelayWorker* PickWorker();
-    void StopRelay(TqRelayHandle* handle);
 
 private:
     TqDarwinRelayRuntime() = default;

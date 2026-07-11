@@ -134,6 +134,45 @@ int main() {
     }
 
     {
+        // Reservation RAII: armed destructor cancels; Dismiss keeps registry entry.
+        auto target = std::make_shared<CountingTarget>();
+        auto owner = TqStreamLifetime::CreateForTest(
+            TqStreamLifetime::Phase::Started, target);
+        const auto baseline = TqStreamLifetime::SnapshotSendCompletions();
+        unsigned cleanups = 0;
+        {
+            auto reservation = owner->ReserveSendCompletion(nullptr, [&] { ++cleanups; });
+            if (!reservation) return 40;
+            if (TqStreamLifetime::SnapshotSendCompletions().ActiveCount !=
+                baseline.ActiveCount + 1) {
+                return 41;
+            }
+        }
+        if (cleanups != 1) return 42;
+        if (TqStreamLifetime::SnapshotSendCompletions().ActiveCount != baseline.ActiveCount) {
+            return 43;
+        }
+
+        auto kept = owner->ReserveSendCompletion(nullptr, [&] { ++cleanups; });
+        if (!kept) return 44;
+        void* key = kept.Key();
+        kept.Dismiss();
+        if (TqStreamLifetime::SnapshotSendCompletions().ActiveCount !=
+            baseline.ActiveCount + 1) {
+            return 45;
+        }
+        if (!owner->CancelSendCompletion(key)) return 46;
+        if (cleanups != 2) return 47;
+        if (TqStreamLifetime::SnapshotSendCompletions().ActiveCount != baseline.ActiveCount) {
+            return 48;
+        }
+        if (TqStreamLifetime::SnapshotSendCompletions().OldestAgeMs != 0 &&
+            TqStreamLifetime::SnapshotSendCompletions().ActiveCount != 0) {
+            return 49;
+        }
+    }
+
+    {
         QUIC_API_TABLE fakeApi{};
         fakeApi.SetCallbackHandler = FakeSetCallbackHandler;
         fakeApi.StreamClose = FakeStreamClose;

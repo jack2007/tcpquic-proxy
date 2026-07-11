@@ -132,6 +132,50 @@ server dial reactor 还支持 speed-test 使用的 ephemeral authorizer：正常
 
 控制面 reactor 只覆盖低流量的入口握手、OPEN、DNS 和 TCP connect。relay worker 仍是高吞吐数据面，不与 client ingress reactor 或 server dial reactor 合并。Windows relay 数据面仍由 `TqWindowsRelayWorker` worker 组处理，使用 IOCP 和 overlapped I/O；macOS relay 数据面仍由 `TqDarwinRelayWorker` worker 组处理，使用独立 kqueue；控制面 reactor 不接管 relay 数据面。
 
+### Darwin relay ownership 与线性化点（2026-07 remediation）
+
+Darwin managed relay 的 ownership 与线性化点如下：
+
+```mermaid
+sequenceDiagram
+    participant Tunnel as tunnel caller
+    participant Control as TqRelayControl
+    participant Owner as TqStreamLifetime
+    participant Router as router/callback
+    participant Worker as Darwin worker
+    participant Reaper as tunnel reaper
+
+    Tunnel->>Control: 每次 start 新建 generation N
+    Tunnel->>Owner: prepare token（FD 未激活）
+    Owner->>Router: PublishTarget（identity 一次初始化）
+    Note over Owner,Router: publish 后禁止 reset 同一 weak_ptr
+    Router-->>Worker: RECEIVE 可进入 precommit
+    Worker->>Worker: commit 校验 phase/generation/map
+    alt terminal-before-commit
+        Worker-->>Tunnel: rollback（Ok=false，FD/filter 一次收敛）
+    else commit 成功
+        Worker->>Worker: Prepared->Active + EnableTcpFilters
+        Tunnel->>Tunnel: 发布 public handle
+    end
+    Worker-->>Owner: terminal / ActiveShutdown
+    Owner->>Control: SignalStop(generation N)
+    Control->>Reaper: stop 可见
+    Reaper->>Tunnel: TqRelayStop + accounting once
+```
+
+关键契约：
+
+- **transaction FD disposition**：publish 成功后 FD 所有权不可逆转移；commit/activation 失败由 prepared token 关闭 FD / 删除 filter / request shutdown，各一次。
+- **terminal 竞争**：terminal callback 与 commit 共用 activation mutex；只有一方赢得 `Prepared|Active -> Terminal` 或 `Prepared -> Active`。
+- **worker stop sink**：kqueue 线程退出前把 route 切到不引用 worker 的 `ShutdownSink`；退出后 purge 只做 lifecycle-safe 收敛，不进入 worker-thread-only 数据面 handler。
+
+禁止模式：
+
+1. 异步路径保存或解引用 tunnel-owned 裸 `TqRelayHandle*`。
+2. `PublishTarget` 之后对同一 binding `shared_ptr`/`weak_ptr` 字段 assign/reset。
+3. 资源失败（如 RECEIVE allocation failure）伪造 `QuicShutdownComplete` / 伪 terminal。
+4. 无 RAII send completion reservation 就注册 completion key（pre-submit 退出必须自动 cancel）。
+
 相关代码：
 
 - `src/tunnel/linux_relay_worker.cpp`
@@ -139,6 +183,7 @@ server dial reactor 还支持 speed-test 使用的 ephemeral authorizer：正常
 - `src/tunnel/darwin_relay_worker.cpp`
 - `src/tunnel/darwin_relay_worker.h`
 - `src/tunnel/relay.cpp`
+- `src/tunnel/stream_lifetime.cpp`
 
 ## 其它应用线程
 

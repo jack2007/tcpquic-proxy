@@ -18,8 +18,11 @@ struct TqDarwinQuicReceiveSlice {
 };
 
 struct TqDarwinPendingQuicReceive {
+    // Strong owner captured from StreamBinding::StreamOwner (weak) at build
+    // time — never derived from the active relay map entry.
+    // Stream API calls must go through StreamOwner->TryAcquireApi(); do not
+    // retain a bare MsQuicStream* for ReceiveComplete / ReceiveSetEnabled.
     std::shared_ptr<TqStreamLifetime> StreamOwner;
-    MsQuicStream* ReceiveCompleteStream{nullptr};
     uint64_t RelayId{0};
     std::shared_ptr<void> BindingOwner;
     bool CallbackBudgetHeld{false};
@@ -42,6 +45,18 @@ struct TqDarwinPendingQuicReceive {
     }
 };
 
+// Typed active-failure reasons for QuicActiveShutdown (not terminal).
+// Task 4 enqueues QuicActiveShutdown only for ReceiveAllocationFailed.
+// ReceiveBudgetExceeded / ReceiveQueueFull are reserved for Task 5+; current
+// budget-reject and queue-full paths are non-terminal backpressure
+// (immediate ReceiveComplete / PENDING hold) and must not forge
+// QuicShutdownComplete.
+enum class TqDarwinActiveShutdownReason : uint8_t {
+    ReceiveAllocationFailed = 0,
+    ReceiveBudgetExceeded = 1,
+    ReceiveQueueFull = 2,
+};
+
 enum class TqDarwinRelayEventType {
     TestMarker,
     TcpWritable,
@@ -53,6 +68,9 @@ enum class TqDarwinRelayEventType {
     QuicPeerSendShutdown,
     QuicSendShutdownComplete,
     QuicShutdownComplete,
+    // Active resource failure: keep owner phase active; Value carries
+    // TqDarwinActiveShutdownReason. Never forged as QuicShutdownComplete.
+    QuicActiveShutdown,
     QuicIdealSendBuffer,
     RegisterRelay,
     UnregisterRelay,

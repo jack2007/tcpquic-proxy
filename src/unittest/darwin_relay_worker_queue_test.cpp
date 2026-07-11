@@ -3,6 +3,9 @@
 #include "darwin_relay_event_queue.h"
 #include "darwin_relay_worker.h"
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -175,6 +178,67 @@ void EventMovePreservesOwnedMembers() {
     CHECK(receive.use_count() == 2);
 }
 
+void PendingReceiveStreamOwnerIsIndependentOfRelayMap() {
+    // Task 2: pending receive retains strong ownership (StreamOwner/BindingOwner)
+    // captured at build time; the queue must keep that alive without a live
+    // relay-map entry.
+    auto bindingOwner = std::make_shared<int>(1);
+    std::weak_ptr<int> weakBinding = bindingOwner;
+    auto receive = std::make_shared<TqDarwinPendingQuicReceive>();
+    receive->RelayId = 7;
+    receive->BindingOwner = bindingOwner;
+    receive->TotalLength = 3;
+
+    TqDarwinRelayEventQueue queue(2);
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicReceiveView;
+    event.ReceiveView = receive;
+    CHECK(queue.TryPush(std::move(event)));
+
+    bindingOwner.reset();
+    CHECK(!weakBinding.expired());
+
+    TqDarwinRelayEvent popped{};
+    CHECK(queue.TryPop(popped));
+    CHECK(popped.ReceiveView != nullptr);
+    CHECK(popped.ReceiveView->BindingOwner != nullptr);
+    CHECK(popped.ReceiveView->RelayId == 7);
+    popped.ReceiveView.reset();
+    receive.reset();
+    CHECK(weakBinding.expired());
+}
+
+void ActiveShutdownEventMovePreservesReasonAndOwner() {
+    // Task 4 wires ReceiveAllocationFailed onto QuicActiveShutdown.
+    // ReceiveBudgetExceeded / ReceiveQueueFull enum values are reserved for
+    // Task 5+; current budget/queue-full paths stay non-terminal backpressure.
+    TqDarwinRelayEventQueue queue(2);
+    auto relayOwner = std::make_shared<int>(99);
+
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicActiveShutdown;
+    event.RelayId = 11;
+    event.RelayOwner = relayOwner;
+    event.Value = static_cast<uint64_t>(TqDarwinActiveShutdownReason::ReceiveAllocationFailed);
+
+    CHECK(queue.TryPush(std::move(event)));
+    CHECK(relayOwner.use_count() == 2);
+
+    TqDarwinRelayEvent popped{};
+    CHECK(queue.TryPop(popped));
+    CHECK(popped.Type == TqDarwinRelayEventType::QuicActiveShutdown);
+    CHECK(popped.RelayId == 11);
+    CHECK(popped.RelayOwner == relayOwner);
+    CHECK(
+        popped.Value ==
+        static_cast<uint64_t>(TqDarwinActiveShutdownReason::ReceiveAllocationFailed));
+    CHECK(relayOwner.use_count() == 2);
+    CHECK(
+        static_cast<uint8_t>(TqDarwinActiveShutdownReason::ReceiveBudgetExceeded) == 1);
+    CHECK(
+        static_cast<uint8_t>(TqDarwinActiveShutdownReason::ReceiveQueueFull) == 2);
+}
+
 void DrainWakeProcessesPastBudgetAndShutdown() {
     TqDarwinRelayWorkerConfig config{};
     config.EventBudget = 2;
@@ -199,6 +263,69 @@ void DrainWakeProcessesPastBudgetAndShutdown() {
     CHECK(!worker.RunningForTest());
 }
 
+struct RealStopPurgeHalfCloseHookState {
+    std::atomic<uint64_t> RelayId{0};
+    std::shared_ptr<void> RelayOwner;
+    std::atomic<bool> Fired{false};
+};
+RealStopPurgeHalfCloseHookState* g_RealStopPurgeHalfCloseHook = nullptr;
+
+void RealStopPurgeHalfCloseHook(TqDarwinRelayWorker* worker) {
+    auto* state = g_RealStopPurgeHalfCloseHook;
+    CHECK(state != nullptr);
+    state->Fired.store(true, std::memory_order_release);
+    const uint64_t id = state->RelayId.load(std::memory_order_acquire);
+    auto relayOwner = state->RelayOwner;
+    if (relayOwner == nullptr) {
+        relayOwner = worker->ActiveRelayOwnerForTest(id);
+    }
+    CHECK(relayOwner != nullptr);
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicPeerSendShutdown, id));
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicSendShutdownComplete, id));
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicIdealSendBuffer, id));
+}
+
+void RealWorkerStopPurgeIgnoresHalfCloseHints() {
+    RealStopPurgeHalfCloseHookState state;
+    g_RealStopPurgeHalfCloseHook = &state;
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 32;
+    config.BeforeWorkerExitHookForTest = RealStopPurgeHalfCloseHook;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
+    registration.EnableQuicSends = true;
+    const auto result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    state.RelayId.store(result.RelayId, std::memory_order_release);
+    state.RelayOwner = worker.ActiveRelayOwnerForTest(result.RelayId);
+    CHECK(state.RelayOwner != nullptr);
+
+    worker.Stop();
+    CHECK(state.Fired.load(std::memory_order_acquire));
+    CHECK(worker.PendingEventsForTest() == 0);
+    CHECK(worker.Snapshot().Errors == 0);
+    g_RealStopPurgeHalfCloseHook = nullptr;
+    ::close(fds[0]);
+}
+
 } // namespace
 
 int main() {
@@ -209,7 +336,10 @@ int main() {
     EmptyQueueRejectsPop();
     MultiProducerPushSingleConsumerPop();
     EventMovePreservesOwnedMembers();
+    PendingReceiveStreamOwnerIsIndependentOfRelayMap();
+    ActiveShutdownEventMovePreservesReasonAndOwner();
     DrainWakeProcessesPastBudgetAndShutdown();
+    RealWorkerStopPurgeIgnoresHalfCloseHints();
     return 0;
 }
 

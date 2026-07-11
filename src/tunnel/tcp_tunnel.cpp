@@ -14,6 +14,10 @@
 #include "tunnel_registry.h"
 #include "tunnel_reaper.h"
 
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#endif
+
 #if !defined(_WIN32)
 #include <arpa/inet.h>
 #endif
@@ -440,6 +444,15 @@ struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
     friend void TqReapTunnelContext(TqTunnelContext* ctx);
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(__APPLE__)
+    friend TqTunnelContext* TqCreateTestDarwinRelayTunnel(
+        unsigned* destroyCount,
+        TqSocketHandle tcpFd,
+        std::shared_ptr<TqStreamLifetime> streamOwner,
+        std::shared_ptr<TqRelayStopControl>* outControl);
+    friend bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
+    friend TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context);
+#endif
 
 public:
     TqTunnelContext(
@@ -1803,6 +1816,7 @@ private:
                 StreamOwner != nullptr ? completionKey : sendContext);
         if (QUIC_FAILED(status)) {
             if (StreamOwner != nullptr) {
+                // Cancel runs the registered cleanup (deletes sendContext).
                 (void)StreamOwner->CancelSendCompletion(completionKey);
                 if ((flags & QUIC_SEND_FLAG_START) != 0) {
                     (void)StreamOwner->PublishStartFailureAndTakeTarget(status);
@@ -1810,6 +1824,7 @@ private:
                     Stream = nullptr;
                     ShutdownComplete = true;
                 }
+                return false;
             }
             TqTunnelSendContext::Delete(sendContext);
             return false;
@@ -2382,7 +2397,9 @@ bool TqSendDispatcherBytes(
         &sendContext->Buffer, 1, flags, completionKey);
     if (QUIC_FAILED(status)) {
         if (owner != nullptr) {
+            // Cancel runs the registered cleanup (deletes sendContext).
             (void)owner->CancelSendCompletion(completionKey);
+            return false;
         }
         TqTunnelSendContext::Delete(sendContext);
         return false;
@@ -2871,4 +2888,82 @@ void TqReleaseTestClientOpenOwner(TqTunnelContext* context) {
         delete context;
     }
 }
+
+#if defined(__APPLE__)
+TqTunnelContext* TqCreateTestDarwinRelayTunnel(
+    unsigned* destroyCount,
+    TqSocketHandle tcpFd,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    std::shared_ptr<TqRelayStopControl>* outControl) {
+    if (!TqSocketValid(tcpFd) || streamOwner == nullptr) {
+        return nullptr;
+    }
+    TqConfig cfg;
+    auto onComplete = [destroyCount]() {
+        if (destroyCount != nullptr) {
+            ++(*destroyCount);
+        }
+    };
+    auto* context = new (std::nothrow) TqTunnelContext(
+        TqTunnelRole::ClientOpen,
+        nullptr,
+        tcpFd,
+        cfg,
+        nullptr,
+        nullptr,
+        nullptr,
+        false,
+        nullptr,
+        std::move(onComplete));
+    if (context == nullptr) {
+        return nullptr;
+    }
+    auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
+        TqTunnelContext::Callback, context);
+    context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
+    if (!context->StartRelay(0)) {
+        delete context;
+        return nullptr;
+    }
+    if (outControl != nullptr) {
+        *outControl = context->RelayHandle.Control;
+    }
+    return context;
+}
+
+bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context) {
+    if (context == nullptr || context->StreamOwner == nullptr) {
+        return false;
+    }
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    return context->StreamOwner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS;
+}
+
+bool TqTestWaitDarwinRelayInactive(
+    TqDarwinRelayWorker* worker,
+    uint64_t baselineActive,
+    int timeoutMs) {
+    if (worker == nullptr) {
+        return true;
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (worker->Snapshot().ActiveRelays <= baselineActive) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return worker->Snapshot().ActiveRelays <= baselineActive;
+}
+
+TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context) {
+    return context != nullptr ? &context->RelayHandle : nullptr;
+}
+
+bool TqTestTunnelRelayStopped(const TqTunnelContext* context) {
+    return TqTunnelRelayStopped(context);
+}
+#endif
 #endif

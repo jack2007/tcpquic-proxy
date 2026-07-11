@@ -10,6 +10,9 @@
 #include "windows_relay_worker.h"
 #endif
 
+#include "relay.h"
+#include "tuning.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -484,6 +487,24 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LinuxRelayTerminalRetainedOwnerCount = snapshot.TerminalRetainedOwnerCount;
     metrics.LinuxRelayTerminalRetainedOldestAgeMs = snapshot.TerminalRetainedOldestAgeMs;
     metrics.LinuxRelayStopRemaining = snapshot.StopRemaining;
+    metrics.RelayPreparedRelays = snapshot.PreparedRelays;
+    metrics.RelayCommitSuccessCount = snapshot.CommitSuccessCount;
+    metrics.RelayTerminalBeforeCommitRollbacks = snapshot.TerminalBeforeCommitRollbacks;
+    metrics.RelayActivationFailureCount = snapshot.ActivationFailureCount;
+    metrics.RelayPrecommitBytes = snapshot.PrecommitBytes;
+    metrics.RelayPrecommitDepth = snapshot.PrecommitDepth;
+    metrics.RelayActiveSendReservations = snapshot.ActiveSendReservations;
+    metrics.RelaySendReservationRollbacks = snapshot.PreSubmitSendRollbacks;
+    metrics.RelaySendReservationOldestAgeMs = snapshot.SendReservationOldestAgeMs;
+    metrics.RelayPendingReceiveActive = snapshot.PendingReceiveActive;
+    metrics.RelayReceiveDiscards = snapshot.DeferredReceiveDiscards;
+    metrics.RelayActiveFailureAllocationFailed = snapshot.ActiveFailureAllocationFailed;
+    metrics.RelayActiveFailureBudgetExceeded = snapshot.ActiveFailureBudgetExceeded;
+    metrics.RelayActiveFailureQueueFull = snapshot.ActiveFailureQueueFull;
+    metrics.RelayShutdownSinkActive = snapshot.ShutdownSinkActive;
+    metrics.RelayWorkerExitedPurgeEvents = snapshot.WorkerExitedPurgeEvents;
+    metrics.RelayStopRemaining = snapshot.StopRemaining;
+    metrics.RelayStopOldestAgeMs = snapshot.StopOldestAgeMs;
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     uint64_t tcpReadBytes = 0;
@@ -598,6 +619,13 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.WindowsRelayReceiveViewFinishLinearSearchNanos = snapshot.ReceiveViewFinishLinearSearchNanos;
     metrics.WindowsRelayReceiveViewFinishNotFrontCount = snapshot.ReceiveViewFinishNotFrontCount;
 #endif
+    metrics.RelayActiveControls = TqGetActiveRelayCount();
+    metrics.RelayControlStopSignaled =
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed);
+    metrics.RelayControlGenerationMismatch =
+        TqRelayControlGenerationMismatchCount().load(std::memory_order_relaxed);
+    metrics.RelayAccountingDuplicateRelease =
+        TqRelayAccountingDuplicateReleaseCount().load(std::memory_order_relaxed);
     return metrics;
 }
 
@@ -713,6 +741,32 @@ static void TqAppendNeutralRelayMetricsJson(std::ostringstream& out, const TqRel
     out << ",\"relay_snapshot_complete\":"
         << (metrics.SnapshotComplete ? "true" : "false");
     out << ",\"relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
+    out << ",\"relay_active_controls\":" << metrics.RelayActiveControls;
+    out << ",\"relay_control_stop_signaled\":" << metrics.RelayControlStopSignaled;
+    out << ",\"relay_control_generation_mismatch\":" << metrics.RelayControlGenerationMismatch;
+    out << ",\"relay_accounting_duplicate_release\":" << metrics.RelayAccountingDuplicateRelease;
+    out << ",\"relay_prepared_relays\":" << metrics.RelayPreparedRelays;
+    out << ",\"relay_commit_success_count\":" << metrics.RelayCommitSuccessCount;
+    out << ",\"relay_terminal_before_commit_rollbacks\":"
+        << metrics.RelayTerminalBeforeCommitRollbacks;
+    out << ",\"relay_activation_failure_count\":" << metrics.RelayActivationFailureCount;
+    out << ",\"relay_precommit_bytes\":" << metrics.RelayPrecommitBytes;
+    out << ",\"relay_precommit_depth\":" << metrics.RelayPrecommitDepth;
+    out << ",\"relay_active_send_reservations\":" << metrics.RelayActiveSendReservations;
+    out << ",\"relay_send_reservation_rollbacks\":" << metrics.RelaySendReservationRollbacks;
+    out << ",\"relay_send_reservation_oldest_age_ms\":"
+        << metrics.RelaySendReservationOldestAgeMs;
+    out << ",\"relay_pending_receive_active\":" << metrics.RelayPendingReceiveActive;
+    out << ",\"relay_receive_discards\":" << metrics.RelayReceiveDiscards;
+    out << ",\"relay_active_failure_allocation_failed\":"
+        << metrics.RelayActiveFailureAllocationFailed;
+    out << ",\"relay_active_failure_budget_exceeded\":"
+        << metrics.RelayActiveFailureBudgetExceeded;
+    out << ",\"relay_active_failure_queue_full\":" << metrics.RelayActiveFailureQueueFull;
+    out << ",\"relay_shutdown_sink_active\":" << metrics.RelayShutdownSinkActive;
+    out << ",\"relay_worker_exited_purge_events\":" << metrics.RelayWorkerExitedPurgeEvents;
+    out << ",\"relay_stop_remaining\":" << metrics.RelayStopRemaining;
+    out << ",\"relay_stop_oldest_age_ms\":" << metrics.RelayStopOldestAgeMs;
     out << ',';
     TqAppendJsonString(out, "relay_backend", metrics.Backend);
 }
