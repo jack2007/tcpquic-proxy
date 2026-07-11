@@ -15,9 +15,13 @@ public:
     void Stop();
     void Register(TqTunnelContext* ctx);
     void Unregister(TqTunnelContext* ctx);
+#if defined(TQ_UNIT_TESTING)
+    size_t ReapReadyForTest();
+#endif
 
 private:
     void ReaperLoop();
+    std::vector<TqTunnelContext*> TakeReady();
 
     std::mutex Mutex;
     std::condition_variable Wakeup;

@@ -76,9 +76,30 @@ void TqTunnelReaper::Unregister(TqTunnelContext* ctx) {
     }
 }
 
+std::vector<TqTunnelContext*> TqTunnelReaper::TakeReady() {
+    std::vector<TqTunnelContext*> ready;
+    std::lock_guard<std::mutex> guard(Mutex);
+    for (auto it = Contexts.begin(); it != Contexts.end();) {
+        if (TqTunnelTerminalReleaseReady(*it)) {
+            ready.push_back(*it);
+            it = Contexts.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return ready;
+}
+
+#if defined(TQ_UNIT_TESTING)
+size_t TqTunnelReaper::ReapReadyForTest() {
+    auto ready = TakeReady();
+    for (auto* context : ready) TqReapTunnelContext(context);
+    return ready.size();
+}
+#endif
+
 void TqTunnelReaper::ReaperLoop() {
     for (;;) {
-        std::vector<TqTunnelContext*> ready;
         {
             std::unique_lock<std::mutex> guard(Mutex);
             Wakeup.wait_for(guard, TqReaperPollInterval, [this] {
@@ -89,17 +110,8 @@ void TqTunnelReaper::ReaperLoop() {
                 return;
             }
 
-            for (auto it = Contexts.begin(); it != Contexts.end();) {
-                TqTunnelContext* ctx = *it;
-                if (TqTunnelTerminalReleaseReady(ctx)) {
-                    ready.push_back(ctx);
-                    it = Contexts.erase(it);
-                } else {
-                    ++it;
-                }
-            }
         }
-
+        auto ready = TakeReady();
         for (TqTunnelContext* ctx : ready) {
             TqReapTunnelContext(ctx);
         }

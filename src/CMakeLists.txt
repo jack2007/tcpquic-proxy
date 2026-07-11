@@ -512,7 +512,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(tcpquic_linux_terminal_convergence_test
         unittest/linux_terminal_convergence_test.cpp
         unittest/trace_proxy_stub.cpp
+        unittest/linux_terminal_convergence_stubs.cpp
         tunnel/linux_relay_worker.cpp
+        tunnel/tcp_tunnel.cpp
+        tunnel/tunnel_reaper.cpp
+        tunnel/tcp_dialer.cpp
+        tunnel/relay.cpp
+        tunnel/server_dial_reactor.cpp
+        tunnel/ares_dns_resolver.cpp
+        runtime/linux_reactor.cpp
+        runtime/speed_test.cpp
+        protocol/control_protocol.cpp
+        acl/acl.cpp
+        acl/acl_filter.cpp
         tunnel/terminal_convergence.cpp
         tunnel/stream_lifetime.cpp
         tunnel/relay_buffer.cpp
@@ -522,8 +534,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_linux_terminal_convergence_test)
-    target_link_libraries(tcpquic_linux_terminal_convergence_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} spdlog::spdlog)
-    target_compile_definitions(tcpquic_linux_terminal_convergence_test PRIVATE ${TCPQUIC_TEST_DEFS} TQ_UNIT_TESTING=1)
+    if(TCPQUIC_TEST_INCLUDES)
+        target_include_directories(tcpquic_linux_terminal_convergence_test PRIVATE ${TCPQUIC_TEST_INCLUDES})
+    endif()
+    target_link_libraries(tcpquic_linux_terminal_convergence_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} inc warnings msquic logging base_link spdlog::spdlog ${TCPQUIC_CARES_TARGET})
+    target_compile_definitions(tcpquic_linux_terminal_convergence_test PRIVATE ${TCPQUIC_TEST_DEFS} TQ_UNIT_TESTING=1 TCPQUIC_TUNNEL_TESTING=1)
     tcpquic_link_mimalloc(tcpquic_linux_terminal_convergence_test)
     set_property(TARGET tcpquic_linux_terminal_convergence_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_terminal_convergence_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")

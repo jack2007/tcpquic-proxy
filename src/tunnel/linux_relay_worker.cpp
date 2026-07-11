@@ -1179,21 +1179,8 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
 
-#if defined(TQ_UNIT_TESTING)
-    if (Config.BeforeTerminalReserveForTest != nullptr) {
-        Config.BeforeTerminalReserveForTest(relay->Id);
-    }
-    if (Config.InsideTerminalDowncallForTest != nullptr) {
-        Config.InsideTerminalDowncallForTest(relay->Id);
-    }
-#endif
     const auto result = relay->StreamOwner->BeginTerminalShutdown(
         errorCode, sink, handoff->Escalation);
-#if defined(TQ_UNIT_TESTING)
-    if (Config.AfterTerminalSubmitForTest != nullptr) {
-        Config.AfterTerminalSubmitForTest(relay->Id);
-    }
-#endif
     AbortRelayAndRelease(relay, reason, false);
     handoff->DataPlaneStopped.store(true, std::memory_order_release);
     handoff->LocalOperationOwnershipTransferredOrDrained.store(

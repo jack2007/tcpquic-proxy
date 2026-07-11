@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <atomic>
 #include <functional>
+#include <memory>
 
 #include "acl.h"
 #include "config.h"
@@ -16,6 +17,10 @@ struct TqClientTunnelOpenHandle;
 class TqEphemeralTargetAuthorizer;
 class TqServerDialReactor;
 class TqServerSpeedTestController;
+class TqStreamLifetime;
+struct TqRelayStopControl;
+struct TqRelayHandle;
+struct TqTunnelContext;
 
 enum class TqTunnelRole {
     ClientOpen,
@@ -69,9 +74,19 @@ void TqHandleServerIncomingStreamForTest(
     const TqEphemeralTargetAuthorizer* authorizer,
     TqTunnelCompletionFn onComplete = {},
     TqTunnelAclDeniedFn onAclDenied = {});
+#if defined(__linux__)
+TqTunnelContext* TqCreateTestLinuxRelayTunnel(
+    std::atomic<unsigned>* destroyCount,
+    TqTunnelRole role,
+    TqSocketHandle tcpFd,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    std::shared_ptr<TqRelayStopControl>* outControl,
+    const TqConfig* configOverride = nullptr);
+bool TqTestDispatchLinuxOwnerEvent(
+    TqTunnelContext* context, QUIC_STREAM_EVENT_TYPE type);
+TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext* context);
 #endif
-
-struct TqTunnelContext;
+#endif
 
 bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
 bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx);

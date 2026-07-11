@@ -493,6 +493,15 @@ public:
     friend bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
     friend TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context);
 #endif
+#if defined(TCPQUIC_TUNNEL_TESTING) && defined(__linux__)
+    friend TqTunnelContext* TqCreateTestLinuxRelayTunnel(
+        std::atomic<unsigned>*, TqTunnelRole, TqSocketHandle,
+        std::shared_ptr<TqStreamLifetime>, std::shared_ptr<TqRelayStopControl>*,
+        const TqConfig*);
+    friend bool TqTestDispatchLinuxOwnerEvent(
+        TqTunnelContext*, QUIC_STREAM_EVENT_TYPE);
+    friend TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext*);
+#endif
 
 public:
     TqTunnelContext(
@@ -3120,6 +3129,41 @@ TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context) {
 
 bool TqTestTunnelRelayStopped(const TqTunnelContext* context) {
     return TqTunnelRelayStopped(context);
+}
+#endif
+
+#if defined(__linux__)
+TqTunnelContext* TqCreateTestLinuxRelayTunnel(
+    std::atomic<unsigned>* destroyCount,
+    TqTunnelRole role,
+    TqSocketHandle tcpFd,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    std::shared_ptr<TqRelayStopControl>* outControl,
+    const TqConfig* configOverride) {
+    if (!TqSocketValid(tcpFd) || streamOwner == nullptr) return nullptr;
+    TqConfig cfg = configOverride != nullptr ? *configOverride : TqConfig{};
+    auto* context = new (std::nothrow) TqTunnelContext(
+        role, nullptr, tcpFd, cfg, nullptr, nullptr, nullptr, false, nullptr,
+        [destroyCount] { if (destroyCount != nullptr) destroyCount->fetch_add(1); });
+    if (context == nullptr) return nullptr;
+    auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
+        TqTunnelContext::Callback, context);
+    context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
+    if (!context->StartRelay(0)) { delete context; return nullptr; }
+    if (outControl != nullptr) *outControl = context->RelayHandle.Control;
+    return context;
+}
+
+bool TqTestDispatchLinuxOwnerEvent(
+    TqTunnelContext* context, QUIC_STREAM_EVENT_TYPE type) {
+    if (context == nullptr || context->StreamOwner == nullptr) return false;
+    QUIC_STREAM_EVENT event{};
+    event.Type = type;
+    return context->StreamOwner->DispatchForTest(&event) == QUIC_STATUS_SUCCESS;
+}
+
+TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext* context) {
+    return context != nullptr ? &context->RelayHandle : nullptr;
 }
 #endif
 #endif

@@ -247,6 +247,12 @@ void TqStreamLifetime::SetShutdownHookForTest(ShutdownHookForTest hook) noexcept
     ShutdownHookForTest_ = std::move(hook);
 }
 
+void TqStreamLifetime::SetTerminalBoundaryHookForTest(
+    TerminalBoundaryHookForTest hook) noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    TerminalBoundaryHookForTest_ = std::move(hook);
+}
+
 void TqStreamLifetime::SetBeforeTerminalLedgerRecordHookForTest(
     BeforeTerminalLedgerRecordHookForTest hook) noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
@@ -651,9 +657,14 @@ QUIC_STATUS TqStreamLifetime::CallTerminalShutdown(
     QUIC_STREAM_SHUTDOWN_FLAGS flags) noexcept {
 #if defined(TQ_UNIT_TESTING)
     ShutdownHookForTest hook;
+    TerminalBoundaryHookForTest boundary;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         hook = ShutdownHookForTest_;
+        boundary = TerminalBoundaryHookForTest_;
+    }
+    if (boundary) {
+        boundary(TerminalBoundaryForTest::InsideShutdownDowncall);
     }
     if (hook) {
         return hook(errorCode, flags);
@@ -732,6 +743,17 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         stream = Stream_;
     }
 
+#if defined(TQ_UNIT_TESTING)
+    TerminalBoundaryHookForTest afterReserve;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        afterReserve = TerminalBoundaryHookForTest_;
+    }
+    if (afterReserve) {
+        afterReserve(TerminalBoundaryForTest::AfterReserve);
+    }
+#endif
+
     const auto flags = static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
         QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE);
     result.Status = CallTerminalShutdown(stream, errorCode, flags);
@@ -751,6 +773,16 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
             TerminalRetryOwned_ = true;
         }
     }
+#if defined(TQ_UNIT_TESTING)
+    TerminalBoundaryHookForTest afterSubmit;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        afterSubmit = TerminalBoundaryHookForTest_;
+    }
+    if (afterSubmit) {
+        afterSubmit(TerminalBoundaryForTest::AfterSubmit);
+    }
+#endif
 #if defined(TQ_UNIT_TESTING)
     BeforeTerminalLedgerRecordHookForTest beforeLedgerRecord;
     {

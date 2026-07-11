@@ -33,8 +33,15 @@ public:
         AbortBothImmediate,
     };
 #if defined(TQ_UNIT_TESTING)
+    enum class TerminalBoundaryForTest : uint8_t {
+        AfterReserve,
+        InsideShutdownDowncall,
+        AfterSubmit,
+    };
     using ShutdownHookForTest = std::function<QUIC_STATUS(
         uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS)>;
+    using TerminalBoundaryHookForTest =
+        std::function<void(TerminalBoundaryForTest)>;
     using BeforeTerminalLedgerRecordHookForTest = std::function<void()>;
 #endif
 
@@ -141,6 +148,7 @@ public:
     bool SendDirectionCompleteForTest() const noexcept;
     uint64_t CancelOnLossErrorCodeForTest() const noexcept;
     void SetShutdownHookForTest(ShutdownHookForTest hook) noexcept;
+    void SetTerminalBoundaryHookForTest(TerminalBoundaryHookForTest hook) noexcept;
     void SetBeforeTerminalLedgerRecordHookForTest(
         BeforeTerminalLedgerRecordHookForTest hook) noexcept;
     bool TerminalRetryOwnedForTest() const noexcept;
@@ -265,6 +273,7 @@ private:
     uint32_t DenyReceiveApiLeasesForTest_{0};
     ShutdownHookForTest ShutdownHookForTest_;
     BeforeTerminalLedgerRecordHookForTest BeforeTerminalLedgerRecordHookForTest_;
+    TerminalBoundaryHookForTest TerminalBoundaryHookForTest_;
 #endif
 };
 
