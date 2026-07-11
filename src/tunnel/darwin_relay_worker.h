@@ -230,6 +230,10 @@ struct TqDarwinRelayWorkerConfig {
     bool FailNextSendCompletionRegisterForTest{false};
     // Next BuildPendingQuicReceive allocation fails once (P1-5 / Task 4).
     bool FailNextPendingReceiveAllocationForTest{false};
+    // Fires on the real kqueue thread after the Run loop exits and after
+    // DetachActiveSendOperationsForStop, before WorkerThreadId is cleared.
+    // Used to enqueue mixed events that Stop must purge off-thread (P2-8).
+    void (*BeforeWorkerExitHookForTest)(TqDarwinRelayWorker*){nullptr};
 #endif
 };
 
@@ -270,6 +274,7 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t ReceiveFailSafeCount{0};
     uint64_t LateTerminalReceiveCount{0};
     uint64_t QuicSendBackpressureEvents{0};
+    uint64_t CancelOnLossCount{0};
     uint64_t Errors{0};
     uint64_t EventQueueFullErrors{0};
     uint64_t WakeFailures{0};
@@ -565,6 +570,7 @@ private:
     void HandoffActiveShutdownFromCallback(
         const std::shared_ptr<RelayState>& relay,
         StreamBinding* binding);
+    void InstallShutdownSinksForStop();
     void ProcessPeerSendShutdown(const std::shared_ptr<RelayState>& relay);
     void ProcessSendShutdownComplete(const std::shared_ptr<RelayState>& relay);
     void RequestRelayShutdown(
@@ -613,6 +619,7 @@ private:
     static bool CompleteDetachedQuicSend(StreamBinding* binding, TqDarwinRelaySendOperation* operation);
 
     struct CallbackEndpoint;
+    struct ShutdownSink;
 
     TqDarwinRelayWorkerConfig Config;
     std::shared_ptr<CallbackEndpoint> StreamCallbackEndpoint;
@@ -670,6 +677,7 @@ private:
     std::atomic<uint64_t> ReceiveFailSafeCount{0};
     std::atomic<uint64_t> LateTerminalReceiveCount{0};
     std::atomic<uint64_t> QuicSendBackpressureEvents{0};
+    std::atomic<uint64_t> CancelOnLossCount{0};
     std::atomic<uint64_t> QuicReceivePausedCount{0};
     std::atomic<uint64_t> QuicReceiveResumedCount{0};
     mutable std::atomic<uint64_t> Errors{0};

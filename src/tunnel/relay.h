@@ -21,6 +21,9 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+// Application error code for QUIC_STREAM_EVENT_CANCEL_ON_LOSS (62-bit wire range).
+inline constexpr uint64_t TqRelayStreamErrorCancelOnLoss = 0x54510001ull;
+
 inline uint64_t TqRelayNextControlGeneration() {
     static std::atomic<uint64_t> next{1};
     return next.fetch_add(1, std::memory_order_relaxed);

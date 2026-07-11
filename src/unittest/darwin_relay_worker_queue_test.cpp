@@ -3,6 +3,9 @@
 #include "darwin_relay_event_queue.h"
 #include "darwin_relay_worker.h"
 
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -260,6 +263,69 @@ void DrainWakeProcessesPastBudgetAndShutdown() {
     CHECK(!worker.RunningForTest());
 }
 
+struct RealStopPurgeHalfCloseHookState {
+    std::atomic<uint64_t> RelayId{0};
+    std::shared_ptr<void> RelayOwner;
+    std::atomic<bool> Fired{false};
+};
+RealStopPurgeHalfCloseHookState* g_RealStopPurgeHalfCloseHook = nullptr;
+
+void RealStopPurgeHalfCloseHook(TqDarwinRelayWorker* worker) {
+    auto* state = g_RealStopPurgeHalfCloseHook;
+    CHECK(state != nullptr);
+    state->Fired.store(true, std::memory_order_release);
+    const uint64_t id = state->RelayId.load(std::memory_order_acquire);
+    auto relayOwner = state->RelayOwner;
+    if (relayOwner == nullptr) {
+        relayOwner = worker->ActiveRelayOwnerForTest(id);
+    }
+    CHECK(relayOwner != nullptr);
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicPeerSendShutdown, id));
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicSendShutdownComplete, id));
+    CHECK(worker->EnqueueRelayCloseEventForTest(
+        relayOwner, TqDarwinRelayEventType::QuicIdealSendBuffer, id));
+}
+
+void RealWorkerStopPurgeIgnoresHalfCloseHints() {
+    RealStopPurgeHalfCloseHookState state;
+    g_RealStopPurgeHalfCloseHook = &state;
+
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 32;
+    config.BeforeWorkerExitHookForTest = RealStopPurgeHalfCloseHook;
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.Start());
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[1];
+    registration.Stream = stream;
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
+    registration.EnableQuicSends = true;
+    const auto result = worker.RegisterRelayWithId(registration);
+    CHECK(result.Ok);
+    state.RelayId.store(result.RelayId, std::memory_order_release);
+    state.RelayOwner = worker.ActiveRelayOwnerForTest(result.RelayId);
+    CHECK(state.RelayOwner != nullptr);
+
+    worker.Stop();
+    CHECK(state.Fired.load(std::memory_order_acquire));
+    CHECK(worker.PendingEventsForTest() == 0);
+    CHECK(worker.Snapshot().Errors == 0);
+    g_RealStopPurgeHalfCloseHook = nullptr;
+    ::close(fds[0]);
+}
+
 } // namespace
 
 int main() {
@@ -273,6 +339,7 @@ int main() {
     PendingReceiveStreamOwnerIsIndependentOfRelayMap();
     ActiveShutdownEventMovePreservesReasonAndOwner();
     DrainWakeProcessesPastBudgetAndShutdown();
+    RealWorkerStopPurgeIgnoresHalfCloseHints();
     return 0;
 }
 
