@@ -509,6 +509,25 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_property(TARGET tcpquic_linux_relay_worker_io_test PROPERTY FOLDER "tools")
     set_property(TARGET tcpquic_linux_relay_worker_io_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
 
+    add_executable(tcpquic_linux_terminal_convergence_test
+        unittest/linux_terminal_convergence_test.cpp
+        unittest/trace_proxy_stub.cpp
+        tunnel/linux_relay_worker.cpp
+        tunnel/terminal_convergence.cpp
+        tunnel/stream_lifetime.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        protocol/compress.cpp
+        config/tuning.cpp
+        ${TCPQUIC_PLATFORM_SOURCES}
+    )
+    tcpquic_target_include_dirs(tcpquic_linux_terminal_convergence_test)
+    target_link_libraries(tcpquic_linux_terminal_convergence_test PRIVATE Threads::Threads ${TCPQUIC_TEST_LIBS} spdlog::spdlog)
+    target_compile_definitions(tcpquic_linux_terminal_convergence_test PRIVATE ${TCPQUIC_TEST_DEFS} TQ_UNIT_TESTING=1)
+    tcpquic_link_mimalloc(tcpquic_linux_terminal_convergence_test)
+    set_property(TARGET tcpquic_linux_terminal_convergence_test PROPERTY FOLDER "tools")
+    set_property(TARGET tcpquic_linux_terminal_convergence_test APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+
     add_executable(tcpquic_linux_reactor_test
         unittest/linux_reactor_test.cpp
         runtime/linux_reactor.cpp
@@ -575,6 +594,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND TCPQUIC_LINUX_TEST_TARGETS
         tcpquic_linux_relay_worker_queue_test
         tcpquic_linux_relay_worker_io_test
+        tcpquic_linux_terminal_convergence_test
         tcpquic_linux_reactor_test
         tcpquic_server_dial_reactor_worker_test
         tcpquic_client_ingress_reactor_test

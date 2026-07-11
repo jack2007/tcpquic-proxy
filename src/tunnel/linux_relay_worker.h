@@ -55,6 +55,11 @@ struct TqLinuxRelayWorkerConfig {
     bool FailStartForTest{false};
     void (*AfterPublishHookForTest)(TqLinuxRelayWorker*, uint64_t){nullptr};
     void (*BeforeSnapshotHookForTest)(TqLinuxRelayWorker*){nullptr};
+    void (*BeforeTerminalReserveForTest)(uint64_t){nullptr};
+    void (*InsideTerminalDowncallForTest)(uint64_t){nullptr};
+    void (*AfterTerminalSubmitForTest)(uint64_t){nullptr};
+    bool ForceTerminalQueueFullForTest{false};
+    bool SuppressTerminalCallbackForTest{false};
 #endif
 };
 

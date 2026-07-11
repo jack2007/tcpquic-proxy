@@ -1179,8 +1179,21 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
 
+#if defined(TQ_UNIT_TESTING)
+    if (Config.BeforeTerminalReserveForTest != nullptr) {
+        Config.BeforeTerminalReserveForTest(relay->Id);
+    }
+    if (Config.InsideTerminalDowncallForTest != nullptr) {
+        Config.InsideTerminalDowncallForTest(relay->Id);
+    }
+#endif
     const auto result = relay->StreamOwner->BeginTerminalShutdown(
         errorCode, sink, handoff->Escalation);
+#if defined(TQ_UNIT_TESTING)
+    if (Config.AfterTerminalSubmitForTest != nullptr) {
+        Config.AfterTerminalSubmitForTest(relay->Id);
+    }
+#endif
     AbortRelayAndRelease(relay, reason, false);
     handoff->DataPlaneStopped.store(true, std::memory_order_release);
     handoff->LocalOperationOwnershipTransferredOrDrained.store(
@@ -4882,6 +4895,11 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         return QUIC_STATUS_SUCCESS;
     }
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+#if defined(TQ_UNIT_TESTING)
+        if (Config.SuppressTerminalCallbackForTest) {
+            return QUIC_STATUS_SUCCESS;
+        }
+#endif
         // Seal the callback route before publishing the asynchronous worker
         // event.  After this callback returns an auto-cleanup wrapper is no
         // longer a valid capability, while the binding remains independently
@@ -4904,7 +4922,11 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         queued.Value = event->SHUTDOWN_COMPLETE.ConnectionErrorCode;
         queued.Length = static_cast<size_t>(event->SHUTDOWN_COMPLETE.ConnectionCloseStatus);
         queued.ControlOwner = binding->weak_from_this().lock();
-        if (!Enqueue(std::move(queued))) {
+        if (
+#if defined(TQ_UNIT_TESTING)
+            Config.ForceTerminalQueueFullForTest ||
+#endif
+            !Enqueue(std::move(queued))) {
             // owner terminal is already published by the stable router.  A
             // full worker queue must not ask MsQuic to retry or resurrect the
             // route; publish callback-safe stop so reaper/unregister performs
