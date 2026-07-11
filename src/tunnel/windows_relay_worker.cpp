@@ -292,6 +292,9 @@ struct TqWindowsRelayWorker::CallbackEndpoint final {
 
     void CloseAndWait() {
         std::unique_lock<std::mutex> guard(Lock);
+        if (Worker == nullptr && ActiveCalls == 0) {
+            return;
+        }
         Worker = nullptr;
         Drained.wait(guard, [this] { return ActiveCalls == 0; });
     }
@@ -4780,6 +4783,8 @@ bool TqWindowsRelayWorker::ShouldRejectReceiveInCallback(
     if (pending < limit && receiveBytes <= limit - pending) {
         return false;
     }
+    // Allow one modest over-limit chunk (receiveBytes < 2*limit while pending < limit) to
+    // enqueue and pause via PauseQuicReceiveFromCallback instead of rejecting before copy.
     if (receiveBytes < limit * 2 && pending < limit) {
         return false;
     }
