@@ -39,6 +39,28 @@ void TqReleaseTestClientOpenOwner(TqTunnelContext* context);
 TqTunnelContext* TqCreateTestServerOpenLegacyPendingTunnel(unsigned* destroyCount);
 bool TqTestCancelServerDialAndHasPending(TqTunnelContext* context);
 #endif
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#include "tunnel_reaper.h"
+#include "tuning.h"
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <thread>
+
+TqTunnelContext* TqCreateTestDarwinRelayTunnel(
+    unsigned* destroyCount,
+    TqSocketHandle tcpFd,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    std::shared_ptr<TqRelayStopControl>* outControl);
+bool TqTestDispatchDarwinOwnerShutdownComplete(TqTunnelContext* context);
+bool TqTestWaitDarwinRelayInactive(
+    TqDarwinRelayWorker* worker,
+    uint64_t baselineActive,
+    int timeoutMs);
+TqRelayHandle* TqTestTunnelRelayHandle(TqTunnelContext* context);
+bool TqTestTunnelRelayStopped(const TqTunnelContext* context);
+#endif
 #endif
 
 uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
@@ -2026,6 +2048,111 @@ static int TestDetectsMsQuicFakeFinReceive() {
     return 0;
 }
 
+#if defined(__APPLE__) && defined(TCPQUIC_TUNNEL_TESTING)
+static int TestDarwinNormalTerminalWakesReaper() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 240;
+
+    TqSocketHandle fds[2]{TqInvalidSocket, TqInvalidSocket};
+    if (!TqSocketPair(fds)) return 241;
+
+    TqTunnelReaper::Instance().Start();
+
+    const uint32_t activeBaseline = TqGetActiveRelayCount();
+    unsigned destroyCount = 0;
+
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    std::memset(stream, 0, sizeof(MsQuicStream));
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    if (owner == nullptr || !owner->InstallStreamForTest(stream)) {
+        TqTunnelReaper::Instance().Stop();
+        TqCloseSocket(fds[0]);
+        TqCloseSocket(fds[1]);
+        return 242;
+    }
+    std::weak_ptr<TqStreamLifetime> weakOwner = owner;
+    std::shared_ptr<TqRelayStopControl> control;
+    auto* ctx = TqCreateTestDarwinRelayTunnel(&destroyCount, fds[1], owner, &control);
+    if (ctx == nullptr) {
+        owner->ReleaseStreamForTest();
+        TqTunnelReaper::Instance().Stop();
+        TqCloseSocket(fds[0]);
+        TqCloseSocket(fds[1]);
+        return 243;
+    }
+    TqRelayHandle* handle = TqTestTunnelRelayHandle(ctx);
+    if (handle == nullptr || handle->DarwinWorker == nullptr || control == nullptr) {
+        TqTunnelReaper::Instance().Stop();
+        TqDestroyTestRegisteredTunnel(ctx);
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 244;
+    }
+    TqDarwinRelayWorker* worker = handle->DarwinWorker;
+    const uint64_t baselineActive = worker->Snapshot().ActiveRelays;
+    std::weak_ptr<TqRelayStopControl> weakControl = control;
+
+    if (!TqTestDispatchDarwinOwnerShutdownComplete(ctx)) {
+        TqTunnelReaper::Instance().Stop();
+        TqDestroyTestRegisteredTunnel(ctx);
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 245;
+    }
+    if (!TqTestWaitDarwinRelayInactive(worker, baselineActive > 0 ? baselineActive - 1 : 0, 2000)) {
+        TqTunnelReaper::Instance().Stop();
+        if (!TqTestTunnelRelayStopped(ctx)) {
+            TqDestroyTestRegisteredTunnel(ctx);
+        }
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 246;
+    }
+    if (!control->Stop.load(std::memory_order_acquire)) {
+        TqTunnelReaper::Instance().Stop();
+        if (!TqTestTunnelRelayStopped(ctx)) {
+            TqDestroyTestRegisteredTunnel(ctx);
+        }
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 247;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (destroyCount == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TqTunnelReaper::Instance().Stop();
+    if (destroyCount != 1) {
+        if (destroyCount == 0) {
+            TqDestroyTestRegisteredTunnel(ctx);
+        }
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 248;
+    }
+    if (TqGetActiveRelayCount() != activeBaseline) {
+        owner->ReleaseStreamForTest();
+        TqCloseSocket(fds[0]);
+        return 249;
+    }
+    owner->ReleaseStreamForTest();
+    owner.reset();
+    control.reset();
+    if (!weakOwner.expired() || !weakControl.expired()) {
+        TqCloseSocket(fds[0]);
+        return 250;
+    }
+    TqCloseSocket(fds[0]);
+    return 0;
+}
+#endif
+
 int main() {
     if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
@@ -2037,6 +2164,9 @@ int main() {
     if (int rc = TestConnectionAbortClosesTunnelTcp()) return rc;
     if (int rc = TestClientOpenOwnerDefersShutdownCompleteDelete()) return rc;
     if (int rc = TestDetectsMsQuicFakeFinReceive()) return rc;
+#if defined(__APPLE__) && defined(TCPQUIC_TUNNEL_TESTING)
+    if (int rc = TestDarwinNormalTerminalWakesReaper()) return rc;
+#endif
     if (int rc = TestServerIncomingOpenDispatchesWithInitialBytes()) return rc;
     if (int rc = TestServerIncomingClientHelloUpdatesConnectionNameOnly()) return rc;
     if (int rc = TestServerIncomingOpenTunnelSnapshotIncludesPeerId()) return rc;

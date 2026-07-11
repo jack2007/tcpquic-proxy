@@ -116,6 +116,7 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::atomic<TqDarwinRelayWorker*> Worker{nullptr};
     std::shared_ptr<CallbackEndpoint> Endpoint;
     std::shared_ptr<TqRelayStopControl> StopControl;
+    uint64_t ControlGeneration{0};
     std::atomic<bool> Retired{false};
     std::atomic<bool> Active{true};
     std::atomic<bool> Terminal{false};
@@ -172,8 +173,8 @@ struct TqDarwinRelayWorker::RelayState {
     TqSocketHandle TcpFd{TqInvalidSocket};
     MsQuicStream* Stream{nullptr};
     std::shared_ptr<TqStreamLifetime> StreamOwner;
-    TqRelayHandle* PublicHandle{nullptr};
     std::shared_ptr<TqRelayStopControl> StopControl;
+    uint64_t ControlGeneration{0};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
     TqCompressAlgo CompressAlgo{TqCompressAlgo::None};
@@ -222,8 +223,24 @@ struct TqDarwinRelayWorker::RelayState {
               return registration.Stream;
           }()),
           StreamOwner(registration.StreamOwner),
-          PublicHandle(registration.Handle),
-          StopControl(registration.Handle != nullptr ? registration.Handle->Control : nullptr),
+          StopControl([&]() -> std::shared_ptr<TqRelayStopControl> {
+              if (registration.Control != nullptr) {
+                  return registration.Control;
+              }
+              return registration.Handle != nullptr ? registration.Handle->Control : nullptr;
+          }()),
+          ControlGeneration([&]() -> uint64_t {
+              if (registration.ControlGeneration != 0) {
+                  return registration.ControlGeneration;
+              }
+              if (registration.Control != nullptr) {
+                  return registration.Control->Generation;
+              }
+              if (registration.Handle != nullptr && registration.Handle->Control != nullptr) {
+                  return registration.Handle->Control->Generation;
+              }
+              return 0;
+          }()),
           Compressor(registration.Compressor),
           Decompressor(registration.Decompressor),
           CompressAlgo(registration.CompressAlgo),
@@ -306,11 +323,9 @@ void TqDarwinRelayWorker::Stop() {
                 relays.swap(Relays);
             }
             for (const auto& entry : relays) {
-                if (entry.second != nullptr && entry.second->StreamOwner != nullptr) {
-                    RequestRelayShutdown(
-                        entry.second,
-                        TqStreamLifetime::ShutdownIntent::AbortBoth);
-                }
+                RequestRelayShutdown(
+                    entry.second,
+                    TqStreamLifetime::ShutdownIntent::AbortBoth);
                 RemoveTcpFilters(entry.second);
                 RetireRelay(
                     entry.second,
@@ -1150,23 +1165,6 @@ void TqDarwinRelayWorker::RemoveTcpFilters(const std::shared_ptr<RelayState>& re
     (void)kevent(KqueueFd, changes, 2, nullptr, 0, nullptr);
 }
 
-void TqDarwinRelayWorker::ClearPublicHandle(const std::shared_ptr<RelayState>& relay) {
-    if (relay == nullptr || relay->PublicHandle == nullptr) {
-        return;
-    }
-    TqRelayHandle* handle = relay->PublicHandle;
-    if (handle->DarwinRelayId == relay->Id) {
-        handle->DarwinRelayId = 0;
-    }
-    if (handle->DarwinWorker == this) {
-        handle->DarwinWorker = nullptr;
-    }
-    if (handle->Backend == TqRelayBackendType::DarwinWorker) {
-        handle->Backend = TqRelayBackendType::None;
-    }
-    relay->PublicHandle = nullptr;
-}
-
 void TqDarwinRelayWorker::RetireRelay(
     const std::shared_ptr<RelayState>& relay,
     TqDarwinRelayCloseDisposition disposition) {
@@ -1288,7 +1286,6 @@ void TqDarwinRelayWorker::RetireRelay(
             }
         }
     }
-    ClearPublicHandle(relay);
     std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
     std::lock_guard<std::mutex> lock(RelayMutex);
     uint64_t inFlight = 0;
@@ -3421,10 +3418,7 @@ void TqDarwinRelayWorker::RequestRelayShutdown(
         (void)relay->StreamOwner->RequestShutdown(intent);
     }
     if (relay != nullptr && relay->StopControl != nullptr) {
-        relay->StopControl->Stop.store(true, std::memory_order_release);
-    }
-    if (relay != nullptr && relay->PublicHandle != nullptr) {
-        relay->PublicHandle->Stop.store(true, std::memory_order_release);
+        (void)relay->StopControl->SignalStop(relay->ControlGeneration);
     }
 }
 
@@ -3448,7 +3442,7 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
     binding->Active.store(false, std::memory_order_release);
     binding->Relay.reset();
     if (binding->StopControl != nullptr) {
-        binding->StopControl->Stop.store(true, std::memory_order_release);
+        (void)binding->StopControl->SignalStop(binding->ControlGeneration);
     }
     if (relay != nullptr) {
         relay->Binding.reset();
@@ -3459,7 +3453,6 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
 void TqDarwinRelayWorker::SealManagedBindingTerminal(
     RelayState* relay,
     StreamBinding* binding) {
-    (void)relay;
     if (binding == nullptr) {
         return;
     }
@@ -3467,21 +3460,32 @@ void TqDarwinRelayWorker::SealManagedBindingTerminal(
     binding->Terminal.store(true, std::memory_order_release);
     binding->Closing.store(true, std::memory_order_release);
     binding->Relay.reset();
+    const uint64_t generation = binding->ControlGeneration != 0
+        ? binding->ControlGeneration
+        : (relay != nullptr ? relay->ControlGeneration : 0);
+    if (binding->StopControl != nullptr) {
+        (void)binding->StopControl->SignalStop(generation);
+    } else if (relay != nullptr && relay->StopControl != nullptr) {
+        (void)relay->StopControl->SignalStop(generation);
+    }
 }
 
 void TqDarwinRelayWorker::HandoffTerminalCloseToShutdownSink(
     const std::shared_ptr<RelayState>& relay,
     StreamBinding* binding) {
-    if (binding != nullptr && binding->StopControl != nullptr) {
-        binding->StopControl->Stop.store(true, std::memory_order_release);
+#if defined(TCPQUIC_TESTING)
+    if (Config.BeforeTerminalHandoffHookForTest != nullptr && relay != nullptr) {
+        Config.BeforeTerminalHandoffHookForTest(this, relay->Id);
     }
-    if (relay != nullptr) {
-        if (relay->StopControl != nullptr) {
-            relay->StopControl->Stop.store(true, std::memory_order_release);
-        }
-        if (relay->PublicHandle != nullptr) {
-            relay->PublicHandle->Stop.store(true, std::memory_order_release);
-        }
+#endif
+    const uint64_t generation = binding != nullptr && binding->ControlGeneration != 0
+        ? binding->ControlGeneration
+        : (relay != nullptr ? relay->ControlGeneration : 0);
+    if (binding != nullptr && binding->StopControl != nullptr) {
+        (void)binding->StopControl->SignalStop(generation);
+    }
+    if (relay != nullptr && relay->StopControl != nullptr) {
+        (void)relay->StopControl->SignalStop(generation);
     }
 }
 
@@ -3566,8 +3570,19 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     if (!Running.load(std::memory_order_acquire) || KqueueFd < 0) {
         return result;
     }
-    if (!TqSocketValid(registration.TcpFd) || registration.Stream == nullptr || registration.Handle == nullptr) {
+    if (!TqSocketValid(registration.TcpFd) || registration.Stream == nullptr) {
         return result;
+    }
+    auto control = registration.Control;
+    if (control == nullptr && registration.Handle != nullptr) {
+        control = registration.Handle->Control;
+    }
+    if (control == nullptr) {
+        return result;
+    }
+    uint64_t controlGeneration = registration.ControlGeneration;
+    if (controlGeneration == 0) {
+        controlGeneration = control->Generation;
     }
     if (!TqSetNonBlocking(registration.TcpFd)) {
         Errors.fetch_add(1, std::memory_order_relaxed);
@@ -3586,7 +3601,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
 #if defined(TCPQUIC_TESTING)
     if (Config.FailManagedBindingForTest) {
         FailManagedBinding(relay.get(), nullptr);
-        ClearPublicHandle(relay);
         return result;
     }
 #endif
@@ -3598,21 +3612,21 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
 
     if (registration.StreamOwner != nullptr) {
         binding->Endpoint = StreamCallbackEndpoint;
-        binding->StopControl = registration.Handle != nullptr
-            ? registration.Handle->Control
-            : nullptr;
+        binding->StopControl = control;
+        binding->ControlGeneration = controlGeneration;
         binding->ActivationState.store(
             StreamBinding::Activation::Prepared,
             std::memory_order_release);
         const uint64_t generation = registration.StreamOwner->RouteGeneration();
         if (!registration.StreamOwner->PublishTarget(generation, binding)) {
             FailManagedBinding(relay.get(), binding.get());
-            ClearPublicHandle(relay);
             return result;
         }
         relay->ManagedBinding = binding;
         result.TcpFdConsumed = true;
     } else {
+        binding->StopControl = control;
+        binding->ControlGeneration = controlGeneration;
         binding->ActivationState.store(
             StreamBinding::Activation::Active,
             std::memory_order_release);
@@ -3649,7 +3663,6 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
             TqCloseSocket(relay->TcpFd);
             relay->TcpFd = TqInvalidSocket;
         }
-        ClearPublicHandle(relay);
         result.Ok = false;
         result.RelayId = 0;
         return result;
@@ -3672,16 +3685,22 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
             TqCloseSocket(relay->TcpFd);
             relay->TcpFd = TqInvalidSocket;
         }
-        ClearPublicHandle(relay);
         result.Ok = false;
         result.RelayId = 0;
         return result;
     }
 
     relay->Committed = true;
-    registration.Handle->Backend = TqRelayBackendType::DarwinWorker;
-    registration.Handle->DarwinWorker = this;
-    registration.Handle->DarwinRelayId = relay->Id;
+    // Optional test/local publish only. Production TqRelayStartImpl publishes
+    // after RegisterRelayWithId returns; the worker never retains Handle.
+    if (registration.Handle != nullptr) {
+        registration.Handle->Stop.store(false, std::memory_order_release);
+        registration.Handle->Control = control;
+        registration.Handle->ControlGeneration = controlGeneration;
+        registration.Handle->Backend = TqRelayBackendType::DarwinWorker;
+        registration.Handle->DarwinWorker = this;
+        registration.Handle->DarwinRelayId = relay->Id;
+    }
 
     if (registration.StreamOwner != nullptr) {
         ActivateManagedBinding(relay, relay->Binding.get());
@@ -4022,6 +4041,11 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
                 }
             } else {
                 binding->Active.store(false, std::memory_order_release);
+                if (binding->StopControl != nullptr) {
+                    (void)binding->StopControl->SignalStop(binding->ControlGeneration);
+                } else if (relay->StopControl != nullptr) {
+                    (void)relay->StopControl->SignalStop(relay->ControlGeneration);
+                }
                 if (!worker->EnqueueRelayCloseFromCallback(
                         relay,
                         TqDarwinRelayEventType::QuicShutdownComplete)) {

@@ -21,13 +21,50 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+inline uint64_t TqRelayNextControlGeneration() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Shared stop/accounting control observed by tunnel reaper and relay workers.
+// Does not own worker, relay, binding, tunnel context, or stream owner.
 struct TqRelayStopControl {
+    const uint64_t Generation;
     std::atomic<bool> Stop{false};
+    std::atomic<bool> ActiveAccountingReleased{false};
+
+    explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
+    TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}
+
+    // Generation mismatch leaves state unchanged.
+    bool SignalStop(uint64_t expectedGeneration) {
+        if (expectedGeneration != Generation) {
+            return false;
+        }
+        Stop.store(true, std::memory_order_release);
+        return true;
+    }
+
+    bool ReleaseActiveAccountingOnce() {
+        bool expected = false;
+        if (!ActiveAccountingReleased.compare_exchange_strong(
+                expected,
+                true,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            return false;
+        }
+        TqRelayUnregisterActive();
+        return true;
+    }
 };
+
+using TqRelayControl = TqRelayStopControl;
 
 struct TqRelayHandle {
     std::atomic<bool> Stop{false};
     std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
+    uint64_t ControlGeneration{0};
     TqRelayBackendType Backend{TqRelayBackendType::None};
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};

@@ -727,9 +727,8 @@ void UnregisterWakesAfterFullQueueWakeFailures() {
     unregisterThread.join();
 
     CHECK(doneBeforeStop);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
 
@@ -872,9 +871,8 @@ void WorkerRegistersTcpReadinessShell() {
     snapshot = worker.Snapshot();
     CHECK(snapshot.Errors == 0);
     CHECK(snapshot.ActiveRelays == 0);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -892,6 +890,8 @@ void EventizedUnregisterClearsHandleAndRelayCount() {
     registration.TcpFd = fds[0];
     registration.Stream = reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(1));
     registration.Handle = &handle;
+    registration.Control = handle.Control;
+    registration.ControlGeneration = handle.Control->Generation;
 
     TqDarwinRelayRegistrationResult result = worker.RegisterRelayWithId(registration);
     CHECK(result.Ok);
@@ -899,9 +899,7 @@ void EventizedUnregisterClearsHandleAndRelayCount() {
 
     worker.UnregisterRelay(result.RelayId);
 
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
     CHECK(worker.Snapshot().ActiveRelays == 0);
     CHECK(worker.Snapshot().Errors == 0);
 
@@ -1131,9 +1129,8 @@ void SendCompleteAfterUnregisterReleasesOperation() {
     CHECK(callbackContext != nullptr);
     CHECK(sendContext != nullptr);
     worker.UnregisterRelay(result.RelayId);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
@@ -1796,7 +1793,8 @@ void StopThenLateCompletionDoesNotUseDanglingWorker() {
     CHECK(callbackContext != nullptr);
     CHECK(sendContext != nullptr);
     worker.UnregisterRelay(result.RelayId);
-    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
@@ -2052,7 +2050,8 @@ void StopReturnedLateCompletionReleasesKnownOperation() {
     CHECK(sendContext != nullptr);
 
     worker.Stop();
-    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     QUIC_STREAM_EVENT event{};
     event.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
@@ -2363,9 +2362,8 @@ void ShutdownCallbackQueuesCloseUntilWorkerDrain() {
 
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.Snapshot().ActiveRelays == 0);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -2412,9 +2410,8 @@ void PeerReceiveAbortCallbackBlocksTcpToQuicUntilWorkerDrain() {
 
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.Snapshot().ActiveRelays == 0);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     worker.Stop();
     worker.SetStreamSendForTest(nullptr);
@@ -2489,9 +2486,8 @@ void TcpErrorEventClosesAndRetiresRelay() {
     CHECK(worker.InvokeTcpEventForTest(result.RelayId, EVFILT_READ, EV_ERROR, ECONNRESET));
     TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
     CHECK(snapshot.ActiveRelays == 0);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     const char payload[] = "after-error-close";
     (void)send(fds[0], payload, sizeof(payload) - 1, MSG_NOSIGNAL);
@@ -2523,9 +2519,8 @@ void StopAfterCompletionLeavesNoKnownOperations() {
 
     TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
     CHECK(snapshot.ActiveRelays == 0);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
@@ -2549,6 +2544,7 @@ void RegisterFilterFailureRollsBackRelayAndHandle() {
 
     TqDarwinRelayWorkerSnapshot snapshot = worker.Snapshot();
     CHECK(snapshot.ActiveRelays == 0);
+    // Failure rolls back before public publish; control may be signaled by shutdown.
     CHECK(handle.Backend == TqRelayBackendType::None);
     CHECK(handle.DarwinWorker == nullptr);
     CHECK(handle.DarwinRelayId == 0);
@@ -2579,6 +2575,7 @@ void RegisterAfterStopFailsWithoutPublishingHandle() {
     CHECK(handle.Backend == TqRelayBackendType::None);
     CHECK(handle.DarwinWorker == nullptr);
     CHECK(handle.DarwinRelayId == 0);
+    CHECK(!handle.Control->Stop.load(std::memory_order_acquire));
 
     CloseSocketPairBoth(fds);
 }
@@ -3292,9 +3289,8 @@ void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
     unregisterThread.join();
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
-    CHECK(handle.Backend == TqRelayBackendType::None);
-    CHECK(handle.DarwinWorker == nullptr);
-    CHECK(handle.DarwinRelayId == 0);
+    CHECK(handle.Control != nullptr);
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
     worker.SetSendMsgForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -3906,7 +3902,7 @@ void QuicShutdownCallbackClosesOnEnqueueFailureWithoutLockedLookup() {
     event.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_SUCCESS);
     CHECK(worker.FindRelayLockedCountForTest() == before);
-    CHECK(handle.Stop.load(std::memory_order_acquire));
+    CHECK(handle.Control->Stop.load(std::memory_order_acquire));
     CHECK(worker.Snapshot().ActiveRelays == 1);
 
     CHECK(worker.DrainOneEventForTest());
@@ -5108,55 +5104,175 @@ void ManagedPublishHookTerminalRejectsCommitAfterTask3() {
     ::close(fds[0]);
 }
 
-void ManagedHandleReleasedAndImmediateReuseSafe() {
-    TqDarwinRelayWorker worker(TqDarwinRelayWorkerConfig{});
+void ManagedNormalTerminalSignalsControlStop() {
+    AdoptedManagedHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+    CHECK(!harness.Handle.Stop.load(std::memory_order_acquire));
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+
+    // P1-1: normal terminal must signal shared control so tunnel reaper can observe stop.
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    harness.StopAndClosePeer();
+}
+
+struct PlacementReuseHandoffState {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    bool Entered{false};
+    bool Released{false};
+    TqDarwinRelayWorker* Worker{nullptr};
+    uint64_t RelayIdA{0};
+    std::shared_ptr<TqRelayStopControl> ControlA;
+
+    void Reset() {
+        Entered = false;
+        Released = false;
+        Worker = nullptr;
+        RelayIdA = 0;
+        ControlA.reset();
+    }
+};
+
+PlacementReuseHandoffState g_PlacementReuse{};
+
+void PlacementReuseBeforeHandoffHook(TqDarwinRelayWorker* worker, uint64_t relayId) {
+    std::unique_lock<std::mutex> lock(g_PlacementReuse.Mutex);
+    if (g_PlacementReuse.Worker != worker || g_PlacementReuse.RelayIdA != relayId) {
+        return;
+    }
+    g_PlacementReuse.Entered = true;
+    g_PlacementReuse.Cv.notify_all();
+    g_PlacementReuse.Cv.wait(lock, [] { return g_PlacementReuse.Released; });
+}
+
+void ManagedHandleStorageReleasedAndReusedDuringFallback() {
+    // P1-6: late queue-full fallback must not touch bare handle storage after reuse.
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    config.BeforeTerminalHandoffHookForTest = PlacementReuseBeforeHandoffHook;
+    TqDarwinRelayWorker worker(config);
     CHECK(worker.StartForTest());
+
     int fdsA[2]{TqInvalidSocket, TqInvalidSocket};
     int fdsB[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsA) == 0);
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fdsB) == 0);
+
     alignas(MsQuicStream) unsigned char streamStorageA[sizeof(MsQuicStream)]{};
     alignas(MsQuicStream) unsigned char streamStorageB[sizeof(MsQuicStream)]{};
+    alignas(TqRelayHandle) unsigned char handleStorage[sizeof(TqRelayHandle)]{};
+
+    auto* handleA = new (handleStorage) TqRelayHandle();
     auto ownerA = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
-    auto ownerB = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
-    TqRelayHandle handleA{};
-    TqRelayHandle handleB{};
+    auto controlA = handleA->Control;
+
     TqDarwinRelayRegistration registrationA{};
     registrationA.TcpFd = fdsA[1];
     registrationA.Stream = reinterpret_cast<MsQuicStream*>(streamStorageA);
     registrationA.StreamOwner = ownerA;
-    registrationA.Handle = &handleA;
+    registrationA.Handle = handleA;
+    registrationA.Control = controlA;
+    registrationA.ControlGeneration = controlA->Generation;
     const auto resultA = worker.RegisterRelayWithId(registrationA);
     CHECK(resultA.Ok);
-    QUIC_STREAM_EVENT terminalA{};
-    terminalA.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(ownerA->DispatchForTest(&terminalA) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.DrainOneEventForTest());
-    CHECK(handleA.Backend == TqRelayBackendType::None);
-    CHECK(handleA.DarwinWorker == nullptr);
-    CHECK(handleA.DarwinRelayId == 0);
+
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(worker.PendingEventsForTest() == 2);
+
+    g_PlacementReuse.Reset();
+    g_PlacementReuse.Worker = &worker;
+    g_PlacementReuse.RelayIdA = resultA.RelayId;
+    g_PlacementReuse.ControlA = controlA;
+
+    auto ownerB = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+
+    std::atomic<bool> terminalReturned{false};
+    std::atomic<bool> terminalOk{false};
+    std::thread terminalThread([&] {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        terminalOk.store(
+            ownerA->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS,
+            std::memory_order_release);
+        terminalReturned.store(true, std::memory_order_release);
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(g_PlacementReuse.Mutex);
+        CHECK(g_PlacementReuse.Cv.wait_for(lock, std::chrono::seconds(2), [] {
+            return g_PlacementReuse.Entered;
+        }));
+    }
+
+    // Destroy A and construct B in the same storage while fallback is paused.
+    // Do not retain handleA owner after this point.
+    handleA->~TqRelayHandle();
+    auto* handleB = new (handleStorage) TqRelayHandle();
+    auto controlB = handleB->Control;
 
     TqDarwinRelayRegistration registrationB{};
     registrationB.TcpFd = fdsB[1];
     registrationB.Stream = reinterpret_cast<MsQuicStream*>(streamStorageB);
     registrationB.StreamOwner = ownerB;
-    registrationB.Handle = &handleB;
+    registrationB.Handle = handleB;
+    registrationB.Control = controlB;
+    registrationB.ControlGeneration = controlB->Generation;
     const auto resultB = worker.RegisterRelayWithId(registrationB);
     CHECK(resultB.Ok);
-    CHECK(resultB.RelayId != resultA.RelayId);
-    CHECK(handleB.DarwinWorker == &worker);
-    QUIC_STREAM_EVENT stale{};
-    stale.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(ownerA->DispatchForTest(&stale) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    const auto backendBefore = handleB->Backend;
+    const auto* workerBefore = handleB->DarwinWorker;
+    const auto relayIdBefore = handleB->DarwinRelayId;
+    const bool stopBefore = handleB->Stop.load(std::memory_order_acquire);
+    auto controlBBefore = handleB->Control;
+    const auto generationBefore = handleB->ControlGeneration;
+
+    {
+        std::lock_guard<std::mutex> lock(g_PlacementReuse.Mutex);
+        g_PlacementReuse.Released = true;
+        g_PlacementReuse.Cv.notify_all();
+    }
+    terminalThread.join();
+    CHECK(terminalReturned.load(std::memory_order_acquire));
+    CHECK(terminalOk.load(std::memory_order_acquire));
+
+    // Late fallback for A may only update control A.
+    CHECK(controlA->Stop.load(std::memory_order_acquire));
+    CHECK(handleB->Backend == backendBefore);
+    CHECK(handleB->DarwinWorker == workerBefore);
+    CHECK(handleB->DarwinRelayId == relayIdBefore);
+    CHECK(handleB->Stop.load(std::memory_order_acquire) == stopBefore);
+    CHECK(handleB->Control == controlBBefore);
+    CHECK(handleB->ControlGeneration == generationBefore);
+    CHECK(!controlBBefore->Stop.load(std::memory_order_acquire));
+    CHECK(controlB == controlBBefore);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(worker.DrainOneEventForTest());
     QUIC_STREAM_EVENT terminalB{};
     terminalB.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     CHECK(ownerB->DispatchForTest(&terminalB) == QUIC_STATUS_SUCCESS);
     CHECK(worker.DrainOneEventForTest());
-    CHECK(worker.Snapshot().ActiveRelays == 0);
+    // Relay A remains after queue-full handoff (control signaled, map entry until stop).
+    CHECK(worker.Snapshot().ActiveRelays == 1);
+
+    handleB->~TqRelayHandle();
     worker.Stop();
+    CHECK(worker.Snapshot().ActiveRelays == 0);
     ::close(fdsA[0]);
     ::close(fdsB[0]);
+    ownerA.reset();
+    ownerB.reset();
+    g_PlacementReuse.Reset();
 }
 
 void ManagedEmergencyAcceptedRejectClosesOnce() {
@@ -5297,7 +5413,8 @@ int main() {
     ManagedRegisterStartFailedPublishRejectsAndTerminalClosesOnce();
     ManagedRegisterBindingAllocFailureRejectsAndTerminalClosesOnce();
     ManagedPublishHookTerminalRejectsCommitAfterTask3();
-    ManagedHandleReleasedAndImmediateReuseSafe();
+    ManagedNormalTerminalSignalsControlStop();
+    ManagedHandleStorageReleasedAndReusedDuringFallback();
     ManagedLateKqueueEventAfterFdReuseMissesNewRelay();
     ManagedEmergencyAcceptedRejectClosesOnce();
     return 0;

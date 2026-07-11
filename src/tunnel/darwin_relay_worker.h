@@ -32,6 +32,11 @@ struct TqDarwinRelayRegistration {
     // 新路径使用公共 manual-cleanup owner；非空时 worker 只发布 router
     // target，不改写已经启动 wrapper 的 Callback/Context。
     std::shared_ptr<TqStreamLifetime> StreamOwner;
+    // Shared control + generation only. Caller publishes Backend/worker/id onto
+    // the tunnel-owned handle after a successful commit. Handle may be set by
+    // unit tests for local publish helpers; the worker must not retain it.
+    std::shared_ptr<TqRelayStopControl> Control;
+    uint64_t ControlGeneration{0};
     TqRelayHandle* Handle{nullptr};
     ITqCompressor* Compressor{nullptr};
     ITqDecompressor* Decompressor{nullptr};
@@ -199,6 +204,9 @@ struct TqDarwinRelayWorkerConfig {
     bool FailCommitForTest{false};
     bool FailManagedBindingForTest{false};
     void (*AfterPublishHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Invoked at the start of queue-full terminal/active handoff so tests can
+    // destroy and reuse handle storage before the fallback touches control.
+    void (*BeforeTerminalHandoffHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
 #endif
 };
 
@@ -387,7 +395,6 @@ private:
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterestLocal(const std::shared_ptr<RelayState>& relay);
     void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
-    void ClearPublicHandle(const std::shared_ptr<RelayState>& relay);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
     // Raw worker-thread lookup; non-worker lifecycle access must use eventized commands.
