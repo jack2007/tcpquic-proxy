@@ -33,6 +33,9 @@ struct TqTerminalHandoffControl {
     std::atomic<bool> DataPlaneStopped{false};
     std::atomic<bool> TerminalHandoffComplete{false};
     std::atomic<bool> LocalOperationOwnershipTransferredOrDrained{false};
+    std::atomic<bool> HandoffStartedCounted{false};
+    std::atomic<bool> HandoffCompletedCounted{false};
+    std::atomic<bool> HandoffFailedCounted{false};
     std::shared_ptr<TqTerminalLedger> Ledger;
     std::shared_ptr<TqTerminalEscalation> Escalation;
 

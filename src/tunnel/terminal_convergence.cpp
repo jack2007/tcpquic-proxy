@@ -90,6 +90,9 @@ std::atomic<uint64_t> g_watchdogTimeout{0};
 std::atomic<uint64_t> g_connectionEscalation{0};
 std::atomic<uint64_t> g_terminalTimeoutPending{0};
 std::atomic<uint64_t> g_schedulerFailure{0};
+std::atomic<uint64_t> g_handoffStarted{0};
+std::atomic<uint64_t> g_handoffCompleted{0};
+std::atomic<uint64_t> g_handoffFailed{0};
 struct RetentionDiagnosticState {
     std::atomic<uint8_t> Bits{0};
 };
@@ -1254,6 +1257,9 @@ std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter) {
 void TqRecordTerminalExactlyOnceViolation() noexcept {
     g_terminalExactlyOnceViolations.fetch_add(1, std::memory_order_relaxed);
 }
+void TqRecordTerminalHandoffStarted() noexcept { g_handoffStarted.fetch_add(1); }
+void TqRecordTerminalHandoffCompleted() noexcept { g_handoffCompleted.fetch_add(1); }
+void TqRecordTerminalHandoffFailed() noexcept { g_handoffFailed.fetch_add(1); }
 
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept {
     return g_terminalExactlyOnceViolations.load(std::memory_order_relaxed);
@@ -1280,6 +1286,9 @@ TqTerminalMetrics TqTerminalMetricsSnapshot() noexcept {
     snapshot.ExactlyOnceViolation =
         g_terminalExactlyOnceViolations.load(std::memory_order_relaxed);
     snapshot.SchedulerFailure = g_schedulerFailure.load(std::memory_order_relaxed);
+    snapshot.HandoffStarted = g_handoffStarted.load(std::memory_order_relaxed);
+    snapshot.HandoffCompleted = g_handoffCompleted.load(std::memory_order_relaxed);
+    snapshot.HandoffFailed = g_handoffFailed.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -1299,6 +1308,9 @@ void TqResetTerminalMetricsForTest() noexcept {
     g_connectionEscalation.store(0, std::memory_order_relaxed);
     g_terminalTimeoutPending.store(0, std::memory_order_relaxed);
     g_schedulerFailure.store(0, std::memory_order_relaxed);
+    g_handoffStarted.store(0, std::memory_order_relaxed);
+    g_handoffCompleted.store(0, std::memory_order_relaxed);
+    g_handoffFailed.store(0, std::memory_order_relaxed);
     g_failNextTerminalSinkControlBlock.store(false, std::memory_order_relaxed);
     g_failNextDiagnosticAllocation.store(0, std::memory_order_relaxed);
     g_failNextDiagnosticEmit.store(0, std::memory_order_relaxed);

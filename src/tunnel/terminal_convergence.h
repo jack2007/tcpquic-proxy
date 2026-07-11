@@ -212,6 +212,9 @@ const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexce
 std::string TqTerminalShutdownStatusName(QUIC_STATUS status);
 const char* TqTerminalEventName(TqTerminalEvent event) noexcept;
 void TqRecordTerminalExactlyOnceViolation() noexcept;
+void TqRecordTerminalHandoffStarted() noexcept;
+void TqRecordTerminalHandoffCompleted() noexcept;
+void TqRecordTerminalHandoffFailed() noexcept;
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept;
 #if defined(TQ_UNIT_TESTING)
 void TqResetTerminalMetricsForTest() noexcept;

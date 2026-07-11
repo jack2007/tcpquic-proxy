@@ -27,6 +27,7 @@ struct TqPendingQuicReceive {
     uint64_t CompletedLength{0};
     uint64_t PendingCompleteBytes{0};
     bool Fin{false};
+    bool ZeroLengthFinCompletionPending{false};
 };
 
 enum class TqLinuxRelayEventType {

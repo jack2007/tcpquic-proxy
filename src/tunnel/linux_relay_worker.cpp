@@ -1174,6 +1174,9 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         AbortRelayAndRelease(relay, reason, false);
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
+    if (!handoff->HandoffStartedCounted.exchange(true, std::memory_order_acq_rel)) {
+        TqRecordTerminalHandoffStarted();
+    }
     auto sink = TqTerminalSink::Create(
         relay->StreamOwner, ledger,
         gracefulComplete ? std::function<void()>([handoff] {
@@ -1181,8 +1184,15 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
             handoff->LocalOperationOwnershipTransferredOrDrained.store(
                 true, std::memory_order_release);
             handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+            if (!handoff->HandoffCompletedCounted.exchange(
+                    true, std::memory_order_acq_rel)) {
+                TqRecordTerminalHandoffCompleted();
+            }
         }) : std::function<void()>{});
     if (sink == nullptr) {
+        if (!handoff->HandoffFailedCounted.exchange(true, std::memory_order_acq_rel)) {
+            TqRecordTerminalHandoffFailed();
+        }
         AbortRelayAndRelease(relay, reason, false);
         return TqTerminalShutdownResult{QUIC_STATUS_OUT_OF_MEMORY, false, false, false, 0};
     }
@@ -1197,6 +1207,13 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
             true, std::memory_order_release);
         if (result.Submitted || result.AlreadyTerminal || result.RetryScheduled) {
             handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+            if (!handoff->HandoffCompletedCounted.exchange(
+                    true, std::memory_order_acq_rel)) {
+                TqRecordTerminalHandoffCompleted();
+            }
+        } else if (!handoff->HandoffFailedCounted.exchange(
+                       true, std::memory_order_acq_rel)) {
+            TqRecordTerminalHandoffFailed();
         }
     }
     return result;
@@ -3323,6 +3340,7 @@ std::shared_ptr<TqPendingQuicReceive> TqLinuxRelayWorker::BuildPendingQuicReceiv
         QuicReceiveViewEmptyFailures.fetch_add(1);
         return {};
     }
+    view->ZeroLengthFinCompletionPending = fin && view->TotalLength == 0;
     RecordQuicReceiveView(view->TotalLength, view->Slices.size());
     return view;
 }
@@ -3658,6 +3676,19 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         }
 
         if (iov.empty()) {
+            if (view->ZeroLengthFinCompletionPending) {
+                if (view->StreamOwner != nullptr) {
+                    auto lease = view->StreamOwner->TryAcquireApi();
+                    if (lease && lease.Stream() != nullptr) {
+                        lease.Stream()->ReceiveComplete(0);
+                    }
+                } else if (view->Stream != nullptr) {
+                    view->Stream->ReceiveComplete(0);
+                }
+                view->ZeroLengthFinCompletionPending = false;
+                DeferredReceiveCompletes.fetch_add(1);
+                DeferredReceiveCompletionFlushes.fetch_add(1);
+            }
             FlushDeferredReceiveCompletion(*view, true);
             if (view->Fin) {
                 relay->TcpWriteShutdownQueued = true;
