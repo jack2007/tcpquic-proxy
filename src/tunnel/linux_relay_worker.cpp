@@ -1169,27 +1169,35 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         AbortRelayAndRelease(relay, reason, false);
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
-    auto sink = TqTerminalSink::Create(relay->StreamOwner, ledger);
-    if (sink == nullptr) {
-        AbortRelayAndRelease(relay, reason, false);
-        return TqTerminalShutdownResult{QUIC_STATUS_OUT_OF_MEMORY, false, false, false, 0};
-    }
     auto handoff = std::atomic_load(&relay->StopControl->TerminalHandoff);
     if (handoff == nullptr || handoff->Ledger.get() != ledger.get()) {
         AbortRelayAndRelease(relay, reason, false);
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
-
+    auto sink = TqTerminalSink::Create(
+        relay->StreamOwner, ledger,
+        gracefulComplete ? std::function<void()>([handoff] {
+            handoff->DataPlaneStopped.store(true, std::memory_order_release);
+            handoff->LocalOperationOwnershipTransferredOrDrained.store(
+                true, std::memory_order_release);
+            handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+        }) : std::function<void()>{});
+    if (sink == nullptr) {
+        AbortRelayAndRelease(relay, reason, false);
+        return TqTerminalShutdownResult{QUIC_STATUS_OUT_OF_MEMORY, false, false, false, 0};
+    }
     const auto result = relay->StreamOwner->BeginTerminalShutdown(
         errorCode, sink, handoff->Escalation,
         gracefulComplete ? TqTerminalShutdownIntent::GracefulComplete
                          : TqTerminalShutdownIntent::AbortBothImmediate);
     AbortRelayAndRelease(relay, reason, false);
-    handoff->DataPlaneStopped.store(true, std::memory_order_release);
-    handoff->LocalOperationOwnershipTransferredOrDrained.store(
-        true, std::memory_order_release);
-    if (result.Submitted || result.AlreadyTerminal || result.RetryScheduled) {
-        handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+    if (!gracefulComplete) {
+        handoff->DataPlaneStopped.store(true, std::memory_order_release);
+        handoff->LocalOperationOwnershipTransferredOrDrained.store(
+            true, std::memory_order_release);
+        if (result.Submitted || result.AlreadyTerminal || result.RetryScheduled) {
+            handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
+        }
     }
     return result;
 }

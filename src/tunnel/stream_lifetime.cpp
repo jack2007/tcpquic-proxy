@@ -756,13 +756,12 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     }
 #endif
 
-    const bool gracefulComplete =
-        intent == TqTerminalShutdownIntent::GracefulComplete;
-    const auto flags = static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
-        QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE);
-    result.Status = gracefulComplete
-        ? QUIC_STATUS_SUCCESS
-        : CallTerminalShutdown(stream, errorCode, flags);
+    const bool gracefulComplete = intent == TqTerminalShutdownIntent::GracefulComplete;
+    const auto flags = gracefulComplete
+        ? QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL
+        : static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
+              QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE);
+    result.Status = CallTerminalShutdown(stream, errorCode, flags);
 
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
@@ -804,12 +803,6 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         result.Attempt,
         result.Submitted,
         intent);
-    if (gracefulComplete) {
-        QUIC_STREAM_EVENT terminal{};
-        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-        (void)Dispatch(stream, &terminal);
-        return result;
-    }
     std::shared_ptr<TqTerminalEscalation> schedulerEscalation;
     uint64_t schedulerErrorCode = 0;
     uint32_t schedulerWatchdogSeconds = 5;

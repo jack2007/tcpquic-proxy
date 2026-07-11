@@ -991,8 +991,10 @@ bool TqTerminalLedger::CompleteAccountingOnce() noexcept {
 
 TqTerminalSink::TqTerminalSink(
     std::weak_ptr<TqStreamLifetime> owner,
-    std::shared_ptr<TqTerminalLedger> ledger) noexcept
-    : Owner_(std::move(owner)), Ledger_(std::move(ledger)) {}
+    std::shared_ptr<TqTerminalLedger> ledger,
+    std::function<void()> onTerminal) noexcept
+    : Owner_(std::move(owner)), Ledger_(std::move(ledger)),
+      OnTerminal_(std::move(onTerminal)) {}
 
 TqTerminalSink::~TqTerminalSink() noexcept {
     ReleasePendingOnce();
@@ -1016,14 +1018,16 @@ void TqTerminalSink::SetFailNextControlBlockForTest(bool fail) noexcept {
 
 std::shared_ptr<TqTerminalSink> TqTerminalSink::Create(
     std::weak_ptr<TqStreamLifetime> owner,
-    std::shared_ptr<TqTerminalLedger> ledger) noexcept {
+    std::shared_ptr<TqTerminalLedger> ledger,
+    std::function<void()> onTerminal) noexcept {
     auto lockedOwner = owner.lock();
     if (lockedOwner == nullptr || ledger == nullptr ||
         lockedOwner->TerminalLedger().get() != ledger.get()) {
         TqRecordTerminalExactlyOnceViolation();
         return nullptr;
     }
-    auto* raw = new (std::nothrow) TqTerminalSink(std::move(owner), std::move(ledger));
+    auto* raw = new (std::nothrow) TqTerminalSink(
+        std::move(owner), std::move(ledger), std::move(onTerminal));
     if (raw == nullptr) {
         return nullptr;
     }
@@ -1084,6 +1088,10 @@ QUIC_STATUS TqTerminalSink::OnStreamEvent(
             g_duplicateTerminalSuppressed.fetch_add(1, std::memory_order_relaxed);
         }
         ReleasePendingOnce();
+        if (OnTerminal_) {
+            auto callback = std::move(OnTerminal_);
+            callback();
+        }
         break;
     case QUIC_STREAM_EVENT_CANCEL_ON_LOSS:
         Ledger_->RecordEvent(TqTerminalEvent::CancelOnLoss);

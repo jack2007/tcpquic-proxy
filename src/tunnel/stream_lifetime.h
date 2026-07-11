@@ -285,7 +285,8 @@ class TqTerminalSink final : public TqStreamLifetime::Target {
 public:
     static std::shared_ptr<TqTerminalSink> Create(
         std::weak_ptr<TqStreamLifetime> owner,
-        std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+        std::shared_ptr<TqTerminalLedger> ledger,
+        std::function<void()> onTerminal = {}) noexcept;
 #if defined(TQ_UNIT_TESTING)
     static void SetFailNextControlBlockForTest(bool fail) noexcept;
 #endif
@@ -296,11 +297,13 @@ public:
 private:
     TqTerminalSink(
         std::weak_ptr<TqStreamLifetime> owner,
-        std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+        std::shared_ptr<TqTerminalLedger> ledger,
+        std::function<void()> onTerminal) noexcept;
     void ReleasePendingOnce() noexcept;
     void ArmPending() noexcept;
     std::weak_ptr<TqStreamLifetime> Owner_;
     std::shared_ptr<TqTerminalLedger> Ledger_;
+    std::function<void()> OnTerminal_;
     std::atomic<bool> Pending_{false};
 };
 

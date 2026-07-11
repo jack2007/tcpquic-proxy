@@ -158,20 +158,35 @@ void TestBeginTerminalShutdownPendingIsSubmittedOnce() {
 void TestGracefulCompleteUsesOnlyGracefulShutdown() {
     auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
     uint32_t calls = 0;
-    owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+    uint32_t terminalCallbacks = 0;
+    owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS flags) {
         ++calls;
-        return QUIC_STATUS_INTERNAL_ERROR;
+        CHECK(flags == QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+        return QUIC_STATUS_PENDING;
     });
     const auto result = owner->BeginTerminalShutdown(
-        0, std::make_shared<CountingTarget>(), nullptr,
+        0, TqTerminalSink::Create(
+               owner, owner->TerminalLedger(), [&] { ++terminalCallbacks; }), nullptr,
         TqTerminalShutdownIntent::GracefulComplete);
     CHECK(result.Submitted);
-    CHECK(calls == 0);
+    CHECK(calls == 1);
     const auto snapshot = owner->TerminalLedger()->Snapshot(std::chrono::steady_clock::now());
     CHECK(snapshot.ShutdownIntent == TqTerminalShutdownIntent::GracefulComplete);
-    CHECK(snapshot.Phase == TerminalPhase::TerminalObserved);
-    CHECK(snapshot.Watchdog == TqTerminalWatchdogState::Idle);
+    CHECK(snapshot.Phase == TerminalPhase::ShutdownSubmitted);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::ShutdownSubmitted);
+    QUIC_STREAM_EVENT sendShutdown{};
+    sendShutdown.Type = QUIC_STREAM_EVENT_SEND_SHUTDOWN_COMPLETE;
+    sendShutdown.SEND_SHUTDOWN_COMPLETE.Graceful = TRUE;
+    CHECK(owner->DispatchForTest(&sendShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::ShutdownSubmitted);
+    CHECK(terminalCallbacks == 0);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
     CHECK(owner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
+    CHECK(terminalCallbacks == 1);
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    CHECK(terminalCallbacks == 1);
 }
 
 void TestBeginTerminalShutdownFailureReturnsToActive() {
