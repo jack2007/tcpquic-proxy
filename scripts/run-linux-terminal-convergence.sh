@@ -68,25 +68,27 @@ self_test() {
   if jq -e '.client.handoff_completed>0 and .client.shutdown_submitted>0 and .client.terminal_observed>0 and .server.handoff_completed>0 and .server.shutdown_submitted>0 and .server.terminal_observed>0' "$fixture/incomplete-chain.json" >/dev/null; then echo "self-test accepted incomplete incident chain" >&2; return 1; fi
   printf 'timestamp\trole\tpid\tcpu\trss_kb\tnlwp\n1\tserver\t10\t2\t100\t3\n1\tclient\t11\t4\t200\t5\n2\tserver\t10\t5\t150\t4\n2\tclient\t11\t6\t250\t6\n' >"$fixture/process.tsv"
   test "$(awk -F '\t' 'NR>1{cpu[$1]+=$4;rss[$1]+=$5;thr[$1]+=$6}END{print cpu[2],rss[2],thr[2]}' "$fixture/process.tsv")" = "11 400 10"
+  capability=true; correlation_consumer_supported=false
+  if [[ "$capability" == true && "$correlation_consumer_supported" == true ]]; then echo "self-test started unsupported correlation consumer" >&2; return 1; fi
+  touch "$fixture/sampler-failed"
+  sampler_rc=0; sampler_ok=true
+  [[ "$sampler_rc" == 0 && ! -e "$fixture/sampler-failed" ]] || sampler_ok=false
+  [[ "$sampler_ok" == false ]] || { echo "self-test ignored sampler failure marker" >&2; return 1; }
   echo "linux terminal convergence runner self-test passed"
 }
 
 if ((SELF_TEST)); then self_test; exit 0; fi
 case "$SCENARIO" in incident|baseline|peak|spike|stress|soak) ;; *) usage; exit 2 ;; esac
+if [[ "$SCENARIO" != incident ]]; then
+  echo "performance release BLOCKED: this runner version does not implement a tunnel-correlated terminal latency consumer; k6 was not started" >&2
+  exit 69
+fi
 for command in curl jq openssl python3 sha256sum ss; do
   command -v "$command" >/dev/null || { echo "required command missing: $command" >&2; exit 69; }
 done
 [[ -x "$BINARY" ]] || { echo "proxy binary missing or not executable: $BINARY" >&2; exit 66; }
 [[ -r "$CLIENT_CONFIG" ]] || { echo "client config not readable: $CLIENT_CONFIG" >&2; exit 66; }
 [[ -r "$SERVER_CONFIG" ]] || { echo "server config not readable: $SERVER_CONFIG" >&2; exit 66; }
-if [[ "$SCENARIO" != incident ]] && ! command -v k6 >/dev/null; then
-  echo "k6 is required for performance scenarios; install: https://grafana.com/docs/k6/latest/set-up/install-k6/" >&2
-  exit 69
-fi
-if [[ "$SCENARIO" != incident && "$SCENARIO" != baseline ]] && [[ ! -r "$BASELINE_SUMMARY" ]]; then
-  echo "non-baseline performance scenarios require --baseline-summary PATH with an accepted historical baseline" >&2
-  exit 66
-fi
 
 mkdir -p "$OUT" "$OUT/logs" "$OUT/metrics" "$OUT/summary" "$OUT/config"
 cp "$CLIENT_CONFIG" "$OUT/config/client.json"
@@ -202,15 +204,6 @@ PY
 done
 ((ready)) || { echo "client HTTP CONNECT listener failed to start at $CLIENT_HTTP" >&2; exit 70; }
 
-if [[ "$SCENARIO" != incident ]]; then
-  correlation_capability="$OUT/metrics/terminal-correlation-capability.json"
-  if ! admin_get "$CLIENT_ADMIN_PORT" /relay/terminal-correlation-capabilities >"$correlation_capability" 2>"$OUT/logs/terminal-correlation-capability.log" ||
-     ! jq -e '.tunnel_correlation==true and (.correlation_field|type)=="string" and (.correlation_field|length)>0' "$correlation_capability" >/dev/null 2>&1; then
-    echo "performance release BLOCKED: Admin lacks tunnel-correlated terminal convergence capability (/relay/terminal-correlation-capabilities)" >&2
-    exit 69
-  fi
-fi
-
 snapshot_role() {
   local role=$1 port=$2 tag=$3 tunnels_path
   [[ "$role" == client ]] && tunnels_path=/tunnels || tunnels_path=/server/tunnels
@@ -247,22 +240,26 @@ snapshot_role() {
 snapshot_role client "$CLIENT_ADMIN_PORT" baseline
 snapshot_role server "$SERVER_ADMIN_PORT" baseline
 stop_sampler=0
+binary_real=$(readlink -f "$BINARY")
+binary_identity=$(stat -Lc '%d:%i' "$binary_real")
 printf 'timestamp\trole\tpid\tcpu\trss_kb\tnlwp\n' >"$OUT/process-samples.tsv"
 sample_metrics() {
-  local n=0 now role pid identity stats cpu rss nlwp
+  trap 'exit 0' TERM
+  local n=0 now role pid exe identity stats cpu rss nlwp
   while ((stop_sampler == 0)); do
     admin_get "$CLIENT_ADMIN_PORT" /relay/metrics >"$OUT/metrics/client-sample-$(printf '%04d' "$n").json" 2>/dev/null || true
     admin_get "$SERVER_ADMIN_PORT" /relay/metrics >"$OUT/metrics/server-sample-$(printf '%04d' "$n").json" 2>/dev/null || true
-    printf '%s\t%s\n' "$(date +%s)" "$n" >>"$OUT/metrics/sample-index.tsv"
     now=$(date +%s)
     for role in server client; do
       [[ "$role" == server ]] && pid=${PIDS[1]} || pid=${PIDS[2]}
-      identity=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)
-      [[ "$identity" == *"$(basename "$BINARY")"* ]] || { echo "proxy identity mismatch role=$role pid=$pid" >>"$OUT/logs/sampler.log"; return 1; }
-      stats=$(ps -o pcpu=,rss=,nlwp= -p "$pid") || return 1
+      exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+      identity=$(stat -Lc '%d:%i' "$exe" 2>/dev/null || true)
+      [[ "$exe" == "$binary_real" && "$identity" == "$binary_identity" ]] || { echo "proxy identity mismatch role=$role pid=$pid exe=$exe" >"$OUT/metrics/sampler-failed"; return 1; }
+      stats=$(ps -o pcpu=,rss=,nlwp= -p "$pid") || { echo "ps failed role=$role pid=$pid" >"$OUT/metrics/sampler-failed"; return 1; }
       read -r cpu rss nlwp <<<"$stats"
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$role" "$pid" "$cpu" "$rss" "$nlwp" >>"$OUT/process-samples.tsv"
     done
+    printf '%s\t%s\n' "$now" "$n" >>"$OUT/metrics/sample-index.tsv"
     n=$((n+1)); sleep 5
   done
 }
@@ -337,6 +334,26 @@ else
   terminal_delta=$(jq -s 'map(.delta.terminal_observed + .delta.terminal_shutdown_submitted + .delta.terminal_connection_escalation)|add' \
     "$OUT/summary/client-resources.json" "$OUT/summary/server-resources.json")
 fi
+kill "$SAMPLER_PID" 2>/dev/null || true
+set +e
+wait "$SAMPLER_PID"
+sampler_rc=$?
+set -e
+unset 'PIDS[-1]'
+sampler_ok=true
+[[ "$sampler_rc" == 0 && ! -e "$OUT/metrics/sampler-failed" ]] || sampler_ok=false
+sample_count=$(wc -l <"$OUT/metrics/sample-index.tsv" 2>/dev/null || echo 0)
+sample_span=$(awk 'NR==1{first=$1} {last=$1} END{print (NR?last-first:0)}' "$OUT/metrics/sample-index.tsv" 2>/dev/null || echo 0)
+process_rows=$(( $(wc -l <"$OUT/process-samples.tsv") - 1 ))
+expected_samples=1
+case "$SCENARIO" in
+  baseline) expected_samples=58 ;;
+  peak) expected_samples=118 ;;
+  spike) expected_samples=28 ;;
+  stress) expected_samples=94 ;;
+  soak) expected_samples=358 ;;
+esac
+if ((sample_count < expected_samples || process_rows != sample_count * 2)); then sampler_ok=false; fi
 performance='null'
 performance_ok=true
 if [[ "$SCENARIO" != incident ]]; then
@@ -359,7 +376,7 @@ if [[ "$SCENARIO" != incident ]]; then
     done
   fi
 fi
-if ((converged)) && [[ "$close_wait" == 0 ]] && [[ "$incident_io_ok" == true ]] && [[ "$incident_chain_ok" == true ]] && [[ "$performance_ok" == true ]]; then
+if ((converged)) && [[ "$close_wait" == 0 ]] && [[ "$incident_io_ok" == true ]] && [[ "$incident_chain_ok" == true ]] && [[ "$performance_ok" == true ]] && [[ "$sampler_ok" == true ]]; then
   if [[ "$SCENARIO" != incident ]] || ((fatal_latency_ms <= 10000 && terminal_delta > 0)); then passed=true; fi
 fi
 jq -n --arg scenario "$SCENARIO" --argjson passed "$passed" --argjson close_wait "$close_wait" \
@@ -370,9 +387,5 @@ jq -n --arg scenario "$SCENARIO" --argjson passed "$passed" --argjson close_wait
   --slurpfile server "$OUT/summary/server-resources.json" \
   '{scenario:$scenario,passed:$passed,close_wait:$close_wait,convergence_ms:$elapsed_ms,fatal_terminal_latency_ms:$fatal_latency_ms,fin_rc:$fin_rc,rst_rc:$rst_rc,target_hits:{fin:$fin_hits,rst:$rst_hits},terminal_metric_delta:$terminal_delta,incident_terminal_deltas:$incident_terminal_deltas,performance:$performance,client_resources:$client[0],server_resources:$server[0]}' \
   >"$OUT/summary/result.json"
-stop_sampler=1
-kill "$SAMPLER_PID" 2>/dev/null || true
-wait "$SAMPLER_PID" 2>/dev/null || true
-unset 'PIDS[-1]'
 if [[ "$passed" != true ]]; then echo "terminal convergence release gate failed; see $OUT/summary/result.json" >&2; exit 1; fi
 echo "linux terminal convergence $SCENARIO passed; evidence: $OUT"
