@@ -131,6 +131,23 @@ void TestSinkPendingRollsBackWhenNeverPublishedOrShutdownRejected() {
     CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
 }
 
+void TestSinkControlBlockFailureDoesNotConsumeAnotherPendingObligation() {
+    Reset();
+    auto owner = TqStreamLifetime::CreateForTest(
+        TqStreamLifetime::Phase::CreatedNotStarted);
+    owner->BindTerminalIdentity(TqTerminalIdentity{
+        17, 133, 2, 7, TqTunnelRole::ClientOpen,
+        TqRelayBackendType::LinuxWorker}, 5);
+    auto first = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(first != nullptr);
+    CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 1);
+    TqTerminalSink::SetFailNextControlBlockForTest(true);
+    CHECK(TqTerminalSink::Create(owner, owner->TerminalLedger()) == nullptr);
+    CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 1);
+    first.reset();
+    CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
+}
+
 void TestSinkPendingHandlesAlreadyTerminalAndMultipleSinks() {
     Reset();
     auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
@@ -327,6 +344,7 @@ int main() {
     TestIdentityRebindKeepsOriginalLedger();
     TestSinkRejectsMissingOrMismatchedOwnerLedger();
     TestSinkPendingRollsBackWhenNeverPublishedOrShutdownRejected();
+    TestSinkControlBlockFailureDoesNotConsumeAnotherPendingObligation();
     TestSinkPendingHandlesAlreadyTerminalAndMultipleSinks();
     TestOwnerClaimsSendCompletionBeforeTerminalSink();
     TestSinkRecordsNonTerminalEvents();

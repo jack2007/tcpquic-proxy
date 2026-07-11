@@ -270,6 +270,9 @@ public:
     static std::shared_ptr<TqTerminalSink> Create(
         std::weak_ptr<TqStreamLifetime> owner,
         std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+#if defined(TQ_UNIT_TESTING)
+    static void SetFailNextControlBlockForTest(bool fail) noexcept;
+#endif
     ~TqTerminalSink() noexcept override;
     QUIC_STATUS OnStreamEvent(
         MsQuicStream*, QUIC_STREAM_EVENT*, uint64_t) noexcept override;
@@ -279,9 +282,10 @@ private:
         std::weak_ptr<TqStreamLifetime> owner,
         std::shared_ptr<TqTerminalLedger> ledger) noexcept;
     void ReleasePendingOnce() noexcept;
+    void ArmPending() noexcept;
     std::weak_ptr<TqStreamLifetime> Owner_;
     std::shared_ptr<TqTerminalLedger> Ledger_;
-    std::atomic<bool> Pending_{true};
+    std::atomic<bool> Pending_{false};
 };
 
 // callback-safe target adapter。Detach 从外部线程调用时等待已经进入的 callback；

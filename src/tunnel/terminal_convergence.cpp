@@ -8,6 +8,9 @@ std::atomic<uint64_t> g_terminalExactlyOnceViolations{0};
 std::atomic<uint64_t> g_terminalObserved{0};
 std::atomic<uint64_t> g_terminalSinkPending{0};
 std::atomic<uint64_t> g_duplicateTerminalSuppressed{0};
+#if defined(TQ_UNIT_TESTING)
+std::atomic<bool> g_failNextTerminalSinkControlBlock{false};
+#endif
 
 void ReleaseTerminalSinkPending() noexcept {
     auto pending = g_terminalSinkPending.load(std::memory_order_relaxed);
@@ -104,6 +107,16 @@ void TqTerminalSink::ReleasePendingOnce() noexcept {
     }
 }
 
+void TqTerminalSink::ArmPending() noexcept {
+    Pending_.store(true, std::memory_order_release);
+}
+
+#if defined(TQ_UNIT_TESTING)
+void TqTerminalSink::SetFailNextControlBlockForTest(bool fail) noexcept {
+    g_failNextTerminalSinkControlBlock.store(fail, std::memory_order_release);
+}
+#endif
+
 std::shared_ptr<TqTerminalSink> TqTerminalSink::Create(
     std::weak_ptr<TqStreamLifetime> owner,
     std::shared_ptr<TqTerminalLedger> ledger) noexcept {
@@ -117,9 +130,16 @@ std::shared_ptr<TqTerminalSink> TqTerminalSink::Create(
     if (raw == nullptr) {
         return nullptr;
     }
+#if defined(TQ_UNIT_TESTING)
+    if (g_failNextTerminalSinkControlBlock.exchange(false, std::memory_order_acq_rel)) {
+        delete raw;
+        return nullptr;
+    }
+#endif
     try {
         std::shared_ptr<TqTerminalSink> sink(raw);
         g_terminalSinkPending.fetch_add(1, std::memory_order_relaxed);
+        sink->ArmPending();
         return sink;
     } catch (...) {
         // shared_ptr 的 pointer constructor 分配 control block 失败时负责 delete raw。
@@ -244,5 +264,6 @@ void TqResetTerminalMetricsForTest() noexcept {
     g_terminalObserved.store(0, std::memory_order_relaxed);
     g_terminalSinkPending.store(0, std::memory_order_relaxed);
     g_duplicateTerminalSuppressed.store(0, std::memory_order_relaxed);
+    g_failNextTerminalSinkControlBlock.store(false, std::memory_order_relaxed);
 }
 #endif
