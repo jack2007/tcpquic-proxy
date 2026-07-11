@@ -661,6 +661,7 @@ public:
             relayWorker = RelayHandle.WindowsWorker;
         } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
             relayId = RelayHandle.DarwinRelayId;
+            relayWorkerIndex = RelayHandle.DarwinWorkerIndex;
             relayWorker = RelayHandle.DarwinWorker;
         }
         if (TraceTunnelId != 0) {
@@ -784,6 +785,10 @@ public:
             backend = "windows";
             workerIndex = RelayHandle.WindowsWorkerIndex;
             relayId = RelayHandle.WindowsRelayId;
+        } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
+            backend = "darwin";
+            workerIndex = RelayHandle.DarwinWorkerIndex;
+            relayId = RelayHandle.DarwinRelayId;
         }
         TqTraceRelayStopping(
             TraceTunnelId,
@@ -1124,6 +1129,8 @@ public:
             metadata.WorkerIndex = linuxCommitted->WorkerIndex;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             metadata.WorkerIndex = RelayHandle.WindowsWorkerIndex;
+        } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
+            metadata.WorkerIndex = RelayHandle.DarwinWorkerIndex;
         }
         TqUpdateConnectionTunnelMetadata(QuicConn, this, metadata);
     }

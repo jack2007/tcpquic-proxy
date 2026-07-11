@@ -241,6 +241,8 @@ struct TqDarwinRelayWorkerConfig {
     void (*BeforeSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
     // Next SnapshotLocal throws once (allocation/build failure injection).
     bool FailNextSnapshotLocalForTest{false};
+    // Start() returns false once for staged-runtime failure injection.
+    bool FailStartForTest{false};
 #endif
 #endif
 };
@@ -414,6 +416,12 @@ public:
         const std::shared_ptr<void>& relayOwner,
         TqDarwinRelayEventType type,
         uint64_t relayId);
+#if defined(TQ_UNIT_TESTING)
+    // Enqueues a Snapshot command that holds `permit` so Stop/purge can prove
+    // cancel releases the execution gate without needing a live worker thread.
+    bool EnqueueDetachedSnapshotCommandForTest(
+        TqRelayRuntimeSnapshotExecutionGate::Permit permit);
+#endif
     MsQuicStream* RelayStreamForTest(uint64_t relayId);
     uint32_t BindingCallbackRefsForTest(uint64_t relayId);
 #endif
@@ -747,16 +755,37 @@ public:
 
     bool Start(const TqTuningConfig& tuning);
     void Stop();
-    TqDarwinRelayWorkerSnapshot Snapshot() const;
     TqDarwinRelayWorker* PickWorker();
+    TqDarwinRelayWorkerSnapshot Snapshot() const;
+    TqDarwinRelayWorkerSnapshot Snapshot(
+        std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers() const;
+    TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers(
+        std::chrono::steady_clock::time_point deadline) const;
+
+#if defined(TQ_UNIT_TESTING)
+    void SetFailStartWorkerIndexForTest(int32_t workerIndex);
+    void SetBeforeWorkerSnapshotHookForTest(
+        void (*hook)(TqDarwinRelayWorker*));
+    TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStatsForTest() const;
+#endif
 
 private:
     TqDarwinRelayRuntime() = default;
+    std::unique_lock<std::mutex> AcquireRuntimeLock() const;
+    std::unique_lock<std::mutex> TryAcquireRuntimeLockForSnapshot(
+        std::chrono::steady_clock::time_point deadline) const;
 
     mutable std::mutex Mutex;
-    bool Started{false};
+    mutable TqRelayRuntimeSnapshotSupport SnapshotSupport;
+    mutable TqRelayRuntimeSnapshotExecutionGate SnapshotExecutionGate;
+    TqRelayRuntimeState State{TqRelayRuntimeState::Stopped};
     uint32_t NextWorker{0};
     std::vector<std::unique_ptr<TqDarwinRelayWorker>> Workers;
+#if defined(TQ_UNIT_TESTING)
+    int32_t FailStartWorkerIndexForTest{-1};
+    void (*BeforeWorkerSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
+#endif
 };
 
 #endif

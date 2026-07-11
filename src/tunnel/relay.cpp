@@ -195,6 +195,7 @@ bool TqRelayStartImpl(
     handle->Backend = TqRelayBackendType::DarwinWorker;
     handle->DarwinWorker = worker;
     handle->DarwinRelayId = registered.RelayId;
+    handle->DarwinWorkerIndex = worker->WorkerIndex();
 
     if (control->Stop.load(std::memory_order_acquire)) {
         TqRelayStop(handle);
@@ -454,6 +455,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->Backend = TqRelayBackendType::None;
         handle->DarwinWorker = nullptr;
         handle->DarwinRelayId = 0;
+        handle->DarwinWorkerIndex = 0;
         handle->Control.reset();
         handle->ControlGeneration = 0;
         handle->Stop.store(true, std::memory_order_release);
