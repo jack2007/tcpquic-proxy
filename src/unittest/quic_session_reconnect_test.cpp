@@ -15,6 +15,106 @@ static int TestServerNewConnectionDisable1RttStatusClassification() {
     return 0;
 }
 
+static int TestTerminalEscalationRejectsOldGeneration() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+    session.MarkSlotConnectedForTest(
+        0, reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6101)));
+    const auto before = session.SnapshotConnections().front();
+    auto escalation = session.MakeTerminalEscalation(
+        before.SlotIndex, before.NumericConnectionId, before.Generation);
+    std::string err;
+    if (!session.ReconnectConnection(before.ConnectionId, err)) return 6101;
+    escalation->RequestConnectionShutdown(
+        before.NumericConnectionId, 17, QUIC_STATUS_INVALID_STATE, 91);
+    if (session.ConnectionShutdownCallsForTest(0) != 0) return 6102;
+    if (session.TerminalEscalationGenerationMismatchForTest() != 1) return 6103;
+    session.Stop();
+    return 0;
+}
+
+static int TestTerminalEscalationIsExactlyOnce() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+    session.MarkSlotConnectedForTest(
+        0, reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6201)));
+    const auto before = session.SnapshotConnections().front();
+    auto escalation = session.MakeTerminalEscalation(
+        before.SlotIndex, before.NumericConnectionId, before.Generation);
+    escalation->RequestConnectionShutdown(
+        before.NumericConnectionId, 18, QUIC_STATUS_INVALID_STATE, 92);
+    escalation->RequestConnectionShutdown(
+        before.NumericConnectionId, 18, QUIC_STATUS_INVALID_STATE, 92);
+    if (session.ConnectionShutdownCallsForTest(0) != 1) return 6201;
+    if (session.TerminalEscalationDuplicateForTest() != 1) return 6202;
+    session.Stop();
+    return 0;
+}
+
+static int TestTerminalEscalationSuppressesClosingConnection() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+    session.MarkSlotConnectedForTest(
+        0, reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6301)));
+    const auto before = session.SnapshotConnections().front();
+    auto escalation = session.MakeTerminalEscalation(
+        before.SlotIndex, before.NumericConnectionId, before.Generation);
+    session.MarkSlotClosingForTest(0);
+    escalation->RequestConnectionShutdown(
+        before.NumericConnectionId, 19, QUIC_STATUS_INVALID_STATE, 93);
+    if (session.ConnectionShutdownCallsForTest(0) != 0) return 6301;
+    if (session.TerminalEscalationClosingSuppressedForTest() != 1) return 6302;
+    session.Stop();
+    return 0;
+}
+
+static int TestServerTerminalEscalationRegistrySafety() {
+    TqResetServerTerminalEscalationCountersForTest();
+    const HQUIC firstHandle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x6401));
+    const uint32_t firstId = TqRegisterServerConnectionForTest(firstHandle);
+    TqServerConnectionSnapshot first{};
+    if (!TqGetServerConnectionSnapshot("srv-" + std::to_string(firstId), first)) return 6401;
+    auto firstEscalation = TqMakeServerTerminalEscalation(
+        {first.NumericConnectionId, first.Generation});
+    if (!firstEscalation) return 6402;
+    firstEscalation->RequestConnectionShutdown(
+        first.NumericConnectionId, 20, QUIC_STATUS_INVALID_STATE, 94);
+    firstEscalation->RequestConnectionShutdown(
+        first.NumericConnectionId, 20, QUIC_STATUS_INVALID_STATE, 94);
+    if (TqServerConnectionShutdownCallsForTest() != 1) return 6403;
+    if (TqServerTerminalDuplicateForTest() != 1) return 6404;
+
+    const HQUIC closingHandle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x6402));
+    const uint32_t closingId = TqRegisterServerConnectionForTest(closingHandle);
+    TqServerConnectionSnapshot closing{};
+    if (!TqGetServerConnectionSnapshot("srv-" + std::to_string(closingId), closing)) return 6405;
+    auto closingEscalation = TqMakeServerTerminalEscalation(
+        {closing.NumericConnectionId, closing.Generation});
+    TqMarkServerConnectionClosingForTest(closingHandle);
+    closingEscalation->RequestConnectionShutdown(
+        closing.NumericConnectionId, 21, QUIC_STATUS_INVALID_STATE, 95);
+    if (TqServerConnectionShutdownCallsForTest() != 1) return 6406;
+    if (TqServerTerminalClosingSuppressedForTest() != 1) return 6407;
+
+    TqUnregisterServerConnectionForTest(firstHandle);
+    const uint32_t replacementId = TqRegisterServerConnectionForTest(firstHandle);
+    TqServerConnectionSnapshot replacement{};
+    if (!TqGetServerConnectionSnapshot(
+            "srv-" + std::to_string(replacementId), replacement)) return 6408;
+    firstEscalation->RequestConnectionShutdown(
+        first.NumericConnectionId, 22, QUIC_STATUS_INVALID_STATE, 96);
+    if (TqServerConnectionShutdownCallsForTest() != 1) return 6409;
+    auto replacementEscalation = TqMakeServerTerminalEscalation(
+        {replacement.NumericConnectionId, replacement.Generation});
+    replacementEscalation->RequestConnectionShutdown(
+        replacement.NumericConnectionId, 23, QUIC_STATUS_INVALID_STATE, 97);
+    if (TqServerConnectionShutdownCallsForTest() != 2) return 6410;
+
+    TqUnregisterServerConnectionForTest(firstHandle);
+    TqUnregisterServerConnectionForTest(closingHandle);
+    return 0;
+}
+
 static int TestFixedDelayRetrySchedulesAndRestartsSlot() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
@@ -802,6 +902,10 @@ static int TestClientHelloSentAfterConnected() {
 
 int main() {
     if (int rc = TestServerNewConnectionDisable1RttStatusClassification()) return rc;
+    if (int rc = TestTerminalEscalationRejectsOldGeneration()) return rc;
+    if (int rc = TestTerminalEscalationIsExactlyOnce()) return rc;
+    if (int rc = TestTerminalEscalationSuppressesClosingConnection()) return rc;
+    if (int rc = TestServerTerminalEscalationRegistrySafety()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;

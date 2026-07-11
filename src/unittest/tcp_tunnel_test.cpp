@@ -112,6 +112,18 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
     return 0;
 }
 
+bool TqLookupClientTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey&,
+    std::shared_ptr<TqTerminalEscalation>&) noexcept {
+    return false;
+}
+
+bool TqLookupServerTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey&,
+    std::shared_ptr<TqTerminalEscalation>&) noexcept {
+    return false;
+}
+
 bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
     return false;
 }

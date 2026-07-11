@@ -23,6 +23,12 @@
 
 namespace {
 
+class TestTerminalEscalation final : public TqTerminalEscalation {
+public:
+    void RequestConnectionShutdown(
+        uint64_t, uint64_t, QUIC_STATUS, uint64_t) noexcept override {}
+};
+
 std::mutex g_FakeSendMutex;
 std::vector<void*> g_FakeSendContexts;
 std::shared_ptr<TqStreamLifetime> g_PrecommitOwner;
@@ -4551,6 +4557,8 @@ int main() {
         auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
         if (!owner->InstallDetachedStreamForTest(stream)) return 5042;
         auto control = std::make_shared<TqRelayStopControl>();
+        auto escalation = std::make_shared<TestTerminalEscalation>();
+        control->TerminalEscalation = escalation;
         bool blockedReleaseReady = true;
         owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
             const auto blocked = std::atomic_load(&control->TerminalHandoff);
@@ -4571,6 +4579,7 @@ int main() {
         const auto handoff = std::atomic_load(&control->TerminalHandoff);
         if (blockedReleaseReady || handoff == nullptr ||
             handoff->Ledger.get() != owner->TerminalLedger().get() ||
+            handoff->Escalation.get() != escalation.get() ||
             !TqTerminalReleaseReady(handoff->Snapshot())) return 5045;
         QUIC_STREAM_EVENT terminal{};
         terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;

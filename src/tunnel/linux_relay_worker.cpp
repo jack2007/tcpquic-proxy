@@ -1179,7 +1179,8 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         return TqTerminalShutdownResult{QUIC_STATUS_INVALID_STATE, false, false, false, 0};
     }
 
-    const auto result = relay->StreamOwner->BeginTerminalShutdown(errorCode, sink, nullptr);
+    const auto result = relay->StreamOwner->BeginTerminalShutdown(
+        errorCode, sink, handoff->Escalation);
     AbortRelayAndRelease(relay, reason, false);
     handoff->DataPlaneStopped.store(true, std::memory_order_release);
     handoff->LocalOperationOwnershipTransferredOrDrained.store(
@@ -1901,7 +1902,8 @@ TqLinuxRelayRegistrationResult TqLinuxRelayWorker::RegisterRelayWithIdLocal(
         }
         std::atomic_store(
             &relay->StopControl->TerminalHandoff,
-            std::make_shared<TqTerminalHandoffControl>(relay->ControlGeneration, ledger));
+            std::make_shared<TqTerminalHandoffControl>(
+                relay->ControlGeneration, ledger, relay->StopControl->TerminalEscalation));
     }
 
     epoll_event event{};

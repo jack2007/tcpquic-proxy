@@ -15,6 +15,7 @@ class TqWindowsRelayWorker;
 class TqDarwinRelayWorker;
 class TqStreamLifetime;
 class TqTerminalLedger;
+class TqTerminalEscalation;
 
 struct TqTerminalHandoffFacts {
     bool DataPlaneStopped{false};
@@ -33,11 +34,14 @@ struct TqTerminalHandoffControl {
     std::atomic<bool> TerminalHandoffComplete{false};
     std::atomic<bool> LocalOperationOwnershipTransferredOrDrained{false};
     std::shared_ptr<TqTerminalLedger> Ledger;
+    std::shared_ptr<TqTerminalEscalation> Escalation;
 
     explicit TqTerminalHandoffControl(
         uint64_t generation,
-        std::shared_ptr<TqTerminalLedger> ledger) noexcept
-        : Generation(generation), Ledger(std::move(ledger)) {}
+        std::shared_ptr<TqTerminalLedger> ledger,
+        std::shared_ptr<TqTerminalEscalation> escalation = {}) noexcept
+        : Generation(generation), Ledger(std::move(ledger)),
+          Escalation(std::move(escalation)) {}
 
     TqTerminalHandoffFacts Snapshot() const noexcept {
         return {DataPlaneStopped.load(std::memory_order_acquire),
@@ -96,6 +100,7 @@ struct TqRelayStopControl {
     std::atomic<bool> ActiveAccountingReleased{false};
     std::atomic<bool> WorkerEndpointAlive{true};
     std::shared_ptr<TqTerminalHandoffControl> TerminalHandoff;
+    std::shared_ptr<TqTerminalEscalation> TerminalEscalation;
 
     explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
     TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}

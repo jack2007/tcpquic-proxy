@@ -6,6 +6,7 @@
 #include "config.h"
 #include "msquic.hpp"
 #include "quic_address.h"
+#include "terminal_convergence.h"
 
 #include <atomic>
 #include <chrono>
@@ -16,6 +17,32 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+struct TqTerminalConnectionKey {
+    uint64_t ConnectionId{0};
+    uint64_t Generation{0};
+};
+
+class TqTerminalConnectionController {
+public:
+    virtual ~TqTerminalConnectionController() = default;
+    virtual bool RequestShutdown(
+        uint32_t slotIndex,
+        TqTerminalConnectionKey key,
+        QUIC_STATUS streamStatus,
+        uint64_t errorCode) noexcept = 0;
+};
+
+std::shared_ptr<TqTerminalEscalation> TqMakeServerTerminalEscalation(
+    TqTerminalConnectionKey key) noexcept;
+bool TqLookupClientTerminalConnection(
+    MsQuicConnection* connection,
+    TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept;
+bool TqLookupServerTerminalConnection(
+    MsQuicConnection* connection,
+    TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept;
 
 // Server-side: assign stable conn_id per accepted QUIC connection (OPEN_OK field).
 uint32_t TqRegisterServerConnection(
@@ -31,6 +58,7 @@ MsQuicSettings TqMakeMsQuicSettings(const TqConfig& cfg, bool server);
 struct TqConnectionSnapshot {
     std::string ConnectionId;
     uint32_t SlotIndex{0};
+    uint64_t NumericConnectionId{0};
     uint64_t Generation{0};
     bool Connected{false};
     bool RetryScheduled{false};
@@ -45,6 +73,8 @@ struct TqConnectionSnapshot {
 
 struct TqServerConnectionSnapshot {
     std::string ConnectionId;
+    uint64_t NumericConnectionId{0};
+    uint64_t Generation{0};
     std::string ClientName;
     std::string RemoteAddress;
     std::string State;
@@ -58,6 +88,9 @@ struct TqServerConnectionSnapshot {
 struct TqClientPickedConnection {
     MsQuicConnection* Connection{nullptr};
     std::string ConnectionId;
+    uint32_t SlotIndex{0};
+    uint64_t NumericConnectionId{0};
+    uint64_t Generation{0};
 };
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections();
@@ -74,6 +107,11 @@ uint32_t TqRegisterServerConnectionForTest(
     const std::string& encryption = "enabled");
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
 void TqUnregisterServerConnectionForTest(HQUIC handle);
+void TqMarkServerConnectionClosingForTest(HQUIC handle);
+uint64_t TqServerConnectionShutdownCallsForTest();
+uint64_t TqServerTerminalDuplicateForTest();
+uint64_t TqServerTerminalClosingSuppressedForTest();
+void TqResetServerTerminalEscalationCountersForTest();
 
 struct TqCredentialConfigSnapshot {
     QUIC_CREDENTIAL_TYPE Type{};
@@ -115,6 +153,10 @@ public:
     bool AbortConnectionTunnels(const std::string& connectionId, std::string& err);
     uint32_t ConnectionCount() const;
     uint32_t ConnectedConnectionCount() const;
+    std::shared_ptr<TqTerminalEscalation> MakeTerminalEscalation(
+        uint32_t slotIndex,
+        uint64_t numericConnectionId,
+        uint64_t generation) noexcept;
 
 #if defined(TQ_UNIT_TESTING)
     struct ReconnectTestHooks {
@@ -134,6 +176,11 @@ public:
     void MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg);
     void MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection);
     void MarkSlotDisconnectedForTest(size_t index);
+    void MarkSlotClosingForTest(size_t index);
+    uint64_t ConnectionShutdownCallsForTest(size_t index) const;
+    uint64_t TerminalEscalationGenerationMismatchForTest() const;
+    uint64_t TerminalEscalationDuplicateForTest() const;
+    uint64_t TerminalEscalationClosingSuppressedForTest() const;
     void SendClientHelloForTest(MsQuicConnection* connection);
     MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
@@ -157,8 +204,11 @@ private:
         ClientConnContext* Context{nullptr};
         std::unique_ptr<MsQuicConnection> Connection;
         std::string ConnectionId;
+        uint64_t NumericConnectionId{0};
         uint64_t Generation{0};
         bool Connected{false};
+        bool Closing{false};
+        bool TerminalShutdownReserved{false};
         bool RetryScheduled{false};
         std::string LastError;
 #if defined(TQ_UNIT_TESTING)
@@ -196,8 +246,13 @@ private:
         DelayedTaskScheduler Scheduler;
         std::shared_ptr<ClientSessionGate> SessionGate;
         std::shared_ptr<MsQuicApi> Api;
+        std::shared_ptr<TqTerminalConnectionController> TerminalController;
+        uint64_t TerminalGenerationMismatch{0};
+        uint64_t TerminalDuplicate{0};
+        uint64_t TerminalClosingSuppressed{0};
 #if defined(TQ_UNIT_TESTING)
         ReconnectTestHooks TestHooks;
+        std::vector<uint64_t> ConnectionShutdownCalls;
 #endif
     };
 

@@ -142,14 +142,25 @@ struct TqTunnelSendContext {
 
 using TqStableCallbackTarget = TqStreamCallbackTarget;
 
-TqTerminalIdentity TqMakeTerminalIdentity(
+struct TqTerminalBinding {
+    TqTerminalIdentity Identity;
+    std::shared_ptr<TqTerminalEscalation> Escalation;
+};
+
+TqTerminalBinding TqMakeTerminalBinding(
     MsQuicConnection* connection,
-    TqTunnelRole role) noexcept {
-    const uint64_t id = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
-    const uint64_t observedConnectionId = role == TqTunnelRole::ClientOpen
-        ? TqLookupClientTraceConnId(connection)
-        : TqLookupServerConnectionId(connection);
-    const uint64_t connectionId = observedConnectionId != 0 ? observedConnectionId : id;
+    TqTunnelRole role,
+    uint64_t streamId,
+    uint64_t tunnelId) noexcept {
+    TqTerminalConnectionKey key{};
+    std::shared_ptr<TqTerminalEscalation> escalation;
+    const bool found = role == TqTunnelRole::ClientOpen
+        ? TqLookupClientTerminalConnection(connection, key, escalation)
+        : TqLookupServerTerminalConnection(connection, key, escalation);
+    if (!found) {
+        const uint64_t fallback = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+        key = {fallback, fallback};
+    }
 #if defined(__linux__)
     constexpr TqRelayBackend backend = TqRelayBackendType::LinuxWorker;
 #elif defined(__APPLE__)
@@ -159,8 +170,9 @@ TqTerminalIdentity TqMakeTerminalIdentity(
 #else
     constexpr TqRelayBackend backend = TqRelayBackendType::None;
 #endif
-    return TqTerminalIdentity{
-        id, id, connectionId, connectionId, role, backend};
+    return {TqTerminalIdentity{
+        streamId, tunnelId, key.ConnectionId, key.Generation, role, backend},
+        std::move(escalation)};
 }
 
 void TqSubmitStreamShutdown(
@@ -623,6 +635,9 @@ public:
         if (StreamOwner == nullptr) {
             return false;
         }
+        if (RelayHandle.Control != nullptr) {
+            RelayHandle.Control->TerminalEscalation = TerminalEscalation;
+        }
         bool tcpFdConsumed = false;
         const bool relayStarted = ReceiveSink
             ? TqRelayStartQuicReceiveSinkManaged(
@@ -1082,6 +1097,10 @@ public:
     void AssignTrace(uint64_t tunnelId, std::string target) {
         TraceTunnelId = tunnelId;
         TraceTarget = std::move(target);
+    }
+
+    void SetTerminalEscalation(std::shared_ptr<TqTerminalEscalation> escalation) {
+        TerminalEscalation = std::move(escalation);
     }
 
     void SetIngressTraceProto(uint8_t proto) {
@@ -1986,6 +2005,7 @@ private:
     TqTunnelCompletionFn OnComplete;
     TqTunnelAclDeniedFn OnAclDenied;
     TqRelayHandle RelayHandle;
+    std::shared_ptr<TqTerminalEscalation> TerminalEscalation;
     std::unique_ptr<ITqCompressor> Compressor;
     std::unique_ptr<ITqDecompressor> Decompressor;
     // Serializes MsQuic stream Send/Shutdown after state checks; take before Lock.
@@ -2089,6 +2109,14 @@ TqTunnelStartResult TqStartClientTunnelInternal(
         return {false, TqOpenError::Internal};
     }
 
+    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
+    const uint32_t connId = TqLookupClientTraceConnId(conn);
+    const uint64_t tunnelId =
+        TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
+    const uint64_t streamId = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+    auto terminalBinding = TqMakeTerminalBinding(
+        conn, TqTunnelRole::ClientOpen, streamId, tunnelId != 0 ? tunnelId : streamId);
+
     auto* context = new (std::nothrow) TqTunnelContext(
         TqTunnelRole::ClientOpen,
         nullptr,
@@ -2109,7 +2137,7 @@ TqTunnelStartResult TqStartClientTunnelInternal(
         *conn,
         QUIC_STREAM_OPEN_FLAG_NONE,
         callbackTarget,
-        TqMakeTerminalIdentity(conn, TqTunnelRole::ClientOpen),
+        terminalBinding.Identity,
         5);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
@@ -2118,6 +2146,7 @@ TqTunnelStartResult TqStartClientTunnelInternal(
     }
 
     context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
+    context->SetTerminalEscalation(std::move(terminalBinding.Escalation));
     context->RegisterWithConnectionIfNeeded();
     auto releaseClientOpenOwner = [context]() {
         if (context->ReleaseClientOpenOwnerAndMaybeDelete()) {
@@ -2125,9 +2154,6 @@ TqTunnelStartResult TqStartClientTunnelInternal(
         }
     };
 
-    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
-    const uint32_t connId = TqLookupClientTraceConnId(conn);
-    const uint64_t tunnelId = TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
     context->AssignTrace(tunnelId, target);
     context->SetIngressTraceProto(req.IngressTraceProto);
 
@@ -2212,6 +2238,14 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         return nullptr;
     }
 
+    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
+    const uint32_t connId = TqLookupClientTraceConnId(conn);
+    const uint64_t tunnelId =
+        TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
+    const uint64_t streamId = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+    auto terminalBinding = TqMakeTerminalBinding(
+        conn, TqTunnelRole::ClientOpen, streamId, tunnelId != 0 ? tunnelId : streamId);
+
     auto* handle = new (std::nothrow) TqClientTunnelOpenHandle();
     if (handle == nullptr) {
         TqTunnelDebugLog(
@@ -2245,7 +2279,7 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
         *conn,
         QUIC_STREAM_OPEN_FLAG_NONE,
         callbackTarget,
-        TqMakeTerminalIdentity(conn, TqTunnelRole::ClientOpen),
+        terminalBinding.Identity,
         5);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
@@ -2258,13 +2292,10 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     }
 
     context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
+    context->SetTerminalEscalation(std::move(terminalBinding.Escalation));
     context->SetClientMetadata(std::move(metadata));
     context->RegisterWithConnectionIfNeeded();
 
-    const std::string target = std::string(req.Host) + ":" + std::to_string(req.Port);
-    const uint32_t connId = TqLookupClientTraceConnId(conn);
-    const uint64_t tunnelId =
-        TqTraceStreamStarted(conn, connId, "client", target.c_str(), openReq.Flags);
     context->AssignTrace(tunnelId, target);
     context->SetIngressTraceProto(req.IngressTraceProto);
     TqTunnelDebugLog(
@@ -2513,9 +2544,11 @@ public:
 
     void SetStreamOwner(
         std::shared_ptr<TqStreamLifetime> owner,
-        std::shared_ptr<TqStableCallbackTarget> target) {
+        std::shared_ptr<TqStableCallbackTarget> target,
+        std::shared_ptr<TqTerminalEscalation> escalation = {}) {
         StreamOwner_ = std::move(owner);
         CallbackTarget_ = std::move(target);
+        TerminalEscalation_ = std::move(escalation);
         Stream_ = StreamOwner_ != nullptr ? StreamOwner_->StreamForInitialization() : nullptr;
     }
 
@@ -2665,6 +2698,7 @@ private:
             return;
         }
         context->SetStreamOwner(StreamOwner_, std::move(target));
+        context->SetTerminalEscalation(TerminalEscalation_);
         context->TakeOpeningBytes(std::move(BufferedRx_));
         context->RegisterWithConnectionIfNeeded();
 
@@ -2740,6 +2774,7 @@ private:
     MsQuicStream* Stream_{nullptr};
     std::shared_ptr<TqStreamLifetime> StreamOwner_;
     std::shared_ptr<TqStableCallbackTarget> CallbackTarget_;
+    std::shared_ptr<TqTerminalEscalation> TerminalEscalation_;
     const TqAcl& Acl_;
     TqConfig Config_;
     TqServerSpeedTestController* Speed_{nullptr};
@@ -2798,17 +2833,22 @@ void TqHandleServerIncomingStreamInternal(
         TqStreamLifetime::RejectAccepted(rawStream);
         return;
     }
+    const uint64_t streamId = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t tunnelId = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+    auto terminalBinding = TqMakeTerminalBinding(
+        conn, TqTunnelRole::ServerOpen, streamId, tunnelId);
     auto streamOwner = TqStreamLifetime::AdoptAccepted(
         rawStream,
         target,
-        TqMakeTerminalIdentity(conn, TqTunnelRole::ServerOpen),
+        terminalBinding.Identity,
         5);
     if (streamOwner == nullptr) {
         target->Detach();
         delete dispatcher;
         return;
     }
-    dispatcher->SetStreamOwner(std::move(streamOwner), std::move(target));
+    dispatcher->SetStreamOwner(
+        std::move(streamOwner), std::move(target), std::move(terminalBinding.Escalation));
 }
 
 } // namespace

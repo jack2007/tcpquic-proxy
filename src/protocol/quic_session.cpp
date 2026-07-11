@@ -2,6 +2,7 @@
 #include "control_protocol.h"
 #include "quic_address.h"
 #include "relay.h"
+#include "terminal_convergence.h"
 #include "trace.h"
 #include "tunnel_registry.h"
 #include "tuning.h"
@@ -20,6 +21,73 @@
 extern const MsQuicApi* MsQuic;
 
 namespace {
+
+std::atomic<uint64_t> g_nextNumericConnectionId{1};
+std::mutex g_clientTerminalRegistryLock;
+struct TqClientTerminalRegistryEntry {
+    TqTerminalConnectionKey Key;
+    std::shared_ptr<TqTerminalEscalation> Escalation;
+};
+std::unordered_map<HQUIC, TqClientTerminalRegistryEntry> g_clientTerminalRegistry;
+
+class TqTerminalController final : public TqTerminalConnectionController {
+public:
+    using Callback = std::function<bool(
+        uint32_t, TqTerminalConnectionKey, QUIC_STATUS, uint64_t)>;
+
+    explicit TqTerminalController(Callback callback) : Callback_(std::move(callback)) {}
+
+    bool RequestShutdown(
+        uint32_t slotIndex,
+        TqTerminalConnectionKey key,
+        QUIC_STATUS streamStatus,
+        uint64_t errorCode) noexcept override {
+        try {
+            return Callback_ && Callback_(slotIndex, key, streamStatus, errorCode);
+        } catch (...) {
+            return false;
+        }
+    }
+
+private:
+    Callback Callback_;
+};
+
+class TqGenerationTerminalEscalation final : public TqTerminalEscalation {
+public:
+    TqGenerationTerminalEscalation(
+        std::weak_ptr<TqTerminalConnectionController> controller,
+        uint32_t slotIndex,
+        TqTerminalConnectionKey key) noexcept
+        : Controller_(std::move(controller)), SlotIndex_(slotIndex), Key_(key) {}
+
+    void RequestConnectionShutdown(
+        uint64_t,
+        uint64_t,
+        QUIC_STATUS streamStatus,
+        uint64_t errorCode) noexcept override {
+        if (auto controller = Controller_.lock()) {
+            (void)controller->RequestShutdown(SlotIndex_, Key_, streamStatus, errorCode);
+        }
+    }
+
+private:
+    std::weak_ptr<TqTerminalConnectionController> Controller_;
+    const uint32_t SlotIndex_;
+    const TqTerminalConnectionKey Key_;
+};
+
+std::shared_ptr<TqTerminalEscalation> TqMakeTerminalEscalationAdapter(
+    const std::shared_ptr<TqTerminalConnectionController>& controller,
+    uint32_t slotIndex,
+    TqTerminalConnectionKey key) noexcept {
+    if (!controller) return nullptr;
+    try {
+        return std::make_shared<TqGenerationTerminalEscalation>(controller, slotIndex, key);
+    } catch (...) {
+        return nullptr;
+    }
+}
 
 constexpr char TqAlpn[] = "tcpquic-tunnel/1";
 constexpr uint64_t TqIdleTimeoutMs = 60 * 1000;
@@ -263,7 +331,12 @@ QUIC_STATUS TqTryDisable1RttEncryptionForServerNewConnection(MsQuicConnection* c
 std::mutex g_serverConnIdLock;
 struct TqServerConnectionRecord {
     uint32_t Id{0};
+    uint64_t NumericConnectionId{0};
+    uint64_t Generation{0};
     MsQuicConnection* Connection{nullptr};
+    std::shared_ptr<TqTerminalConnectionController> TerminalController;
+    bool Closing{false};
+    bool TerminalShutdownReserved{false};
     std::string ClientName;
     std::string RemoteAddress;
     std::string State{"connected"};
@@ -274,6 +347,11 @@ struct TqServerConnectionRecord {
 };
 std::unordered_map<HQUIC, TqServerConnectionRecord> g_serverConnIds;
 std::atomic<uint32_t> g_nextServerConnId{1};
+#if defined(TQ_UNIT_TESTING)
+std::atomic<uint64_t> g_serverTerminalShutdownCalls{0};
+std::atomic<uint64_t> g_serverTerminalDuplicate{0};
+std::atomic<uint64_t> g_serverTerminalClosingSuppressed{0};
+#endif
 
 struct TqServerConnectionContext {
     QuicServerSession* Session{nullptr};
@@ -312,9 +390,50 @@ uint32_t TqRegisterServerConnectionByHandle(
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
     TqServerConnectionRecord record;
     record.Id = id;
+    record.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+    record.Generation = 1;
     record.Connection = connection;
     record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
     record.Encryption = encryption == "disabled" ? "disabled" : "enabled";
+    const uint64_t numericId = record.NumericConnectionId;
+    record.TerminalController = std::make_shared<TqTerminalController>(
+        [numericId](uint32_t, TqTerminalConnectionKey key, QUIC_STATUS, uint64_t) {
+            MsQuicConnection* current = nullptr;
+            {
+                std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+                for (auto& item : g_serverConnIds) {
+                    auto& candidate = item.second;
+                    if (candidate.NumericConnectionId != numericId) continue;
+                    if (candidate.Generation != key.Generation ||
+                        candidate.NumericConnectionId != key.ConnectionId) return false;
+                    if (candidate.TerminalShutdownReserved) {
+#if defined(TQ_UNIT_TESTING)
+                        g_serverTerminalDuplicate.fetch_add(1);
+#endif
+                        return false;
+                    }
+                    if (candidate.Closing) {
+#if defined(TQ_UNIT_TESTING)
+                        g_serverTerminalClosingSuppressed.fetch_add(1);
+#endif
+                        return false;
+                    }
+                    candidate.TerminalShutdownReserved = true;
+                    candidate.Closing = true;
+                    current = candidate.Connection;
+                    break;
+                }
+            }
+            if (current != nullptr) {
+                current->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+                return true;
+            }
+#if defined(TQ_UNIT_TESTING)
+            g_serverTerminalShutdownCalls.fetch_add(1);
+            return true;
+#endif
+            return false;
+        });
     g_serverConnIds[handle] = std::move(record);
     return id;
 }
@@ -344,10 +463,60 @@ void TqUnregisterServerConnectionByHandle(HQUIC handle) {
         return;
     }
     std::lock_guard<std::mutex> guard(g_serverConnIdLock);
-    g_serverConnIds.erase(handle);
+    auto it = g_serverConnIds.find(handle);
+    if (it != g_serverConnIds.end()) {
+        it->second.Closing = true;
+        g_serverConnIds.erase(it);
+    }
 }
 
 } // namespace
+
+std::shared_ptr<TqTerminalEscalation> TqMakeServerTerminalEscalation(
+    TqTerminalConnectionKey key) noexcept {
+    std::shared_ptr<TqTerminalConnectionController> controller;
+    {
+        std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+        for (const auto& item : g_serverConnIds) {
+            if (item.second.NumericConnectionId == key.ConnectionId &&
+                item.second.Generation == key.Generation) {
+                controller = item.second.TerminalController;
+                break;
+            }
+        }
+    }
+    return TqMakeTerminalEscalationAdapter(controller, 0, key);
+}
+
+bool TqLookupClientTerminalConnection(
+    MsQuicConnection* connection,
+    TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    if (connection == nullptr || connection->Handle == nullptr) return false;
+    std::lock_guard<std::mutex> guard(g_clientTerminalRegistryLock);
+    const auto it = g_clientTerminalRegistry.find(connection->Handle);
+    if (it == g_clientTerminalRegistry.end()) return false;
+    key = it->second.Key;
+    escalation = it->second.Escalation;
+    return escalation != nullptr;
+}
+
+bool TqLookupServerTerminalConnection(
+    MsQuicConnection* connection,
+    TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    if (connection == nullptr || connection->Handle == nullptr) return false;
+    std::shared_ptr<TqTerminalConnectionController> controller;
+    {
+        std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+        const auto it = g_serverConnIds.find(connection->Handle);
+        if (it == g_serverConnIds.end()) return false;
+        key = {it->second.NumericConnectionId, it->second.Generation};
+        controller = it->second.TerminalController;
+    }
+    escalation = TqMakeTerminalEscalationAdapter(controller, 0, key);
+    return escalation != nullptr;
+}
 
 std::string QuicClientSession::MakeConnectionId(size_t index) {
     return "conn-" + std::to_string(index);
@@ -419,6 +588,30 @@ void TqUnregisterServerConnectionForTest(HQUIC handle) {
     TqUnregisterServerConnectionByHandle(handle);
 }
 
+void TqMarkServerConnectionClosingForTest(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    const auto it = g_serverConnIds.find(handle);
+    if (it != g_serverConnIds.end()) it->second.Closing = true;
+}
+
+uint64_t TqServerConnectionShutdownCallsForTest() {
+    return g_serverTerminalShutdownCalls.load();
+}
+
+uint64_t TqServerTerminalDuplicateForTest() {
+    return g_serverTerminalDuplicate.load();
+}
+
+uint64_t TqServerTerminalClosingSuppressedForTest() {
+    return g_serverTerminalClosingSuppressed.load();
+}
+
+void TqResetServerTerminalEscalationCountersForTest() {
+    g_serverTerminalShutdownCalls.store(0);
+    g_serverTerminalDuplicate.store(0);
+    g_serverTerminalClosingSuppressed.store(0);
+}
+
 const char* TqClassifyServerNewConnectionDisable1RttStatusForTest(QUIC_STATUS status) {
     switch (TqClassifyServerNewConnectionDisable1RttStatus(status)) {
     case TqServerNewConnectionDisable1RttResult::Disabled:
@@ -446,6 +639,8 @@ std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections() {
     for (const auto& item : g_serverConnIds) {
         TqServerConnectionSnapshot snapshot;
         snapshot.ConnectionId = "srv-" + std::to_string(item.second.Id);
+        snapshot.NumericConnectionId = item.second.NumericConnectionId;
+        snapshot.Generation = item.second.Generation;
         snapshot.ClientName = item.second.ClientName;
         snapshot.RemoteAddress = item.second.RemoteAddress;
         snapshot.State = item.second.State;
@@ -682,7 +877,11 @@ bool QuicClientSession::Start(const TqConfig& cfg) {
         State->Slots.resize(slotCount);
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
+            State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         }
+#if defined(TQ_UNIT_TESTING)
+        State->ConnectionShutdownCalls.assign(slotCount, 0);
+#endif
         PickIndex.store(0);
     }
     {
@@ -791,22 +990,35 @@ MsQuicConnection* QuicClientSession::PickConnection() {
 }
 
 TqClientPickedConnection QuicClientSession::PickConnectionWithId() {
-    std::lock_guard<std::mutex> guard(State->Lock);
-    if (State->Slots.empty()) {
-        return {};
-    }
-    const size_t count = State->Slots.size();
-    for (size_t attempt = 0; attempt < count; ++attempt) {
-        const size_t index = PickIndex.fetch_add(1) % count;
-        auto& slot = State->Slots[index];
-        if (auto* connection = PickableConnectionLocked(slot)) {
-            TqClientPickedConnection picked;
-            picked.Connection = connection;
-            picked.ConnectionId = slot.ConnectionId.empty() ? MakeConnectionId(index) : slot.ConnectionId;
-            return picked;
+    TqClientPickedConnection picked;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (State->Slots.empty()) return {};
+        const size_t count = State->Slots.size();
+        for (size_t attempt = 0; attempt < count; ++attempt) {
+            const size_t index = PickIndex.fetch_add(1) % count;
+            auto& slot = State->Slots[index];
+            if (auto* connection = PickableConnectionLocked(slot)) {
+                picked.Connection = connection;
+                picked.ConnectionId = slot.ConnectionId.empty() ? MakeConnectionId(index) : slot.ConnectionId;
+                picked.SlotIndex = static_cast<uint32_t>(index);
+                picked.NumericConnectionId = slot.NumericConnectionId;
+                picked.Generation = slot.Generation;
+                break;
+            }
         }
     }
-    return {};
+    if (picked.Connection == nullptr) return {};
+    auto escalation = MakeTerminalEscalation(
+        picked.SlotIndex, picked.NumericConnectionId, picked.Generation);
+#if !defined(TQ_UNIT_TESTING)
+    if (escalation && picked.Connection->Handle != nullptr) {
+        std::lock_guard<std::mutex> guard(g_clientTerminalRegistryLock);
+        g_clientTerminalRegistry[picked.Connection->Handle] = {
+            {picked.NumericConnectionId, picked.Generation}, escalation};
+    }
+#endif
+    return picked;
 }
 
 MsQuicConnection* QuicClientSession::PickConnectionAt(size_t index) {
@@ -844,6 +1056,82 @@ uint32_t QuicClientSession::ConnectedConnectionCount() const {
     return ConnectedCountLocked(*State);
 }
 
+std::shared_ptr<TqTerminalEscalation> QuicClientSession::MakeTerminalEscalation(
+    uint32_t slotIndex,
+    uint64_t numericConnectionId,
+    uint64_t generation) noexcept {
+    std::shared_ptr<TqTerminalConnectionController> controller;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (!State->TerminalController) {
+            std::weak_ptr<ClientSharedState> weakState = State;
+            State->TerminalController = std::make_shared<TqTerminalController>(
+                [weakState](uint32_t index, TqTerminalConnectionKey key,
+                            QUIC_STATUS, uint64_t) {
+                    auto state = weakState.lock();
+                    if (!state) return false;
+                    DelayedTaskScheduler scheduler;
+                    {
+                        std::lock_guard<std::mutex> guard(state->Lock);
+                        if (index >= state->Slots.size()) {
+                            ++state->TerminalGenerationMismatch;
+                            return false;
+                        }
+                        auto& slot = state->Slots[index];
+                        if (slot.NumericConnectionId != key.ConnectionId ||
+                            slot.Generation != key.Generation) {
+                            ++state->TerminalGenerationMismatch;
+                            return false;
+                        }
+                        if (slot.TerminalShutdownReserved) {
+                            ++state->TerminalDuplicate;
+                            return false;
+                        }
+                        if (slot.Closing || !slot.Connected) {
+                            ++state->TerminalClosingSuppressed;
+                            return false;
+                        }
+                        slot.TerminalShutdownReserved = true;
+                        slot.Closing = true;
+                        scheduler = state->Scheduler;
+                    }
+                    auto operation = [weakState, index, key]() {
+                        auto currentState = weakState.lock();
+                        if (!currentState) return;
+                        MsQuicConnection* current = nullptr;
+                        {
+                            std::lock_guard<std::mutex> guard(currentState->Lock);
+                            if (index >= currentState->Slots.size()) return;
+                            auto& slot = currentState->Slots[index];
+                            if (slot.NumericConnectionId != key.ConnectionId ||
+                                slot.Generation != key.Generation ||
+                                !slot.TerminalShutdownReserved) return;
+#if defined(TQ_UNIT_TESTING)
+                            if (index >= currentState->ConnectionShutdownCalls.size()) {
+                                currentState->ConnectionShutdownCalls.resize(index + 1);
+                            }
+                            ++currentState->ConnectionShutdownCalls[index];
+#else
+                            current = slot.Connection.get();
+#endif
+                        }
+                        if (current != nullptr) {
+                            current->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+                        }
+                    };
+                    if (scheduler && scheduler(std::chrono::milliseconds(0), operation)) {
+                        return true;
+                    }
+                    operation();
+                    return true;
+                });
+        }
+        controller = State->TerminalController;
+    }
+    return TqMakeTerminalEscalationAdapter(
+        controller, slotIndex, {numericConnectionId, generation});
+}
+
 std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const {
     std::vector<TqConnectionSnapshot> snapshots;
     std::scoped_lock guard(ConfigLock, State->Lock);
@@ -853,6 +1141,7 @@ std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const
         TqConnectionSnapshot snapshot;
         snapshot.ConnectionId = slot.ConnectionId.empty() ? MakeConnectionId(i) : slot.ConnectionId;
         snapshot.SlotIndex = static_cast<uint32_t>(i);
+        snapshot.NumericConnectionId = slot.NumericConnectionId;
         snapshot.Generation = slot.Generation;
         snapshot.Connected = slot.Connected && slot.Connection && slot.Connection->IsValid();
         snapshot.RetryScheduled = slot.RetryScheduled;
@@ -913,6 +1202,7 @@ bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string&
         State->Slots.resize(desired);
         for (size_t i = oldSize; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
+            State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         }
     }
 
@@ -972,8 +1262,11 @@ bool QuicClientSession::ReconnectSlot(size_t index, std::string& err) {
         }
         auto& slot = State->Slots[index];
         slot.Connected = false;
+        slot.Closing = true;
         slot.RetryScheduled = false;
         ++slot.Generation;
+        slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+        slot.TerminalShutdownReserved = false;
     }
     (void)StartSlot(index);
     State->StateChanged.notify_all();
@@ -1119,7 +1412,9 @@ void QuicClientSession::MarkReconnectStartedForTest(size_t slots, const TqConfig
         State->Slots.resize(slots);
         for (size_t i = 0; i < State->Slots.size(); ++i) {
             State->Slots[i].ConnectionId = MakeConnectionId(i);
+            State->Slots[i].NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         }
+        State->ConnectionShutdownCalls.assign(slots, 0);
         if (!State->SessionGate) {
             State->SessionGate = std::make_shared<ClientSessionGate>();
         }
@@ -1138,9 +1433,39 @@ void QuicClientSession::MarkSlotConnectedForTest(size_t index, MsQuicConnection*
     }
     auto& slot = State->Slots[index];
     slot.Connected = true;
+    slot.Closing = false;
+    if (slot.NumericConnectionId == 0) {
+        slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
+    }
     slot.RetryScheduled = false;
     slot.LastError.clear();
     slot.TestConnectionOverride = connection;
+}
+
+void QuicClientSession::MarkSlotClosingForTest(size_t index) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index < State->Slots.size()) State->Slots[index].Closing = true;
+}
+
+uint64_t QuicClientSession::ConnectionShutdownCallsForTest(size_t index) const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return index < State->ConnectionShutdownCalls.size()
+        ? State->ConnectionShutdownCalls[index] : 0;
+}
+
+uint64_t QuicClientSession::TerminalEscalationGenerationMismatchForTest() const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return State->TerminalGenerationMismatch;
+}
+
+uint64_t QuicClientSession::TerminalEscalationDuplicateForTest() const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return State->TerminalDuplicate;
+}
+
+uint64_t QuicClientSession::TerminalEscalationClosingSuppressedForTest() const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return State->TerminalClosingSuppressed;
 }
 
 void QuicClientSession::MarkSlotDisconnectedForTest(size_t index) {
@@ -1537,6 +1862,8 @@ bool QuicClientSession::StartSlot(size_t index) {
             auto& slot = state->Slots[index];
             slot.Connection = std::move(newConnection);
             slot.Context = newContext;
+            slot.Closing = false;
+            slot.TerminalShutdownReserved = false;
             connectionToStart = slot.Connection.get();
             TqClientDebugLog("connection-opened", index, connectionToStart,
                 slot.Connection->GetInitStatus());
@@ -1697,6 +2024,7 @@ QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotDisconne
     const bool wasConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (slot.Connection.get() == connection) {
         slot.Connected = false;
+        slot.Closing = true;
     }
     const bool isConnected = slot.Connected && slot.Connection && slot.Connection->IsValid();
     if (wasConnected != isConnected) {
