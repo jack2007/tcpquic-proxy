@@ -515,6 +515,13 @@ private:
         QUIC_STREAM_EVENT* event,
         StreamBinding* binding) noexcept;
     void ActivateManagedBinding(const std::shared_ptr<RelayState>& relay, StreamBinding* binding);
+    // Under ActivationMutex: take precommit once for drain or discard. Returns
+    // false if already settled (or empty after marking settled).
+    bool TakePrecommitForSettlementLocked(
+        StreamBinding* binding,
+        std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& out);
+    void DiscardPrecommitReceives(
+        std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& pending);
     void FailManagedBinding(RelayState* relay, StreamBinding* binding);
     void SealManagedBindingTerminal(RelayState* relay, StreamBinding* binding);
     void HandoffTerminalCloseToShutdownSink(

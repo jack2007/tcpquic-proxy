@@ -141,6 +141,8 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> PrecommitReceives;
     uint64_t PrecommitPendingBytes{0};
     uint64_t PrecommitMaxPendingBytes{0};
+    // Once-only under ActivationMutex: drain or discard must clear precommit.
+    bool PrecommitSettled{false};
 #if defined(TCPQUIC_TESTING)
     TqDarwinRelayWorker* DestructorCounterOwner{nullptr};
 #endif
@@ -2849,7 +2851,8 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
         handled = false;
         return true;
     }
-    if (activation == StreamBinding::Activation::Failed ||
+    if (binding->PrecommitSettled ||
+        activation == StreamBinding::Activation::Failed ||
         activation == StreamBinding::Activation::Terminal ||
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
@@ -3585,21 +3588,15 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
     {
         std::lock_guard<std::mutex> guard(binding->ActivationMutex);
         const auto phase = binding->ActivationState.load(std::memory_order_acquire);
-        if (phase == StreamBinding::Activation::Terminal ||
-            phase == StreamBinding::Activation::Failed) {
-            pending.swap(binding->PrecommitReceives);
-            binding->PrecommitPendingBytes = 0;
-        } else {
+        if (phase != StreamBinding::Activation::Terminal &&
+            phase != StreamBinding::Activation::Failed) {
             binding->ActivationState.store(
                 StreamBinding::Activation::Failed,
                 std::memory_order_release);
-            pending.swap(binding->PrecommitReceives);
-            binding->PrecommitPendingBytes = 0;
         }
+        (void)TakePrecommitForSettlementLocked(binding, pending);
     }
-    for (const auto& receive : pending) {
-        (void)DiscardDeferredQuicReceive(nullptr, receive);
-    }
+    DiscardPrecommitReceives(pending);
     binding->Closing.store(true, std::memory_order_release);
     binding->Active.store(false, std::memory_order_release);
     // Do not reset binding->Relay after publish (P1-4).
@@ -3612,12 +3609,37 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
     }
 }
 
+bool TqDarwinRelayWorker::TakePrecommitForSettlementLocked(
+    StreamBinding* binding,
+    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& out) {
+    if (binding == nullptr || binding->PrecommitSettled) {
+        return false;
+    }
+    binding->PrecommitSettled = true;
+    if (binding->PrecommitReceives.empty()) {
+        binding->PrecommitPendingBytes = 0;
+        return false;
+    }
+    out.swap(binding->PrecommitReceives);
+    binding->PrecommitPendingBytes = 0;
+    return !out.empty();
+}
+
+void TqDarwinRelayWorker::DiscardPrecommitReceives(
+    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>>& pending) {
+    for (const auto& receive : pending) {
+        (void)DiscardDeferredQuicReceive(nullptr, receive);
+    }
+    pending.clear();
+}
+
 void TqDarwinRelayWorker::SealManagedBindingTerminal(
     RelayState* relay,
     StreamBinding* binding) {
     if (binding == nullptr) {
         return;
     }
+    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> pending;
     {
         std::lock_guard<std::mutex> guard(binding->ActivationMutex);
         const auto phase = binding->ActivationState.load(std::memory_order_acquire);
@@ -3627,7 +3649,11 @@ void TqDarwinRelayWorker::SealManagedBindingTerminal(
                 StreamBinding::Activation::Terminal,
                 std::memory_order_release);
         }
+        // If terminal races after commit (or during Prepared), take precommit
+        // here so ActivateManagedBinding cannot leave PENDING receives orphaned.
+        (void)TakePrecommitForSettlementLocked(binding, pending);
     }
+    DiscardPrecommitReceives(pending);
     binding->Active.store(false, std::memory_order_release);
     binding->Terminal.store(true, std::memory_order_release);
     binding->Closing.store(true, std::memory_order_release);
@@ -3649,19 +3675,25 @@ void TqDarwinRelayWorker::ActivateManagedBinding(
         return;
     }
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> pending;
+    bool drain = false;
     {
         std::lock_guard<std::mutex> guard(binding->ActivationMutex);
-        if (binding->ActivationState.load(std::memory_order_acquire) !=
-            StreamBinding::Activation::Active) {
+        const auto phase = binding->ActivationState.load(std::memory_order_acquire);
+        // Post-commit disposition must always settle precommit: Active drains,
+        // Terminal/Failed discards. Never return while PrecommitReceives remain.
+        if (!TakePrecommitForSettlementLocked(binding, pending)) {
             return;
         }
-        pending.swap(binding->PrecommitReceives);
-        binding->PrecommitPendingBytes = 0;
+        drain = phase == StreamBinding::Activation::Active;
     }
-    while (!pending.empty()) {
-        (void)ProcessQuicReceiveViewEvent(pending.front());
-        pending.pop_front();
+    if (drain) {
+        while (!pending.empty()) {
+            (void)ProcessQuicReceiveViewEvent(pending.front());
+            pending.pop_front();
+        }
+        return;
     }
+    DiscardPrecommitReceives(pending);
 }
 
 void TqDarwinRelayWorker::HandoffTerminalCloseToShutdownSink(

@@ -4323,6 +4323,14 @@ void CommitBarrierTerminalAfterActivationSucceedsThenStops() {
     CHECK(worker.TcpFilterDeleteCountForTest() == 1);
     CHECK(worker.TcpFdCloseCountForTest() == 1);
     CHECK(TcpRelayFdClosedOnce(consumedFd));
+    // Terminal raced after Prepared->Active: precommit must be discarded once
+    // (not left PENDING until binding dtor). Completes stay 0 for terminal owner.
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
+    CHECK(worker.Snapshot().DeferredReceiveCompletes == 0);
+    CHECK(
+        worker.Snapshot().DeferredReceiveDiscards +
+            worker.Snapshot().DeferredReceiveCompletes >=
+        1);
 
     g_PrecommitOwner.reset();
     worker.Stop();
