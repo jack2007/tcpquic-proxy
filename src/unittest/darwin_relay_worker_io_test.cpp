@@ -5964,6 +5964,7 @@ void FullyClosedOffWorkerFinSetsConvergenceStickyThenStops() {
     CHECK(harness.OpenSocketPair());
     harness.Worker.SetStreamSendForTest(FakeStreamSend);
     CHECK(harness.Register(/*enableQuicSends=*/true));
+    CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
 
     auto control = harness.Handle.Control;
     CHECK(control != nullptr);
@@ -5990,8 +5991,7 @@ void FullyClosedOffWorkerFinSetsConvergenceStickyThenStops() {
     QUIC_STREAM_EVENT finComplete{};
     finComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
     finComplete.SEND_COMPLETE.ClientContext = sendContext;
-    CHECK(TqDarwinRelayWorker::StreamCallback(nullptr, callbackContext, &finComplete) ==
-        QUIC_STATUS_SUCCESS);
+    CHECK(harness.DispatchViaRouter(finComplete) == QUIC_STATUS_SUCCESS);
 
     CHECK(harness.Worker.FallbackSendCompletionCountForTest() > fallbackBefore);
     CHECK(harness.Worker.ConvergenceCheckStickyForTest(harness.Result.RelayId));
