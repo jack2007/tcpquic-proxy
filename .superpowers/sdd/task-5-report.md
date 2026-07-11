@@ -24,3 +24,11 @@
 
 - epoll tag 为兼容既有 63-bit relay-id allocator，仅在实际注册 tag 中编码低 31-bit relay id 与 32-bit generation；当前 runtime relay id 递增且远低于该边界，但这是显式容量约束。
 - 未实现 Task 6 的真实 connection escalation controller；本任务传入空 escalation。
+
+## 后续测试修复
+
+系统化诊断确认 queue-full `5028` 在基线 `413bfc8` 同样复现，根因是测试局部
+`registration.StreamOwner` 在 `owner.reset()` 后仍保留唯一强引用，并非 production
+handoff 回归。测试现已在 close-count 断言前释放该引用。fatal barrier 也在验证
+`PENDING` handoff 后注入晚到 `SHUTDOWN_COMPLETE`，并断言 terminal retention registry
+回到进入用例前的基线，避免污染后续用例。

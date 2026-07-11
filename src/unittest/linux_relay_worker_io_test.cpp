@@ -4524,6 +4524,8 @@ int main() {
     // A Linux fatal event publishes the owner's one ledger and completes all
     // three release facts only after the terminal handoff has returned.
     {
+        const uint64_t retentionBaseline =
+            TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount;
         QUIC_API_TABLE fakeApi{};
         InstallFakeMsQuicForSend(fakeApi);
         TqLinuxRelayWorker worker({});
@@ -4556,7 +4558,14 @@ int main() {
         if (blockedReleaseReady || handoff == nullptr ||
             handoff->Ledger.get() != owner->TerminalLedger().get() ||
             !TqTerminalReleaseReady(handoff->Snapshot())) return 5045;
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(owner->DispatchForTest(&terminal)) ||
+            TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount !=
+                retentionBaseline) return 5046;
         worker.Stop();
+        registration.StreamOwner.reset();
+        owner.reset();
         ::close(fds[1]);
         MsQuic = nullptr;
     }
@@ -4625,6 +4634,7 @@ int main() {
         if (!control->Stop.load(std::memory_order_acquire) ||
             worker.RetiredBindingCountForTest() != 0 ||
             ::fcntl(fds[0], F_GETFD) != -1 || errno != EBADF) return 5027;
+        registration.StreamOwner.reset();
         owner.reset();
         if (g_FakeStreamCloseCalls != 1) return 5028;
         worker.Stop();
