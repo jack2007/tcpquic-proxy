@@ -71,7 +71,7 @@
       `CreatedNotStarted`、`Starting`、`Started`、`StartFailed`、`TerminalPublished`、`Closed`；
       shutdown desired/reserved/submitted和双向 half-close保存在独立 ledger，不能扩张或反向
       修改 wrapper phase。start异步失败进入 `StartFailed`，不能假装等待永远不会到达的 terminal callback。
-- [ ] 提供 outgoing/accepted 两个 factory：先建立 shared owner+router再打开/包装 stream，不允许运行期 raw-wrapper adopt。
+- [x] 提供 outgoing/accepted 两个 factory：先建立 shared owner+router再打开/包装 stream，不允许运行期 raw-wrapper adopt。
 - [ ] managed outgoing factory禁止 `QUIC_STREAM_START_FLAG_SHUTDOWN_ON_FAIL`；当前 phase把
       `StartFailed`视为可直接 close。若未来支持该 flag，必须先扩展为 failure后继续等待
       `SHUTDOWN_COMPLETE`的状态/retention路径，不能悄悄透传。
@@ -84,39 +84,39 @@
       通知 open失败。direct `StreamStart` 此后可 close；若由已成功排队的
       `SEND(START)` 触发，start-send record/buffer仍由独立 completion retention保活，直到随后
       `SEND_COMPLETE(Canceled=true)` once-only归还。`StreamSend`同步失败才立即 unregister并释放。
-- [ ] accepted factory在安装 handler前准备好 owner/router/retention，返回前直接进入
+- [x] accepted factory在安装 handler前准备好 owner/router/retention，返回前直接进入
       `Started`；accepted stream不等待本地 `START_COMPLETE`。
 - [ ] accepted owner/router allocation failure安装无分配 emergency C callback，abort后在 terminal close raw HQUIC；禁止直接 close已启动 raw stream。
-- [ ] outgoing进入 `Starting`、accepted安装 handler前启用 terminal retention；只有确认未启动/无 callback或 terminal已发布的 owner才能 delete wrapper。
-- [ ] router callback入口先从 retention/registry取得强 owner guard，再读取 route snapshot；
+- [x] outgoing进入 `Starting`、accepted安装 handler前启用 terminal retention；只有确认未启动/无 callback或 terminal已发布的 owner才能 delete wrapper。
+- [x] router callback入口先从 retention/registry取得强 owner guard，再读取 route snapshot；
       terminal发布可以解除 retention，但 guard必须持续到 callback返回，禁止最后一个引用在
       `PublishTerminalAndTakeTarget()` 内或其临界区内析构 wrapper/router。
-- [ ] 实现轻量 API lease；lease 持有 shared owner，禁止只返回无 owner 的裸 pointer。
+- [x] 实现轻量 API lease；lease 持有 shared owner，禁止只返回无 owner 的裸 pointer。
 - [ ] lease 根据 owner phase/API kind/route generation判断；lease admission、shutdown reservation、
       `PublishTarget`、`PublishStartFailureAndTakeTarget` 和
       `PublishTerminalAndTakeTarget` 使用同一个短 control临界区或经证明等价的原子协议。
       terminal 发布前 admitted 的 lease允许完成，callback不等待它；terminal后新 lease为零。
-- [ ] 实现 stable callback router：wrapper callback/context 启动前设置一次，router 使用安全 route snapshot/target adapter完成 dispatcher、tunnel、relay handoff。
+- [x] 实现 stable callback router：wrapper callback/context 启动前设置一次，router 使用安全 route snapshot/target adapter完成 dispatcher、tunnel、relay handoff。
 - [ ] router target不得与 lifetime owner形成无法在 terminal/failure 路径打破的强引用环；callback snapshot 必须保活当前 target。
 - [ ] route snapshot不保存裸 `TqTunnelContext*` / relay / worker；target adapter用 shared owner或 `TryEnter/Leave` + deferred retire保证 callback期间存活。
-- [ ] `PublishTarget`、`PublishStartFailureAndTakeTarget` 与 `PublishTerminalAndTakeTarget` 使用上述
+- [x] `PublishTarget`、`PublishStartFailureAndTakeTarget` 与 `PublishTerminalAndTakeTarget` 使用上述
       公共 control线性化协议；`StartFailed`/terminal后 publish必须失败，临界区内不调用
       MsQuic、等待 worker或触发 owner析构。
-- [ ] 增加 owner级 send completion registry；router把 `ClientContext` 仅作为 opaque key once-only claim typed record，不按当前 target cast或读取未知 pointer。
+- [x] 增加 owner级 send completion registry；router把 `ClientContext` 仅作为 opaque key once-only claim typed record，不按当前 target cast或读取未知 pointer。
 - [ ] registry record不反向强持 owner形成引用环；claim后需要异步 owner时由 callback显式转交。
       terminal时允许存在已 admitted但尚未从 send API返回的 record；最后一个 in-flight send lease
       返回后由 deferred finalizer once-only reconcile，不能在 terminal callback内断言为空或提前清理。
-- [ ] 每个成功提交、尚未 `SEND_COMPLETE` 的 record在 connection/runtime retention registry持有
+- [x] 每个成功提交、尚未 `SEND_COMPLETE` 的 record在 connection/runtime retention registry持有
       独立 completion-retention token，保证 callback入口的 owner/router存活；callback建立 owner
       guard并claim后才解除 token。token不得放回 owner内 record形成 self-cycle。
-- [ ] completion key/envelope地址在同一 owner生命周期内不得复用，或保留 tombstone/nonce
+- [x] completion key/envelope地址在同一 owner生命周期内不得复用，或保留 tombstone/nonce
       消除 pointer-key ABA；duplicate completion不能误 claim地址复用后的新 operation。
 - [ ] registry claim成功后所有权必须进入 typed callback guard、Linux event或 shutdown sink之一；
       Linux event queue full时在 callback-safe fallback完成 accounting/释放，不能只返回
       `QUIC_STATUS_OUT_OF_MEMORY` 丢失已经 claim的 record。
 - [ ] 不得用 `StreamOpLock` 包住 worker MsQuic API 再让 callback 获取同一锁；为该禁令增加注释/断言。
-- [ ] owner/lease 不授权 worker修改已启动 stream 的 callback/context；handler handoff 只切换 router target。
-- [ ] client tunnel和 server accepted wrapper从创建时使用 `CleanUpManual`；禁止在 terminal callback 内转换，因为 adapter 已提前缓存 `DeleteOnExit`。
+- [x] owner/lease 不授权 worker修改已启动 stream 的 callback/context；handler handoff 只切换 router target。
+- [x] client tunnel和 server accepted wrapper从创建时使用 `CleanUpManual`；禁止在 terminal callback 内转换，因为 adapter 已提前缓存 `DeleteOnExit`。
 - [ ] 覆盖同步/异步 client tunnel、server incoming dispatcher、dispatcher -> tunnel和 dispatcher -> speed-control target；client hello/structured-error由 dispatcher stable target完成 terminal。
 - [ ] `TqTunnelContext` / dispatcher 的 pre-relay shutdown、self-delete 和 relay handoff 都使用同一 owner；任何 target都能在 owner 发布 terminal。
 - [ ] 审计 `TqTunnelContext::SendBytes/Abort/Drain`、dispatcher和 server speed-control的非 callback API调用，全部通过 owner lease/phase；callback内调用也通过 owner注册 send和转换状态。
@@ -127,21 +127,21 @@
       fd所有权转给 prepared token/worker的不可逆点，即使 commit/activation失败也由 token
       `EPOLL_CTL_DEL`（若已 arm）并 close。start结果必须告诉 caller fd是否 consumed，caller在
       consumed后立即置 `TqInvalidSocket`，防止 double-close或 fd-number reuse误关新连接。
-- [ ] prepared target提供有界 precommit receive/pending-bytes queue；publish与commit之间不写 TCP或调用其它 stream API。
-- [ ] 删除 `DispatchPendingRelayRx()` 对 wrapper callback/context 的读取和人工回调；copied pending bytes进入 precommit queue。
+- [x] prepared target提供有界 precommit receive/pending-bytes queue；publish与commit之间不写 TCP或调用其它 stream API。
+- [x] 删除 `DispatchPendingRelayRx()` 对 wrapper callback/context 的读取和人工回调；copied pending bytes进入 precommit queue。
 - [ ] publish前失败可恢复旧 target；publish后 activation失败不可回切，必须 request shutdown并清理 precommit ownership。
 - [ ] 明确注册成功、注册失败、worker stop 三种情况下 owner 归属，增加析构一次/无泄漏测试。
-- [ ] 将 `TqRelayHandle*` 从 callback/binding/sink生命周期契约中移除，或以 shared
+- [x] 将 `TqRelayHandle*` 从 callback/binding/sink生命周期契约中移除，或以 shared
       control owner + generation替代；terminal callback、late event和 worker stop只能发布
       该 control state。`TqTunnelContext`/reaper销毁后不得再读取 `Backend`、worker/id或
       `Stop`所在内存。
-- [ ] public handle的 backend/worker/id/stop必须作为一个同步发布的 committed result可见；
+- [x] public handle的 backend/worker/id/stop必须作为一个同步发布的 committed result可见；
       prepare阶段不可见，commit后 snapshot/stop不能观察到字段半更新。
 - [ ] 已启动 stream 的 relay registration failure request shutdown并等待 terminal；只有 StreamStart失败/从未启动才能直接 close。
 - [ ] `RequestShutdown(intent)` 使用公共方向性 desired/reserved/submitted ledger合并请求：同方向
       相同强度只提交一次，graceful send允许升级为 abort send，receive abort独立合并；API failure
       释放 reservation但保留 desired intent/retention供策略重试，terminal并发时 terminal wins。
-- [ ] 定义 Linux worker stop target：先关闭 registration/post gate，拒绝新 handoff；active
+- [x] 定义 Linux worker stop target：先关闭 registration/post gate，拒绝新 handoff；active
       owner request shutdown；`EPOLL_CTL_DEL`后关闭本地 fd；把 router切到不引用 worker的
       shutdown sink；处理/转交已接受的 terminal、receive和claimed completion owner后再退出
       线程。不得超时强制 close started owner，也不得让 callback经 raw `Worker*`访问已析构对象。
@@ -152,12 +152,12 @@
       `linux_relay_worker_io_test.cpp` 覆盖真实 Linux event/epoll组合；生命周期测试必须构造
       正常的 `CleanUpManual` wrapper和 fake `StreamClose`计数，不能继续只用未执行构造函数的
       `alignas(MsQuicStream) uint8_t[]` 伪对象证明析构安全。
-- [ ] 在 `linux_relay_worker_io_test.cpp` 增加 terminal router 测试。注册 relay 后，通过固定 router callback 分派 `SHUTDOWN_COMPLETE`，不要直接调用 `ProcessQuicShutdownComplete()` test helper。
+- [x] 在 `linux_relay_worker_io_test.cpp` 增加 terminal router 测试。注册 relay 后，通过固定 router callback 分派 `SHUTDOWN_COMPLETE`，不要直接调用 `ProcessQuicShutdownComplete()` test helper。
 - [ ] router callback 同步返回后、worker event 尚未 drain 时断言 owner phase terminal、binding closing，wrapper callback/context 仍为原 router且 target 已清空。
 - [ ] callback 返回后释放 tunnel 侧 owner，通过 `weak_ptr`/析构计数确认 binding 或 API lease 仍保活 wrapper；然后 drain worker event。
 - [ ] 断言 worker 能完成 logical detach、snapshot 显示 `StreamDetached`、没有 fake stream API 调用。
 - [ ] 在同一失效 wrapper 状态下分派 `EPOLLERR | EPOLLHUP | EPOLLRDHUP`，断言只清理 relay/TCP，并保持 late-error metric。
-- [ ] 增加 shutdown complete 前 active TCP hard error 对照，断言 fake `StreamShutdown` 仍恰好调用一次。
+- [x] 增加 shutdown complete 前 active TCP hard error 对照，断言 fake `StreamShutdown` 仍恰好调用一次。
 - [ ] 增加 API lease 与 terminal callback 交错测试：lease 释放前 wrapper 不析构，terminal 后不能取得新 lease。
 - [ ] 增加 active TCP hard error取得 lease后暂停、terminal callback发布后再恢复 abort downcall
       的确定性 barrier测试；callback不得等待，wrapper在 lease释放前存活，shutdown最多提交一次。
@@ -183,15 +183,15 @@
 - [ ] 增加 completion key duplicate/unknown/地址复用测试，以及 send-complete event queue full
       测试；typed record、buffer、outstanding sends/bytes必须各收敛一次。
 - [ ] 在 prepare/publish/commit 每个边界注入 terminal/failure，断言 fd未误 arm、relay不残留且 owner只释放一次。
-- [ ] 在 publish前失败和publish后 commit失败分别断言 fd disposition：前者 caller仍能使用并
+- [x] 在 publish前失败和publish后 commit失败分别断言 fd disposition：前者 caller仍能使用并
       只 close一次，后者 caller已置 invalid且 token/worker只 close一次；强制复用相同 fd number
       验证不会误关新 socket。
-- [ ] 在 publish/commit间注入 RECEIVE和activation failure，断言 receive ownership有界、只释放一次且旧 target不被错误恢复。
+- [x] 在 publish/commit间注入 RECEIVE和activation failure，断言 receive ownership有界、只释放一次且旧 target不被错误恢复。
 - [ ] 并发 snapshot/stop在 prepare阶段看不到 public active relay；commit后 handle字段一次性一致可见。
 - [ ] 让 terminal sink/late epoll event与 tunnel reaper销毁并发，释放原
       `TqTunnelContext`/public handle后继续 drain；control owner/generation仍安全发布 stop，
       ASan下不得访问旧 `TqRelayHandle*`。
-- [ ] 填满 `TqLinuxRelayEventQueue` 后触发 terminal callback，断言 callback仍先发布 owner
+- [x] 填满 `TqLinuxRelayEventQueue` 后触发 terminal callback，断言 callback仍先发布 owner
       terminal并返回 success，fallback完成 fd/relay/control owner回收，terminal-retained计数归零。
 - [ ] 构造 `epoll_wait` 已返回的旧 relay token，随后 logical detach、close并复用 fd；消费旧
       `EPOLLERR|EPOLLHUP|EPOLLRDHUP`时 generation不匹配且不得命中新 relay或调用任何 stream API。
@@ -199,36 +199,36 @@
 
 ## Task 3: 在 router terminal callback 内发布 owner 终态
 
-- [ ] router callback 调用幂等 `PublishTerminalAndTakeTarget()`，在线性化临界区发布 owner terminal并取走唯一 route snapshot。
+- [x] router callback 调用幂等 `PublishTerminalAndTakeTarget()`，在线性化临界区发布 owner terminal并取走唯一 route snapshot。
 - [ ] 在临界区外从 snapshot取得 relay id、route/relay generation、shared control owner和
       callback-safe worker endpoint/post permit，release-store `binding->Closing=true` 并清除
       binding route capability；不得把裸 `TqRelayHandle*`、`RelayState*` 或 `Worker*` 复制进事件/sink。
-- [ ] router 已为 terminal-empty；不得写 `stream->Callback` / `stream->Context`。
-- [ ] shutdown event仅携带 relay id、generation、error code/status和必要的 shared logical-cleanup
+- [x] router 已为 terminal-empty；不得写 `stream->Callback` / `stream->Context`。
+- [x] shutdown event仅携带 relay id、generation、error code/status和必要的 shared logical-cleanup
       owner；禁止加入 stream/public-handle/worker裸指针。worker用 generation拒绝 stale/duplicate event。
 - [ ] enqueue 失败时只发布 handle stop 或执行无 wrapper fallback，不得重新激活 binding，也不得调用 `Shutdown()`。
-- [ ] enqueue失败或 worker post gate已关闭时，通过 control owner发布 stop，并由 shutdown sink
+- [x] enqueue失败或 worker post gate已关闭时，通过 control owner发布 stop，并由 shutdown sink
       执行/登记 logical cleanup；sink只能操作 fd disposition、relay-local owner和 accounting，
       不能访问已析构 tunnel/worker。不能因 terminal event丢失而泄漏。
-- [ ] 确认 `SEND_COMPLETE` 特殊分支仍能交还已经完成的 send operation，且 terminal event 不会吞掉已排队 completion。
+- [x] 确认 `SEND_COMPLETE` 特殊分支仍能交还已经完成的 send operation，且 terminal event 不会吞掉已排队 completion。
 - [ ] send前注册、同步失败unregister；`SEND_COMPLETE` registry claim一次，unknown/duplicate key不得解引用、delete或 cast。
 - [ ] SEND_COMPLETE claim后投递 Linux queue失败时，callback/sink直接执行 typed completion或
       转交持久 endpoint，仍返回 success；禁止把已 claim key重新塞回 registry或遗失 byte accounting。
 
 ## Task 4: 将 worker cleanup 改为 logical detach
 
-- [ ] `ProcessQuicShutdownComplete(relayId, generation, ...)` 在 active和retired索引中按 generation
+- [x] `ProcessQuicShutdownComplete(relayId, generation, ...)` 在 active和retired索引中按 generation
       定位；即使 relay已 `Closing`/unregister也要幂等完成 terminal logical detach，不能沿用
       当前 `if (relay == nullptr || relay->Closing) return` 而遗漏 terminal回收。
 - [ ] 设置 `StreamShutdownComplete=true` 后立即将 relay 的 `Stream` / `StreamBinding` 逻辑清空，
       但不读取 stream字段；duplicate/stale generation只记诊断，不触碰新 relay。
-- [ ] 将 sealed binding 放入 retired binding 容器；释放条件只依赖 callback refs、outstanding operation 和 lifetime owner/lease。
+- [x] 将 sealed binding 放入 retired binding 容器；释放条件只依赖 callback refs、outstanding operation 和 lifetime owner/lease。
 - [ ] 删除 terminal path 中 `DetachRelayStreamBinding(relay, stream, binding)` 形式的调用。
-- [ ] 删除或重构 `RetiringStream`。若 pending sends 需要延迟 cleanup，只保留 `RetiringStreamBinding` 或独立 completion owner。
-- [ ] `CompletePendingStreamDetach()` 不得从 terminal state 恢复或解引用 stream pointer。
+- [x] 删除或重构 `RetiringStream`。若 pending sends 需要延迟 cleanup，只保留 `RetiringStreamBinding` 或独立 completion owner。
+- [x] `CompletePendingStreamDetach()` 不得从 terminal state 恢复或解引用 stream pointer。
 - [ ] 普通 abort/unregister 不再从 worker 跨线程清 callback/context；已启动 stream 发起 shutdown 后保留 binding/owner，等待 terminal callback retire。
 - [ ] 只有 StreamStart失败或从未启动的 stream 可以直接 close；relay registration failure 不能据此直接析构已启动 owner。
-- [ ] terminal cleanup顺序固定为 logical stream detach -> `EPOLL_CTL_DEL`/close owned TCP fd ->
+- [x] terminal cleanup顺序固定为 logical stream detach -> `EPOLL_CTL_DEL`/close owned TCP fd ->
       不调用 stream API地 discard pending receive/write -> 通过 control owner发布 stop；claimed
       send completion可在前后到达，但 byte/accounting只结算一次。任何 trace/snapshot不得在
       stop发布后经裸 handle读取 tunnel内存。
@@ -253,8 +253,8 @@
       event queue wait或整个 relay lifetime；retry每次重新取得 lease，避免 terminal owner被长时间
       非必要保留并控制 shared ownership热路径开销。
 - [ ] `HasAbortableStream()` 增加/保留 binding terminal 检查；`TcpWriteClosed` 和 `StreamShutdownComplete` 继续返回 false。
-- [ ] terminal worker path 和 retired cleanup 不得出现 `stream->`。
-- [ ] 审计 `Callback` / `Context` 写入点；只允许 stream 启动前的 router初始化，terminal callback 也不得改写。
+- [x] terminal worker path 和 retired cleanup 不得出现 `stream->`。
+- [x] 审计 `Callback` / `Context` 写入点；只允许 stream 启动前的 router初始化，terminal callback 也不得改写。
 - [ ] epoll data携带不可误命中新 relay的 relay token/generation；`EPOLL_CTL_DEL`/close后已返回的
       event只做 stale accounting。不要为不存在的 Asio `async_read` 增加 cancel/wait逻辑。
 
@@ -262,7 +262,7 @@
 
 - [ ] 构造 shutdown complete 到达时至少一个 send-complete event 已入队但尚未消费的测试。
 - [ ] 先处理 terminal event再处理 send completion，以及反向顺序各覆盖一次。
-- [ ] 断言 operation/buffer 只释放一次，outstanding sends/bytes 最终归零。
+- [x] 断言 operation/buffer 只释放一次，outstanding sends/bytes 最终归零。
 - [ ] 覆盖 worker stop 和 `UnregisterRelay()` 与 terminal event 相邻的情况，binding 不提前释放且不访问 wrapper。
 - [ ] `UnregisterRelay()` active路径先撤销数据面/epoll token并 request shutdown，再把 route交给
       shutdown sink等待 terminal；terminal已发布路径只 logical detach。两条路径都不得跨线程
@@ -282,7 +282,7 @@
 
 ## Task 7: 验证
 
-- [ ] 运行：
+- [x] 运行：
 
 ```bash
 rtk cmake --build build --target tcpquic_stream_lifetime_test tcpquic_linux_relay_worker_io_test tcpquic_linux_relay_worker_queue_test tcpquic_tcp_tunnel_test tcpquic_client_tunnel_open_test tcpquic_speed_test_test tcpquic_router_runtime_test -j$(nproc)
@@ -298,7 +298,7 @@ rtk rg -n 'RetiringStream|TqRelayHandle\*|MsQuicStream\*' src/tunnel/linux_relay
 rtk git diff --check
 ```
 
-- [ ] 建立独立 ASan目录并运行 owner和 Linux relay IO test：
+- [x] 建立独立 ASan目录并运行 owner和 Linux relay IO test：
 
 ```bash
 rtk cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DQUIC_ENABLE_ASAN=ON -DTCPQUIC_USE_MIMALLOC=OFF -DTCPQUIC_ENABLE_CRASHPAD=OFF
@@ -343,3 +343,92 @@ rtk env ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 build-asan/bin/Release/tcpqu
 - active TCP hard error 仍调用一次 stream abort；terminal seal 后调用零次。
 - 现有 Linux late TCP error 指标和回归测试继续通过。
 - feature system-test release gates通过。
+
+---
+
+## 2026-07-11 Linux 实现评审记录
+
+### 标注口径
+
+- 本次仅对有明确生产代码和对应回归证据的条目标记 `[x]`。
+- 存在关键子项未实现、仅有测试钩子、或测试仍使用未构造 fake wrapper 的复合条目保留 `[ ]`。
+- 已完成的主干包括：`TqStreamLifetime` manual-cleanup owner、terminal retention、stable router、API lease、send completion registry、Linux precommit receive queue、terminal logical stream detach、pending send completion accounting、late TCP error guard和 prepare/commit fd disposition 的部分回归。
+
+### 评审发现及修复结果
+
+#### 已修复（P1）：speed-control send 同步失败路径重复释放 completion context
+
+`TqServerSpeedControl::SendFrame()` 原注册的 completion cleanup 已调用
+`TqControlSendContext::Delete(sendContext)`。`Stream_->Send()` 返回失败时，
+`CancelSendCompletion()` 会同步执行该 cleanup，随后代码又直接调用一次
+`TqControlSendContext::Delete(sendContext)`，导致 double-free/UAF。修复后 managed path
+完全由 `CancelSendCompletion()` 的 once-only cleanup 负责释放，仅 legacy path 直接释放。
+`TestServerIncomingSpeedControlSynchronousSendFailureCleansOnce` 已注入同步 Send 失败，
+并在 ASan 下验证 registry 归零且无重复释放。
+
+#### 已修复（P1）：Linux retired managed binding 只增不减
+
+`RetireStreamBinding()` 仍将 binding 移入 retired 容器，新增
+`PurgeRetiredStreamBindings()` 在 callback refs 归零且 active/retired relay 不再引用时
+回收 managed/legacy binding。`LifetimeBinding` 保证 callback 已取得 raw relay snapshot
+时 relay state 不会先行析构。queue-full 真实 wrapper 回归断言 retired binding
+数量最终为零。
+
+#### 已修复（P1）：Linux worker 保存 tunnel 内的裸 `TqRelayHandle*`
+
+`RelayState` 和 binding 现在只持有 `shared_ptr<TqRelayStopControl>` 及 generation，
+stop、unregister trace 和 snapshot 不再访问 public handle。`TqRelayHandle` 新增不可变
+`TqRelayLinuxCommittedState`，用 `atomic_store/atomic_exchange` 一次性发布和取走
+worker/id/index/control 组合。仅 unmanaged unit test registration 保留 legacy handle 入口，
+生产 managed registration 不传递该指针。
+
+#### 已修复（P1）：terminal event queue-full fallback 未完成 relay-local logical cleanup
+
+terminal callback enqueue 失败时现在将 sealed binding 投递到 intrusive
+`TerminalFallbackHead`，由 worker 在普通队列之外 once-only drain。fallback 走与正常
+terminal 相同的 logical detach、`EPOLL_CTL_DEL`/fd close、pending ownership discard、
+stop 发布和relay unregister 顺序，不依赖 tunnel reaper。`Stop()` 也会关闭 callback
+admission、drain normal/fallback lane 并清理剩余 relay。
+
+#### 已修复（P1）：unregister/terminal 交错忽略 terminal logical detach
+
+`ProcessQuicShutdownComplete()` 不再因 `relay->Closing` 提前返回，会在 active/retired
+索引中查找 relay，校验 control generation，并用 `StreamShutdownComplete` 幂等
+拒绝 duplicate。terminal event 已显式携带 generation，stale generation 只增加
+diagnostic，不会触碰当前 relay。
+
+#### 已修复（P2）：accepted target allocation failure 未进入 emergency callback 路径
+
+server incoming dispatcher 现在用 `new (std::nothrow)` 创建 stable target，失败时
+删除 dispatcher 并调用 `RejectAccepted()`。
+`TestServerIncomingTargetAllocationFailureUsesEmergencyHandler` 注入 target 分配失败，
+断言 emergency handler 只 abort 一次、terminal 时 close raw stream 一次。
+
+#### 已修复（P2）：send completion unknown/duplicate 诊断未连通
+
+completion registry 现在保留 owner-scoped claimed tombstone；找不到 active record 时
+可区分 duplicate 与 unknown key 并更新对应计数。owner 析构时清理自身
+tombstone，envelope 在 owner 生命周期内仍不复用。`stream_lifetime_test`
+已断言 duplicate/unknown 计数分别恰好增加一次。
+
+#### 已修复（P2）：缺少真实 wrapper 的 Linux terminal 回归证据
+
+原 worker 逻辑对照测试仍保留 inert fake stream，但新增的 queue-full terminal
+组合测试通过 `AdoptAccepted()` 构造正常 `CleanUpManual` wrapper，从 wrapper
+固定 callback/context 进入 router，验证 terminal 先发布、queue-full fallback、
+fd close、binding 回收、callback/context 不改写以及 wrapper 只 close 一次。
+
+### 本次验证结果
+
+- 已成功构建计列的 7 个 focused target。
+- 已成功运行 `tcpquic_stream_lifetime_test`、`tcpquic_linux_relay_worker_io_test`、
+  `tcpquic_linux_relay_worker_queue_test`、`tcpquic_tcp_tunnel_test`、
+  `tcpquic_client_tunnel_open_test`、`tcpquic_speed_test_test` 和
+  `tcpquic_router_runtime_test`。
+- 已在现有 `build-asan` 独立目录重新构建并成功运行
+  `tcpquic_stream_lifetime_test`、`tcpquic_linux_relay_worker_io_test`、
+  `tcpquic_tcp_tunnel_test` 和 `tcpquic_client_tunnel_open_test`，使用
+  `ASAN_OPTIONS=detect_leaks=1:halt_on_error=1`。
+- 修复后的定向回归已覆盖 speed 同步 send 失败、accepted target 分配失败、
+  completion duplicate/unknown、stale terminal generation、terminal queue-full 无 reaper、
+  retired binding 回收和真实 manual-cleanup wrapper 析构一次语义。

@@ -46,6 +46,9 @@ constexpr auto TqOpenTimeout = std::chrono::seconds(10);
 constexpr int TqTcpDialTimeoutMs = 10 * 1000;
 
 std::atomic<TqServerDialReactor*> g_serverDialReactor{nullptr};
+#if defined(TCPQUIC_TUNNEL_TESTING)
+std::atomic<bool> g_failNextAcceptedTargetAllocation{false};
+#endif
 
 bool TqTunnelDebugEnabled() {
     static const bool enabled = []() {
@@ -163,6 +166,9 @@ TqCompressAlgo TqAlgoFromFlags(uint8_t flags) {
 }
 
 std::string TqRelayBackendName(const TqRelayHandle& handle) {
+    if (TqRelayLinuxCommittedSnapshot(&handle) != nullptr) {
+        return "linux";
+    }
     switch (handle.Backend) {
     case TqRelayBackendType::LinuxWorker:
         return "linux";
@@ -644,10 +650,11 @@ public:
         uint32_t relayWorkerIndex = 0;
         uint64_t relayId = 0;
         const void* relayWorker = nullptr;
-        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
-            relayId = RelayHandle.LinuxRelayId;
-            relayWorkerIndex = RelayHandle.LinuxWorkerIndex;
-            relayWorker = RelayHandle.LinuxWorker;
+        const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
+        if (linuxCommitted != nullptr) {
+            relayId = linuxCommitted->RelayId;
+            relayWorkerIndex = linuxCommitted->WorkerIndex;
+            relayWorker = reinterpret_cast<const void*>(linuxCommitted->WorkerIdentity);
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             relayId = RelayHandle.WindowsRelayId;
             relayWorkerIndex = RelayHandle.WindowsWorkerIndex;
@@ -768,10 +775,11 @@ public:
         const char* backend = "none";
         uint32_t workerIndex = 0;
         uint64_t relayId = 0;
-        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
+        const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
+        if (linuxCommitted != nullptr) {
             backend = "linux";
-            workerIndex = RelayHandle.LinuxWorkerIndex;
-            relayId = RelayHandle.LinuxRelayId;
+            workerIndex = linuxCommitted->WorkerIndex;
+            relayId = linuxCommitted->RelayId;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             backend = "windows";
             workerIndex = RelayHandle.WindowsWorkerIndex;
@@ -1111,8 +1119,9 @@ public:
         metadata.Ingress = TraceIngressProto == 2 ? "http" : (TraceIngressProto == 1 ? "socks" : "");
         metadata.Compress = TqCompressName(algo);
         metadata.RelayBackend = TqRelayBackendName(RelayHandle);
-        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
-            metadata.WorkerIndex = RelayHandle.LinuxWorkerIndex;
+        const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
+        if (linuxCommitted != nullptr) {
+            metadata.WorkerIndex = linuxCommitted->WorkerIndex;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             metadata.WorkerIndex = RelayHandle.WindowsWorkerIndex;
         }
@@ -2719,8 +2728,23 @@ void TqHandleServerIncomingStreamInternal(
         TqStreamLifetime::RejectAccepted(rawStream);
         return;
     }
-    auto target = std::make_shared<TqStableCallbackTarget>(
-        TqServerIncomingStreamDispatcher::Callback, dispatcher);
+    std::shared_ptr<TqStableCallbackTarget> target;
+#if defined(TCPQUIC_TUNNEL_TESTING)
+    const bool failTargetAllocation =
+        g_failNextAcceptedTargetAllocation.exchange(false, std::memory_order_acq_rel);
+#else
+    constexpr bool failTargetAllocation = false;
+#endif
+    if (!failTargetAllocation) {
+        target = std::shared_ptr<TqStableCallbackTarget>(
+            new (std::nothrow) TqStableCallbackTarget(
+                TqServerIncomingStreamDispatcher::Callback, dispatcher));
+    }
+    if (target == nullptr) {
+        delete dispatcher;
+        TqStreamLifetime::RejectAccepted(rawStream);
+        return;
+    }
     auto streamOwner = TqStreamLifetime::AdoptAccepted(rawStream, target);
     if (streamOwner == nullptr) {
         target->Detach();
@@ -2731,6 +2755,12 @@ void TqHandleServerIncomingStreamInternal(
 }
 
 } // namespace
+
+#if defined(TCPQUIC_TUNNEL_TESTING)
+void TqTestFailNextAcceptedTargetAllocation() {
+    g_failNextAcceptedTargetAllocation.store(true, std::memory_order_release);
+}
+#endif
 
 void TqHandleServerIncomingStream(
     MsQuicConnection* conn,

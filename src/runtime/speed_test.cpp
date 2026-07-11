@@ -1250,9 +1250,13 @@ private:
             &sendContext->Buffer, 1, flags, completionKey);
         if (QUIC_FAILED(status)) {
             if (StreamOwner_ != nullptr) {
+                // The registered cleanup owns sendContext.  A successful
+                // cancellation runs it synchronously; a failed cancellation
+                // means SEND_COMPLETE already claimed that ownership.
                 (void)StreamOwner_->CancelSendCompletion(completionKey);
+            } else {
+                TqControlSendContext::Delete(sendContext);
             }
-            TqControlSendContext::Delete(sendContext);
             return false;
         }
         return true;

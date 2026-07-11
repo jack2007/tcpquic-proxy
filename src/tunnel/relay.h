@@ -50,6 +50,7 @@ struct TqRelayStopControl {
     const uint64_t Generation;
     std::atomic<bool> Stop{false};
     std::atomic<bool> ActiveAccountingReleased{false};
+    std::atomic<bool> WorkerEndpointAlive{true};
 
     explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
     TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}
@@ -84,6 +85,14 @@ struct TqRelayStopControl {
 
 using TqRelayControl = TqRelayStopControl;
 
+struct TqRelayLinuxCommittedState {
+    uintptr_t WorkerIdentity{0};
+    uint64_t RelayId{0};
+    uint32_t WorkerIndex{0};
+    std::shared_ptr<TqRelayStopControl> Control;
+    uint64_t ControlGeneration{0};
+};
+
 struct TqRelayHandle {
     std::atomic<bool> Stop{false};
     std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
@@ -92,12 +101,22 @@ struct TqRelayHandle {
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};
     uint32_t LinuxWorkerIndex{0};
+    // Authoritative Linux publication. Backend/worker/id fields above remain
+    // compatibility mirrors for non-concurrent diagnostics.
+    std::shared_ptr<const TqRelayLinuxCommittedState> LinuxCommitted;
     TqWindowsRelayWorker* WindowsWorker{nullptr};
     uint64_t WindowsRelayId{0};
     uint32_t WindowsWorkerIndex{0};
     TqDarwinRelayWorker* DarwinWorker{nullptr};
     uint64_t DarwinRelayId{0};
 };
+
+inline std::shared_ptr<const TqRelayLinuxCommittedState>
+TqRelayLinuxCommittedSnapshot(const TqRelayHandle* handle) {
+    return handle != nullptr
+        ? std::atomic_load(&handle->LinuxCommitted)
+        : std::shared_ptr<const TqRelayLinuxCommittedState>{};
+}
 
 bool TqRelayStart(
     TqSocketHandle tcpFd,

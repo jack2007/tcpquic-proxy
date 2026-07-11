@@ -13,6 +13,8 @@
 #include "msquic.hpp"
 #include "tuning.h"
 
+#include <new>
+
 namespace {
 bool TqRelayStartImpl(
     TqSocketHandle tcpFd,
@@ -64,10 +66,12 @@ bool TqRelayStartImpl(
     }
 
     TqLinuxRelayRegistration registration{};
+    auto control = std::make_shared<TqRelayStopControl>();
     registration.TcpFd = tcpFd;
     registration.Stream = stream;
     registration.StreamOwner = std::move(streamOwner);
-    registration.Handle = handle;
+    registration.StopControl = control;
+    registration.ControlGeneration = control->Generation;
     registration.Compressor = compressor;
     registration.Decompressor = decompressor;
     registration.CompressAlgo = compressAlgo;
@@ -82,11 +86,35 @@ bool TqRelayStartImpl(
         return false;
     }
 
+    if (control->Stop.load(std::memory_order_acquire)) {
+        worker->UnregisterRelay(registered.RelayId);
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    auto committed = std::shared_ptr<TqRelayLinuxCommittedState>(
+        new (std::nothrow) TqRelayLinuxCommittedState{});
+    if (committed == nullptr) {
+        worker->UnregisterRelay(registered.RelayId);
+        TqRelayUnregisterActive();
+        return false;
+    }
+    committed->WorkerIdentity = reinterpret_cast<uintptr_t>(worker);
+    committed->RelayId = registered.RelayId;
+    committed->WorkerIndex = worker->WorkerIndex();
+    committed->Control = control;
+    committed->ControlGeneration = control->Generation;
+
     handle->Stop.store(false);
-    handle->Backend = TqRelayBackendType::LinuxWorker;
+    handle->Control = control;
+    handle->ControlGeneration = control->Generation;
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
     handle->LinuxWorkerIndex = worker->WorkerIndex();
+    std::atomic_store(
+        &handle->LinuxCommitted,
+        std::shared_ptr<const TqRelayLinuxCommittedState>(std::move(committed)));
+    handle->Backend = TqRelayBackendType::LinuxWorker;
     return true;
 #elif defined(__APPLE__)
     if (streamOwner == nullptr) {
@@ -223,10 +251,12 @@ bool TqRelayStartQuicReceiveSinkImpl(
     }
 
     TqLinuxRelayRegistration registration{};
+    auto control = std::make_shared<TqRelayStopControl>();
     registration.TcpFd = -1;
     registration.Stream = stream;
     registration.StreamOwner = std::move(streamOwner);
-    registration.Handle = handle;
+    registration.StopControl = control;
+    registration.ControlGeneration = control->Generation;
     registration.EnableQuicSends = false;
     registration.SinkQuicReceives = true;
     registration.SinkQuicReceiveBytes = receiveBytes;
@@ -237,11 +267,35 @@ bool TqRelayStartQuicReceiveSinkImpl(
         return false;
     }
 
+    if (control->Stop.load(std::memory_order_acquire)) {
+        worker->UnregisterRelay(registered.RelayId);
+        TqRelayUnregisterActive();
+        return false;
+    }
+
+    auto committed = std::shared_ptr<TqRelayLinuxCommittedState>(
+        new (std::nothrow) TqRelayLinuxCommittedState{});
+    if (committed == nullptr) {
+        worker->UnregisterRelay(registered.RelayId);
+        TqRelayUnregisterActive();
+        return false;
+    }
+    committed->WorkerIdentity = reinterpret_cast<uintptr_t>(worker);
+    committed->RelayId = registered.RelayId;
+    committed->WorkerIndex = worker->WorkerIndex();
+    committed->Control = control;
+    committed->ControlGeneration = control->Generation;
+
     handle->Stop.store(false);
-    handle->Backend = TqRelayBackendType::LinuxWorker;
+    handle->Control = control;
+    handle->ControlGeneration = control->Generation;
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
     handle->LinuxWorkerIndex = worker->WorkerIndex();
+    std::atomic_store(
+        &handle->LinuxCommitted,
+        std::shared_ptr<const TqRelayLinuxCommittedState>(std::move(committed)));
+    handle->Backend = TqRelayBackendType::LinuxWorker;
     return true;
 #else
     (void)streamOwner;
@@ -306,17 +360,33 @@ void TqRelayStop(TqRelayHandle* handle) {
 #endif
 
 #if defined(__linux__)
-    if (handle->Backend == TqRelayBackendType::LinuxWorker) {
-        TqLinuxRelayWorker* worker = handle->LinuxWorker;
-        const uint64_t relayId = handle->LinuxRelayId;
+    auto linuxCommitted = std::atomic_exchange(
+        &handle->LinuxCommitted,
+        std::shared_ptr<const TqRelayLinuxCommittedState>{});
+    if (linuxCommitted != nullptr || handle->Backend == TqRelayBackendType::LinuxWorker) {
+        TqLinuxRelayWorker* const legacyWorker = handle->LinuxWorker;
+        const uint64_t relayId = linuxCommitted != nullptr
+            ? linuxCommitted->RelayId
+            : handle->LinuxRelayId;
+        auto control = linuxCommitted != nullptr
+            ? linuxCommitted->Control
+            : handle->Control;
+        const uint64_t generation = linuxCommitted != nullptr
+            ? linuxCommitted->ControlGeneration
+            : (control != nullptr ? control->Generation : 0);
         handle->Backend = TqRelayBackendType::None;
         handle->LinuxWorker = nullptr;
         handle->LinuxRelayId = 0;
         handle->LinuxWorkerIndex = 0;
         handle->Stop.store(true);
-        if (handle->Control != nullptr) handle->Control->Stop.store(true);
-        if (worker != nullptr && relayId != 0) {
-            worker->UnregisterRelay(relayId);
+        if (control != nullptr) (void)control->SignalStop(generation);
+        if (linuxCommitted != nullptr && relayId != 0 &&
+            (control == nullptr ||
+             control->WorkerEndpointAlive.load(std::memory_order_acquire))) {
+            TqLinuxRelayRuntime::Instance().UnregisterRelay(
+                linuxCommitted->WorkerIndex, relayId);
+        } else if (legacyWorker != nullptr && relayId != 0) {
+            legacyWorker->UnregisterRelay(relayId);
         }
         TqRelayUnregisterActive();
         return;
@@ -363,7 +433,7 @@ void TqRelayStop(TqRelayHandle* handle) {
 
 bool TqRelayLinuxFastPathEnabled(const TqRelayHandle* handle) {
 #if defined(__linux__)
-    return handle != nullptr && handle->Backend == TqRelayBackendType::LinuxWorker;
+    return TqRelayLinuxCommittedSnapshot(handle) != nullptr;
 #else
     (void)handle;
     return false;

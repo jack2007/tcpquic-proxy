@@ -57,6 +57,7 @@ struct TqLinuxRelayEvent {
     TqLinuxRelayEventType Type{TqLinuxRelayEventType::Shutdown};
     uint64_t Value{0};
     uint64_t RelayId{0};
+    uint64_t Generation{0};
     void* Relay{nullptr};
     void* Control{nullptr};
     std::shared_ptr<void> ControlOwner;

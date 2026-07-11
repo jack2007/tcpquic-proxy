@@ -25,6 +25,7 @@ struct SendCompletionRetention {
 
 std::mutex g_sendCompletionLock;
 std::unordered_map<void*, SendCompletionRetention> g_sendCompletions;
+std::unordered_map<void*, TqStreamLifetime*> g_claimedSendCompletions;
 std::atomic<uint64_t> g_nextSendNonce{1};
 std::atomic<uint64_t> g_sendCompletionPreSubmitRollbacks{0};
 std::atomic<uint64_t> g_sendCompletionUnknownClaims{0};
@@ -56,12 +57,23 @@ TqStreamLifetime::TqStreamLifetime(
 
 TqStreamLifetime::~TqStreamLifetime() noexcept {
     MsQuicStream* stream = nullptr;
+    std::vector<void*> completionKeys;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         stream = Stream_;
         Stream_ = nullptr;
         Phase_ = Phase::Closed;
         Target_.reset();
+        completionKeys.reserve(SendKeyEnvelopes_.size());
+        for (const auto& envelope : SendKeyEnvelopes_) {
+            completionKeys.push_back(envelope.get());
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(g_sendCompletionLock);
+        for (void* key : completionKeys) {
+            g_claimedSendCompletions.erase(key);
+        }
     }
     delete stream;
 }
@@ -632,10 +644,18 @@ QUIC_STATUS TqStreamLifetime::Dispatch(
             std::lock_guard<std::mutex> guard(g_sendCompletionLock);
             auto it = g_sendCompletions.find(event->SEND_COMPLETE.ClientContext);
             if (it == g_sendCompletions.end() || it->second.Owner.get() != this) {
+                const auto claimed =
+                    g_claimedSendCompletions.find(event->SEND_COMPLETE.ClientContext);
+                if (claimed != g_claimedSendCompletions.end() && claimed->second == this) {
+                    RecordDuplicateSendClaim();
+                } else {
+                    RecordUnknownSendClaim();
+                }
                 return QUIC_STATUS_SUCCESS;
             }
             completion = std::move(it->second);
             g_sendCompletions.erase(it);
+            g_claimedSendCompletions[event->SEND_COMPLETE.ClientContext] = this;
         }
         QUIC_STATUS status = QUIC_STATUS_SUCCESS;
         if (completion.Route.TargetOwner) {

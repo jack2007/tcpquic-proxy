@@ -83,6 +83,14 @@ void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t) {
 
 std::mutex g_FakeStreamShutdownMutex;
 uint64_t g_FakeStreamShutdownCalls = 0;
+uint64_t g_FakeStreamCloseCalls = 0;
+
+void QUIC_API FakeSetCallbackHandler(HQUIC, void*, void*) {
+}
+
+void QUIC_API FakeStreamClose(HQUIC) {
+    ++g_FakeStreamCloseCalls;
+}
 
 QUIC_STATUS QUIC_API FakeStreamShutdown(HQUIC, QUIC_STREAM_SHUTDOWN_FLAGS, QUIC_UINT62) {
     std::lock_guard<std::mutex> guard(g_FakeStreamShutdownMutex);
@@ -107,6 +115,8 @@ QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
 void InstallFakeMsQuicForSend(QUIC_API_TABLE& table) {
     std::memset(&table, 0, sizeof(table));
     table.StreamSend = FakeStreamSend;
+    table.SetCallbackHandler = FakeSetCallbackHandler;
+    table.StreamClose = FakeStreamClose;
     table.StreamShutdown = FakeStreamShutdown;
     table.StreamReceiveComplete = FakeStreamReceiveComplete;
     table.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
@@ -2323,7 +2333,7 @@ int main() {
         config.EventQueueCapacity = 2;
 
         TqLinuxRelayWorker worker(config);
-        if (!worker.Start()) {
+        if (!worker.StartForTest()) {
             return 1;
         }
 
@@ -2347,8 +2357,6 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
-        worker.Stop();
-
         TqLinuxRelayEvent markerA{};
         markerA.Type = TqLinuxRelayEventType::TestMarker;
         if (!worker.EnqueueForTest(std::move(markerA))) {
@@ -3761,9 +3769,9 @@ int main() {
 
         TqLinuxRelayActiveSnapshot relayState{};
         const TqLinuxRelayWorkerSnapshot afterShutdown = worker.Snapshot();
-        if (!FindActiveRelayState(afterShutdown, registered.RelayId, &relayState) ||
-            !relayState.StreamDetached) {
-            std::fprintf(stderr, "expected stream detached after shutdown complete\n");
+        if (FindActiveRelayState(afterShutdown, registered.RelayId, &relayState) ||
+            !handle.Stop.load(std::memory_order_acquire)) {
+            std::fprintf(stderr, "expected terminal relay to be logically removed\n");
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;
@@ -4511,6 +4519,71 @@ int main() {
         worker.Stop();
         ::close(fds[1]);
         g_PrecommitPublishTerminal = false;
+    }
+
+    // A full normal event queue uses the intrusive terminal fallback lane.
+    // This case uses a normally constructed CleanUpManual wrapper and verifies
+    // that callback/context remain the stable router until wrapper close.
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        g_FakeStreamCloseCalls = 0;
+        TqLinuxRelayWorkerConfig config{};
+        config.EventQueueCapacity = 2;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) return 5020;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5021;
+
+        const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x9876));
+        auto owner = TqStreamLifetime::AdoptAccepted(raw, nullptr);
+        if (owner == nullptr) return 5022;
+        MsQuicStream* stream = owner->StreamForInitialization();
+        const auto originalCallback = stream->Callback;
+        void* const originalContext = stream->Context;
+        auto control = std::make_shared<TqRelayStopControl>();
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = stream;
+        registration.StreamOwner = owner;
+        registration.StopControl = control;
+        registration.ControlGeneration = control->Generation;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok || !registered.TcpFdConsumed) return 5023;
+
+        const uint64_t mismatchesBefore =
+            TqRelayControlGenerationMismatchCount().load(std::memory_order_relaxed);
+        TqLinuxRelayEvent staleTerminal{};
+        staleTerminal.Type = TqLinuxRelayEventType::QuicShutdownComplete;
+        staleTerminal.RelayId = registered.RelayId;
+        staleTerminal.Generation = control->Generation + 1;
+        if (!worker.EnqueueForTest(std::move(staleTerminal))) return 5029;
+        (void)worker.DrainForTest(4);
+        if (TqRelayControlGenerationMismatchCount().load(std::memory_order_relaxed) !=
+                mismatchesBefore + 1 ||
+            owner->GetPhase() != TqStreamLifetime::Phase::Started) return 5030;
+
+        for (int i = 0; i < 2; ++i) {
+            TqLinuxRelayEvent marker{};
+            marker.Type = TqLinuxRelayEventType::TestMarker;
+            if (!worker.EnqueueForTest(std::move(marker))) return 5024;
+        }
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(stream->Callback(stream, stream->Context, &terminal))) return 5025;
+        if (stream->Callback != originalCallback || stream->Context != originalContext ||
+            owner->GetPhase() != TqStreamLifetime::Phase::TerminalPublished) return 5026;
+
+        (void)worker.DrainForTest(16);
+        (void)worker.DrainForTest(16);
+        if (!control->Stop.load(std::memory_order_acquire) ||
+            worker.RetiredBindingCountForTest() != 0 ||
+            ::fcntl(fds[0], F_GETFD) != -1 || errno != EBADF) return 5027;
+        owner.reset();
+        if (g_FakeStreamCloseCalls != 1) return 5028;
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
     }
 
     return 0;

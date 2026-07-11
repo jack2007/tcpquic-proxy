@@ -110,6 +110,7 @@ int main() {
         auto target = std::make_shared<CountingTarget>();
         auto owner = TqStreamLifetime::CreateForTest(
             TqStreamLifetime::Phase::Started, target);
+        const auto diagnosticsBefore = TqStreamLifetime::SnapshotSendCompletions();
         unsigned cleanups = 0;
         void* first = owner->RegisterSendCompletion(nullptr, [&] { ++cleanups; });
         if (first == nullptr) return 35;
@@ -119,12 +120,16 @@ int main() {
         (void)owner->DispatchForTest(&complete);
         (void)owner->DispatchForTest(&complete);
         if (cleanups != 1 || target->Calls != 1) return 36;
+        if (TqStreamLifetime::SnapshotSendCompletions().DuplicateClaims !=
+            diagnosticsBefore.DuplicateClaims + 1) return 50;
         void* second = owner->RegisterSendCompletion(nullptr, [&] { ++cleanups; });
         if (second == nullptr || second == first) return 37;
         int unknown = 0;
         complete.SEND_COMPLETE.ClientContext = &unknown;
         (void)owner->DispatchForTest(&complete);
         if (cleanups != 1) return 38;
+        if (TqStreamLifetime::SnapshotSendCompletions().UnknownClaims !=
+            diagnosticsBefore.UnknownClaims + 1) return 51;
         QUIC_STREAM_EVENT terminal{};
         terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         (void)owner->DispatchForTest(&terminal);

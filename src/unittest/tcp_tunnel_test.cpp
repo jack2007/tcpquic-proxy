@@ -36,6 +36,7 @@ TqTunnelContext* TqCreateTestClientOpenOwnedTunnel(unsigned* destroyCount);
 void TqTestArmSelfDeleteOnShutdown(TqTunnelContext* context);
 void TqTestDispatchShutdownComplete(TqTunnelContext* context);
 void TqReleaseTestClientOpenOwner(TqTunnelContext* context);
+void TqTestFailNextAcceptedTargetAllocation();
 #if defined(__linux__)
 TqTunnelContext* TqCreateTestServerOpenLegacyPendingTunnel(unsigned* destroyCount);
 bool TqTestCancelServerDialAndHasPending(TqTunnelContext* context);
@@ -493,10 +494,12 @@ struct FakeQuicStreamRecord {
 
 std::mutex g_fake_quic_lock;
 std::map<HQUIC, FakeQuicStreamRecord> g_fake_quic_streams;
+bool g_fail_next_fake_stream_send = false;
 
 void ResetFakeQuicState() {
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
     g_fake_quic_streams.clear();
+    g_fail_next_fake_stream_send = false;
 }
 
 void QUIC_API FakeSetCallbackHandler(HQUIC handle, void* handler, void* context) {
@@ -521,6 +524,10 @@ QUIC_STATUS QUIC_API FakeStreamSend(
     }
 
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    if (g_fail_next_fake_stream_send) {
+        g_fail_next_fake_stream_send = false;
+        return QUIC_STATUS_INTERNAL_ERROR;
+    }
     auto& record = g_fake_quic_streams[handle];
     record.Sends.push_back(FakeQuicSendRecord{std::move(bytes), flags, clientSendContext});
     return QUIC_STATUS_SUCCESS;
@@ -615,6 +622,12 @@ unsigned FakeShutdownCount(HQUIC handle) {
     std::lock_guard<std::mutex> guard(g_fake_quic_lock);
     const auto it = g_fake_quic_streams.find(handle);
     return it == g_fake_quic_streams.end() ? 0 : it->second.ShutdownCount;
+}
+
+unsigned FakeCloseCount(HQUIC handle) {
+    std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+    const auto it = g_fake_quic_streams.find(handle);
+    return it == g_fake_quic_streams.end() ? 0 : it->second.CloseCount;
 }
 
 QUIC_STREAM_SHUTDOWN_FLAGS FakeLastShutdownFlags(HQUIC handle) {
@@ -1766,6 +1779,59 @@ int TestServerIncomingSpeedControlDispatchesToController() {
     return 0;
 }
 
+int TestServerIncomingSpeedControlSynchronousSendFailureCleansOnce() {
+    TqSocketStartup startup;
+    if (!startup.Ok()) return 310;
+
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+    TqAcl acl;
+    acl.AllowCidrs.push_back("127.0.0.0/8");
+    TqConfig cfg{};
+    TqServerSpeedTestController controller;
+    const auto before = TqStreamLifetime::SnapshotSendCompletions();
+
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7108));
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, &controller);
+    const std::vector<uint8_t> speedStart =
+        BuildSpeedStartBytes(89, TqSpeedDirection::Upload, 1, 1);
+    if (speedStart.empty()) return 311;
+    {
+        std::lock_guard<std::mutex> guard(g_fake_quic_lock);
+        g_fail_next_fake_stream_send = true;
+    }
+    QUIC_BUFFER buffer{
+        static_cast<uint32_t>(speedStart.size()),
+        const_cast<uint8_t*>(speedStart.data()),
+    };
+    QUIC_STREAM_EVENT receive{};
+    receive.Type = QUIC_STREAM_EVENT_RECEIVE;
+    receive.RECEIVE.BufferCount = 1;
+    receive.RECEIVE.Buffers = &buffer;
+    if (!DispatchFakeStreamEvent(rawStream, receive)) return 312;
+    if (FakeShutdownCount(rawStream) != 1) return 313;
+    if (TqStreamLifetime::SnapshotSendCompletions().ActiveCount != before.ActiveCount) {
+        return 314;
+    }
+    if (!DispatchFakeShutdownComplete(rawStream)) return 315;
+    controller.StopAll();
+    return 0;
+}
+
+int TestServerIncomingTargetAllocationFailureUsesEmergencyHandler() {
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+    TqAcl acl;
+    TqConfig cfg{};
+    auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7109));
+    TqTestFailNextAcceptedTargetAllocation();
+    TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, nullptr);
+    if (FakeShutdownCount(rawStream) != 1 || FakeCloseCount(rawStream) != 0) return 316;
+    if (!DispatchFakeShutdownComplete(rawStream)) return 317;
+    if (FakeCloseCount(rawStream) != 1) return 318;
+    return 0;
+}
+
 int TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort() {
     TqSocketStartup startup;
     if (!startup.Ok()) return 280;
@@ -2287,6 +2353,8 @@ int main() {
 #endif
     if (int rc = TestServerIncomingSpeedStartQueuesStructuredErrorWithoutImmediateAbort()) return rc;
     if (int rc = TestServerIncomingSpeedControlDispatchesToController()) return rc;
+    if (int rc = TestServerIncomingSpeedControlSynchronousSendFailureCleansOnce()) return rc;
+    if (int rc = TestServerIncomingTargetAllocationFailureUsesEmergencyHandler()) return rc;
     if (int rc = TestServerIncomingUnknownCommandQueuesStructuredErrorWithoutImmediateAbort()) return rc;
 
     TunnelRequest req{};
