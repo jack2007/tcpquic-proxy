@@ -4,6 +4,10 @@
 #include "server_metrics.h"
 #include "trace.h"
 #include "tunnel_registry.h"
+#if defined(__APPLE__)
+#include "darwin_relay_worker.h"
+#include "tuning.h"
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -1390,6 +1394,58 @@ int main() {
         if (aggregateWorkerResp.find("\"worker_index\":0") == std::string::npos) return 351;
         if (aggregateWorkerResp.find("\"relays\":[") == std::string::npos) return 352;
         if (aggregateWorkerResp.find("\"errors\":") == std::string::npos) return 353;
+
+#if defined(__APPLE__)
+        {
+            // Stopped runtime: list is complete aggregate-only. Start briefly to
+            // assert darwin-N rows, capacity, and detail lookup without Windows.
+            auto& darwinRuntime = TqDarwinRelayRuntime::Instance();
+            darwinRuntime.Stop();
+            TqTuningConfig darwinTuning{};
+            darwinTuning.RelayWorkerCount = 2;
+            darwinTuning.RelayEventQueueCapacity = 1000;
+            if (!darwinRuntime.Start(darwinTuning)) return 1370;
+
+            TqHttpRequest darwinWorkers = Request("GET", "/relay/workers", "");
+            std::string darwinWorkersResp = adminRuntime.HandleAdmin(darwinWorkers);
+            if (darwinWorkersResp.find("HTTP/1.1 200 OK") == std::string::npos) return 1371;
+            if (darwinWorkersResp.find("\"snapshot_complete\":true") == std::string::npos) return 1372;
+            if (darwinWorkersResp.find("\"worker_id\":\"aggregate\"") == std::string::npos) return 1373;
+            if (darwinWorkersResp.find("\"worker_id\":\"darwin-0\"") == std::string::npos) return 1374;
+            if (darwinWorkersResp.find("\"worker_id\":\"darwin-1\"") == std::string::npos) return 1375;
+            if (darwinWorkersResp.find("\"worker_index\":0") == std::string::npos) return 1376;
+            if (darwinWorkersResp.find("\"worker_index\":1") == std::string::npos) return 1377;
+            if (darwinWorkersResp.find("\"event_queue_capacity\":1024") == std::string::npos) return 1378;
+
+            TqHttpRequest darwin0 = Request("GET", "/relay/workers/darwin-0", "");
+            std::string darwin0Resp = adminRuntime.HandleAdmin(darwin0);
+            if (darwin0Resp.find("HTTP/1.1 200 OK") == std::string::npos) return 1379;
+            if (darwin0Resp.find("\"worker_id\":\"darwin-0\"") == std::string::npos) return 1380;
+
+            TqHttpRequest darwinMetrics = Request("GET", "/relay/metrics", "");
+            std::string darwinMetricsResp = adminRuntime.HandleAdmin(darwinMetrics);
+            if (darwinMetricsResp.find("HTTP/1.1 200 OK") == std::string::npos) return 1381;
+            if (darwinMetricsResp.find("\"snapshot_complete\":true") == std::string::npos) return 1382;
+            if (darwinMetricsResp.find("\"relay_runtime_snapshot_inflight_max\"") ==
+                std::string::npos) {
+                return 1383;
+            }
+            if (darwinMetricsResp.find("\"relay_snapshot_execution_busy\"") ==
+                std::string::npos) {
+                return 1384;
+            }
+
+            darwinRuntime.Stop();
+            TqHttpRequest stoppedWorkers = Request("GET", "/relay/workers", "");
+            std::string stoppedWorkersResp = adminRuntime.HandleAdmin(stoppedWorkers);
+            if (stoppedWorkersResp.find("\"worker_id\":\"darwin-0\"") != std::string::npos) {
+                return 1385;
+            }
+            if (stoppedWorkersResp.find("\"snapshot_complete\":true") == std::string::npos) {
+                return 1386;
+            }
+        }
+#endif
 
         TqHttpRequest missingWorker = Request("GET", "/relay/workers/worker-1", "");
         std::string missingWorkerResp = adminRuntime.HandleAdmin(missingWorker);

@@ -156,7 +156,21 @@ struct TqRelayMetricsSnapshot {
     uint64_t LinuxRelaySnapshotCommandTimeouts{0};
     uint64_t LinuxRelayRuntimeLockWaitNanos{0};
     uint64_t LinuxRelayRuntimeLockAcquireCount{0};
+    // Legacy Linux alias; prefer RelayRuntimeSnapshotInFlightMax.
     uint64_t LinuxRelayRuntimeSnapshotInFlightMax{0};
+    // Neutral runtime snapshot helper / execution-gate stats.
+    uint64_t RelayRuntimeSnapshotInFlight{0};
+    uint64_t RelayRuntimeSnapshotInFlightMax{0};
+    uint64_t RelayRuntimeSnapshotAcquireCount{0};
+    uint64_t RelayRuntimeSnapshotFailureCount{0};
+    uint64_t RelayRuntimeSnapshotStopWaitCount{0};
+    uint64_t RelayRuntimeSnapshotStopWaitNanos{0};
+    uint64_t RelaySnapshotExecutionBusy{0};
+    uint64_t RelaySnapshotExecutionOutstanding{0};
+    uint64_t RelaySnapshotExecutionWaitCount{0};
+    uint64_t RelaySnapshotExecutionWaitNanos{0};
+    uint64_t RelaySnapshotExecutionDeadlineTimeouts{0};
+    uint64_t RelaySnapshotExecutionDetachedLateCommands{0};
     uint64_t TcpReadBufferAcquireFailures{0};
     uint64_t TcpReadBufferAcquirePendingBudgetFailures{0};
     uint64_t TcpReadBufferAcquireAllocFailures{0};

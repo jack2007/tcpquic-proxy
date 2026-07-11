@@ -762,11 +762,14 @@ public:
     TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers() const;
     TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot> SnapshotWorkers(
         std::chrono::steady_clock::time_point deadline) const;
+    TqRelayRuntimeSnapshotStats SnapshotSupportStats() const;
+    TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStats() const;
 
 #if defined(TQ_UNIT_TESTING)
     void SetFailStartWorkerIndexForTest(int32_t workerIndex);
     void SetBeforeWorkerSnapshotHookForTest(
         void (*hook)(TqDarwinRelayWorker*));
+    void FailNextWorkerRefMaterializationForTest() const;
     TqRelayRuntimeSnapshotExecutionGateStats SnapshotExecutionGateStatsForTest() const;
 #endif
 

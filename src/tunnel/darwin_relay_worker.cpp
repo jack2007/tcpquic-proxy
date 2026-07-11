@@ -5261,6 +5261,15 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot(
     return snapshot;
 }
 
+TqRelayRuntimeSnapshotStats TqDarwinRelayRuntime::SnapshotSupportStats() const {
+    return SnapshotSupport.Stats();
+}
+
+TqRelayRuntimeSnapshotExecutionGateStats
+TqDarwinRelayRuntime::SnapshotExecutionGateStats() const {
+    return SnapshotExecutionGate.Stats();
+}
+
 TqRelayRuntimeSnapshotResult<TqDarwinRelayWorkerSnapshot>
 TqDarwinRelayRuntime::SnapshotWorkers() const {
     return SnapshotWorkers(std::chrono::steady_clock::now() + std::chrono::seconds(5));
@@ -5340,6 +5349,10 @@ void TqDarwinRelayRuntime::SetBeforeWorkerSnapshotHookForTest(
     auto guard = AcquireRuntimeLock();
     assert(State == TqRelayRuntimeState::Stopped);
     BeforeWorkerSnapshotHookForTest = hook;
+}
+
+void TqDarwinRelayRuntime::FailNextWorkerRefMaterializationForTest() const {
+    SnapshotSupport.FailNextWorkerRefMaterializationForTest();
 }
 
 TqRelayRuntimeSnapshotExecutionGateStats
