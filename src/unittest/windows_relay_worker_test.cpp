@@ -257,8 +257,11 @@ bool StopRelayWorkerAndAssertZeroForTest(TqWindowsRelayWorker& worker) {
 }
 
 bool AssertGateTeardownZeroForTest(TqWindowsRelayWorker& worker) {
-    TqStreamLifetime::ResetLifecycleRegistriesForTest();
-    return AssertWorkerLifecycleZeroForTest(worker);
+    const bool ok = AssertWorkerLifecycleZeroForTest(worker);
+    if (ok) {
+        TqStreamLifetime::ResetLifecycleRegistriesForTest();
+    }
+    return ok;
 }
 
 void ReleaseTestStreamOwnerForLifecycleAssert(
@@ -2060,8 +2063,11 @@ bool TestWindowsRelayRegistrationPrepareRollbackForTest() {
     worker.Stop();
     TqCloseSocket(pair[0]);
     TqCloseSocket(pair[1]);
-    TqStreamLifetime::ResetLifecycleRegistriesForTest();
-    return ok && AssertWorkerLifecycleZeroForTest(worker);
+    const bool lifecycleOk = AssertWorkerLifecycleZeroForTest(worker);
+    if (lifecycleOk) {
+        TqStreamLifetime::ResetLifecycleRegistriesForTest();
+    }
+    return ok && lifecycleOk;
 }
 
 bool TestWindowsRelayRegistrationCommitRollbackForTest() {
@@ -2085,8 +2091,11 @@ bool TestWindowsRelayRegistrationCommitRollbackForTest() {
     owner.reset();
     worker.Stop();
     TqCloseSocket(pair[1]);
-    TqStreamLifetime::ResetLifecycleRegistriesForTest();
-    return ok && AssertWorkerLifecycleZeroForTest(worker);
+    const bool lifecycleOk = AssertWorkerLifecycleZeroForTest(worker);
+    if (lifecycleOk) {
+        TqStreamLifetime::ResetLifecycleRegistriesForTest();
+    }
+    return ok && lifecycleOk;
 }
 
 bool TestWindowsRelayHandleReuseControlIsolationForTest() {
@@ -2249,8 +2258,10 @@ bool TestWindowsRelayLifecycleMetricsObservabilityForTest() {
         result.StopControl->Generation.load(std::memory_order_acquire));
     (void)WaitForTerminalOperationDrainForTest(worker, 2000);
     owner.reset();
-    TqStreamLifetime::ResetLifecycleRegistriesForTest();
-    return StopRelayWorkerAndAssertZeroForTest(worker);
+    if (worker.TestHasIocpForTest()) {
+        worker.Stop();
+    }
+    return AssertGateTeardownZeroForTest(worker);
 }
 
 void WindowsAfterManagedPublishHook(TqWindowsRelayWorker* worker, uint64_t relayId) {
@@ -3381,6 +3392,7 @@ bool TestWindowsRelayActiveReceiveLeaseFailFinRetryForTest() {
 }
 
 int RunWindowsRelayTask5GateTestsForTest() {
+    TqStreamLifetime::ResetLifecycleRegistriesForTest();
     {
         QUIC_API_TABLE fakeApi{};
         fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
@@ -3733,6 +3745,7 @@ void FinishClosingSocketRelayForTest(TqWindowsRelayWorker& worker, uint64_t rela
 }
 
 int RunWindowsRelayTask6GateTestsForTest() {
+    TqStreamLifetime::ResetLifecycleRegistriesForTest();
     {
         TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
         if (!TqSocketPair(pair)) {

@@ -134,6 +134,18 @@ std::shared_ptr<TqStreamLifetime> MakeWindowsRelayTestStreamOwner(MsQuicStream* 
     return owner;
 }
 
+void ReleaseWindowsRelayTestStreamOwnerForTest() {
+    if (!g_WindowsRelayTestStreamOwner) {
+        return;
+    }
+    const auto phase = g_WindowsRelayTestStreamOwner->GetPhase();
+    if (phase == TqStreamLifetime::Phase::Starting ||
+        phase == TqStreamLifetime::Phase::Started) {
+        (void)g_WindowsRelayTestStreamOwner->PublishTerminalAndTakeTarget();
+    }
+    g_WindowsRelayTestStreamOwner.reset();
+}
+
 TqWindowsRelayRegistration MakeWindowsRelayTestRegistration(
     TqSocketHandle tcpFd,
     MsQuicStream* stream,
@@ -972,6 +984,17 @@ void TqWindowsRelayWorker::FinalizeWorkerStopOnWorkerThread() {
     DrainMaintenanceQueueOnStop();
     {
         std::lock_guard<std::mutex> guard(Lock_);
+        for (const auto& entry : Relays_) {
+            const auto& relay = entry.second;
+            if (!relay || relay->StreamOwner == nullptr) {
+                continue;
+            }
+            const auto phase = relay->StreamOwner->GetPhase();
+            if (phase == TqStreamLifetime::Phase::Starting ||
+                phase == TqStreamLifetime::Phase::Started) {
+                (void)relay->StreamOwner->PublishTerminalAndTakeTarget();
+            }
+        }
         Relays_.clear();
         RetiredCallbacks_.clear();
     }
@@ -2593,6 +2616,9 @@ bool TqWindowsRelayWorker::RegisterRelayForTest(
         return RegisterRelayWithId(registration);
     }();
     FillWindowsRelayTestHandle(handle, result);
+    if (!result.Ok) {
+        ReleaseWindowsRelayTestStreamOwnerForTest();
+    }
     return result.Ok;
 }
 
@@ -2622,6 +2648,9 @@ bool TqWindowsRelayWorker::RegisterRelay(
         compressAlgo);
     const auto result = RegisterRelayWithId(registration);
     FillWindowsRelayTestHandle(handle, result);
+    if (!result.Ok) {
+        ReleaseWindowsRelayTestStreamOwnerForTest();
+    }
     return result.Ok;
 }
 
@@ -4273,6 +4302,13 @@ void TqWindowsRelayWorker::TryRetireRelay(
     }
     if (relay->StopPublished.exchange(true, std::memory_order_acq_rel)) {
         return;
+    }
+    if (relay->StreamOwner != nullptr) {
+        const auto phase = relay->StreamOwner->GetPhase();
+        if (phase == TqStreamLifetime::Phase::Starting ||
+            phase == TqStreamLifetime::Phase::Started) {
+            (void)relay->StreamOwner->PublishTerminalAndTakeTarget();
+        }
     }
     std::shared_ptr<WindowsStreamRelayBinding> bindingKeepAlive;
     if (relay->ManagedBinding) {
@@ -6103,7 +6139,6 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.TcpCancelRequestedCount += snapshot.TcpCancelRequestedCount;
         total.TcpCancelNotFoundCount += snapshot.TcpCancelNotFoundCount;
         total.TcpCancelErrorCount += snapshot.TcpCancelErrorCount;
-        total.StopDrainRemaining += snapshot.StopDrainRemaining;
         total.TerminalRetainedOwnerCount = std::max(
             total.TerminalRetainedOwnerCount, snapshot.TerminalRetainedOwnerCount);
         total.TerminalRetainedOldestAgeMs = std::max(
@@ -6149,6 +6184,15 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
             snapshot.ActiveRelayStates.begin(),
             snapshot.ActiveRelayStates.end());
     }
+    total.StopDrainRemaining =
+        total.ActiveRelays +
+        total.PendingOverlappedTcpRecvs +
+        total.PendingOverlappedTcpSends +
+        total.PendingOverlappedWorkerOps +
+        total.TerminalShutdownSinkPendingCount +
+        total.TerminalOperationPendingCount +
+        total.TerminalRetainedOwnerCount +
+        total.SendCompletionRegistryCount;
     return total;
 }
 

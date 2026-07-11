@@ -410,7 +410,7 @@ Per-relay 队列（`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFre
 | `windows_relay_terminal_shutdown_sink_pending_count` | shutdown sink 待 drain 记录数 |
 | `windows_relay_terminal_operation_pending_count` | 已 post 未消费的 terminal IOCP operation 数 |
 
-单元测试在 focused case 结束断言上述 pending/registry/retention 均归零，不以“进程未崩溃”为通过条件。Task 5/6 gate 在 `Stop()` 后调用 `AssertGateTeardownZeroForTest`（worker-local + 全局 registry/retention）；`TestCreateIocpForCallbackPostOnly` 的 FIN lease-retry case（gate 641）仅断言 inline pending receive 归零，因无 worker 线程运行完整 stop-drain，`ActiveRelays` 由 `FinalizeTestStreamOwnerForGateTeardownForTest` + terminal IOCP drain 单独收敛。
+单元测试在 focused case 结束断言上述 pending/registry/retention 均归零，不以“进程未崩溃”为通过条件。Task 5/6 gate 在 `Stop()` 后调用 `AssertGateTeardownZeroForTest`：先断言 worker-local 与全局 registry/retention 归零，通过后再 `ResetLifecycleRegistriesForTest` 做用例隔离；断言失败时不 reset，保留诊断现场。`TestCreateIocpForCallbackPostOnly` 的 FIN lease-retry case（gate 641）仅断言 inline pending receive 归零，因无 worker 线程运行完整 stop-drain，`ActiveRelays` 由 `FinalizeTestStreamOwnerForGateTeardownForTest` + terminal IOCP drain 单独收敛。多 worker runtime 聚合 `stop_drain_remaining` 时，对 worker-local 分量求和、对全局 registry/retention 取 max 一次后重算，避免重复计入。
 
 ### 8.2 已知测试债务（`#if 0` legacy）
 
