@@ -236,6 +236,7 @@ struct TqDarwinRelayWorkerConfig {
     // DetachActiveSendOperationsForStop, before WorkerThreadId is cleared.
     // Used to enqueue mixed events that Stop must purge off-thread (P2-8).
     void (*BeforeWorkerExitHookForTest)(TqDarwinRelayWorker*){nullptr};
+#endif
 #if defined(TQ_UNIT_TESTING)
     // Blocks Snapshot dispatch on the worker thread until the hook returns.
     void (*BeforeSnapshotHookForTest)(TqDarwinRelayWorker*){nullptr};
@@ -243,7 +244,6 @@ struct TqDarwinRelayWorkerConfig {
     bool FailNextSnapshotLocalForTest{false};
     // Start() returns false once for staged-runtime failure injection.
     bool FailStartForTest{false};
-#endif
 #endif
 };
 

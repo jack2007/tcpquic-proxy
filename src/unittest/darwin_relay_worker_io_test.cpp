@@ -1041,7 +1041,7 @@ void DarwinRuntimeSnapshotWorkersIdentityAndCapacity() {
 
     TqTuningConfig tuning{};
     tuning.RelayWorkerCount = 2;
-    tuning.RelayEventQueueCapacity = 2048;
+    tuning.RelayEventQueueCapacity = 1000; // non-power-of-2 → normalized 1024
     CHECK(runtime.Start(tuning));
     CHECK(runtime.Start(tuning)); // Running Start is idempotent
 
@@ -1051,12 +1051,15 @@ void DarwinRuntimeSnapshotWorkersIdentityAndCapacity() {
     CHECK(workers.Workers.size() == 2);
     CHECK(workers.Workers[0].WorkerIndex == 0);
     CHECK(workers.Workers[1].WorkerIndex == 1);
-    CHECK(workers.Workers[0].EventQueueCapacity == 2048);
-    CHECK(workers.Workers[1].EventQueueCapacity == 2048);
+    const uint64_t expectedCapacity =
+        TqDarwinRelayEventQueue::NormalizeCapacityForTest(1000);
+    CHECK(expectedCapacity == 1024);
+    CHECK(workers.Workers[0].EventQueueCapacity == expectedCapacity);
+    CHECK(workers.Workers[1].EventQueueCapacity == expectedCapacity);
 
     const auto aggregate = runtime.Snapshot();
     CHECK(aggregate.SnapshotComplete);
-    CHECK(aggregate.EventQueueCapacity == 2048);
+    CHECK(aggregate.EventQueueCapacity == expectedCapacity);
 
     runtime.Stop();
     const auto stoppedWorkers = runtime.SnapshotWorkers();
@@ -1067,42 +1070,79 @@ void DarwinRuntimeSnapshotWorkersIdentityAndCapacity() {
     CHECK(stoppedAggregate.SnapshotComplete);
 }
 
-void DarwinRuntimeRelayHandleWorkerIndexIdentity() {
+void DarwinRuntimeTqRelayStartSetsWorkerIndexIdentity() {
+    // Production path: TqRelayStartManaged publishes DarwinWorkerIndex from the
+    // accepting worker slot. Do not assign the field manually.
     auto& runtime = TqDarwinRelayRuntime::Instance();
     runtime.Stop();
 
+    ScopedFakeMsQuicApi fakeApi;
+
     TqTuningConfig tuning{};
     tuning.RelayWorkerCount = 2;
-    tuning.RelayEventQueueCapacity = 2048;
-    CHECK(runtime.Start(tuning));
+    tuning.RelayEventQueueCapacity = 1000;
 
-    uint32_t seenIndexes[2]{0, 0};
-    uint32_t seenCount = 0;
-    for (uint32_t i = 0; i < 4; ++i) {
-        TqDarwinRelayWorker* worker = runtime.PickWorker();
-        CHECK(worker != nullptr);
-        const uint32_t index = worker->WorkerIndex();
-        CHECK(index < 2);
-        if (seenIndexes[index] == 0) {
-            seenIndexes[index] = 1;
-            ++seenCount;
-        }
+    struct StartedRelay {
+        int Fds[2]{TqInvalidSocket, TqInvalidSocket};
+        alignas(MsQuicStream) unsigned char StreamStorage[sizeof(MsQuicStream)]{};
+        MsQuicStream* Stream{nullptr};
+        std::shared_ptr<TqStreamLifetime> Owner;
+        TqRelayHandle Handle{};
+    };
 
-        // Mirror relay.cpp publish path: slot identity lives on the handle.
-        TqRelayHandle handle{};
-        handle.Backend = TqRelayBackendType::DarwinWorker;
-        handle.DarwinWorker = worker;
-        handle.DarwinRelayId = 1000 + i;
-        handle.DarwinWorkerIndex = index;
-        CHECK(handle.DarwinWorkerIndex == index);
-        CHECK(handle.DarwinWorkerIndex == worker->WorkerIndex());
+    StartedRelay relays[2]{};
+    uint32_t seenMask = 0;
+    for (uint32_t i = 0; i < 2; ++i) {
+        auto& relay = relays[i];
+        CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, relay.Fds) == 0);
+        relay.Stream = reinterpret_cast<MsQuicStream*>(relay.StreamStorage);
+        std::memset(relay.Stream, 0, sizeof(MsQuicStream));
+        relay.Stream->Callback = MsQuicStream::NoOpCallback;
+        relay.Stream->Handle =
+            reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0xE300 + i));
+        relay.Owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+        CHECK(relay.Owner != nullptr);
+        CHECK(relay.Owner->InstallStreamForTest(relay.Stream));
+
+        bool tcpFdConsumed = false;
+        CHECK(TqRelayStartManaged(
+            relay.Fds[1],
+            relay.Stream,
+            relay.Owner,
+            nullptr,
+            nullptr,
+            &relay.Handle,
+            tuning,
+            TqCompressAlgo::None,
+            &tcpFdConsumed));
+        CHECK(tcpFdConsumed);
+        CHECK(relay.Handle.Backend == TqRelayBackendType::DarwinWorker);
+        CHECK(relay.Handle.DarwinWorker != nullptr);
+        CHECK(relay.Handle.DarwinRelayId != 0);
+        // Field must come from production start, matching the worker slot.
+        CHECK(relay.Handle.DarwinWorkerIndex == relay.Handle.DarwinWorker->WorkerIndex());
+        CHECK(relay.Handle.DarwinWorkerIndex < 2);
+        seenMask |= (1u << relay.Handle.DarwinWorkerIndex);
     }
-    CHECK(seenCount == 2);
+    CHECK(seenMask == 0x3u);
+    CHECK(relays[0].Handle.DarwinWorkerIndex != relays[1].Handle.DarwinWorkerIndex);
 
     const auto snapshots = runtime.SnapshotWorkers();
+    CHECK(snapshots.SnapshotComplete);
     CHECK(snapshots.Workers.size() == 2);
     CHECK(snapshots.Workers[0].WorkerIndex == 0);
     CHECK(snapshots.Workers[1].WorkerIndex == 1);
+
+    for (auto& relay : relays) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        CHECK(relay.Owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+        TqRelayStop(&relay.Handle);
+        CHECK(relay.Handle.DarwinWorkerIndex == 0);
+        CHECK(relay.Handle.DarwinWorker == nullptr);
+        relay.Owner->ReleaseStreamForTest();
+        ::close(relay.Fds[0]);
+    }
     runtime.Stop();
 }
 
@@ -7073,7 +7113,7 @@ int main() {
     SnapshotLocalThrowKeepsWorkerAliveAndReturnsIncomplete();
     StopPurgesDetachedSnapshotAndReleasesPermit();
     DarwinRuntimeSnapshotWorkersIdentityAndCapacity();
-    DarwinRuntimeRelayHandleWorkerIndexIdentity();
+    DarwinRuntimeTqRelayStartSetsWorkerIndexIdentity();
     DarwinRuntimeSnapshotTimeoutHoldsPermitAndBlocksSecondRequest();
     DarwinRuntimeStopWaitsForSnapshotLease();
     DarwinRuntimeStartFailureRollsBackAndRetryUsesFullRange();
