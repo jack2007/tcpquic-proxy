@@ -122,6 +122,7 @@ set(TCPQUIC_PROXY_SOURCES
     tunnel/tcp_dialer.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
     tunnel/tunnel_registry.cpp
     ingress/http_connect_server.cpp
     ingress/proxy_auth.cpp
@@ -306,6 +307,7 @@ set_property(TARGET tcpquic_relay_runtime_snapshot_test APPEND PROPERTY BUILD_RP
 add_tcpquic_executable(tcpquic_stream_lifetime_test
     unittest/stream_lifetime_test.cpp
     tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
 )
 tcpquic_target_include_dirs(tcpquic_stream_lifetime_test)
 target_link_libraries(tcpquic_stream_lifetime_test PRIVATE Threads::Threads)
@@ -467,6 +469,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/stream_lifetime.cpp
+        tunnel/terminal_convergence.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         config/tuning.cpp
@@ -484,6 +487,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/trace_proxy_stub.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/stream_lifetime.cpp
+        tunnel/terminal_convergence.cpp
         tunnel/relay_buffer.cpp
         tunnel/relay_alloc.cpp
         protocol/compress.cpp
@@ -805,6 +809,7 @@ set(TCPQUIC_TUNNEL_TEST_SOURCES
     runtime/speed_test.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
     config/tuning.cpp
@@ -888,6 +893,7 @@ set_property(TARGET tcpquic_tcp_tunnel_test PROPERTY FOLDER "tools")
 
 add_executable(tcpquic_quic_session_reconnect_test
     unittest/quic_session_reconnect_test.cpp
+    tunnel/terminal_convergence.cpp
     protocol/control_protocol.cpp
     protocol/quic_address.cpp
     protocol/quic_session.cpp
@@ -1067,6 +1073,7 @@ set_property(TARGET tcpquic_admin_http_test APPEND PROPERTY BUILD_RPATH "$ORIGIN
 
 set(TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES
     unittest/router_runtime_test.cpp
+    tunnel/terminal_convergence.cpp
     runtime/router_runtime.cpp
     runtime/relay_metrics.cpp
     runtime/server_metrics.cpp
@@ -1137,6 +1144,7 @@ set_property(TARGET tcpquic_tunnel_registry_test APPEND PROPERTY BUILD_RPATH "$O
 
 add_executable(tcpquic_server_admin_test
     unittest/server_admin_test.cpp
+    tunnel/terminal_convergence.cpp
     runtime/admin_memory.cpp
     runtime/admin_config.cpp
     runtime/memory_stats.cpp

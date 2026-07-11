@@ -252,7 +252,14 @@ struct AdoptedManagedHarness {
             target = std::make_shared<CountingTarget>();
         }
         Raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7000 + g_fakeCloseCount));
-        Owner = TqStreamLifetime::AdoptAccepted(Raw, std::move(target));
+        const uint64_t id = reinterpret_cast<uintptr_t>(Raw);
+        Owner = TqStreamLifetime::AdoptAccepted(
+            Raw,
+            std::move(target),
+            TqTerminalIdentity{
+                id, id, id, id,
+                TqTunnelRole::ServerOpen, TqRelayBackendType::DarwinWorker},
+            5);
         if (Owner == nullptr) {
             return false;
         }
@@ -6036,7 +6043,13 @@ void ManagedShutdownApiFailureRetainsDesiredIntent() {
     ScopedFakeMsQuicApi fakeApi;
     const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x6300));
     auto target = std::make_shared<CountingTarget>();
-    auto owner = TqStreamLifetime::AdoptAccepted(raw, target);
+    auto owner = TqStreamLifetime::AdoptAccepted(
+        raw,
+        target,
+        TqTerminalIdentity{
+            0x6300, 0x6300, 0x6300, 0x6300,
+            TqTunnelRole::ServerOpen, TqRelayBackendType::DarwinWorker},
+        5);
     CHECK(owner != nullptr);
     g_fakeShutdownFail = true;
     CHECK(QUIC_FAILED(owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::GracefulSend)));
@@ -6054,7 +6067,13 @@ void ManagedShutdownDuplicateGracefulUpgradesAbort() {
     ScopedFakeMsQuicApi fakeApi;
     const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x5000));
     auto target = std::make_shared<CountingTarget>();
-    auto owner = TqStreamLifetime::AdoptAccepted(raw, target);
+    auto owner = TqStreamLifetime::AdoptAccepted(
+        raw,
+        target,
+        TqTerminalIdentity{
+            0x5000, 0x5000, 0x5000, 0x5000,
+            TqTunnelRole::ServerOpen, TqRelayBackendType::DarwinWorker},
+        5);
     CHECK(owner != nullptr);
     CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::GracefulSend)));
     CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::GracefulSend)));
@@ -6072,7 +6091,13 @@ void ManagedShutdownTerminalWinsOverDesired() {
     ScopedFakeMsQuicApi fakeApi;
     const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x5100));
     auto target = std::make_shared<CountingTarget>();
-    auto owner = TqStreamLifetime::AdoptAccepted(raw, target);
+    auto owner = TqStreamLifetime::AdoptAccepted(
+        raw,
+        target,
+        TqTerminalIdentity{
+            0x5100, 0x5100, 0x5100, 0x5100,
+            TqTunnelRole::ServerOpen, TqRelayBackendType::DarwinWorker},
+        5);
     CHECK(owner != nullptr);
     CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::GracefulSend)));
     QUIC_STREAM_EVENT terminal{};

@@ -46,6 +46,7 @@ constexpr auto TqOpenTimeout = std::chrono::seconds(10);
 constexpr int TqTcpDialTimeoutMs = 10 * 1000;
 
 std::atomic<TqServerDialReactor*> g_serverDialReactor{nullptr};
+std::atomic<uint64_t> g_nextTerminalIdentity{1};
 #if defined(TCPQUIC_TUNNEL_TESTING)
 std::atomic<bool> g_failNextAcceptedTargetAllocation{false};
 #endif
@@ -141,6 +142,27 @@ struct TqTunnelSendContext {
 
 using TqStableCallbackTarget = TqStreamCallbackTarget;
 
+TqTerminalIdentity TqMakeTerminalIdentity(
+    MsQuicConnection* connection,
+    TqTunnelRole role) noexcept {
+    const uint64_t id = g_nextTerminalIdentity.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t observedConnectionId = role == TqTunnelRole::ClientOpen
+        ? TqLookupClientTraceConnId(connection)
+        : TqLookupServerConnectionId(connection);
+    const uint64_t connectionId = observedConnectionId != 0 ? observedConnectionId : id;
+#if defined(__linux__)
+    constexpr TqRelayBackend backend = TqRelayBackendType::LinuxWorker;
+#elif defined(__APPLE__)
+    constexpr TqRelayBackend backend = TqRelayBackendType::DarwinWorker;
+#elif defined(_WIN32)
+    constexpr TqRelayBackend backend = TqRelayBackendType::WindowsWorker;
+#else
+    constexpr TqRelayBackend backend = TqRelayBackendType::None;
+#endif
+    return TqTerminalIdentity{
+        id, id, connectionId, connectionId, role, backend};
+}
+
 void TqSubmitStreamShutdown(
     const std::shared_ptr<TqStreamLifetime>& owner,
     MsQuicStream* stream,
@@ -152,11 +174,6 @@ void TqSubmitStreamShutdown(
         (void)stream->Shutdown(0, legacyFlags);
     }
 }
-
-enum class TqTunnelRole {
-    ClientOpen,
-    ServerOpen,
-};
 
 TqCompressAlgo TqAlgoFromFlags(uint8_t flags) {
     if ((flags & TQ_FLAG_COMPRESS) == 0) {
@@ -2070,7 +2087,11 @@ TqTunnelStartResult TqStartClientTunnelInternal(
     auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
         TqTunnelContext::Callback, context);
     auto streamOwner = TqStreamLifetime::OpenOutgoing(
-        *conn, QUIC_STREAM_OPEN_FLAG_NONE, callbackTarget);
+        *conn,
+        QUIC_STREAM_OPEN_FLAG_NONE,
+        callbackTarget,
+        TqMakeTerminalIdentity(conn, TqTunnelRole::ClientOpen),
+        5);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
         delete context;
@@ -2202,7 +2223,11 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
         TqTunnelContext::Callback, context);
     auto streamOwner = TqStreamLifetime::OpenOutgoing(
-        *conn, QUIC_STREAM_OPEN_FLAG_NONE, callbackTarget);
+        *conn,
+        QUIC_STREAM_OPEN_FLAG_NONE,
+        callbackTarget,
+        TqMakeTerminalIdentity(conn, TqTunnelRole::ClientOpen),
+        5);
     if (streamOwner == nullptr) {
         callbackTarget->Detach();
         delete context;
@@ -2754,7 +2779,11 @@ void TqHandleServerIncomingStreamInternal(
         TqStreamLifetime::RejectAccepted(rawStream);
         return;
     }
-    auto streamOwner = TqStreamLifetime::AdoptAccepted(rawStream, target);
+    auto streamOwner = TqStreamLifetime::AdoptAccepted(
+        rawStream,
+        target,
+        TqMakeTerminalIdentity(conn, TqTunnelRole::ServerOpen),
+        5);
     if (streamOwner == nullptr) {
         target->Detach();
         delete dispatcher;

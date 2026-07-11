@@ -11,6 +11,7 @@ namespace {
 std::mutex g_terminalRetentionLock;
 struct TerminalRetention {
     std::shared_ptr<TqStreamLifetime> Owner;
+    std::shared_ptr<TqTerminalLedger> Ledger;
     std::chrono::steady_clock::time_point Since;
 };
 std::unordered_map<TqStreamLifetime*, TerminalRetention> g_terminalRetentions;
@@ -34,8 +35,19 @@ std::atomic<uint64_t> g_sendCompletionDuplicateClaims{0};
 std::atomic<uint64_t> g_detachedOwnerDestroyCount{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextRegisterSendCompletion{false};
+std::atomic<uint64_t> g_nextTestTerminalId{1};
 #endif
 thread_local TqStreamCallbackTarget* g_activeCallbackTarget = nullptr;
+
+bool SameTerminalIdentity(
+    const TqTerminalIdentity& left,
+    const TqTerminalIdentity& right) noexcept {
+    return left.StreamId == right.StreamId &&
+           left.TunnelId == right.TunnelId &&
+           left.ConnectionId == right.ConnectionId &&
+           left.ConnectionGeneration == right.ConnectionGeneration &&
+           left.Role == right.Role && left.Backend == right.Backend;
+}
 
 QUIC_STATUS QUIC_API EmergencyAcceptedCallback(
     HQUIC stream,
@@ -101,16 +113,24 @@ bool TqStreamLifetime::InstallStream(MsQuicStream* stream) noexcept {
 std::shared_ptr<TqStreamLifetime> TqStreamLifetime::OpenOutgoing(
     const MsQuicConnection& connection,
     QUIC_STREAM_OPEN_FLAGS flags,
-    std::shared_ptr<Target> initialTarget) noexcept {
+    std::shared_ptr<TqStreamLifetime::Target> initialTarget,
+    TqTerminalIdentity identity,
+    uint32_t watchdogSeconds) noexcept {
     auto owner = std::shared_ptr<TqStreamLifetime>(
         new (std::nothrow) TqStreamLifetime(Phase::CreatedNotStarted, std::move(initialTarget)));
     if (!owner) {
         return nullptr;
     }
+    owner->BindTerminalIdentity(identity, watchdogSeconds);
+    if (owner->TerminalLedger() == nullptr) {
+        return nullptr;
+    }
+    owner->RetainUntilTerminal();
     auto* stream = new (std::nothrow) MsQuicStream(
         connection, flags, CleanUpManual, Callback, owner.get());
     if (!owner->InstallStream(stream)) {
         delete stream;
+        owner->ReleaseTerminalRetention();
         return nullptr;
     }
     return owner;
@@ -118,13 +138,20 @@ std::shared_ptr<TqStreamLifetime> TqStreamLifetime::OpenOutgoing(
 
 std::shared_ptr<TqStreamLifetime> TqStreamLifetime::AdoptAccepted(
     HQUIC rawStream,
-    std::shared_ptr<Target> initialTarget) noexcept {
+    std::shared_ptr<TqStreamLifetime::Target> initialTarget,
+    TqTerminalIdentity identity,
+    uint32_t watchdogSeconds) noexcept {
     if (rawStream == nullptr) {
         return nullptr;
     }
     auto owner = std::shared_ptr<TqStreamLifetime>(
         new (std::nothrow) TqStreamLifetime(Phase::Started, std::move(initialTarget)));
     if (!owner) {
+        RejectAccepted(rawStream);
+        return nullptr;
+    }
+    owner->BindTerminalIdentity(identity, watchdogSeconds);
+    if (owner->TerminalLedger() == nullptr) {
         RejectAccepted(rawStream);
         return nullptr;
     }
@@ -148,6 +175,12 @@ std::shared_ptr<TqStreamLifetime> TqStreamLifetime::CreateForTest(
     auto owner = std::shared_ptr<TqStreamLifetime>(
         new TqStreamLifetime(phase, std::move(initialTarget)));
     if (phase == Phase::Starting || phase == Phase::Started) {
+        const uint64_t id = g_nextTestTerminalId.fetch_add(1, std::memory_order_relaxed);
+        owner->BindTerminalIdentity(
+            TqTerminalIdentity{
+                id, id, id, id,
+                TqTunnelRole::ClientOpen, TqRelayBackendType::LinuxWorker},
+            5);
         owner->RetainUntilTerminal();
     }
     return owner;
@@ -492,6 +525,7 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
             DesiredReceiveAbort_ = true;
             break;
         case ShutdownIntent::AbortBoth:
+        case ShutdownIntent::AbortBothImmediate:
             DesiredSendShutdown_ = 2;
             DesiredReceiveAbort_ = true;
             break;
@@ -663,11 +697,46 @@ TqStreamLifetime::RouteSnapshot TqStreamLifetime::PublishTerminalAndTakeTarget()
 void TqStreamLifetime::RetainUntilTerminal() {
     std::lock_guard<std::mutex> guard(g_terminalRetentionLock);
     if (!TerminalRetained_) {
+        if (TerminalLedger_ == nullptr) {
+            TqRecordTerminalExactlyOnceViolation();
+            return;
+        }
         g_terminalRetentions.emplace(
             this,
-            TerminalRetention{shared_from_this(), std::chrono::steady_clock::now()});
+            TerminalRetention{
+                shared_from_this(), TerminalLedger_, std::chrono::steady_clock::now()});
         TerminalRetained_ = true;
     }
+}
+
+void TqStreamLifetime::BindTerminalIdentity(
+    TqTerminalIdentity identity,
+    uint32_t watchdogSeconds) noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    if (TerminalLedger_ != nullptr) {
+        const auto bound = TerminalLedger_->Identity();
+        if (!SameTerminalIdentity(bound, identity) ||
+            TerminalWatchdogSeconds_ != watchdogSeconds) {
+            TqRecordTerminalExactlyOnceViolation();
+        }
+        return;
+    }
+    if (watchdogSeconds < 5 || watchdogSeconds > 30) {
+        TqRecordTerminalExactlyOnceViolation();
+        return;
+    }
+    try {
+        TerminalLedger_ = std::make_shared<TqTerminalLedger>(identity);
+        TerminalWatchdogSeconds_ = watchdogSeconds;
+    } catch (...) {
+        TerminalLedger_.reset();
+    }
+}
+
+std::shared_ptr<TqTerminalLedger>
+TqStreamLifetime::TerminalLedger() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return TerminalLedger_;
 }
 
 void TqStreamLifetime::ReleaseTerminalRetention() {

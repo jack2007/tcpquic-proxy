@@ -4,8 +4,11 @@
 #include <atomic>
 #include <memory>
 #include <condition_variable>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
+
+#define CHECK(condition) do { if (!(condition)) std::abort(); } while (false)
 
 const MsQuicApi* MsQuic = nullptr;
 
@@ -75,7 +78,44 @@ public:
 
 } // namespace
 
+void TestTerminalPublicInterfaceDefaults() {
+    TqTerminalIdentity identity{};
+    identity.StreamId = 17;
+    identity.TunnelId = 133;
+    identity.ConnectionId = 2;
+    identity.ConnectionGeneration = 7;
+    identity.Role = TqTunnelRole::ClientOpen;
+    identity.Backend = TqRelayBackendType::LinuxWorker;
+    auto owner = TqStreamLifetime::CreateForTest(
+        TqStreamLifetime::Phase::CreatedNotStarted);
+    owner->BindTerminalIdentity(identity, 5);
+    auto ledger = owner->TerminalLedger();
+    CHECK(ledger != nullptr);
+    const auto snapshot = ledger->Snapshot(std::chrono::steady_clock::now());
+    CHECK(snapshot.Identity.StreamId == 17);
+    CHECK(snapshot.Phase == TerminalPhase::Active);
+    CHECK(snapshot.ShutdownAttempt == 0);
+    CHECK(snapshot.Watchdog == TqTerminalWatchdogState::Idle);
+    CHECK(snapshot.LastStreamEvent == TqTerminalEvent::None);
+    CHECK(!snapshot.ConnectionEscalated);
+}
+
+void TestBindTerminalIdentityCreatesExactlyOneLedger() {
+    auto owner = TqStreamLifetime::CreateForTest(
+        TqStreamLifetime::Phase::CreatedNotStarted);
+    const TqTerminalIdentity identity{
+        17, 133, 2, 7, TqTunnelRole::ClientOpen,
+        TqRelayBackendType::LinuxWorker};
+    owner->BindTerminalIdentity(identity, 5);
+    const auto first = owner->TerminalLedger();
+    owner->BindTerminalIdentity(identity, 5);
+    CHECK(first != nullptr);
+    CHECK(owner->TerminalLedger().get() == first.get());
+}
+
 int main() {
+    TestTerminalPublicInterfaceDefaults();
+    TestBindTerminalIdentityCreatesExactlyOneLedger();
     {
         int context = 1;
         auto target = std::make_shared<TqStreamCallbackTarget>(BlockingCallback, &context);
@@ -190,7 +230,13 @@ int main() {
 
         const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
         auto target = std::make_shared<CountingTarget>();
-        auto owner = TqStreamLifetime::AdoptAccepted(raw, target);
+        auto owner = TqStreamLifetime::AdoptAccepted(
+            raw,
+            target,
+            TqTerminalIdentity{
+                1, 1, 1, 1,
+                TqTunnelRole::ServerOpen, TqRelayBackendType::LinuxWorker},
+            5);
         if (!owner) return 25;
         if (owner->StreamForInitialization()->CleanUpMode != CleanUpManual) return 26;
         if (QUIC_FAILED(owner->RequestShutdown(

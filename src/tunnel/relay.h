@@ -21,6 +21,8 @@ enum class TqRelayBackendType {
     DarwinWorker,
 };
 
+using TqRelayBackend = TqRelayBackendType;
+
 // Application error code for QUIC_STREAM_EVENT_CANCEL_ON_LOSS (62-bit wire range).
 inline constexpr uint64_t TqRelayStreamErrorCancelOnLoss = 0x54510001ull;
 

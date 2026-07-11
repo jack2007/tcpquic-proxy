@@ -1787,7 +1787,29 @@ void TqHandleServerSpeedControlStream(
         return;
     }
 
-    auto owner = TqStreamLifetime::AdoptAccepted(rawStream, nullptr);
+    static std::atomic<uint64_t> nextTerminalId{1};
+    const uint64_t terminalId = nextTerminalId.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t connectionId = terminalId;
+    auto owner = TqStreamLifetime::AdoptAccepted(
+        rawStream,
+        nullptr,
+        TqTerminalIdentity{
+            terminalId,
+            terminalId,
+            connectionId,
+            connectionId,
+            TqTunnelRole::ServerOpen,
+#if defined(__linux__)
+            TqRelayBackendType::LinuxWorker
+#elif defined(__APPLE__)
+            TqRelayBackendType::DarwinWorker
+#elif defined(_WIN32)
+            TqRelayBackendType::WindowsWorker
+#else
+            TqRelayBackendType::None
+#endif
+        },
+        5);
     if (owner == nullptr) {
         return;
     }

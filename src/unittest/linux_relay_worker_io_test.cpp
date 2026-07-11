@@ -4536,7 +4536,13 @@ int main() {
         if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5021;
 
         const HQUIC raw = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x9876));
-        auto owner = TqStreamLifetime::AdoptAccepted(raw, nullptr);
+        auto owner = TqStreamLifetime::AdoptAccepted(
+            raw,
+            nullptr,
+            TqTerminalIdentity{
+                0x9876, 0x9876, 0x9876, 0x9876,
+                TqTunnelRole::ServerOpen, TqRelayBackendType::LinuxWorker},
+            5);
         if (owner == nullptr) return 5022;
         MsQuicStream* stream = owner->StreamForInitialization();
         const auto originalCallback = stream->Callback;

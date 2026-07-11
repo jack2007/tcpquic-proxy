@@ -17,6 +17,11 @@ class TqEphemeralTargetAuthorizer;
 class TqServerDialReactor;
 class TqServerSpeedTestController;
 
+enum class TqTunnelRole {
+    ClientOpen,
+    ServerOpen,
+};
+
 struct TunnelRequest {
     uint8_t AddrType;
     char Host[256];

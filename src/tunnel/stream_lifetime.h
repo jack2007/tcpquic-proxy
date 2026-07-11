@@ -1,5 +1,6 @@
 #pragma once
 
+#include "terminal_convergence.h"
 #include <msquic.hpp>
 
 #include <cstdint>
@@ -28,6 +29,7 @@ public:
         AbortSend,
         AbortReceive,
         AbortBoth,
+        AbortBothImmediate,
     };
 
     class Target {
@@ -107,11 +109,15 @@ public:
     static std::shared_ptr<TqStreamLifetime> OpenOutgoing(
         const MsQuicConnection& connection,
         QUIC_STREAM_OPEN_FLAGS flags,
-        std::shared_ptr<Target> initialTarget) noexcept;
+        std::shared_ptr<TqStreamLifetime::Target> initialTarget,
+        TqTerminalIdentity identity,
+        uint32_t watchdogSeconds) noexcept;
 
     static std::shared_ptr<TqStreamLifetime> AdoptAccepted(
         HQUIC rawStream,
-        std::shared_ptr<Target> initialTarget) noexcept;
+        std::shared_ptr<TqStreamLifetime::Target> initialTarget,
+        TqTerminalIdentity identity,
+        uint32_t watchdogSeconds) noexcept;
 
 #if defined(TQ_UNIT_TESTING)
     // 状态机测试不依赖 MsQuic runtime；生产 factory 始终提供真实 wrapper。
@@ -168,6 +174,15 @@ public:
     void DenyReceiveApiLeasesForTest(uint32_t count) noexcept;
 #endif
     QUIC_STATUS RequestShutdown(ShutdownIntent intent, uint64_t errorCode = 0) noexcept;
+    void BindTerminalIdentity(
+        TqTerminalIdentity identity,
+        uint32_t watchdogSeconds = 5) noexcept;
+    std::shared_ptr<TqTerminalLedger> TerminalLedger() const noexcept;
+    TerminalPhase GetTerminalPhase() const noexcept;
+    TqTerminalShutdownResult BeginTerminalShutdown(
+        uint64_t errorCode,
+        std::shared_ptr<TqStreamLifetime::Target> terminalSink,
+        std::shared_ptr<TqTerminalEscalation> escalation) noexcept;
 
     bool PublishTarget(
         uint64_t expectedGeneration,
@@ -214,6 +229,14 @@ private:
     bool ReservedReceiveAbort_{false};
     bool SendDirectionComplete_{false};
     uint64_t CancelOnLossErrorCode_{0};
+    std::shared_ptr<TqTerminalLedger> TerminalLedger_;
+    TerminalPhase TerminalPhase_{TerminalPhase::Active};
+    std::shared_ptr<TqTerminalEscalation> TerminalEscalation_;
+    uint64_t TerminalErrorCode_{0};
+    uint32_t TerminalShutdownAttempt_{0};
+    bool TerminalRetryOwned_{false};
+    uint32_t TerminalWatchdogSeconds_{5};
+    std::shared_ptr<Target> TerminalSink_;
     std::vector<std::unique_ptr<uint64_t>> SendKeyEnvelopes_;
 #if defined(TQ_UNIT_TESTING)
     uint32_t DenyReceiveApiLeasesForTest_{0};
