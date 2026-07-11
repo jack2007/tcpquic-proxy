@@ -20,19 +20,48 @@ macOS relay 后端由 `TqDarwinRelayRuntime` 管理。runtime 按配置启动多
 flowchart TD
     A["TqTunnelContext::StartRelay(flags)"] --> B["按 flags 创建 compressor/decompressor"]
     B --> C["TqRelayStart(tcpFd, stream, tuning, algo)"]
-    C --> D["TqRelayRegisterActive()"]
+    C --> D["新建 TqRelayControl(generation N) + TqRelayRegisterActive()"]
     D --> E["TqApplyRelayPoolBudget(tuning, activeRelays)"]
     E --> F["TqDarwinRelayRuntime::Start(tuning)"]
     F --> G["读取 tuning.Relay* 平台中性字段组装 TqDarwinRelayWorkerConfig"]
     G --> H["每个 worker: kqueue() + EVFILT_USER wake + thread"]
     H --> I["TqDarwinRelayRuntime::PickWorker()"]
-    I --> J["TqDarwinRelayWorker::RegisterRelayWithId()"]
+    I --> J["prepare token + PublishTarget + commit"]
     J --> K["worker event: RegisterRelayWithIdLocal()"]
     K --> L["TCP fd non-blocking + SO_NOSIGPIPE"]
-    L --> M["kqueue 注册 EVFILT_READ/WRITE"]
-    M --> N["stream.Callback = TqDarwinRelayWorker::StreamCallback"]
-    N --> O["TqRelayHandle.Backend = DarwinWorker"]
+    L --> M["kqueue 先 EV_ADD|EV_DISABLE，commit 后 EV_ENABLE"]
+    M --> N["binding identity 在 publish 前一次初始化"]
+    N --> O["caller 发布 TqRelayHandle.Backend/DarwinWorker/id"]
 ```
+
+### Darwin control / registration / stop 生命周期
+
+```mermaid
+sequenceDiagram
+    participant Caller as tunnel caller
+    participant Ctrl as TqRelayControl
+    participant Owner as TqStreamLifetime
+    participant CB as MsQuic callback
+    participant W as Darwin worker
+    participant R as tunnel reaper
+
+    Caller->>Ctrl: start 新建 generation N
+    Caller->>Owner: prepare（FD inactive）
+    Owner->>CB: PublishTarget（identity 完整）
+    CB-->>W: precommit RECEIVE（有界）
+    W->>W: commit 线性化 Prepared->Active
+    alt terminal-before-commit
+        W-->>Caller: rollback Ok=false
+    else success
+        Caller->>Caller: 发布 public handle
+    end
+    CB->>Owner: terminal 或 ActiveShutdown
+    Owner->>Ctrl: SignalStop(N)
+    Ctrl->>R: stop 可见
+    R->>Caller: TqRelayStop + accounting once
+```
+
+禁止模式：异步裸 `TqRelayHandle*`、publish 后 reset weak pointer、资源失败伪 terminal、无 reservation 的 completion key。
 
 当前 Darwin relay 读取 `TqTuningConfig` 内的平台中性 `Relay*` 字段：worker 数、事件预算、read chunk/batch、IOV、TCP write burst、per-tunnel pending bytes 和 QUIC receive complete batch 等都从中性字段进入 worker config。旧 `LinuxRelay*` 字段仍作为 legacy mirror 保留，服务旧配置、旧 CLI 和兼容测试，不再是 macOS 用户调优入口。
 
@@ -291,9 +320,18 @@ fallback 路径（非 worker submit、worker stop 后迟到 callback、unregiste
 2. callback 在 backpressure 暂存后返回 `QUIC_STATUS_PENDING`（buffer 生命周期由 worker 侧结构接管）。
 3. snapshot 细分计数：`EventQueueFullErrors`、`WakeFailures`、`QuicReceiveEnqueueFailures`、`CallbackReceiveBudgetRejects`、`QuicReceiveViewBackpressureQueued`（`SnapshotLocal()` + `TqDarwinRelayRuntime::Snapshot()` 聚合）。
 
-### P2：Darwin metrics 命名仍带 Linux — **第一阶段已完成**
+### P2：Darwin metrics 命名仍带 Linux — **第一阶段已完成；发布门禁字段已补齐**
 
 第一阶段已新增 `relay_*` 平台中性 metrics alias，例如 `relay_backend`、`relay_pending_bytes`、`relay_active_relays`、`relay_event_queue_capacity` 等；旧 `linux_relay_*` key 继续输出，作为 admin UI、脚本和兼容测试的 legacy key。
+
+2026-07 remediation Task 6 额外补齐发布门禁 `relay_*` 字段：
+
+- control：`relay_active_controls`、`relay_control_stop_signaled`、`relay_control_generation_mismatch`、`relay_accounting_duplicate_release`
+- registration：`relay_prepared_relays`、`relay_commit_success_count`、`relay_terminal_before_commit_rollbacks`、`relay_activation_failure_count`、`relay_precommit_bytes` / `relay_precommit_depth`
+- operation：`relay_active_send_reservations`、`relay_send_reservation_rollbacks`、`relay_send_reservation_oldest_age_ms`、`relay_pending_receive_active`、`relay_receive_discards`、`relay_active_failure_*`
+- stop：`relay_shutdown_sink_active`、`relay_worker_exited_purge_events`、`relay_stop_remaining`、`relay_stop_oldest_age_ms`
+
+multi-worker 聚合对全局 terminal retention / send reservation / shutdown sink 使用 max，避免重复计算；per-worker 计数与本地 gauge 使用 sum。
 
 后续工作不再是新增基础平台中性 alias，而是：
 

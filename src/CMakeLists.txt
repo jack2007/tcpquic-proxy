@@ -633,6 +633,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         tunnel/stream_lifetime.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
+        config/tuning.cpp
         ${TCPQUIC_PLATFORM_SOURCES}
     )
     tcpquic_target_include_dirs(tcpquic_darwin_relay_metrics_test)

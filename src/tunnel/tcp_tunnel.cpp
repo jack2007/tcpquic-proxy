@@ -1809,6 +1809,7 @@ private:
                 StreamOwner != nullptr ? completionKey : sendContext);
         if (QUIC_FAILED(status)) {
             if (StreamOwner != nullptr) {
+                // Cancel runs the registered cleanup (deletes sendContext).
                 (void)StreamOwner->CancelSendCompletion(completionKey);
                 if ((flags & QUIC_SEND_FLAG_START) != 0) {
                     (void)StreamOwner->PublishStartFailureAndTakeTarget(status);
@@ -1816,6 +1817,7 @@ private:
                     Stream = nullptr;
                     ShutdownComplete = true;
                 }
+                return false;
             }
             TqTunnelSendContext::Delete(sendContext);
             return false;
@@ -2388,7 +2390,9 @@ bool TqSendDispatcherBytes(
         &sendContext->Buffer, 1, flags, completionKey);
     if (QUIC_FAILED(status)) {
         if (owner != nullptr) {
+            // Cancel runs the registered cleanup (deletes sendContext).
             (void)owner->CancelSendCompletion(completionKey);
+            return false;
         }
         TqTunnelSendContext::Delete(sendContext);
         return false;

@@ -289,7 +289,27 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t DuplicateSendClaims{0};
     uint64_t SendReservationOldestAgeMs{0};
     uint64_t StopRemaining{0};
+    // Release-gate gauges / counters (Task 6 remediation).
+    uint64_t PreparedRelays{0};
+    uint64_t CommitSuccessCount{0};
+    uint64_t TerminalBeforeCommitRollbacks{0};
+    uint64_t ActivationFailureCount{0};
+    uint64_t PrecommitBytes{0};
+    uint64_t PrecommitDepth{0};
+    uint64_t PendingReceiveActive{0};
+    uint64_t ActiveFailureAllocationFailed{0};
+    uint64_t ActiveFailureBudgetExceeded{0};
+    uint64_t ActiveFailureQueueFull{0};
+    uint64_t ShutdownSinkActive{0};
+    uint64_t WorkerExitedPurgeEvents{0};
+    uint64_t StopOldestAgeMs{0};
 };
+
+// Merge one worker snapshot into an aggregate. Global owner/registry gauges use
+// max (never sum); per-worker counters and local gauges use sum.
+void TqAccumulateDarwinRelayWorkerSnapshot(
+    TqDarwinRelayWorkerSnapshot& total,
+    const TqDarwinRelayWorkerSnapshot& part);
 
 enum class TqDarwinQuicReceiveEnqueueResult : uint8_t {
     Ok = 0,
@@ -686,6 +706,13 @@ private:
     mutable std::atomic<uint64_t> CallbackReceiveBudgetRejects{0};
     mutable std::atomic<uint64_t> QuicReceiveEnqueueFailures{0};
     mutable std::atomic<uint64_t> QuicReceiveViewBackpressureQueued{0};
+    std::atomic<uint64_t> CommitSuccessCount{0};
+    std::atomic<uint64_t> TerminalBeforeCommitRollbacks{0};
+    std::atomic<uint64_t> ActivationFailureCount{0};
+    std::atomic<uint64_t> ActiveFailureAllocationFailed{0};
+    std::atomic<uint64_t> ActiveFailureBudgetExceeded{0};
+    std::atomic<uint64_t> ActiveFailureQueueFull{0};
+    std::atomic<uint64_t> WorkerExitedPurgeEvents{0};
 };
 
 class TqDarwinRelayRuntime final {

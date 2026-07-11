@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cerrno>
 #include <chrono>
@@ -78,6 +79,10 @@ struct TqDarwinRelayWorker::CompletionState {
     std::unordered_map<TqDarwinRelaySendOperation*, KnownSendOperationInfo> FallbackSendOperations;
     std::atomic<uint64_t> KnownSendOperationCount{0};
 };
+
+namespace {
+std::atomic<uint64_t> g_DarwinShutdownSinkActive{0};
+} // namespace
 
 struct TqDarwinRelayWorker::CallbackEndpoint final {
     explicit CallbackEndpoint(TqDarwinRelayWorker* worker) : Worker(worker) {}
@@ -232,6 +237,7 @@ struct TqDarwinRelayWorker::RelayState {
     std::deque<std::unique_ptr<TqDarwinRelaySendOperation>> PendingQuicSends;
     std::vector<uint8_t> CompressionOutput;
     std::vector<uint8_t> DecompressionOutput;
+    std::chrono::steady_clock::time_point RetiredAt{};
 
     RelayState(const TqDarwinRelayRegistration& registration, const TqDarwinRelayWorkerConfig& config)
         : TcpFd(registration.TcpFd),
@@ -275,6 +281,13 @@ struct TqDarwinRelayWorker::ShutdownSink final : TqStreamLifetime::Target {
     uint64_t ControlGeneration{0};
     std::weak_ptr<TqStreamLifetime> StreamOwner;
     std::shared_ptr<CompletionState> Completions;
+
+    ShutdownSink() {
+        g_DarwinShutdownSinkActive.fetch_add(1, std::memory_order_relaxed);
+    }
+    ~ShutdownSink() override {
+        g_DarwinShutdownSinkActive.fetch_sub(1, std::memory_order_relaxed);
+    }
 
     QUIC_STATUS OnStreamEvent(
         MsQuicStream*,
@@ -1221,6 +1234,7 @@ void TqDarwinRelayWorker::PurgeQueuedEventsForStop() {
     }
     if (processed > 0) {
         EventsProcessed.fetch_add(processed, std::memory_order_relaxed);
+        WorkerExitedPurgeEvents.fetch_add(processed, std::memory_order_relaxed);
     }
 }
 
@@ -1627,6 +1641,7 @@ void TqDarwinRelayWorker::RetireRelay(
             }
         }
         if (!alreadyRetired) {
+            relay->RetiredAt = std::chrono::steady_clock::now();
             RetiredRelays.push_back(relay);
         }
     }
@@ -2674,6 +2689,17 @@ bool TqDarwinRelayWorker::EnqueueQuicActiveShutdownFromCallback(
     TqDarwinActiveShutdownReason reason) {
     if (relay == nullptr) {
         return false;
+    }
+    switch (reason) {
+    case TqDarwinActiveShutdownReason::ReceiveAllocationFailed:
+        ActiveFailureAllocationFailed.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case TqDarwinActiveShutdownReason::ReceiveBudgetExceeded:
+        ActiveFailureBudgetExceeded.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case TqDarwinActiveShutdownReason::ReceiveQueueFull:
+        ActiveFailureQueueFull.fetch_add(1, std::memory_order_relaxed);
+        break;
     }
 #if defined(TCPQUIC_TESTING)
     LastActiveShutdownReason.store(
@@ -4310,6 +4336,11 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
 
     const auto disposition = TryCommitPreparedActivation(relay, binding.get(), registration);
     if (disposition != PreparedCommitDisposition::CommitActive) {
+        if (disposition == PreparedCommitDisposition::RollbackTerminal) {
+            TerminalBeforeCommitRollbacks.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            ActivationFailureCount.fetch_add(1, std::memory_order_relaxed);
+        }
         const auto intent = disposition == PreparedCommitDisposition::RollbackTerminal
             ? TqStreamLifetime::ShutdownIntent::AbortBoth
             : TqStreamLifetime::ShutdownIntent::AbortBoth;
@@ -4319,6 +4350,7 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         result.RelayId = 0;
         return result;
     }
+    CommitSuccessCount.fetch_add(1, std::memory_order_relaxed);
 
 #if defined(TCPQUIC_TESTING)
     if (Config.AfterCommitActivationHookForTest != nullptr) {
@@ -4489,6 +4521,7 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
     snapshot.CancelOnLossCount = CancelOnLossCount.load(std::memory_order_relaxed);
     snapshot.QuicReceivePausedCount = QuicReceivePausedCount.load(std::memory_order_relaxed);
     snapshot.QuicReceiveResumedCount = QuicReceiveResumedCount.load(std::memory_order_relaxed);
+    const auto now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(RelayMutex);
         snapshot.ActiveRelays = Relays.size();
@@ -4517,9 +4550,31 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
                 }
             }
             snapshot.CurrentPendingQuicReceiveBytes += relay->PendingQuicReceiveBytes;
+            snapshot.PendingReceiveActive += relay->PendingQuicReceives.size();
             snapshot.PendingTcpWriteQueue += relay->PendingTcpWrites.size();
             snapshot.PendingTcpWriteBytes += relay->PendingTcpWriteBytes;
             snapshot.PendingBytes += relayPendingBytes;
+            if (relay->Binding != nullptr) {
+                const auto phase =
+                    relay->Binding->ActivationState.load(std::memory_order_acquire);
+                if (phase == StreamBinding::Activation::Prepared) {
+                    ++snapshot.PreparedRelays;
+                }
+                snapshot.PrecommitBytes += relay->Binding->PrecommitPendingBytes;
+                snapshot.PrecommitDepth += relay->Binding->PrecommitReceives.size();
+            }
+        }
+        snapshot.StopRemaining = Relays.size() + RetiredRelays.size();
+        for (const auto& retired : RetiredRelays) {
+            if (retired == nullptr ||
+                retired->RetiredAt == std::chrono::steady_clock::time_point{}) {
+                continue;
+            }
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - retired->RetiredAt).count();
+            snapshot.StopOldestAgeMs = std::max<uint64_t>(
+                snapshot.StopOldestAgeMs,
+                age > 0 ? static_cast<uint64_t>(age) : 0);
         }
     }
     snapshot.Errors = Errors.load(std::memory_order_relaxed);
@@ -4538,10 +4593,17 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
     snapshot.UnknownSendClaims = sendCompletions.UnknownClaims;
     snapshot.DuplicateSendClaims = sendCompletions.DuplicateClaims;
     snapshot.SendReservationOldestAgeMs = sendCompletions.OldestAgeMs;
-    {
-        std::lock_guard<std::mutex> lock(RelayMutex);
-        snapshot.StopRemaining = Relays.size() + RetiredRelays.size();
-    }
+    snapshot.CommitSuccessCount = CommitSuccessCount.load(std::memory_order_relaxed);
+    snapshot.TerminalBeforeCommitRollbacks =
+        TerminalBeforeCommitRollbacks.load(std::memory_order_relaxed);
+    snapshot.ActivationFailureCount = ActivationFailureCount.load(std::memory_order_relaxed);
+    snapshot.ActiveFailureAllocationFailed =
+        ActiveFailureAllocationFailed.load(std::memory_order_relaxed);
+    snapshot.ActiveFailureBudgetExceeded =
+        ActiveFailureBudgetExceeded.load(std::memory_order_relaxed);
+    snapshot.ActiveFailureQueueFull = ActiveFailureQueueFull.load(std::memory_order_relaxed);
+    snapshot.ShutdownSinkActive = g_DarwinShutdownSinkActive.load(std::memory_order_relaxed);
+    snapshot.WorkerExitedPurgeEvents = WorkerExitedPurgeEvents.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -4925,6 +4987,71 @@ void TqDarwinRelayRuntime::Stop() {
     NextWorker = 0;
 }
 
+void TqAccumulateDarwinRelayWorkerSnapshot(
+    TqDarwinRelayWorkerSnapshot& total,
+    const TqDarwinRelayWorkerSnapshot& part) {
+    total.EventsProcessed += part.EventsProcessed;
+    total.Wakeups += part.Wakeups;
+    total.PendingEvents += part.PendingEvents;
+    total.PendingBytes += part.PendingBytes;
+    total.ActiveRelays += part.ActiveRelays;
+    total.TcpReadArmedRelays += part.TcpReadArmedRelays;
+    total.TcpWriteArmedRelays += part.TcpWriteArmedRelays;
+    total.QuicReceivePausedCount += part.QuicReceivePausedCount;
+    total.QuicReceiveResumedCount += part.QuicReceiveResumedCount;
+    total.CurrentPendingQuicReceiveBytes += part.CurrentPendingQuicReceiveBytes;
+    total.PendingTcpWriteQueue += part.PendingTcpWriteQueue;
+    total.PendingTcpWriteBytes += part.PendingTcpWriteBytes;
+    total.OutstandingQuicSends += part.OutstandingQuicSends;
+    total.OutstandingQuicSendBytes += part.OutstandingQuicSendBytes;
+    total.TcpReadBatches += part.TcpReadBatches;
+    total.TcpReadBytes += part.TcpReadBytes;
+    total.TcpWriteBatches += part.TcpWriteBatches;
+    total.TcpWriteBytes += part.TcpWriteBytes;
+    total.QuicReceiveViewCount += part.QuicReceiveViewCount;
+    total.QuicReceiveViewBytes += part.QuicReceiveViewBytes;
+    total.DeferredReceiveCompletes += part.DeferredReceiveCompletes;
+    total.DeferredReceiveDiscards += part.DeferredReceiveDiscards;
+    total.ReceiveFailSafeCount += part.ReceiveFailSafeCount;
+    total.LateTerminalReceiveCount += part.LateTerminalReceiveCount;
+    total.QuicSendBackpressureEvents += part.QuicSendBackpressureEvents;
+    total.CancelOnLossCount += part.CancelOnLossCount;
+    total.Errors += part.Errors;
+    total.EventQueueFullErrors += part.EventQueueFullErrors;
+    total.WakeFailures += part.WakeFailures;
+    total.CallbackReceiveBudgetRejects += part.CallbackReceiveBudgetRejects;
+    total.QuicReceiveEnqueueFailures += part.QuicReceiveEnqueueFailures;
+    total.QuicReceiveViewBackpressureQueued += part.QuicReceiveViewBackpressureQueued;
+    // Global owner/registry gauges: max, never sum across workers.
+    total.TerminalRetainedOwnerCount =
+        std::max(total.TerminalRetainedOwnerCount, part.TerminalRetainedOwnerCount);
+    total.TerminalRetainedOldestAgeMs =
+        std::max(total.TerminalRetainedOldestAgeMs, part.TerminalRetainedOldestAgeMs);
+    total.ActiveSendReservations =
+        std::max(total.ActiveSendReservations, part.ActiveSendReservations);
+    total.PreSubmitSendRollbacks =
+        std::max(total.PreSubmitSendRollbacks, part.PreSubmitSendRollbacks);
+    total.UnknownSendClaims = std::max(total.UnknownSendClaims, part.UnknownSendClaims);
+    total.DuplicateSendClaims =
+        std::max(total.DuplicateSendClaims, part.DuplicateSendClaims);
+    total.SendReservationOldestAgeMs =
+        std::max(total.SendReservationOldestAgeMs, part.SendReservationOldestAgeMs);
+    total.ShutdownSinkActive = std::max(total.ShutdownSinkActive, part.ShutdownSinkActive);
+    total.StopRemaining += part.StopRemaining;
+    total.PreparedRelays += part.PreparedRelays;
+    total.CommitSuccessCount += part.CommitSuccessCount;
+    total.TerminalBeforeCommitRollbacks += part.TerminalBeforeCommitRollbacks;
+    total.ActivationFailureCount += part.ActivationFailureCount;
+    total.PrecommitBytes += part.PrecommitBytes;
+    total.PrecommitDepth += part.PrecommitDepth;
+    total.PendingReceiveActive += part.PendingReceiveActive;
+    total.ActiveFailureAllocationFailed += part.ActiveFailureAllocationFailed;
+    total.ActiveFailureBudgetExceeded += part.ActiveFailureBudgetExceeded;
+    total.ActiveFailureQueueFull += part.ActiveFailureQueueFull;
+    total.WorkerExitedPurgeEvents += part.WorkerExitedPurgeEvents;
+    total.StopOldestAgeMs = std::max(total.StopOldestAgeMs, part.StopOldestAgeMs);
+}
+
 TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot() const {
     std::lock_guard<std::mutex> lock(Mutex);
     TqDarwinRelayWorkerSnapshot snapshot{};
@@ -4932,44 +5059,7 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayRuntime::Snapshot() const {
         if (worker == nullptr) {
             continue;
         }
-        const auto workerSnapshot = worker->Snapshot();
-        snapshot.EventsProcessed += workerSnapshot.EventsProcessed;
-        snapshot.Wakeups += workerSnapshot.Wakeups;
-        snapshot.PendingEvents += workerSnapshot.PendingEvents;
-        snapshot.PendingBytes += workerSnapshot.PendingBytes;
-        snapshot.ActiveRelays += workerSnapshot.ActiveRelays;
-        snapshot.TcpReadArmedRelays += workerSnapshot.TcpReadArmedRelays;
-        snapshot.TcpWriteArmedRelays += workerSnapshot.TcpWriteArmedRelays;
-        snapshot.QuicReceivePausedCount += workerSnapshot.QuicReceivePausedCount;
-        snapshot.QuicReceiveResumedCount += workerSnapshot.QuicReceiveResumedCount;
-        snapshot.CurrentPendingQuicReceiveBytes += workerSnapshot.CurrentPendingQuicReceiveBytes;
-        snapshot.PendingTcpWriteQueue += workerSnapshot.PendingTcpWriteQueue;
-        snapshot.PendingTcpWriteBytes += workerSnapshot.PendingTcpWriteBytes;
-        snapshot.OutstandingQuicSends += workerSnapshot.OutstandingQuicSends;
-        snapshot.OutstandingQuicSendBytes += workerSnapshot.OutstandingQuicSendBytes;
-        snapshot.TcpReadBatches += workerSnapshot.TcpReadBatches;
-        snapshot.TcpReadBytes += workerSnapshot.TcpReadBytes;
-        snapshot.TcpWriteBatches += workerSnapshot.TcpWriteBatches;
-        snapshot.TcpWriteBytes += workerSnapshot.TcpWriteBytes;
-        snapshot.QuicReceiveViewCount += workerSnapshot.QuicReceiveViewCount;
-        snapshot.QuicReceiveViewBytes += workerSnapshot.QuicReceiveViewBytes;
-        snapshot.DeferredReceiveCompletes += workerSnapshot.DeferredReceiveCompletes;
-        snapshot.DeferredReceiveDiscards += workerSnapshot.DeferredReceiveDiscards;
-        snapshot.ReceiveFailSafeCount += workerSnapshot.ReceiveFailSafeCount;
-        snapshot.LateTerminalReceiveCount += workerSnapshot.LateTerminalReceiveCount;
-        snapshot.QuicSendBackpressureEvents += workerSnapshot.QuicSendBackpressureEvents;
-        snapshot.CancelOnLossCount += workerSnapshot.CancelOnLossCount;
-        snapshot.Errors += workerSnapshot.Errors;
-        snapshot.EventQueueFullErrors += workerSnapshot.EventQueueFullErrors;
-        snapshot.WakeFailures += workerSnapshot.WakeFailures;
-        snapshot.CallbackReceiveBudgetRejects += workerSnapshot.CallbackReceiveBudgetRejects;
-        snapshot.QuicReceiveEnqueueFailures += workerSnapshot.QuicReceiveEnqueueFailures;
-        snapshot.QuicReceiveViewBackpressureQueued += workerSnapshot.QuicReceiveViewBackpressureQueued;
-        snapshot.TerminalRetainedOwnerCount = std::max(
-            snapshot.TerminalRetainedOwnerCount, workerSnapshot.TerminalRetainedOwnerCount);
-        snapshot.TerminalRetainedOldestAgeMs = std::max(
-            snapshot.TerminalRetainedOldestAgeMs, workerSnapshot.TerminalRetainedOldestAgeMs);
-        snapshot.StopRemaining += workerSnapshot.StopRemaining;
+        TqAccumulateDarwinRelayWorkerSnapshot(snapshot, worker->Snapshot());
     }
     return snapshot;
 }

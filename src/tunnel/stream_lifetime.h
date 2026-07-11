@@ -116,9 +116,11 @@ public:
         std::shared_ptr<Target> initialTarget = nullptr);
     bool InstallStreamForTest(MsQuicStream* stream) noexcept;
     void ReleaseStreamForTest() noexcept;
-    QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
     void* TargetContextForTest() const noexcept;
     static void SetFailNextRegisterSendCompletionForTest(bool fail) noexcept;
+#endif
+#if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
+    QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
 #endif
 
     ~TqStreamLifetime() noexcept;

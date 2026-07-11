@@ -1551,6 +1551,12 @@ int main() {
         if (bodyText.find("\"linux_relay_terminal_retained_owner_count\":") == std::string::npos) return 375;
         if (bodyText.find("\"linux_relay_terminal_retained_oldest_age_ms\":") == std::string::npos) return 376;
         if (bodyText.find("\"linux_relay_stop_remaining\":") == std::string::npos) return 377;
+        if (bodyText.find("\"relay_active_controls\":") == std::string::npos) return 378;
+        if (bodyText.find("\"relay_control_generation_mismatch\":") == std::string::npos) return 379;
+        if (bodyText.find("\"relay_prepared_relays\":") == std::string::npos) return 380;
+        if (bodyText.find("\"relay_active_send_reservations\":") == std::string::npos) return 381;
+        if (bodyText.find("\"relay_shutdown_sink_active\":") == std::string::npos) return 382;
+        if (bodyText.find("\"relay_stop_remaining\":") == std::string::npos) return 383;
 #if defined(__linux__)
         if (bodyText.find("\"linux_relay_backend\":\"epoll\"") == std::string::npos) return 235;
 #elif defined(__APPLE__)

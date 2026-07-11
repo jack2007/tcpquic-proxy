@@ -133,10 +133,6 @@ std::shared_ptr<TqStreamLifetime> TqStreamLifetime::CreateForTest(
     return owner;
 }
 
-QUIC_STATUS TqStreamLifetime::DispatchForTest(QUIC_STREAM_EVENT* event) noexcept {
-    return Dispatch(nullptr, event);
-}
-
 bool TqStreamLifetime::InstallStreamForTest(MsQuicStream* stream) noexcept {
     return InstallStream(stream);
 }
@@ -153,6 +149,12 @@ void* TqStreamLifetime::TargetContextForTest() const noexcept {
 
 void TqStreamLifetime::SetFailNextRegisterSendCompletionForTest(bool fail) noexcept {
     g_failNextRegisterSendCompletion.store(fail, std::memory_order_release);
+}
+#endif
+
+#if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
+QUIC_STATUS TqStreamLifetime::DispatchForTest(QUIC_STREAM_EVENT* event) noexcept {
+    return Dispatch(nullptr, event);
 }
 #endif
 

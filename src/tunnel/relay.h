@@ -34,6 +34,16 @@ inline std::atomic<uint64_t>& TqRelayControlGenerationMismatchCount() {
     return mismatches;
 }
 
+inline std::atomic<uint64_t>& TqRelayControlStopSignaledCount() {
+    static std::atomic<uint64_t> signaled{0};
+    return signaled;
+}
+
+inline std::atomic<uint64_t>& TqRelayAccountingDuplicateReleaseCount() {
+    static std::atomic<uint64_t> duplicates{0};
+    return duplicates;
+}
+
 // Shared stop/accounting control observed by tunnel reaper and relay workers.
 // Does not own worker, relay, binding, tunnel context, or stream owner.
 struct TqRelayStopControl {
@@ -50,7 +60,10 @@ struct TqRelayStopControl {
             TqRelayControlGenerationMismatchCount().fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        Stop.store(true, std::memory_order_release);
+        const bool wasStopped = Stop.exchange(true, std::memory_order_acq_rel);
+        if (!wasStopped) {
+            TqRelayControlStopSignaledCount().fetch_add(1, std::memory_order_relaxed);
+        }
         return true;
     }
 
@@ -61,6 +74,7 @@ struct TqRelayStopControl {
                 true,
                 std::memory_order_acq_rel,
                 std::memory_order_acquire)) {
+            TqRelayAccountingDuplicateReleaseCount().fetch_add(1, std::memory_order_relaxed);
             return false;
         }
         TqRelayUnregisterActive();
