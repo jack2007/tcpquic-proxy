@@ -3,7 +3,7 @@
 **日期：** 2026-07-11  
 **平台：** macOS / Darwin kqueue relay（client）  
 **入口：** HTTP CONNECT ingress（本例 `amazon-sgp` → `0.0.0.0:18080`）  
-**状态：** 取证完成 — H1 已证据闭环；收敛设计已确认（语义 B + sticky），见 `docs/superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md`；实现计划待写
+**状态：** 修复已实现（语义 B + sticky）。设计见 [`docs/superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md`](superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md)；实现见 [`docs/superpowers/plans/2026-07-11-darwin-fully-closed-convergence.md`](superpowers/plans/2026-07-11-darwin-fully-closed-convergence.md)。
 
 相关代码：
 
@@ -444,3 +444,16 @@ Admin / `stats_relay` / `event=stats_darwin_half_close` 聚合字段：
 | 关键计数 / 日志摘录 | Admin：`active_relays=8`，`tcp_read_closed_relays=8`，`tcp_write_closed_relays=8`，`quic_send_fin_submitted/completed_relays=8`，`quic_send_shutdown_complete_relays=8`，`fully_closed_predicate_ready_relays=8`，`tcp_read_armed_relays=0`，`relay_control_stop_signaled=0`。日志多条 `trigger=tcp_shut_wr blockers=predicate_ready_no_signal_stop`。隧道仍 `state=active`。 |
 | H2–H5 | H2 排除（全部 `tcp_read_closed=1`）；H3/H4 排除（已见 `peer_send_shutdown`→`tcp_shut_wr`，无 enqueue fail）；H5 本场景 `send_shutdown_complete` 已到达，非阻塞项 |
 | 是否允许进入收敛修复 | **是** — 在满足 §8（worker 线程归属、事件可靠交付、谓词含 callback pending）前提下，可实施 Darwin `MaybeStopFullyClosedRelay` / `SignalStop` 等价收敛 |
+
+### 9.7 修复验证
+
+修复已落地（`MaybePublishFullyClosedStopLocal` + half-close sticky）。手工回归：
+
+1. 启动 client（HTTP CONNECT）
+2. `curl -x 127.0.0.1:18080 https://example.com/` 若干次后关闭
+3. `GET /api/v1/relay/metrics`：
+   - `fully_closed_predicate_ready_relays` 不长期 == `active_relays`
+   - `relay_control_stop_signaled` 上升
+   - `active_relays` 数秒内归零
+4. `rg 'fully_closed_stop|predicate_ready_no_signal_stop' log/client.log`
+   - 应见 `fully_closed_stop`；不应长期 `predicate_ready_no_signal_stop`

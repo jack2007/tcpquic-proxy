@@ -252,15 +252,16 @@ Darwin Runtime 已接入公共 `TqRelayRuntimeSnapshotSupport` + `TqRelayRuntime
 
 ## 3. 目前代码问题和建议
 
-### P0：HTTP CONNECT 浏览器关闭后 tunnel/relay 不收敛 — **根因已证实（H1），待修收敛**
+### P0：HTTP CONNECT 浏览器关闭后 tunnel/relay 不收敛 — **已修：fully-closed SignalStop**
 
-现象：client HTTP CONNECT 代理下浏览器关闭后，admin 仍显示大量 active tunnel/relay；进程持有已 `CLOSED` 的 ingress TCP FD 未释放。
+现象（修复前）：client HTTP CONNECT 代理下浏览器关闭后，admin 仍显示大量 active tunnel/relay；进程持有已 `CLOSED` 的 ingress TCP FD 未释放。
 
-根因（2026-07-11 诊断复现闭环）：双向半关闭与本地 QUIC FIN/`SEND_SHUTDOWN_COMPLETE` 均已完成，`fully_closed_predicate_ready` 成立，但 Darwin 不 `SignalStop`（H1）。修复须遵守文档 §8（线程归属 / 事件可靠交付 / 谓词完整性）。
+根因（H1）：双向半关闭完成后 Darwin 缺少 Linux 的 `MaybeStopFullyClosedRelay` 等价收敛。2026-07-11 已落地 worker-only `MaybePublishFullyClosedStopLocal`（语义 B：`QuicSendFinCompleted` 即可 stop）+ half-close sticky 可靠交付。
 
 详见：
 
-- `docs/2026-07-11-darwin-http-connect-zombie-relay.md`（§9.6 证据结论）
+- [`docs/2026-07-11-darwin-http-connect-zombie-relay.md`](2026-07-11-darwin-http-connect-zombie-relay.md)（§9.6 证据、§9.7 修复验证）
+- [`docs/superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md`](superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md)
 
 ### P0：Darwin 配置复用 Linux 字段，语义和用户接口不清晰 — **第一阶段已完成**
 

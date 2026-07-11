@@ -1,6 +1,6 @@
 # Darwin Fully-Closed Relay Convergence Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Darwin HTTP CONNECT 半关闭完成后及时 `SignalStop`，消除 H1 僵尸 relay（兼容 Linux 谓词 + event queue 满时 sticky 可靠交付）。
 
@@ -45,7 +45,7 @@ cmake --build build --config Release --target tcpquic_darwin_relay_metrics_test 
 - Modify: `src/tunnel/darwin_relay_worker.cpp`（消费、PEER_SEND_SHUTDOWN / SEND_SHUTDOWN_COMPLETE 失败路径）
 - Test: `src/unittest/darwin_relay_worker_io_test.cpp`
 
-- [ ] **Step 1: 写失败测试 — queue 满时 peer FIN 仍能置 sticky 并被 worker 消费**
+- [x] **Step 1: 写失败测试 — queue 满时 peer FIN 仍能置 sticky 并被 worker 消费**
 
 在 `darwin_relay_worker_io_test.cpp` 的 `main` 调用列表前增加（复用 `ManagedRelayHarness` + `EventQueueCapacity=2` 填满队列模式，参考 `ManagedReceiveAllocationFailureQueueFullKeepsOwnerViaSink`）：
 
@@ -81,7 +81,7 @@ void FullyClosedPeerSendShutdownStickySurvivesQueueFull() {
 
 在 `main()` 中注册调用（暂时可注释到实现后再打开，或先打开并接受 FAIL）。
 
-- [ ] **Step 2: Run test — expect FAIL**
+- [x] **Step 2: Run test — expect FAIL**
 
 ```bash
 cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_test -- -j8
@@ -90,7 +90,7 @@ cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_tes
 
 Expected: 编译失败（缺 hooks）或断言失败（sticky 未置位）。
 
-- [ ] **Step 3: 在 `StreamBinding` 增加 sticky + worker helpers**
+- [x] **Step 3: 在 `StreamBinding` 增加 sticky + worker helpers**
 
 `darwin_relay_worker.h` — 在 `StreamBinding`（cpp 内嵌 struct）增加：
 
@@ -115,7 +115,7 @@ bool TcpWriteShutdownQueuedOrClosedForTest(uint64_t relayId);
 #endif
 ```
 
-- [ ] **Step 4: 实现 sticky 置位与消费（尚不 SignalStop）**
+- [x] **Step 4: 实现 sticky 置位与消费（尚不 SignalStop）**
 
 `EnqueueRelayCloseFromCallback` 调用方：当 `QuicPeerSendShutdown` / `QuicSendShutdownComplete` 的 `TryPush` 失败时：
 
@@ -150,7 +150,7 @@ void TqDarwinRelayWorker::ConsumeHalfCloseStickies(
 
 在 `DrainEvents` / `DrainWake` 处理每个 relay 相关事件前后，对涉及的 relay 调用 `ConsumeHalfCloseStickies`；并在 worker 主循环每 tick 对 active map 做轻量扫描 **或** 仅在 Wake 后扫描带 sticky 的 binding（优先：在 `FlushAllCallbackPendingQuicReceivesLocal` 同类位置增加 `FlushHalfCloseStickiesLocal()`，遍历 Relays 调 `ConsumeHalfCloseStickies`）。
 
-- [ ] **Step 5: Run test — expect PASS**
+- [x] **Step 5: Run test — expect PASS**
 
 ```bash
 cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_test -- -j8
@@ -159,7 +159,7 @@ cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_tes
 
 Expected: PASS（含新 sticky 测试）。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/tunnel/darwin_relay_worker.h src/tunnel/darwin_relay_worker.cpp \
@@ -181,7 +181,7 @@ EOF
 - Modify: `src/tunnel/darwin_relay_worker.h` / `.cpp`
 - Test: `src/unittest/darwin_relay_worker_io_test.cpp`
 
-- [ ] **Step 1: 写失败测试 — EOF + peer FIN 无 SHUTDOWN_COMPLETE 也 SignalStop**
+- [x] **Step 1: 写失败测试 — EOF + peer FIN 无 SHUTDOWN_COMPLETE 也 SignalStop**
 
 ```cpp
 void FullyClosedStopAfterEofAndPeerFinWithoutShutdownComplete() {
@@ -209,13 +209,13 @@ void FullyClosedStopAfterEofAndPeerFinWithoutShutdownComplete() {
 }
 ```
 
-- [ ] **Step 2: Run test — expect FAIL**（`control->Stop` 仍为 false）
+- [x] **Step 2: Run test — expect FAIL**（`control->Stop` 仍为 false）
 
 ```bash
 ./build/bin/Release/tcpquic_darwin_relay_worker_io_test 2>&1 | rg -n "FullyClosedStopAfterEof|CHECK failed" | head -20
 ```
 
-- [ ] **Step 3: 实现 `MaybePublishFullyClosedStopLocal`**
+- [x] **Step 3: 实现 `MaybePublishFullyClosedStopLocal`**
 
 声明（`.h`）：
 
@@ -262,7 +262,7 @@ if (relay.Binding != nullptr) {
 
 更新 `TraceHalfClose`：当 `FullyClosedPredicateReady` 且 `StopControl->Stop` 已为 true 时，不要再写 `predicate_ready_no_signal_stop`，改为 `already_stopped`。
 
-- [ ] **Step 4: 在触发点调用 helper**
+- [x] **Step 4: 在触发点调用 helper**
 
 至少：
 
@@ -285,14 +285,14 @@ MaybePublishFullyClosedStopLocal(relay, trigger);
 
 （helper 内部已 Trace；避免双打时可删除原 `TraceHalfClose` 或让 helper 在未 ready 时 Trace。）
 
-- [ ] **Step 5: Run tests — expect PASS**
+- [x] **Step 5: Run tests — expect PASS**
 
 ```bash
 cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_test -- -j8
 ./build/bin/Release/tcpquic_darwin_relay_worker_io_test
 ```
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/tunnel/darwin_relay_worker.h src/tunnel/darwin_relay_worker.cpp \
@@ -314,7 +314,7 @@ EOF
 - Modify: `src/tunnel/darwin_relay_worker.cpp`（`CompleteQuicSend` else 分支）
 - Test: `src/unittest/darwin_relay_worker_io_test.cpp`
 
-- [ ] **Step 1: 写失败测试 — fallback completion 不直接 stop，但 sticky 唤醒后 stop**
+- [x] **Step 1: 写失败测试 — fallback completion 不直接 stop，但 sticky 唤醒后 stop**
 
 复用已有 `FallbackSendCompletionCount` / 强制 queue 满使 send completion inline 的测试模式（搜 `FallbackSendCompletionCount`）。最小断言：
 
@@ -330,9 +330,9 @@ void FullyClosedOffWorkerFinSetsConvergenceStickyThenStops() {
 
 实现者须对照现有 fallback 测试把 Arrange 写完整；禁止留 TBD。
 
-- [ ] **Step 2: Run — expect FAIL**
+- [x] **Step 2: Run — expect FAIL**
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 在 `CompleteQuicSend` 的 `info.Fin` 且 `!(workerThread && !bindingRelayFallback)` 分支，更新 `QuicSendFinCompleted` 后：
 
@@ -350,9 +350,9 @@ if (auto binding = relay->Binding) {
 MaybePublishFullyClosedStopLocal(relay, "convergence_sticky");
 ```
 
-- [ ] **Step 4: Run — expect PASS**
+- [x] **Step 4: Run — expect PASS**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -372,7 +372,7 @@ EOF
 - Test: `src/unittest/darwin_relay_worker_io_test.cpp`
 - 如需：`.h` 增加 `CallbackPendingReceiveBytes` 注入或复用 `InvokeQuicReceiveViewForTest` + queue-full receive fallback
 
-- [ ] **Step 1: 反向顺序测试**
+- [x] **Step 1: 反向顺序测试**
 
 ```cpp
 void FullyClosedStopPeerFinBeforeTcpEof() {
@@ -396,15 +396,15 @@ void FullyClosedStopPeerFinBeforeTcpEof() {
 }
 ```
 
-- [ ] **Step 2: callback pending 阻塞 stop**
+- [x] **Step 2: callback pending 阻塞 stop**
 
 构造 binding `CallbackPendingReceiveBytes > 0`（queue-full receive fallback 或 test hook），使谓词为假；排空后 stop。断言中间态 `!control->Stop`，排空后 `control->Stop`。
 
-- [ ] **Step 3: 幂等 — 重复 peer FIN / 重复 sticky**
+- [x] **Step 3: 幂等 — 重复 peer FIN / 重复 sticky**
 
 两次 `PEER_SEND_SHUTDOWN` + 重复置 sticky；`SignalStop` 仅首次增加 `TqRelayControlStopSignaledCount`（或 `Stop` 保持 true 且无崩溃）。
 
-- [ ] **Step 4: Run full Darwin io + metrics tests**
+- [x] **Step 4: Run full Darwin io + metrics tests**
 
 ```bash
 cmake --build build --config Release --target tcpquic_darwin_relay_worker_io_test -- -j8
@@ -415,7 +415,7 @@ cmake --build build --config Release --target tcpquic_darwin_relay_metrics_test 
 
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git commit -m "$(cat <<'EOF'
@@ -435,7 +435,7 @@ EOF
 - Modify: `docs/relay_macos.md`
 - Modify: `docs/superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md`
 
-- [ ] **Step 1: 更新文档状态**
+- [x] **Step 1: 更新文档状态**
 
 - 问题文档：状态 →「修复已实现（语义 B + sticky）」；§9.6 下增加「修复验证」小节（命令与期望 metrics）。
 - `relay_macos.md` P0：由「待修收敛」改为「已修：fully-closed SignalStop」。
@@ -454,7 +454,7 @@ EOF
    - 应见 fully_closed_stop；不应长期 predicate_ready_no_signal_stop
 ```
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/2026-07-11-darwin-http-connect-zombie-relay.md docs/relay_macos.md \

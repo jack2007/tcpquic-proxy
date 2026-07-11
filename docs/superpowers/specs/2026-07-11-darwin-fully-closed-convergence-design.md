@@ -1,7 +1,7 @@
 # Darwin fully-closed relay 收敛设计
 
 **日期：** 2026-07-11  
-**状态：** 设计已确认；实现计划见 `docs/superpowers/plans/2026-07-11-darwin-fully-closed-convergence.md`  
+**状态：** 已实现（实现计划：[`docs/superpowers/plans/2026-07-11-darwin-fully-closed-convergence.md`](../plans/2026-07-11-darwin-fully-closed-convergence.md)）  
 **问题文档：** `docs/2026-07-11-darwin-http-connect-zombie-relay.md`（H1 已证据闭环）  
 **对照：** Linux `MaybeStopFullyClosedRelay` / `SetRelayStop`（`src/tunnel/linux_relay_worker.cpp`）
 
