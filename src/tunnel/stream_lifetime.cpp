@@ -526,6 +526,9 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
     uint8_t sendRequest = 0;
     bool receiveRequest = false;
     bool immediateRequest = false;
+    bool ownsSendReservation = false;
+    bool ownsReceiveReservation = false;
+    bool ownsImmediateReservation = false;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         if (Stream_ == nullptr ||
@@ -556,14 +559,18 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
             DesiredSendShutdown_ > ReservedSendShutdown_) {
             sendRequest = DesiredSendShutdown_;
             ReservedSendShutdown_ = sendRequest;
+            ownsSendReservation = true;
         }
         if (DesiredReceiveAbort_ && !SubmittedReceiveAbort_ && !ReservedReceiveAbort_) {
             receiveRequest = true;
             ReservedReceiveAbort_ = true;
+            ownsReceiveReservation = true;
         }
-        if (DesiredImmediate_ && !SubmittedImmediate_ && !ReservedImmediate_) {
+        if (intent == ShutdownIntent::AbortBothImmediate &&
+            DesiredImmediate_ && !SubmittedImmediate_ && !ReservedImmediate_) {
             immediateRequest = true;
             ReservedImmediate_ = true;
+            ownsImmediateReservation = true;
             // IMMEDIATE is a strength upgrade of abort-both, so it must carry
             // both directions even if an ordinary abort-both is in flight.
             sendRequest = 2;
@@ -607,23 +614,24 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
     }
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
-        if (sendRequest != 0 && ReservedSendShutdown_ == sendRequest) {
+        if (ownsSendReservation && ReservedSendShutdown_ == sendRequest) {
             ReservedSendShutdown_ = 0;
-            if (QUIC_SUCCEEDED(status) && SubmittedSendShutdown_ < sendRequest) {
-                SubmittedSendShutdown_ = sendRequest;
-            }
         }
-        if (receiveRequest && ReservedReceiveAbort_) {
+        if (QUIC_SUCCEEDED(status) &&
+            sendRequest != 0 && SubmittedSendShutdown_ < sendRequest) {
+            SubmittedSendShutdown_ = sendRequest;
+        }
+        if (ownsReceiveReservation && ReservedReceiveAbort_) {
             ReservedReceiveAbort_ = false;
-            if (QUIC_SUCCEEDED(status)) {
-                SubmittedReceiveAbort_ = true;
-            }
         }
-        if (immediateRequest && ReservedImmediate_) {
+        if (QUIC_SUCCEEDED(status) && receiveRequest) {
+            SubmittedReceiveAbort_ = true;
+        }
+        if (ownsImmediateReservation && ReservedImmediate_) {
             ReservedImmediate_ = false;
-            if (QUIC_SUCCEEDED(status)) {
-                SubmittedImmediate_ = true;
-            }
+        }
+        if (QUIC_SUCCEEDED(status) && immediateRequest) {
+            SubmittedImmediate_ = true;
         }
     }
     return status;

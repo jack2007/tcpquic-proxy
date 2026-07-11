@@ -21,6 +21,8 @@ unsigned g_closeCount = 0;
 unsigned g_shutdownCount = 0;
 QUIC_STREAM_SHUTDOWN_FLAGS g_lastShutdownFlags = QUIC_STREAM_SHUTDOWN_FLAG_NONE;
 bool g_shutdownFail = false;
+bool g_shutdownOrdinaryFail = false;
+bool g_shutdownImmediateFail = false;
 bool g_shutdownBlock = false;
 bool g_shutdownEntered = false;
 bool g_shutdownRelease = false;
@@ -49,17 +51,22 @@ void QUIC_API FakeStreamClose(HQUIC) {
 
 QUIC_STATUS QUIC_API FakeStreamShutdown(
     HQUIC, QUIC_STREAM_SHUTDOWN_FLAGS flags, QUIC_UINT62) {
+    bool fail = false;
     {
         std::unique_lock<std::mutex> guard(g_gateLock);
         ++g_shutdownCount;
         g_lastShutdownFlags = flags;
+        fail = g_shutdownFail ||
+            (((flags & QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE) != 0)
+                 ? g_shutdownImmediateFail
+                 : g_shutdownOrdinaryFail);
         if (g_shutdownBlock && g_shutdownCount == 1) {
             g_shutdownEntered = true;
             g_gateCv.notify_all();
             g_gateCv.wait(guard, [] { return g_shutdownRelease; });
         }
     }
-    return g_shutdownFail ? QUIC_STATUS_INTERNAL_ERROR : QUIC_STATUS_SUCCESS;
+    return fail ? QUIC_STATUS_INVALID_STATE : QUIC_STATUS_SUCCESS;
 }
 
 bool DispatchAdapter(HQUIC handle, QUIC_STREAM_EVENT& event) {
@@ -308,6 +315,99 @@ void TestAbortBothImmediateUpgradesInFlightAbortBoth() {
     CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
 }
 
+void TestInFlightAbortBothSuccessSurvivesImmediateFailure() {
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    {
+        std::lock_guard<std::mutex> guard(g_gateLock);
+        g_shutdownCount = 0;
+        g_shutdownBlock = true;
+        g_shutdownEntered = false;
+        g_shutdownRelease = false;
+        g_shutdownOrdinaryFail = false;
+        g_shutdownImmediateFail = true;
+    }
+    QUIC_STATUS ordinaryStatus = QUIC_STATUS_INTERNAL_ERROR;
+    std::thread ordinary([&] {
+        ordinaryStatus = owner->RequestShutdown(
+            TqStreamLifetime::ShutdownIntent::AbortBoth, 98);
+    });
+    {
+        std::unique_lock<std::mutex> guard(g_gateLock);
+        g_gateCv.wait(guard, [] { return g_shutdownEntered; });
+    }
+    const auto immediateStatus = owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 98);
+    CHECK(immediateStatus == QUIC_STATUS_INVALID_STATE);
+    {
+        std::lock_guard<std::mutex> guard(g_gateLock);
+        g_shutdownRelease = true;
+    }
+    g_gateCv.notify_all();
+    ordinary.join();
+    CHECK(ordinaryStatus == QUIC_STATUS_SUCCESS);
+    CHECK(g_shutdownCount == 2);
+    const auto duplicateOrdinary = owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBoth, 98);
+    CHECK(duplicateOrdinary == QUIC_STATUS_SUCCESS);
+    CHECK(g_shutdownCount == 2);
+    g_shutdownImmediateFail = false;
+    CHECK(owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 98) ==
+        QUIC_STATUS_SUCCESS);
+    CHECK(g_shutdownCount == 3);
+    CHECK(owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 98) ==
+        QUIC_STATUS_SUCCESS);
+    CHECK(g_shutdownCount == 3);
+    g_shutdownBlock = false;
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+}
+
+void TestImmediateSuccessSurvivesInFlightAbortBothFailure() {
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    {
+        std::lock_guard<std::mutex> guard(g_gateLock);
+        g_shutdownCount = 0;
+        g_shutdownBlock = true;
+        g_shutdownEntered = false;
+        g_shutdownRelease = false;
+        g_shutdownOrdinaryFail = true;
+        g_shutdownImmediateFail = false;
+    }
+    QUIC_STATUS ordinaryStatus = QUIC_STATUS_SUCCESS;
+    std::thread ordinary([&] {
+        ordinaryStatus = owner->RequestShutdown(
+            TqStreamLifetime::ShutdownIntent::AbortBoth, 99);
+    });
+    {
+        std::unique_lock<std::mutex> guard(g_gateLock);
+        g_gateCv.wait(guard, [] { return g_shutdownEntered; });
+    }
+    const auto immediateStatus = owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 99);
+    CHECK(QUIC_SUCCEEDED(immediateStatus));
+    {
+        std::lock_guard<std::mutex> guard(g_gateLock);
+        g_shutdownRelease = true;
+    }
+    g_gateCv.notify_all();
+    ordinary.join();
+    CHECK(ordinaryStatus == QUIC_STATUS_INVALID_STATE);
+    CHECK(g_shutdownCount == 2);
+    CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBoth, 99)));
+    CHECK(QUIC_SUCCEEDED(owner->RequestShutdown(
+        TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 99)));
+    CHECK(g_shutdownCount == 2);
+    g_shutdownOrdinaryFail = false;
+    g_shutdownBlock = false;
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+}
+
 void TestTerminalCallbackGuardDefersOwnerDestructionUntilReturn() {
     TqStreamLifetime::ResetTestDetachedOwnerDestroyCountForTest();
     auto owner = TqStreamLifetime::CreateForTest(
@@ -373,6 +473,8 @@ int main() {
     TestAbortBothImmediateAddsImmediateFlag();
     TestAbortBothDoesNotAddImmediateFlag();
     TestAbortBothImmediateUpgradesInFlightAbortBoth();
+    TestInFlightAbortBothSuccessSurvivesImmediateFailure();
+    TestImmediateSuccessSurvivesInFlightAbortBothFailure();
     TestTerminalCallbackGuardDefersOwnerDestructionUntilReturn();
     {
         int context = 1;
