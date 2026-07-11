@@ -1,5 +1,5 @@
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 
 const fatalTerminalLatency = new Trend('fatal_terminal_latency', true);
@@ -8,6 +8,8 @@ const finReverseFlowChecks = new Counter('fin_reverse_flow_checks');
 
 const scenario = __ENV.SCENARIO || 'baseline';
 const target = __ENV.TARGET_URL || 'https://127.0.0.1:18080';
+const adminUrl = __ENV.CLIENT_ADMIN_URL || '';
+const adminToken = __ENV.ADMIN_TOKEN || '';
 
 const scenarios = {
   baseline: { executor: 'constant-vus', vus: 100, duration: '5m' },
@@ -33,6 +35,7 @@ export const options = {
     http_req_failed: ['rate<0.001'],
     dropped_iterations: ['count==0'],
     http_req_duration: ['p(95)<500', 'p(99)<1000'],
+    fatal_terminal_latency: ['p(95)<1000', 'p(99)<5000'],
   },
 };
 
@@ -46,6 +49,13 @@ function payloadSize() {
 export default function () {
   const rst = ((__VU + __ITER) % 5) === 0; // deterministic 20% RST / 80% FIN
   const body = 'x'.repeat(payloadSize());
+  let terminalBefore = null;
+  if (rst && adminUrl && adminToken) {
+    const snapshot = http.get(`${adminUrl}/api/v1/relay/metrics`, {
+      headers: { Authorization: `Bearer ${adminToken}` }, tags: { control_plane: 'true' },
+    });
+    if (snapshot.status === 200) terminalBefore = snapshot.json('terminal_observed');
+  }
   const started = Date.now();
   const response = http.post(`${target}/${rst ? 'rst' : 'fin'}`, body, {
     headers: { 'Content-Type': 'application/octet-stream' },
@@ -57,7 +67,17 @@ export default function () {
   });
   if (rst) {
     rstCount.add(1);
-    fatalTerminalLatency.add(Date.now() - started);
+    let observed = false;
+    for (let attempt = 0; attempt < 50 && terminalBefore !== null; attempt += 1) {
+      const snapshot = http.get(`${adminUrl}/api/v1/relay/metrics`, {
+        headers: { Authorization: `Bearer ${adminToken}` }, tags: { control_plane: 'true' },
+      });
+      if (snapshot.status === 200 && snapshot.json('terminal_observed') > terminalBefore) {
+        observed = true; break;
+      }
+      sleep(0.1);
+    }
+    if (observed) fatalTerminalLatency.add(Date.now() - started);
   } else if (ok) {
     finReverseFlowChecks.add(1);
   }
