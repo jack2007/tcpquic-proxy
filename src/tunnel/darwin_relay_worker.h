@@ -201,12 +201,31 @@ struct TqDarwinRelayWorkerConfig {
     bool FailPrepareForTest{false};
     bool FailCommitForTest{false};
     bool FailManagedBindingForTest{false};
+    // Fires immediately after PublishTarget returns (publish window), before the
+    // next registration statement. Identity fields must already be initialized.
     void (*AfterPublishHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after inactive filters are installed and immediately before the
+    // activation-mutex final commit check (barrier A).
+    void (*BeforeCommitFinalCheckHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after Prepared->Active wins under the activation mutex, before
+    // filter enable / precommit drain (barrier B).
+    void (*AfterCommitActivationHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
     // Invoked at the start of queue-full terminal/active handoff so tests can
     // destroy and reuse handle storage before the fallback touches control.
     void (*BeforeTerminalHandoffHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
 #endif
 };
+
+#if defined(TCPQUIC_TESTING)
+struct TqDarwinBindingPublishIdentitySnapshot {
+    uint64_t RelayId{0};
+    uint64_t RouteGeneration{0};
+    uint64_t ControlGeneration{0};
+    bool RelayLockable{false};
+    bool StreamOwnerLockable{false};
+    size_t PrecommitDepth{0};
+};
+#endif
 
 struct TqDarwinRelayWorkerSnapshot {
     uint64_t EventsProcessed{0};
@@ -311,6 +330,15 @@ public:
     void MarkWorkerThreadExitedForTest();
     bool BindingActiveForTest(uint64_t relayId);
     bool BindingTerminalForTest(uint64_t relayId);
+    TqDarwinBindingPublishIdentitySnapshot BindingPublishIdentityForTest(uint64_t relayId) const;
+    TqDarwinBindingPublishIdentitySnapshot LastPublishIdentityForTest() const;
+    size_t PrecommitQueueDepthForTest(uint64_t relayId) const;
+    uint64_t TcpFilterInstallCountForTest() const;
+    uint64_t TcpFilterDeleteCountForTest() const;
+    uint64_t TcpFdCloseCountForTest() const;
+    uint64_t MapPublicationCountForTest() const;
+    uint64_t StreamBindingDestructorCountForTest() const;
+    uint64_t RelayStateDestructorCountForTest() const;
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
     uint64_t RetiredRelayCountForTest();
@@ -390,9 +418,25 @@ private:
         TqDarwinRelayWorkerSnapshot result);
     uint32_t DrainWakeEvents();
     bool RegisterTcpFilters(const std::shared_ptr<RelayState>& relay);
+    bool InstallInactiveTcpFilters(const std::shared_ptr<RelayState>& relay);
+    bool EnableTcpFilters(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterest(const std::shared_ptr<RelayState>& relay);
     bool UpdateTcpInterestLocal(const std::shared_ptr<RelayState>& relay);
     void RemoveTcpFilters(const std::shared_ptr<RelayState>& relay);
+    void CloseRelayTcpFdOnce(const std::shared_ptr<RelayState>& relay);
+    enum class PreparedCommitDisposition : uint8_t {
+        CommitActive = 0,
+        RollbackTerminal,
+        RollbackFailed,
+    };
+    struct PreparedRelayToken;
+    PreparedCommitDisposition TryCommitPreparedActivation(
+        const std::shared_ptr<RelayState>& relay,
+        StreamBinding* binding,
+        const TqDarwinRelayRegistration& registration);
+    void RollbackPreparedRelay(
+        PreparedRelayToken& token,
+        TqStreamLifetime::ShutdownIntent intent);
     std::shared_ptr<RelayState> FindRelay(uint64_t relayId);
     std::shared_ptr<RelayState> FindRetiredRelay(uint64_t relayId);
     // Raw worker-thread lookup; non-worker lifecycle access must use eventized commands.
@@ -560,6 +604,13 @@ private:
     mutable std::atomic<uint64_t> ActiveSendLocalCompleteCount{0};
     mutable std::atomic<uint64_t> ActiveSendOperationsSize{0};
     mutable std::atomic<uint64_t> FallbackSendCompletionCount{0};
+    mutable std::atomic<uint64_t> TcpFilterInstallCount{0};
+    mutable std::atomic<uint64_t> TcpFilterDeleteCount{0};
+    mutable std::atomic<uint64_t> TcpFdCloseCount{0};
+    mutable std::atomic<uint64_t> MapPublicationCount{0};
+    mutable std::atomic<uint64_t> StreamBindingDestructorCount{0};
+    mutable std::atomic<uint64_t> RelayStateDestructorCount{0};
+    mutable TqDarwinBindingPublishIdentitySnapshot LastPublishIdentity{};
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};

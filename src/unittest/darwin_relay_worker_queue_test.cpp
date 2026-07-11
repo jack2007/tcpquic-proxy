@@ -175,6 +175,36 @@ void EventMovePreservesOwnedMembers() {
     CHECK(receive.use_count() == 2);
 }
 
+void PendingReceiveStreamOwnerIsIndependentOfRelayMap() {
+    // Task 2: pending receive retains strong ownership (StreamOwner/BindingOwner)
+    // captured at build time; the queue must keep that alive without a live
+    // relay-map entry.
+    auto bindingOwner = std::make_shared<int>(1);
+    std::weak_ptr<int> weakBinding = bindingOwner;
+    auto receive = std::make_shared<TqDarwinPendingQuicReceive>();
+    receive->RelayId = 7;
+    receive->BindingOwner = bindingOwner;
+    receive->TotalLength = 3;
+
+    TqDarwinRelayEventQueue queue(2);
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicReceiveView;
+    event.ReceiveView = receive;
+    CHECK(queue.TryPush(std::move(event)));
+
+    bindingOwner.reset();
+    CHECK(!weakBinding.expired());
+
+    TqDarwinRelayEvent popped{};
+    CHECK(queue.TryPop(popped));
+    CHECK(popped.ReceiveView != nullptr);
+    CHECK(popped.ReceiveView->BindingOwner != nullptr);
+    CHECK(popped.ReceiveView->RelayId == 7);
+    popped.ReceiveView.reset();
+    receive.reset();
+    CHECK(weakBinding.expired());
+}
+
 void DrainWakeProcessesPastBudgetAndShutdown() {
     TqDarwinRelayWorkerConfig config{};
     config.EventBudget = 2;
@@ -209,6 +239,7 @@ int main() {
     EmptyQueueRejectsPop();
     MultiProducerPushSingleConsumerPop();
     EventMovePreservesOwnedMembers();
+    PendingReceiveStreamOwnerIsIndependentOfRelayMap();
     DrainWakeProcessesPastBudgetAndShutdown();
     return 0;
 }

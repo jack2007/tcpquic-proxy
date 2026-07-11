@@ -127,15 +127,33 @@ struct TqDarwinRelayWorker::StreamBinding final
     std::atomic<uint64_t> CallbackPendingReceiveEvents{0};
     std::shared_ptr<CompletionState> Completions;
     uint64_t RelayId{0};
+    // Immutable after PublishTarget: never assign/reset the same weak_ptr instance.
     std::weak_ptr<RelayState> Relay;
+    std::weak_ptr<TqStreamLifetime> StreamOwner;
+    uint64_t RouteGeneration{0};
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> CallbackPendingQuicReceives;
     mutable std::mutex CallbackPendingQuicReceivesMutex;
-    enum class Activation : uint8_t { Prepared, Active, Failed };
+    enum class Activation : uint8_t { Prepared, Active, Terminal, Failed };
     std::atomic<Activation> ActivationState{Activation::Prepared};
-    std::mutex PrecommitLock;
+    // Single activation mutex: phase transitions + precommit queue. No MsQuic /
+    // kevent / close / wait / destructor under this lock — disposition only.
+    std::mutex ActivationMutex;
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> PrecommitReceives;
     uint64_t PrecommitPendingBytes{0};
     uint64_t PrecommitMaxPendingBytes{0};
+#if defined(TCPQUIC_TESTING)
+    TqDarwinRelayWorker* DestructorCounterOwner{nullptr};
+#endif
+
+    ~StreamBinding() {
+#if defined(TCPQUIC_TESTING)
+        if (DestructorCounterOwner != nullptr) {
+            DestructorCounterOwner->StreamBindingDestructorCount.fetch_add(
+                1,
+                std::memory_order_relaxed);
+        }
+#endif
+    }
 
     QUIC_STATUS OnStreamEvent(
         MsQuicStream* stream,
@@ -236,6 +254,17 @@ struct TqDarwinRelayWorker::RelayState {
             ? config.MaxBufferedQuicSendBytes
             : config.ReadBatchBytes * 2;
     }
+
+#if defined(TCPQUIC_TESTING)
+    TqDarwinRelayWorker* DestructorCounterOwner{nullptr};
+    ~RelayState() {
+        if (DestructorCounterOwner != nullptr) {
+            DestructorCounterOwner->RelayStateDestructorCount.fetch_add(
+                1,
+                std::memory_order_relaxed);
+        }
+    }
+#endif
 };
 
 TqDarwinRelayWorker::TqDarwinRelayWorker(const TqDarwinRelayWorkerConfig& config)
@@ -745,6 +774,70 @@ bool TqDarwinRelayWorker::BindingTerminalForTest(uint64_t relayId) {
     return false;
 }
 
+TqDarwinBindingPublishIdentitySnapshot TqDarwinRelayWorker::BindingPublishIdentityForTest(
+    uint64_t relayId) const {
+    TqDarwinBindingPublishIdentitySnapshot snapshot{};
+    std::shared_ptr<StreamBinding> binding;
+    {
+        std::lock_guard<std::mutex> lock(RelayMutex);
+        const auto it = Relays.find(relayId);
+        if (it != Relays.end()) {
+            binding = it->second != nullptr ? it->second->Binding : nullptr;
+        }
+        if (binding == nullptr) {
+            for (const auto& retired : RetiredStreamBindings) {
+                if (retired->RelayId == relayId) {
+                    binding = retired;
+                    break;
+                }
+            }
+        }
+    }
+    if (binding == nullptr) {
+        return snapshot;
+    }
+    snapshot.RelayId = binding->RelayId;
+    snapshot.RouteGeneration = binding->RouteGeneration;
+    snapshot.ControlGeneration = binding->ControlGeneration;
+    snapshot.RelayLockable = !binding->Relay.expired();
+    snapshot.StreamOwnerLockable = !binding->StreamOwner.expired();
+    std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+    snapshot.PrecommitDepth = binding->PrecommitReceives.size();
+    return snapshot;
+}
+
+TqDarwinBindingPublishIdentitySnapshot TqDarwinRelayWorker::LastPublishIdentityForTest() const {
+    return LastPublishIdentity;
+}
+
+size_t TqDarwinRelayWorker::PrecommitQueueDepthForTest(uint64_t relayId) const {
+    return BindingPublishIdentityForTest(relayId).PrecommitDepth;
+}
+
+uint64_t TqDarwinRelayWorker::TcpFilterInstallCountForTest() const {
+    return TcpFilterInstallCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::TcpFilterDeleteCountForTest() const {
+    return TcpFilterDeleteCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::TcpFdCloseCountForTest() const {
+    return TcpFdCloseCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::MapPublicationCountForTest() const {
+    return MapPublicationCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::StreamBindingDestructorCountForTest() const {
+    return StreamBindingDestructorCount.load(std::memory_order_relaxed);
+}
+
+uint64_t TqDarwinRelayWorker::RelayStateDestructorCountForTest() const {
+    return RelayStateDestructorCount.load(std::memory_order_relaxed);
+}
+
 std::shared_ptr<TqStreamLifetime> TqDarwinRelayWorker::StreamOwnerForTest(uint64_t relayId) {
     std::lock_guard<std::mutex> lock(RelayMutex);
     const auto it = Relays.find(relayId);
@@ -1075,7 +1168,53 @@ bool TqDarwinRelayWorker::RegisterTcpFilters(const std::shared_ptr<RelayState>& 
         0,
         0,
         reinterpret_cast<void*>(relay->Id));
-    return kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) == 0;
+    if (kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) != 0) {
+        return false;
+    }
+#if defined(TCPQUIC_TESTING)
+    TcpFilterInstallCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+    return true;
+}
+
+bool TqDarwinRelayWorker::InstallInactiveTcpFilters(const std::shared_ptr<RelayState>& relay) {
+    if (relay == nullptr || KqueueFd < 0) {
+        return false;
+    }
+#if defined(TCPQUIC_TESTING)
+    if (FailRegisterTcpFiltersForTest) {
+        return false;
+    }
+#endif
+
+    struct kevent changes[2];
+    EV_SET(
+        &changes[0],
+        static_cast<uintptr_t>(relay->TcpFd),
+        EVFILT_READ,
+        EV_ADD | EV_DISABLE,
+        0,
+        0,
+        reinterpret_cast<void*>(relay->Id));
+    EV_SET(
+        &changes[1],
+        static_cast<uintptr_t>(relay->TcpFd),
+        EVFILT_WRITE,
+        EV_ADD | EV_DISABLE,
+        0,
+        0,
+        reinterpret_cast<void*>(relay->Id));
+    if (kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) != 0) {
+        return false;
+    }
+#if defined(TCPQUIC_TESTING)
+    TcpFilterInstallCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+    return true;
+}
+
+bool TqDarwinRelayWorker::EnableTcpFilters(const std::shared_ptr<RelayState>& relay) {
+    return UpdateTcpInterest(relay);
 }
 
 // Lifecycle/fallback helper: worker data-plane paths must use UpdateTcpInterestLocal().
@@ -1149,7 +1288,30 @@ void TqDarwinRelayWorker::RemoveTcpFilters(const std::shared_ptr<RelayState>& re
     struct kevent changes[2];
     EV_SET(&changes[0], static_cast<uintptr_t>(relay->TcpFd), EVFILT_READ, EV_DELETE, 0, 0, nullptr);
     EV_SET(&changes[1], static_cast<uintptr_t>(relay->TcpFd), EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-    (void)kevent(KqueueFd, changes, 2, nullptr, 0, nullptr);
+    if (kevent(KqueueFd, changes, 2, nullptr, 0, nullptr) == 0) {
+#if defined(TCPQUIC_TESTING)
+        TcpFilterDeleteCount.fetch_add(1, std::memory_order_relaxed);
+#endif
+    }
+}
+
+void TqDarwinRelayWorker::CloseRelayTcpFdOnce(const std::shared_ptr<RelayState>& relay) {
+    if (relay == nullptr) {
+        return;
+    }
+    TqSocketHandle fd = TqInvalidSocket;
+    {
+        std::lock_guard<std::mutex> relayLock(relay->Mutex);
+        if (!TqSocketValid(relay->TcpFd)) {
+            return;
+        }
+        fd = relay->TcpFd;
+        relay->TcpFd = TqInvalidSocket;
+    }
+    TqCloseSocket(fd);
+#if defined(TCPQUIC_TESTING)
+    TcpFdCloseCount.fetch_add(1, std::memory_order_relaxed);
+#endif
 }
 
 void TqDarwinRelayWorker::RetireRelay(
@@ -1197,6 +1359,9 @@ void TqDarwinRelayWorker::RetireRelay(
         if (TqSocketValid(relay->TcpFd)) {
             TqCloseSocket(relay->TcpFd);
             relay->TcpFd = TqInvalidSocket;
+#if defined(TCPQUIC_TESTING)
+            TcpFdCloseCount.fetch_add(1, std::memory_order_relaxed);
+#endif
         }
         relay->PendingQuicSends.clear();
         static constexpr uint32_t kMaxSubmittingYields = 100000;
@@ -1256,9 +1421,8 @@ void TqDarwinRelayWorker::RetireRelay(
             (void)DiscardDeferredQuicReceive(nullptr, receive);
         }
         binding->Active.store(false, std::memory_order_release);
-        if (terminalDetach) {
-            binding->Relay.reset();
-        }
+        // Do not reset binding->Relay after publish (P1-4): weak expiry follows
+        // RelayState destruction naturally.
         bool bindingExpected = false;
         retireBinding = binding->Retired.compare_exchange_strong(
             bindingExpected,
@@ -2627,7 +2791,8 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
     receive->RelayId = binding->RelayId;
     receive->BindingOwner = binding;
     receive->ReceiveCompleteStream = effectiveStream;
-    if (relay != nullptr) {
+    receive->StreamOwner = binding->StreamOwner.lock();
+    if (receive->StreamOwner == nullptr && relay != nullptr) {
         receive->StreamOwner = relay->StreamOwner;
     }
     receive->Fin = fin;
@@ -2669,6 +2834,8 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
     handled = true;
     if (binding->ActivationState.load(std::memory_order_acquire) ==
             StreamBinding::Activation::Failed ||
+        binding->ActivationState.load(std::memory_order_acquire) ==
+            StreamBinding::Activation::Terminal ||
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
     }
@@ -2676,13 +2843,14 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
     if (!receive) {
         return false;
     }
-    std::lock_guard<std::mutex> guard(binding->PrecommitLock);
+    std::lock_guard<std::mutex> guard(binding->ActivationMutex);
     const auto activation = binding->ActivationState.load(std::memory_order_acquire);
     if (activation == StreamBinding::Activation::Active) {
         handled = false;
         return true;
     }
     if (activation == StreamBinding::Activation::Failed ||
+        activation == StreamBinding::Activation::Terminal ||
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
     }
@@ -3415,19 +3583,26 @@ void TqDarwinRelayWorker::FailManagedBinding(RelayState* relay, StreamBinding* b
     }
     std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> pending;
     {
-        std::lock_guard<std::mutex> guard(binding->PrecommitLock);
-        binding->ActivationState.store(
-            StreamBinding::Activation::Failed,
-            std::memory_order_release);
-        pending.swap(binding->PrecommitReceives);
-        binding->PrecommitPendingBytes = 0;
+        std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+        const auto phase = binding->ActivationState.load(std::memory_order_acquire);
+        if (phase == StreamBinding::Activation::Terminal ||
+            phase == StreamBinding::Activation::Failed) {
+            pending.swap(binding->PrecommitReceives);
+            binding->PrecommitPendingBytes = 0;
+        } else {
+            binding->ActivationState.store(
+                StreamBinding::Activation::Failed,
+                std::memory_order_release);
+            pending.swap(binding->PrecommitReceives);
+            binding->PrecommitPendingBytes = 0;
+        }
     }
     for (const auto& receive : pending) {
         (void)DiscardDeferredQuicReceive(nullptr, receive);
     }
     binding->Closing.store(true, std::memory_order_release);
     binding->Active.store(false, std::memory_order_release);
-    binding->Relay.reset();
+    // Do not reset binding->Relay after publish (P1-4).
     if (binding->StopControl != nullptr) {
         (void)binding->StopControl->SignalStop(binding->ControlGeneration);
     }
@@ -3443,10 +3618,20 @@ void TqDarwinRelayWorker::SealManagedBindingTerminal(
     if (binding == nullptr) {
         return;
     }
+    {
+        std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+        const auto phase = binding->ActivationState.load(std::memory_order_acquire);
+        if (phase != StreamBinding::Activation::Terminal &&
+            phase != StreamBinding::Activation::Failed) {
+            binding->ActivationState.store(
+                StreamBinding::Activation::Terminal,
+                std::memory_order_release);
+        }
+    }
     binding->Active.store(false, std::memory_order_release);
     binding->Terminal.store(true, std::memory_order_release);
     binding->Closing.store(true, std::memory_order_release);
-    binding->Relay.reset();
+    // Do not reset binding->Relay after publish (P1-4).
     const uint64_t generation = binding->ControlGeneration != 0
         ? binding->ControlGeneration
         : (relay != nullptr ? relay->ControlGeneration : 0);
@@ -3454,6 +3639,28 @@ void TqDarwinRelayWorker::SealManagedBindingTerminal(
         (void)binding->StopControl->SignalStop(generation);
     } else if (relay != nullptr && relay->StopControl != nullptr) {
         (void)relay->StopControl->SignalStop(generation);
+    }
+}
+
+void TqDarwinRelayWorker::ActivateManagedBinding(
+    const std::shared_ptr<RelayState>& relay,
+    StreamBinding* binding) {
+    if (relay == nullptr || binding == nullptr) {
+        return;
+    }
+    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> pending;
+    {
+        std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+        if (binding->ActivationState.load(std::memory_order_acquire) !=
+            StreamBinding::Activation::Active) {
+            return;
+        }
+        pending.swap(binding->PrecommitReceives);
+        binding->PrecommitPendingBytes = 0;
+    }
+    while (!pending.empty()) {
+        (void)ProcessQuicReceiveViewEvent(pending.front());
+        pending.pop_front();
     }
 }
 
@@ -3521,28 +3728,107 @@ void TqDarwinRelayWorker::ProcessSendShutdownComplete(
     relay->QuicSendClosed = true;
 }
 
-void TqDarwinRelayWorker::ActivateManagedBinding(
+struct TqDarwinRelayWorker::PreparedRelayToken {
+    std::shared_ptr<RelayState> Relay;
+    std::shared_ptr<StreamBinding> Binding;
+    bool OwnsFd{false};
+    bool FilterInstalled{false};
+    bool MapPublished{false};
+    bool RollbackDone{false};
+};
+
+TqDarwinRelayWorker::PreparedCommitDisposition
+TqDarwinRelayWorker::TryCommitPreparedActivation(
     const std::shared_ptr<RelayState>& relay,
-    StreamBinding* binding) {
+    StreamBinding* binding,
+    const TqDarwinRelayRegistration& registration) {
     if (relay == nullptr || binding == nullptr) {
+        return PreparedCommitDisposition::RollbackFailed;
+    }
+    std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+    const auto phase = binding->ActivationState.load(std::memory_order_acquire);
+    if (phase == StreamBinding::Activation::Terminal) {
+        return PreparedCommitDisposition::RollbackTerminal;
+    }
+    if (phase != StreamBinding::Activation::Prepared) {
+        return PreparedCommitDisposition::RollbackFailed;
+    }
+    if (binding->Terminal.load(std::memory_order_acquire) ||
+        binding->Closing.load(std::memory_order_acquire)) {
+        binding->ActivationState.store(
+            StreamBinding::Activation::Terminal,
+            std::memory_order_release);
+        return PreparedCommitDisposition::RollbackTerminal;
+    }
+    if (registration.StreamOwner != nullptr) {
+        const auto ownerPhase = registration.StreamOwner->GetPhase();
+        if (ownerPhase == TqStreamLifetime::Phase::TerminalPublished ||
+            ownerPhase == TqStreamLifetime::Phase::Closed) {
+            binding->ActivationState.store(
+                StreamBinding::Activation::Terminal,
+                std::memory_order_release);
+            return PreparedCommitDisposition::RollbackTerminal;
+        }
+        if (registration.StreamOwner->RouteGeneration() != binding->RouteGeneration) {
+            binding->ActivationState.store(
+                StreamBinding::Activation::Failed,
+                std::memory_order_release);
+            return PreparedCommitDisposition::RollbackFailed;
+        }
+    }
+    if (binding->ControlGeneration != relay->ControlGeneration) {
+        binding->ActivationState.store(
+            StreamBinding::Activation::Failed,
+            std::memory_order_release);
+        return PreparedCommitDisposition::RollbackFailed;
+    }
+    const auto mapped = Relays.find(relay->Id);
+    if (mapped == Relays.end() || mapped->second != relay || binding->RelayId != relay->Id) {
+        binding->ActivationState.store(
+            StreamBinding::Activation::Failed,
+            std::memory_order_release);
+        return PreparedCommitDisposition::RollbackFailed;
+    }
+#if defined(TCPQUIC_TESTING)
+    if (Config.FailCommitForTest) {
+        binding->ActivationState.store(
+            StreamBinding::Activation::Failed,
+            std::memory_order_release);
+        return PreparedCommitDisposition::RollbackFailed;
+    }
+#endif
+    binding->ActivationState.store(
+        StreamBinding::Activation::Active,
+        std::memory_order_release);
+    return PreparedCommitDisposition::CommitActive;
+}
+
+void TqDarwinRelayWorker::RollbackPreparedRelay(
+    PreparedRelayToken& token,
+    TqStreamLifetime::ShutdownIntent intent) {
+    if (token.RollbackDone) {
         return;
     }
-    std::deque<std::shared_ptr<TqDarwinPendingQuicReceive>> pending;
-    {
-        std::lock_guard<std::mutex> guard(binding->PrecommitLock);
-        if (binding->ActivationState.load(std::memory_order_acquire) !=
-            StreamBinding::Activation::Prepared) {
-            return;
-        }
-        binding->ActivationState.store(
-            StreamBinding::Activation::Active,
-            std::memory_order_release);
-        pending.swap(binding->PrecommitReceives);
-        binding->PrecommitPendingBytes = 0;
+    token.RollbackDone = true;
+    if (token.Binding != nullptr) {
+        FailManagedBinding(token.Relay.get(), token.Binding.get());
     }
-    while (!pending.empty()) {
-        (void)ProcessQuicReceiveViewEvent(pending.front());
-        pending.pop_front();
+    if (token.Relay != nullptr) {
+        RequestRelayShutdown(token.Relay, intent);
+        if (token.FilterInstalled) {
+            RemoveTcpFilters(token.Relay);
+            token.FilterInstalled = false;
+        }
+        if (token.MapPublished) {
+            std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
+            std::lock_guard<std::mutex> lock(RelayMutex);
+            Relays.erase(token.Relay->Id);
+            token.MapPublished = false;
+        }
+        if (token.OwnsFd) {
+            CloseRelayTcpFdOnce(token.Relay);
+            token.OwnsFd = false;
+        }
     }
 }
 
@@ -3578,6 +3864,9 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     }
 
     auto relay = std::make_shared<RelayState>(registration, Config);
+#if defined(TCPQUIC_TESTING)
+    relay->DestructorCounterOwner = this;
+#endif
     {
         std::lock_guard<std::mutex> relayLock(relay->Mutex);
         relay->TcpReadArmed = true;
@@ -3589,96 +3878,96 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
     }
 #endif
     auto binding = std::make_shared<StreamBinding>();
+#if defined(TCPQUIC_TESTING)
+    binding->DestructorCounterOwner = this;
+#endif
     binding->Worker.store(this, std::memory_order_release);
     binding->Completions = std::make_shared<CompletionState>();
     binding->PrecommitMaxPendingBytes = MaxPendingQuicReceiveBytesPerRelay();
+    binding->StopControl = control;
+    binding->ControlGeneration = controlGeneration;
+    binding->ActivationState.store(
+        StreamBinding::Activation::Prepared,
+        std::memory_order_release);
     relay->Binding = binding;
 
-    if (registration.StreamOwner != nullptr) {
-        binding->Endpoint = StreamCallbackEndpoint;
-        binding->StopControl = control;
-        binding->ControlGeneration = controlGeneration;
-        binding->ActivationState.store(
-            StreamBinding::Activation::Prepared,
-            std::memory_order_release);
-        const uint64_t generation = registration.StreamOwner->RouteGeneration();
-        if (!registration.StreamOwner->PublishTarget(generation, binding)) {
-            FailManagedBinding(relay.get(), binding.get());
-            return result;
-        }
-        relay->ManagedBinding = binding;
-        result.TcpFdConsumed = true;
-    } else {
-        binding->StopControl = control;
-        binding->ControlGeneration = controlGeneration;
-        binding->ActivationState.store(
-            StreamBinding::Activation::Active,
-            std::memory_order_release);
-    }
+    PreparedRelayToken token{};
+    token.Relay = relay;
+    token.Binding = binding;
 
+    // Allocate id + initialize all callback-visible identity BEFORE PublishTarget.
     {
         std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
         std::lock_guard<std::mutex> lock(RelayMutex);
         relay->Id = NextRelayId++;
         binding->RelayId = relay->Id;
         binding->Relay = relay;
+        if (registration.StreamOwner != nullptr) {
+            binding->StreamOwner = registration.StreamOwner;
+            binding->RouteGeneration = registration.StreamOwner->RouteGeneration();
+            binding->Endpoint = StreamCallbackEndpoint;
+        } else {
+            binding->ActivationState.store(
+                StreamBinding::Activation::Active,
+                std::memory_order_release);
+        }
         Relays.emplace(relay->Id, relay);
-        result.Ok = true;
-        result.RelayId = relay->Id;
-    }
-
+        token.MapPublished = true;
 #if defined(TCPQUIC_TESTING)
-    if (registration.StreamOwner != nullptr && Config.AfterPublishHookForTest != nullptr) {
-        Config.AfterPublishHookForTest(this, relay->Id);
-    }
+        MapPublicationCount.fetch_add(1, std::memory_order_relaxed);
 #endif
-
-    if (registration.StreamOwner != nullptr &&
-        (registration.StreamOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished ||
-         relay->Binding == nullptr ||
-         relay->Binding->Closing.load(std::memory_order_acquire))) {
-        FailManagedBinding(relay.get(), relay->Binding.get());
-        {
-            std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
-            std::lock_guard<std::mutex> lock(RelayMutex);
-            Relays.erase(relay->Id);
-        }
-        if (result.TcpFdConsumed) {
-            TqCloseSocket(relay->TcpFd);
-            relay->TcpFd = TqInvalidSocket;
-        }
-        result.Ok = false;
-        result.RelayId = 0;
-        return result;
     }
-
-    bool commitFailed = false;
-#if defined(TCPQUIC_TESTING)
-    commitFailed = Config.FailCommitForTest;
-#endif
-    if (commitFailed || !RegisterTcpFilters(relay)) {
-        FailManagedBinding(relay.get(), relay->Binding.get());
-        RequestRelayShutdown(relay, TqStreamLifetime::ShutdownIntent::AbortBoth);
-        {
-            std::unique_lock<std::shared_mutex> mapAccess(RelayMapAccessMutex);
-            std::lock_guard<std::mutex> lock(RelayMutex);
-            RemoveTcpFilters(relay);
-            Relays.erase(relay->Id);
-        }
-        if (result.TcpFdConsumed) {
-            TqCloseSocket(relay->TcpFd);
-            relay->TcpFd = TqInvalidSocket;
-        }
-        result.Ok = false;
-        result.RelayId = 0;
-        return result;
-    }
-
-    relay->Committed = true;
 
     if (registration.StreamOwner != nullptr) {
-        ActivateManagedBinding(relay, relay->Binding.get());
+        const uint64_t expectedGeneration = binding->RouteGeneration;
+        uint64_t publishedGeneration = 0;
+        if (!registration.StreamOwner->PublishTarget(
+                expectedGeneration,
+                binding,
+                &publishedGeneration)) {
+            RollbackPreparedRelay(token, TqStreamLifetime::ShutdownIntent::AbortBoth);
+            return result;
+        }
+        // Immutable callback-visible generation is the post-publish route id.
+        binding->RouteGeneration = publishedGeneration != 0
+            ? publishedGeneration
+            : registration.StreamOwner->RouteGeneration();
+        relay->ManagedBinding = binding;
+        // Publish success irreversibly transfers FD ownership to the token.
+        token.OwnsFd = true;
+        result.TcpFdConsumed = true;
+
+#if defined(TCPQUIC_TESTING)
+        LastPublishIdentity.RelayId = binding->RelayId;
+        LastPublishIdentity.RouteGeneration = binding->RouteGeneration;
+        LastPublishIdentity.ControlGeneration = binding->ControlGeneration;
+        LastPublishIdentity.RelayLockable = !binding->Relay.expired();
+        LastPublishIdentity.StreamOwnerLockable = !binding->StreamOwner.expired();
+        {
+            std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+            LastPublishIdentity.PrecommitDepth = binding->PrecommitReceives.size();
+        }
+        if (Config.AfterPublishHookForTest != nullptr) {
+            Config.AfterPublishHookForTest(this, relay->Id);
+        }
+        {
+            std::lock_guard<std::mutex> guard(binding->ActivationMutex);
+            LastPublishIdentity.PrecommitDepth = binding->PrecommitReceives.size();
+        }
+#endif
     } else {
+        result.Ok = true;
+        result.RelayId = relay->Id;
+        if (!RegisterTcpFilters(relay)) {
+            RollbackPreparedRelay(token, TqStreamLifetime::ShutdownIntent::AbortBoth);
+            result.Ok = false;
+            result.RelayId = 0;
+            return result;
+        }
+        token.FilterInstalled = true;
+        token.OwnsFd = true;
+        result.TcpFdConsumed = true;
+        relay->Committed = true;
 #if defined(TCPQUIC_TESTING)
         if (TqDarwinRelayStreamUsableForTest(registration.Stream)) {
             registration.Stream->Callback = TqDarwinRelayWorker::StreamCallback;
@@ -3688,7 +3977,70 @@ TqDarwinRelayRegistrationResult TqDarwinRelayWorker::RegisterRelayWithIdLocal(
         registration.Stream->Callback = TqDarwinRelayWorker::StreamCallback;
         registration.Stream->Context = binding.get();
 #endif
+        return result;
     }
+
+    if (!InstallInactiveTcpFilters(relay)) {
+        RollbackPreparedRelay(token, TqStreamLifetime::ShutdownIntent::AbortBoth);
+        result.Ok = false;
+        result.RelayId = 0;
+        return result;
+    }
+    token.FilterInstalled = true;
+
+#if defined(TCPQUIC_TESTING)
+    if (Config.BeforeCommitFinalCheckHookForTest != nullptr) {
+        Config.BeforeCommitFinalCheckHookForTest(this, relay->Id);
+    }
+#endif
+
+    const auto disposition = TryCommitPreparedActivation(relay, binding.get(), registration);
+    if (disposition != PreparedCommitDisposition::CommitActive) {
+        const auto intent = disposition == PreparedCommitDisposition::RollbackTerminal
+            ? TqStreamLifetime::ShutdownIntent::AbortBoth
+            : TqStreamLifetime::ShutdownIntent::AbortBoth;
+        RollbackPreparedRelay(token, intent);
+        result.Ok = false;
+        result.TcpFdConsumed = true;
+        result.RelayId = 0;
+        return result;
+    }
+
+#if defined(TCPQUIC_TESTING)
+    if (Config.AfterCommitActivationHookForTest != nullptr) {
+        Config.AfterCommitActivationHookForTest(this, relay->Id);
+    }
+#endif
+
+    // Commit already linearized Prepared->Active. A terminal that arrives after
+    // that point must not roll registration back; normal terminal cleanup owns
+    // filter/FD disposition from here.
+    const bool terminalAfterCommit =
+        binding->Terminal.load(std::memory_order_acquire) ||
+        binding->ActivationState.load(std::memory_order_acquire) ==
+            StreamBinding::Activation::Terminal;
+    if (!terminalAfterCommit) {
+        if (!EnableTcpFilters(relay)) {
+            RollbackPreparedRelay(token, TqStreamLifetime::ShutdownIntent::AbortBoth);
+            result.Ok = false;
+            result.TcpFdConsumed = true;
+            result.RelayId = 0;
+            return result;
+        }
+    } else {
+        (void)EnableTcpFilters(relay);
+    }
+
+    relay->Committed = true;
+    ActivateManagedBinding(relay, binding.get());
+    result.Ok = true;
+    result.RelayId = relay->Id;
+    result.TcpFdConsumed = true;
+    // Token successfully committed — do not roll back FD/map on scope exit.
+    token.OwnsFd = false;
+    token.FilterInstalled = false;
+    token.MapPublished = false;
+    token.RollbackDone = true;
     return result;
 }
 

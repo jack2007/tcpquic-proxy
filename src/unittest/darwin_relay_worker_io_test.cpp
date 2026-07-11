@@ -4100,6 +4100,266 @@ void TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard() {
     ::close(fds[1]);
 }
 
+void PublishWindowReceiveSeesInitializedIdentity() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload.fill(0xCD);
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+    const uint64_t expectedGenerationBeforePublish = g_PrecommitOwner->RouteGeneration();
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.FailCommitForTest = true;
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(!result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(g_PrecommitReceiveStatus == QUIC_STATUS_PENDING);
+
+    const auto identity = worker.LastPublishIdentityForTest();
+    CHECK(identity.RelayId != 0);
+    // Binding stores the post-publish immutable route generation.
+    CHECK(identity.RouteGeneration == expectedGenerationBeforePublish + 1);
+    CHECK(identity.RouteGeneration == g_PrecommitOwner->RouteGeneration());
+    CHECK(identity.ControlGeneration != 0);
+    CHECK(identity.RelayLockable);
+    CHECK(identity.StreamOwnerLockable);
+    CHECK(identity.PrecommitDepth == 1);
+    CHECK(TcpRelayFdClosedOnce(consumedFd));
+    CHECK(worker.TcpFdCloseCountForTest() == 1);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void PublishWindowTerminalRollsBackWithoutPublicHandle() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitPublishTerminal = true;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    g_PrecommitPublishTerminal = false;
+    CHECK(!result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(result.RelayId == 0);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(handle.DarwinWorker == nullptr);
+    CHECK(handle.DarwinRelayId == 0);
+    CHECK(TcpRelayFdClosedOnce(consumedFd));
+    CHECK(worker.TcpFdCloseCountForTest() == 1);
+    CHECK(worker.MapPublicationCountForTest() == 1);
+    CHECK(worker.TcpFilterInstallCountForTest() <= 1);
+    CHECK(worker.CommittedRelayCountForTest() == 0);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void PublishWindowPeerAbortRollsBackPreparedRelay() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+
+    TqDarwinRelayWorkerConfig config{};
+    // Force commit failure after the publish-window peer abort so registration
+    // still rolls back once; the abort itself must observe a lockable relay.
+    config.FailCommitForTest = true;
+    config.AfterPublishHookForTest = [](TqDarwinRelayWorker* worker, uint64_t relayId) {
+        CHECK(relayId != 0);
+        const auto identity = worker->LastPublishIdentityForTest();
+        CHECK(identity.RelayId == relayId);
+        CHECK(identity.RelayLockable);
+        CHECK(identity.StreamOwnerLockable);
+        QUIC_STREAM_EVENT abortEvent{};
+        abortEvent.Type = QUIC_STREAM_EVENT_PEER_SEND_ABORTED;
+        abortEvent.PEER_SEND_ABORTED.ErrorCode = 0x41;
+        g_PrecommitReceiveStatus = g_PrecommitOwner->DispatchForTest(&abortEvent);
+        CHECK(g_PrecommitReceiveStatus == QUIC_STATUS_SUCCESS);
+    };
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(!result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(TcpRelayFdClosedOnce(consumedFd));
+    CHECK(worker.TcpFdCloseCountForTest() == 1);
+    CHECK(worker.CommittedRelayCountForTest() == 0);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void CommitBarrierTerminalBeforeFinalCheckRollsBack() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload = {1, 2, 3, 4};
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+    config.BeforeCommitFinalCheckHookForTest = [](TqDarwinRelayWorker*, uint64_t) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)g_PrecommitOwner->DispatchForTest(&terminal);
+    };
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(!result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(handle.Backend == TqRelayBackendType::None);
+    CHECK(TcpRelayFdClosedOnce(consumedFd));
+    CHECK(worker.TcpFilterInstallCountForTest() == 1);
+    CHECK(worker.TcpFilterDeleteCountForTest() == 1);
+    CHECK(worker.TcpFdCloseCountForTest() == 1);
+    CHECK(worker.MapPublicationCountForTest() == 1);
+    CHECK(worker.CommittedRelayCountForTest() == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards +
+              worker.Snapshot().DeferredReceiveCompletes >=
+          1);
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void CommitBarrierTerminalAfterActivationSucceedsThenStops() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    g_PrecommitPayload = {5, 6, 7, 8};
+    g_PrecommitOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
+    std::shared_ptr<TqRelayStopControl> observedControl;
+
+    TqDarwinRelayWorkerConfig config{};
+    config.MaxPendingQuicReceiveBytesPerRelay = g_PrecommitPayload.size();
+    config.AfterPublishHookForTest = AfterManagedPublishHook;
+    config.AfterCommitActivationHookForTest = [](TqDarwinRelayWorker*, uint64_t) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)g_PrecommitOwner->DispatchForTest(&terminal);
+    };
+
+    TqDarwinRelayWorker worker(config);
+    CHECK(worker.StartForTest());
+    TqRelayHandle handle{};
+    handle.Control = std::make_shared<TqRelayStopControl>();
+    handle.ControlGeneration = handle.Control->Generation;
+    observedControl = handle.Control;
+    const int consumedFd = fds[0];
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = consumedFd;
+    registration.Stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    registration.StreamOwner = g_PrecommitOwner;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(result.Ok);
+    CHECK(result.TcpFdConsumed);
+    CHECK(result.RelayId != 0);
+    CHECK(handle.Backend == TqRelayBackendType::DarwinWorker);
+    CHECK(observedControl->Stop.load(std::memory_order_acquire));
+    CHECK(worker.TcpFilterInstallCountForTest() == 1);
+    CHECK(worker.MapPublicationCountForTest() == 1);
+
+    // Drain terminal cleanup and unregister so filter/FD settle exactly once.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (worker.PendingEventsForTest() != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        (void)worker.DrainOneEventForTest();
+    }
+    TqRelayStop(&handle);
+    CHECK(worker.TcpFilterDeleteCountForTest() == 1);
+    CHECK(worker.TcpFdCloseCountForTest() == 1);
+    CHECK(TcpRelayFdClosedOnce(consumedFd));
+
+    g_PrecommitOwner.reset();
+    worker.Stop();
+    ::close(fds[1]);
+}
+
+void ManagedBindingWeakPointersExpireWithoutOwnershipCycle() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    const uint64_t relayId = harness.Result.RelayId;
+    std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
+    std::weak_ptr<void> weakRelay = harness.Worker.ActiveRelayOwnerForTest(relayId);
+    CHECK(!weakOwner.expired());
+    CHECK(!weakRelay.expired());
+
+    const uint64_t bindingDtorsBefore = harness.Worker.StreamBindingDestructorCountForTest();
+    const uint64_t relayDtorsBefore = harness.Worker.RelayStateDestructorCountForTest();
+
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (harness.Worker.PendingEventsForTest() != 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        (void)harness.Worker.DrainOneEventForTest();
+    }
+    TqRelayStop(&harness.Handle);
+    harness.Owner.reset();
+    harness.StopAndClosePeer();
+
+    CHECK(weakOwner.expired());
+    CHECK(weakRelay.expired());
+    CHECK(harness.Worker.StreamBindingDestructorCountForTest() > bindingDtorsBefore);
+    CHECK(harness.Worker.RelayStateDestructorCountForTest() > relayDtorsBefore);
+}
+
 void ManagedStaleSendCompletionEnvelopeDoesNotClaimTwice() {
     auto target = std::make_shared<CountingTarget>();
     auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started, target);
@@ -5657,6 +5917,12 @@ int main() {
     PreparedReceiveBufferedBeforeCommit();
     PreparedReceivePrecommitDiscardIncrementsDeferredComplete();
     TerminalOwnerSkipsReceiveCompleteOnPrecommitDiscard();
+    PublishWindowReceiveSeesInitializedIdentity();
+    PublishWindowTerminalRollsBackWithoutPublicHandle();
+    PublishWindowPeerAbortRollsBackPreparedRelay();
+    CommitBarrierTerminalBeforeFinalCheckRollsBack();
+    CommitBarrierTerminalAfterActivationSucceedsThenStops();
+    ManagedBindingWeakPointersExpireWithoutOwnershipCycle();
     ManagedStaleSendCompletionEnvelopeDoesNotClaimTwice();
     LateReceiveAfterInactiveBindingUsesFailSafeSink();
     LeaseHeldDeferredReceiveDoesNotDiscard();

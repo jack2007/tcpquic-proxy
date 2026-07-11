@@ -18,6 +18,8 @@ struct TqDarwinQuicReceiveSlice {
 };
 
 struct TqDarwinPendingQuicReceive {
+    // Strong owner captured from StreamBinding::StreamOwner (weak) at build
+    // time — never derived from the active relay map entry.
     std::shared_ptr<TqStreamLifetime> StreamOwner;
     MsQuicStream* ReceiveCompleteStream{nullptr};
     uint64_t RelayId{0};
