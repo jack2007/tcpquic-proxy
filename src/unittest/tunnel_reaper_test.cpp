@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "tunnel_reaper.h"
+#include "relay.h"
 
 #include <atomic>
 #include <cassert>
@@ -15,7 +16,7 @@ struct TestTunnelContext {
 static std::atomic<int> g_reapedCount{0};
 static TestTunnelContext* g_lastReaped = nullptr;
 
-bool TqTunnelRelayStopped(const TqTunnelContext* ctx) {
+bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx) {
     const auto* tunnel = reinterpret_cast<const TestTunnelContext*>(ctx);
     return tunnel != nullptr && tunnel->stopped.load();
 }
@@ -36,6 +37,11 @@ static bool WaitForReap(int expected, int timeoutMs) {
 }
 
 int main() {
+    if (TqTerminalReleaseReady({false, true, true})) return 90;
+    if (TqTerminalReleaseReady({true, false, true})) return 91;
+    if (TqTerminalReleaseReady({true, true, false})) return 92;
+    if (!TqTerminalReleaseReady({true, true, true})) return 93;
+
     TqTunnelReaper& reaper = TqTunnelReaper::Instance();
     reaper.Start();
     reaper.Stop();

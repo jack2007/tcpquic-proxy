@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #include "compress.h"
 #include "platform_socket.h"
@@ -13,6 +14,37 @@ class TqLinuxRelayWorker;
 class TqWindowsRelayWorker;
 class TqDarwinRelayWorker;
 class TqStreamLifetime;
+class TqTerminalLedger;
+
+struct TqTerminalHandoffFacts {
+    bool DataPlaneStopped{false};
+    bool TerminalHandoffComplete{false};
+    bool LocalOperationOwnershipTransferredOrDrained{false};
+};
+
+inline bool TqTerminalReleaseReady(const TqTerminalHandoffFacts& facts) noexcept {
+    return facts.DataPlaneStopped && facts.TerminalHandoffComplete &&
+           facts.LocalOperationOwnershipTransferredOrDrained;
+}
+
+struct TqTerminalHandoffControl {
+    const uint64_t Generation;
+    std::atomic<bool> DataPlaneStopped{false};
+    std::atomic<bool> TerminalHandoffComplete{false};
+    std::atomic<bool> LocalOperationOwnershipTransferredOrDrained{false};
+    std::shared_ptr<TqTerminalLedger> Ledger;
+
+    explicit TqTerminalHandoffControl(
+        uint64_t generation,
+        std::shared_ptr<TqTerminalLedger> ledger) noexcept
+        : Generation(generation), Ledger(std::move(ledger)) {}
+
+    TqTerminalHandoffFacts Snapshot() const noexcept {
+        return {DataPlaneStopped.load(std::memory_order_acquire),
+                TerminalHandoffComplete.load(std::memory_order_acquire),
+                LocalOperationOwnershipTransferredOrDrained.load(std::memory_order_acquire)};
+    }
+};
 
 enum class TqRelayBackendType {
     None,
@@ -53,6 +85,7 @@ struct TqRelayStopControl {
     std::atomic<bool> Stop{false};
     std::atomic<bool> ActiveAccountingReleased{false};
     std::atomic<bool> WorkerEndpointAlive{true};
+    std::shared_ptr<TqTerminalHandoffControl> TerminalHandoff;
 
     explicit TqRelayStopControl(uint64_t generation) : Generation(generation) {}
     TqRelayStopControl() : Generation(TqRelayNextControlGeneration()) {}

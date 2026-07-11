@@ -466,6 +466,7 @@ void TqNotifyClientTunnelOpenComplete(
 struct TqTunnelContext final {
 public:
     friend bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
+    friend bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx);
     friend void TqReapTunnelContext(TqTunnelContext* ctx);
 #if defined(TCPQUIC_TUNNEL_TESTING) && defined(__APPLE__)
     friend TqTunnelContext* TqCreateTestDarwinRelayTunnel(
@@ -2036,6 +2037,18 @@ bool TqTunnelRelayStopped(const TqTunnelContext* ctx) {
     return ctx->RelayHandle.Stop.load() ||
         (ctx->RelayHandle.Control != nullptr &&
          ctx->RelayHandle.Control->Stop.load(std::memory_order_acquire));
+}
+
+bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx) {
+    if (ctx == nullptr) {
+        return true;
+    }
+    const auto control = ctx->RelayHandle.Control;
+    if (control == nullptr) {
+        return false;
+    }
+    const auto handoff = std::atomic_load(&control->TerminalHandoff);
+    return handoff != nullptr && TqTerminalReleaseReady(handoff->Snapshot());
 }
 
 void TqReapTunnelContext(TqTunnelContext* ctx) {

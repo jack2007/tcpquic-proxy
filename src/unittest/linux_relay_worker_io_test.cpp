@@ -4521,6 +4521,46 @@ int main() {
         g_PrecommitPublishTerminal = false;
     }
 
+    // A Linux fatal event publishes the owner's one ledger and completes all
+    // three release facts only after the terminal handoff has returned.
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        TqLinuxRelayWorker worker({});
+        if (!worker.StartForTest()) return 5040;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5041;
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+        auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+        if (!owner->InstallDetachedStreamForTest(stream)) return 5042;
+        auto control = std::make_shared<TqRelayStopControl>();
+        bool blockedReleaseReady = true;
+        owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+            const auto blocked = std::atomic_load(&control->TerminalHandoff);
+            blockedReleaseReady = blocked != nullptr &&
+                TqTerminalReleaseReady(blocked->Snapshot());
+            return QUIC_STATUS_PENDING;
+        });
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = stream;
+        registration.StreamOwner = owner;
+        registration.StopControl = control;
+        registration.ControlGeneration = control->Generation;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) return 5043;
+        ::close(fds[0]);
+        if (!worker.DispatchTcpEventsForTest(registered.RelayId, EPOLLERR)) return 5044;
+        const auto handoff = std::atomic_load(&control->TerminalHandoff);
+        if (blockedReleaseReady || handoff == nullptr ||
+            handoff->Ledger.get() != owner->TerminalLedger().get() ||
+            !TqTerminalReleaseReady(handoff->Snapshot())) return 5045;
+        worker.Stop();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
     // A full normal event queue uses the intrusive terminal fallback lane.
     // This case uses a normally constructed CleanUpManual wrapper and verifies
     // that callback/context remain the stable router until wrapper close.

@@ -3,7 +3,7 @@
 #include <chrono>
 
 struct TqTunnelContext;
-bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
+bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx);
 void TqReapTunnelContext(TqTunnelContext* ctx);
 #include <mutex>
 #include <thread>
@@ -91,7 +91,7 @@ void TqTunnelReaper::ReaperLoop() {
 
             for (auto it = Contexts.begin(); it != Contexts.end();) {
                 TqTunnelContext* ctx = *it;
-                if (TqTunnelRelayStopped(ctx)) {
+                if (TqTunnelTerminalReleaseReady(ctx)) {
                     ready.push_back(ctx);
                     it = Contexts.erase(it);
                 } else {

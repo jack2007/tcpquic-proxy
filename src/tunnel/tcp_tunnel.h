@@ -86,4 +86,5 @@ void TqHandleServerIncomingStreamForTest(
 struct TqTunnelContext;
 
 bool TqTunnelRelayStopped(const TqTunnelContext* ctx);
+bool TqTunnelTerminalReleaseReady(const TqTunnelContext* ctx);
 void TqReapTunnelContext(TqTunnelContext* ctx);

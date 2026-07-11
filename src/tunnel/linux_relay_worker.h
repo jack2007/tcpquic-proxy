@@ -515,6 +515,10 @@ private:
         uint32_t receiveFlags,
         bool fin);
     void SetRelayStop(RelayState* relay, const char* trigger);
+    TqTerminalShutdownResult BeginTerminalHandoff(
+        RelayState* relay,
+        const char* reason,
+        uint64_t errorCode) noexcept;
     void AbortRelayAndRelease(RelayState* relay, const char* trigger, bool abortStream);
     void RequestRelayShutdown(
         RelayState* relay,
