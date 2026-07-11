@@ -535,7 +535,7 @@ TqClientTunnelOpenHandle* TqClientPeerRuntime::StartTunnel(
     metadata.PeerId = PeerId;
     metadata.ConnectionId = picked.ConnectionId;
     auto* handle = TqStartClientTunnelAsync(
-        picked.Connection,
+        picked,
         req,
         fd,
         Config,

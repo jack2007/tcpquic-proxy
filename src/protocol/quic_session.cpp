@@ -334,6 +334,7 @@ struct TqServerConnectionRecord {
     uint64_t NumericConnectionId{0};
     uint64_t Generation{0};
     MsQuicConnection* Connection{nullptr};
+    std::shared_ptr<MsQuicConnection> ConnectionOwner;
     std::shared_ptr<TqTerminalConnectionController> TerminalController;
     bool Closing{false};
     bool TerminalShutdownReserved{false};
@@ -351,10 +352,12 @@ std::atomic<uint32_t> g_nextServerConnId{1};
 std::atomic<uint64_t> g_serverTerminalShutdownCalls{0};
 std::atomic<uint64_t> g_serverTerminalDuplicate{0};
 std::atomic<uint64_t> g_serverTerminalClosingSuppressed{0};
+std::function<void()> g_beforeServerTerminalShutdown;
 #endif
 
 struct TqServerConnectionContext {
     QuicServerSession* Session{nullptr};
+    std::shared_ptr<MsQuicConnection> ConnectionOwner;
     std::string Encryption{"enabled"};
 };
 
@@ -382,7 +385,8 @@ void TqSampleConnectionRtt(MsQuicConnection* connection) {
 uint32_t TqRegisterServerConnectionByHandle(
     HQUIC handle,
     MsQuicConnection* connection,
-    const std::string& encryption) {
+    const std::string& encryption,
+    std::shared_ptr<MsQuicConnection> connectionOwner = {}) {
     if (handle == nullptr) {
         return 0;
     }
@@ -393,12 +397,16 @@ uint32_t TqRegisterServerConnectionByHandle(
     record.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
     record.Generation = 1;
     record.Connection = connection;
+    record.ConnectionOwner = std::move(connectionOwner);
     record.RemoteAddress = TqFormatConnectionAddr(connection, QUIC_PARAM_CONN_REMOTE_ADDRESS);
     record.Encryption = encryption == "disabled" ? "disabled" : "enabled";
     const uint64_t numericId = record.NumericConnectionId;
     record.TerminalController = std::make_shared<TqTerminalController>(
         [numericId](uint32_t, TqTerminalConnectionKey key, QUIC_STATUS, uint64_t) {
-            MsQuicConnection* current = nullptr;
+            std::shared_ptr<MsQuicConnection> connectionPin;
+#if defined(TQ_UNIT_TESTING)
+            std::function<void()> beforeShutdown;
+#endif
             {
                 std::lock_guard<std::mutex> guard(g_serverConnIdLock);
                 for (auto& item : g_serverConnIds) {
@@ -420,12 +428,22 @@ uint32_t TqRegisterServerConnectionByHandle(
                     }
                     candidate.TerminalShutdownReserved = true;
                     candidate.Closing = true;
-                    current = candidate.Connection;
+                    connectionPin = candidate.ConnectionOwner;
+#if defined(TQ_UNIT_TESTING)
+                    beforeShutdown = g_beforeServerTerminalShutdown;
+#endif
                     break;
                 }
             }
-            if (current != nullptr) {
-                current->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+#if defined(TQ_UNIT_TESTING)
+            if (beforeShutdown) beforeShutdown();
+#endif
+            if (connectionPin != nullptr) {
+#if defined(TQ_UNIT_TESTING)
+                g_serverTerminalShutdownCalls.fetch_add(1);
+#else
+                connectionPin->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+#endif
                 return true;
             }
 #if defined(TQ_UNIT_TESTING)
@@ -578,6 +596,17 @@ uint32_t TqRegisterServerConnectionForTest(
     MsQuicConnection* connection,
     const std::string& encryption) {
     return TqRegisterServerConnectionByHandle(handle, connection, encryption);
+}
+
+uint32_t TqRegisterServerConnectionOwnerForTest(
+    HQUIC handle, std::shared_ptr<MsQuicConnection> connection) {
+    return TqRegisterServerConnectionByHandle(
+        handle, connection.get(), "enabled", std::move(connection));
+}
+
+void TqSetBeforeServerTerminalShutdownForTest(std::function<void()> hook) {
+    std::lock_guard<std::mutex> guard(g_serverConnIdLock);
+    g_beforeServerTerminalShutdown = std::move(hook);
 }
 
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName) {
@@ -1000,6 +1029,7 @@ TqClientPickedConnection QuicClientSession::PickConnectionWithId() {
             auto& slot = State->Slots[index];
             if (auto* connection = PickableConnectionLocked(slot)) {
                 picked.Connection = connection;
+                picked.ConnectionOwner = slot.Connection;
                 picked.ConnectionId = slot.ConnectionId.empty() ? MakeConnectionId(index) : slot.ConnectionId;
                 picked.SlotIndex = static_cast<uint32_t>(index);
                 picked.NumericConnectionId = slot.NumericConnectionId;
@@ -1011,8 +1041,17 @@ TqClientPickedConnection QuicClientSession::PickConnectionWithId() {
     if (picked.Connection == nullptr) return {};
     auto escalation = MakeTerminalEscalation(
         picked.SlotIndex, picked.NumericConnectionId, picked.Generation);
+    picked.TerminalEscalation = escalation;
 #if !defined(TQ_UNIT_TESTING)
-    if (escalation && picked.Connection->Handle != nullptr) {
+    bool stillCurrent = false;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        stillCurrent = picked.SlotIndex < State->Slots.size() &&
+            State->Slots[picked.SlotIndex].NumericConnectionId == picked.NumericConnectionId &&
+            State->Slots[picked.SlotIndex].Generation == picked.Generation &&
+            State->Slots[picked.SlotIndex].Connection.get() == picked.Connection;
+    }
+    if (stillCurrent && escalation && picked.Connection->Handle != nullptr) {
         std::lock_guard<std::mutex> guard(g_clientTerminalRegistryLock);
         g_clientTerminalRegistry[picked.Connection->Handle] = {
             {picked.NumericConnectionId, picked.Generation}, escalation};
@@ -1098,7 +1137,10 @@ std::shared_ptr<TqTerminalEscalation> QuicClientSession::MakeTerminalEscalation(
                     auto operation = [weakState, index, key]() {
                         auto currentState = weakState.lock();
                         if (!currentState) return;
-                        MsQuicConnection* current = nullptr;
+                        std::shared_ptr<MsQuicConnection> connectionPin;
+#if defined(TQ_UNIT_TESTING)
+                        std::function<void()> beforeShutdown;
+#endif
                         {
                             std::lock_guard<std::mutex> guard(currentState->Lock);
                             if (index >= currentState->Slots.size()) return;
@@ -1106,17 +1148,22 @@ std::shared_ptr<TqTerminalEscalation> QuicClientSession::MakeTerminalEscalation(
                             if (slot.NumericConnectionId != key.ConnectionId ||
                                 slot.Generation != key.Generation ||
                                 !slot.TerminalShutdownReserved) return;
+                            connectionPin = slot.Connection;
 #if defined(TQ_UNIT_TESTING)
                             if (index >= currentState->ConnectionShutdownCalls.size()) {
                                 currentState->ConnectionShutdownCalls.resize(index + 1);
                             }
                             ++currentState->ConnectionShutdownCalls[index];
-#else
-                            current = slot.Connection.get();
+                            beforeShutdown = currentState->TestHooks.BeforeTerminalConnectionShutdown;
 #endif
                         }
-                        if (current != nullptr) {
-                            current->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+#if defined(TQ_UNIT_TESTING)
+                        if (beforeShutdown) beforeShutdown();
+#endif
+                        if (connectionPin != nullptr) {
+#if !defined(TQ_UNIT_TESTING)
+                            connectionPin->Shutdown(0, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT);
+#endif
                         }
                     };
                     if (scheduler && scheduler(std::chrono::milliseconds(0), operation)) {
@@ -1213,7 +1260,7 @@ bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string&
 }
 
 bool QuicClientSession::StopHighestConnection(const std::string& connectionId, std::string& err) {
-    std::unique_ptr<MsQuicConnection> oldConnection;
+    std::shared_ptr<MsQuicConnection> oldConnection;
     {
         std::scoped_lock guard(ConfigLock, State->Lock);
         if (!Config.QuicPaths.empty()) {
@@ -1442,9 +1489,24 @@ void QuicClientSession::MarkSlotConnectedForTest(size_t index, MsQuicConnection*
     slot.TestConnectionOverride = connection;
 }
 
+void QuicClientSession::MarkSlotConnectedForTest(
+    size_t index, std::shared_ptr<MsQuicConnection> connection) {
+    MarkSlotConnectedForTest(index, connection.get());
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index < State->Slots.size()) State->Slots[index].Connection = std::move(connection);
+}
+
 void QuicClientSession::MarkSlotClosingForTest(size_t index) {
     std::lock_guard<std::mutex> guard(State->Lock);
     if (index < State->Slots.size()) State->Slots[index].Closing = true;
+}
+
+void QuicClientSession::ClearSlotConnectionForTest(size_t index) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    if (index < State->Slots.size()) {
+        State->Slots[index].Connection.reset();
+        State->Slots[index].TestConnectionOverride = nullptr;
+    }
 }
 
 uint64_t QuicClientSession::ConnectionShutdownCallsForTest(size_t index) const {
@@ -1656,7 +1718,7 @@ bool QuicClientSession::StartSlot(size_t index) {
     std::function<QUIC_STATUS(size_t)> connectionStartOverride;
 #endif
 
-    std::unique_ptr<MsQuicConnection> oldConnection;
+    std::shared_ptr<MsQuicConnection> oldConnection;
     std::shared_ptr<ClientSharedState> state = State;
     TqClientSlotPath path;
     uint64_t generation = 0;
@@ -1745,7 +1807,7 @@ bool QuicClientSession::StartSlot(size_t index) {
         state->OrphanedConnections.push_back(std::move(oldConnection));
     }
 
-    std::unique_ptr<MsQuicConnection> newConnection;
+    std::shared_ptr<MsQuicConnection> newConnection;
     MsQuicConnection* connectionToStart = nullptr;
     ClientConnContext* newContext = nullptr;
     TqConfig configSnapshot;
@@ -1800,7 +1862,7 @@ bool QuicClientSession::StartSlot(size_t index) {
     };
 
     if (!scheduleRetry) {
-        newConnection = std::make_unique<MsQuicConnection>(
+        newConnection = std::make_shared<MsQuicConnection>(
                 *registration,
                 CleanUpManual,
                 QuicClientSession::ConnectionCallback,
@@ -1889,7 +1951,7 @@ bool QuicClientSession::StartSlot(size_t index) {
         TqTraceQuicConnecting("client", static_cast<uint32_t>(index + 1), path.PeerText.c_str());
     }
 
-    std::unique_ptr<MsQuicConnection> failedStartConnection;
+    std::shared_ptr<MsQuicConnection> failedStartConnection;
     ClientConnContext* failedStartContext = nullptr;
     {
         std::lock_guard<std::mutex> guard(state->Lock);
@@ -2176,7 +2238,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
     {
         std::shared_ptr<QuicClientSession::ClientSessionGate> gate = slotContext->Gate;
-        std::unique_ptr<MsQuicConnection> completedSlotConnection;
+        std::shared_ptr<MsQuicConnection> completedSlotConnection;
         TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
         {
@@ -2376,15 +2438,21 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
     }
     serverContext->Session = session;
 
-    auto* connection = new (std::nothrow) MsQuicConnection(
-        event->NEW_CONNECTION.Connection,
-        CleanUpAutoDelete,
-        QuicServerSession::ConnectionCallback,
-        serverContext);
+    std::shared_ptr<MsQuicConnection> connectionOwner;
+    try {
+        connectionOwner = std::make_shared<MsQuicConnection>(
+            event->NEW_CONNECTION.Connection,
+            CleanUpManual,
+            QuicServerSession::ConnectionCallback,
+            serverContext);
+    } catch (...) {
+    }
+    auto* connection = connectionOwner.get();
     if (connection == nullptr) {
         delete serverContext;
         return QUIC_STATUS_OUT_OF_MEMORY;
     }
+    serverContext->ConnectionOwner = connectionOwner;
 
     const QUIC_STATUS disableStatus =
         TqTryDisable1RttEncryptionForServerNewConnection(connection);
@@ -2397,8 +2465,9 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
             "tcpquic-proxy: failed to negotiate server QUIC encryption mode, 0x%x\n",
             disableStatus);
         connection->Handle = nullptr;
+        serverContext->ConnectionOwner.reset();
         delete serverContext;
-        delete connection;
+        connectionOwner.reset();
         return disableStatus;
     }
 
@@ -2410,8 +2479,9 @@ QUIC_STATUS QUIC_API QuicServerSession::ListenerCallback(
         }
         if (session->Stopping || !session->Configuration || QUIC_FAILED(configStatus)) {
             connection->Handle = nullptr;
+            serverContext->ConnectionOwner.reset();
             delete serverContext;
-            delete connection;
+            connectionOwner.reset();
             return QUIC_FAILED(configStatus) ? configStatus : QUIC_STATUS_INVALID_STATE;
         }
     }
@@ -2484,7 +2554,8 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
                 serverContext != nullptr && !serverContext->Encryption.empty()
                     ? serverContext->Encryption
                     : "enabled";
-            const uint32_t connId = TqRegisterServerConnection(connection, encryption);
+            const uint32_t connId = TqRegisterServerConnectionByHandle(
+                connection->Handle, connection, encryption, serverContext->ConnectionOwner);
             char line[256];
             std::snprintf(
                 line,
@@ -2536,6 +2607,8 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
         }
         break;
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+    {
+        auto connectionPin = serverContext->ConnectionOwner;
         (void)TqAbortConnectionTunnels(connection);
         {
             const uint32_t connId = TqLookupServerConnectionId(connection);
@@ -2554,8 +2627,11 @@ QUIC_STATUS QUIC_API QuicServerSession::ConnectionCallback(
             TqTraceQuicDisconnected(connection, connId, "server");
         }
         TqUnregisterServerConnection(connection);
+        connection->Close();
+        serverContext->ConnectionOwner.reset();
         delete serverContext;
         break;
+    }
     default:
         break;
     }

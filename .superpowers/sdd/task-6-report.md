@@ -49,3 +49,14 @@ rtk git diff --check
 - client 优先通过现有 zero-delay session scheduler 执行 shutdown operation；scheduler 不可用时同步执行 operation，但仍保持二次 key 校验与锁外 down-call。
 - server registry 当前没有独立 owner task queue，因此 controller 预留后同步在 registry lock 外执行 down-call；接口与 operation 边界已隔离，后续可把该 operation 投递到 server connection owner queue，而无需改变 escalation/key 协议。
 - `tcpquic_client_peer_runtime_test` 当前链接目标缺少 `stream_lifetime.cpp` / `terminal_convergence.cpp` 等既有实现对象，出现大量既有 undefined reference；production `tcpquic-proxy` 与本任务相关测试均可构建。
+
+## Review 修订：connection lifetime pin 与 identity 直传
+
+Review 后追加以下修订：
+
+- client slot owner 从 `unique_ptr` 改为 `shared_ptr<MsQuicConnection>`。terminal operation 在 state lock 内完成二次 key 校验时同步复制 connection pin，锁外只通过该 pin down-call；barrier 测试覆盖 operation 与 slot erase 并发，wrapper 在 operation 返回前不会析构。
+- server accepted wrapper 改用 `CleanUpManual` 和明确的 shared owner。server context 与 accepted record 持有同一 owner；controller 在 registry lock 内校验并复制 pin，锁外 down-call；shutdown-complete 先取得 callback local pin、erase record、`Close()`，回调返回后才释放最后 pin。测试覆盖 record erase 与在途 down-call 的析构 barrier。
+- `TqClientPickedConnection` 在同一次 slot state lock 选择中携带 connection owner、numeric id、generation；随后生成 immutable escalation token。client runtime 使用 picked overload 直接把 identity/token/owner 传给 tunnel factory。
+- legacy handle side table 仅在 pick 返回后重新锁定并确认 slot incarnation 仍完全一致时发布，迟到 pick 不能覆盖 reconnect 后的新 incarnation。
+- production terminal binding 不再生成 counter fallback。client raw lookup 或 server accepted record lookup 失败时，factory 在 callback 安装、stream start 或 retention handoff 前直接失败。
+- 新增测试覆盖迟到 picked token 在 reconnect 后被 generation gate 拒绝、lookup failure 不安装 accepted callback、client/server owner erase/down-call lifetime barrier，以及既有 handle reuse/weak expiry。

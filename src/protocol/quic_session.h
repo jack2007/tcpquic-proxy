@@ -87,10 +87,12 @@ struct TqServerConnectionSnapshot {
 
 struct TqClientPickedConnection {
     MsQuicConnection* Connection{nullptr};
+    std::shared_ptr<MsQuicConnection> ConnectionOwner;
     std::string ConnectionId;
     uint32_t SlotIndex{0};
     uint64_t NumericConnectionId{0};
     uint64_t Generation{0};
+    std::shared_ptr<TqTerminalEscalation> TerminalEscalation;
 };
 
 std::vector<TqServerConnectionSnapshot> TqSnapshotServerConnections();
@@ -105,6 +107,9 @@ uint32_t TqRegisterServerConnectionForTest(
     HQUIC handle,
     MsQuicConnection* connection = nullptr,
     const std::string& encryption = "enabled");
+uint32_t TqRegisterServerConnectionOwnerForTest(
+    HQUIC handle, std::shared_ptr<MsQuicConnection> connection);
+void TqSetBeforeServerTerminalShutdownForTest(std::function<void()> hook);
 bool TqSetServerConnectionClientNameForTest(HQUIC handle, const std::string& clientName);
 void TqUnregisterServerConnectionForTest(HQUIC handle);
 void TqMarkServerConnectionClosingForTest(HQUIC handle);
@@ -170,13 +175,17 @@ public:
             QUIC_STREAM_OPEN_FLAGS openFlags,
             QUIC_SEND_FLAGS sendFlags,
             const std::vector<uint8_t>& payload)> SendClientHelloOverride;
+        std::function<void()> BeforeTerminalConnectionShutdown;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
     void MarkReconnectStartedForTest(size_t slots, const TqConfig& cfg);
     void MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection);
+    void MarkSlotConnectedForTest(
+        size_t index, std::shared_ptr<MsQuicConnection> connection);
     void MarkSlotDisconnectedForTest(size_t index);
     void MarkSlotClosingForTest(size_t index);
+    void ClearSlotConnectionForTest(size_t index);
     uint64_t ConnectionShutdownCallsForTest(size_t index) const;
     uint64_t TerminalEscalationGenerationMismatchForTest() const;
     uint64_t TerminalEscalationDuplicateForTest() const;
@@ -202,7 +211,7 @@ private:
 
     struct ConnectionSlot {
         ClientConnContext* Context{nullptr};
-        std::unique_ptr<MsQuicConnection> Connection;
+        std::shared_ptr<MsQuicConnection> Connection;
         std::string ConnectionId;
         uint64_t NumericConnectionId{0};
         uint64_t Generation{0};
@@ -237,7 +246,7 @@ private:
         bool Started{false};
         bool Stopping{false};
         std::vector<ConnectionSlot> Slots;
-        std::vector<std::unique_ptr<MsQuicConnection>> OrphanedConnections;
+        std::vector<std::shared_ptr<MsQuicConnection>> OrphanedConnections;
         std::mutex Lock;
         std::condition_variable StateChanged;
         std::condition_variable OrphanDrained;

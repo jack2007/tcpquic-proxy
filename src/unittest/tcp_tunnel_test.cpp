@@ -26,6 +26,14 @@ static std::mutex g_test_server_connection_lock;
 static std::map<HQUIC, TqServerConnectionSnapshot> g_test_server_connections;
 static std::map<MsQuicConnection*, HQUIC> g_test_server_connection_handles;
 static uint32_t g_next_test_server_connection_id = 1;
+static std::atomic<uint64_t> g_next_test_terminal_connection_id{1};
+static std::atomic<bool> g_fail_next_terminal_lookup{false};
+
+class TqTestTerminalEscalation final : public TqTerminalEscalation {
+public:
+    void RequestConnectionShutdown(
+        uint64_t, uint64_t, QUIC_STATUS, uint64_t) noexcept override {}
+};
 
 #if defined(TCPQUIC_TUNNEL_TESTING)
 TqTunnelContext* TqCreateTestRegisteredTunnel(
@@ -113,15 +121,20 @@ uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
 }
 
 bool TqLookupClientTerminalConnection(
-    MsQuicConnection*, TqTerminalConnectionKey&,
-    std::shared_ptr<TqTerminalEscalation>&) noexcept {
-    return false;
+    MsQuicConnection* connection, TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    if (connection == nullptr) return false;
+    if (g_fail_next_terminal_lookup.exchange(false)) return false;
+    const uint64_t id = g_next_test_terminal_connection_id.fetch_add(1);
+    key = {id, 1};
+    escalation = std::make_shared<TqTestTerminalEscalation>();
+    return true;
 }
 
 bool TqLookupServerTerminalConnection(
-    MsQuicConnection*, TqTerminalConnectionKey&,
-    std::shared_ptr<TqTerminalEscalation>&) noexcept {
-    return false;
+    MsQuicConnection* connection, TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    return TqLookupClientTerminalConnection(connection, key, escalation);
 }
 
 bool QuicClientSession::EnsureAnyConnected(std::chrono::milliseconds) {
@@ -620,6 +633,21 @@ bool DispatchFakeStreamEvent(HQUIC handle, QUIC_STREAM_EVENT& event) {
     auto* callback =
         reinterpret_cast<QUIC_STREAM_CALLBACK_HANDLER>(handler);
     return callback(handle, context, &event) == QUIC_STATUS_SUCCESS;
+}
+
+int TestTerminalLookupFailureRejectsBeforeCallbackInstall() {
+    QUIC_API_TABLE fakeApi{};
+    InstallFakeMsQuicForTcpTunnel(fakeApi);
+    const HQUIC rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7061));
+    auto* connection = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x7062));
+    g_fail_next_terminal_lookup.store(true);
+    TqAcl acl;
+    TqConfig cfg{};
+    TqHandleServerIncomingStream(connection, rawStream, acl, cfg, nullptr);
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    if (DispatchFakeStreamEvent(rawStream, event)) return 7061;
+    return 0;
 }
 
 bool WaitForFakeSend(
@@ -2514,6 +2542,7 @@ static int TestDarwinRelayWorkerIndexPropagatesToHandleAndRegistry() {
 #endif
 
 int main() {
+    if (int rc = TestTerminalLookupFailureRejectsBeforeCallbackInstall()) return rc;
     if (int rc = TestQuicClientSessionReconnectApiSurface()) return rc;
     if (int rc = TestTunnelRegistryAbortsOnlyMatchingConnection()) return rc;
     if (int rc = TestTunnelRegistryRemovesBeforeCallbacks()) return rc;

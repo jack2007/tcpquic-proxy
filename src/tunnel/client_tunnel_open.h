@@ -8,6 +8,7 @@
 
 struct TqClientTunnelOpenHandle;
 struct MsQuicConnection;
+struct TqClientPickedConnection;
 
 using TqClientTunnelOpenComplete =
     std::function<void(TqClientTunnelOpenHandle*, TqTunnelStartResult)>;
@@ -45,6 +46,14 @@ TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
 
 TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
     MsQuicConnection* conn,
+    const TunnelRequest& req,
+    TqSocketHandle clientTcpFd,
+    const TqConfig& cfg,
+    TqClientTunnelOpenComplete onComplete,
+    TqClientTunnelMetadata metadata);
+
+TqClientTunnelOpenHandle* TqStartClientTunnelAsync(
+    const TqClientPickedConnection& picked,
     const TunnelRequest& req,
     TqSocketHandle clientTcpFd,
     const TqConfig& cfg,

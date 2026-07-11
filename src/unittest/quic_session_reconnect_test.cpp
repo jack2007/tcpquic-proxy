@@ -68,6 +68,76 @@ static int TestTerminalEscalationSuppressesClosingConnection() {
     return 0;
 }
 
+static int TestTerminalEscalationPinsConnectionAcrossSlotErase() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+    std::atomic<bool> destroyed{false};
+    auto owner = std::shared_ptr<MsQuicConnection>(
+        reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6351)),
+        [&](MsQuicConnection*) { destroyed.store(true, std::memory_order_release); });
+    session.MarkSlotConnectedForTest(0, owner.get());
+    const auto before = session.SnapshotConnections().front();
+    session.MarkSlotConnectedForTest(0, owner);
+    std::mutex lock;
+    std::condition_variable cv;
+    bool pinned = false;
+    bool release = false;
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.BeforeTerminalConnectionShutdown = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        pinned = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+    auto escalation = session.MakeTerminalEscalation(
+        before.SlotIndex, before.NumericConnectionId, before.Generation);
+    owner.reset();
+    std::thread worker([&] {
+        escalation->RequestConnectionShutdown(
+            before.NumericConnectionId, 24, QUIC_STATUS_INVALID_STATE, 98);
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return pinned; });
+    }
+    session.ClearSlotConnectionForTest(0);
+    if (destroyed.load(std::memory_order_acquire)) return 6351;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    worker.join();
+    if (!destroyed.load(std::memory_order_acquire)) return 6352;
+    return 0;
+}
+
+static int TestQueuedTerminalOperationRejectsReconnectedSlot() {
+    QuicClientSession session;
+    session.MarkReconnectStartedForTest(1);
+    auto* connection = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6361));
+    session.MarkSlotConnectedForTest(0, connection);
+    const auto before = session.SnapshotConnections().front();
+    std::function<void()> queued;
+    session.SetDelayedTaskScheduler([&](std::chrono::milliseconds delay, std::function<void()> task) {
+        if (delay != std::chrono::milliseconds(0)) return false;
+        queued = std::move(task);
+        return true;
+    });
+    auto escalation = session.MakeTerminalEscalation(
+        before.SlotIndex, before.NumericConnectionId, before.Generation);
+    escalation->RequestConnectionShutdown(
+        before.NumericConnectionId, 27, QUIC_STATUS_INVALID_STATE, 101);
+    if (!queued) return 6361;
+    std::string err;
+    if (!session.ReconnectConnection(before.ConnectionId, err)) return 6362;
+    queued();
+    if (session.ConnectionShutdownCallsForTest(0) != 0) return 6363;
+    session.Stop();
+    return 0;
+}
+
 static int TestServerTerminalEscalationRegistrySafety() {
     TqResetServerTerminalEscalationCountersForTest();
     const HQUIC firstHandle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x6401));
@@ -112,6 +182,50 @@ static int TestServerTerminalEscalationRegistrySafety() {
 
     TqUnregisterServerConnectionForTest(firstHandle);
     TqUnregisterServerConnectionForTest(closingHandle);
+    return 0;
+}
+
+static int TestServerTerminalEscalationPinsOwnerAcrossRecordErase() {
+    TqResetServerTerminalEscalationCountersForTest();
+    const HQUIC handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x6451));
+    std::atomic<bool> destroyed{false};
+    auto owner = std::shared_ptr<MsQuicConnection>(
+        reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x6452)),
+        [&](MsQuicConnection*) { destroyed.store(true, std::memory_order_release); });
+    const uint32_t id = TqRegisterServerConnectionOwnerForTest(handle, owner);
+    TqServerConnectionSnapshot snapshot{};
+    if (!TqGetServerConnectionSnapshot("srv-" + std::to_string(id), snapshot)) return 6451;
+    auto escalation = TqMakeServerTerminalEscalation(
+        {snapshot.NumericConnectionId, snapshot.Generation});
+    std::mutex lock;
+    std::condition_variable cv;
+    bool pinned = false;
+    bool release = false;
+    TqSetBeforeServerTerminalShutdownForTest([&] {
+        std::unique_lock<std::mutex> guard(lock);
+        pinned = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    });
+    owner.reset();
+    std::thread worker([&] {
+        escalation->RequestConnectionShutdown(
+            snapshot.NumericConnectionId, 26, QUIC_STATUS_INVALID_STATE, 100);
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return pinned; });
+    }
+    TqUnregisterServerConnectionForTest(handle);
+    if (destroyed.load(std::memory_order_acquire)) return 6452;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    worker.join();
+    TqSetBeforeServerTerminalShutdownForTest({});
+    if (!destroyed.load(std::memory_order_acquire)) return 6453;
     return 0;
 }
 
@@ -352,6 +466,12 @@ static int TestPickConnectionWithIdReturnsSlotId() {
     if (picked.Connection != first && picked.Connection != second) return 130;
     if (picked.Connection == first && picked.ConnectionId != "conn-0") return 131;
     if (picked.Connection == second && picked.ConnectionId != "conn-1") return 132;
+    if (picked.NumericConnectionId == 0 || picked.TerminalEscalation == nullptr) return 133;
+    std::string err;
+    if (!session.ReconnectConnection(picked.ConnectionId, err)) return 134;
+    picked.TerminalEscalation->RequestConnectionShutdown(
+        picked.NumericConnectionId, 25, QUIC_STATUS_INVALID_STATE, 99);
+    if (session.TerminalEscalationGenerationMismatchForTest() != 1) return 135;
 
     session.Stop();
     return 0;
@@ -905,7 +1025,10 @@ int main() {
     if (int rc = TestTerminalEscalationRejectsOldGeneration()) return rc;
     if (int rc = TestTerminalEscalationIsExactlyOnce()) return rc;
     if (int rc = TestTerminalEscalationSuppressesClosingConnection()) return rc;
+    if (int rc = TestTerminalEscalationPinsConnectionAcrossSlotErase()) return rc;
+    if (int rc = TestQueuedTerminalOperationRejectsReconnectedSlot()) return rc;
     if (int rc = TestServerTerminalEscalationRegistrySafety()) return rc;
+    if (int rc = TestServerTerminalEscalationPinsOwnerAcrossRecordErase()) return rc;
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
