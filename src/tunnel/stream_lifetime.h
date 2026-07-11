@@ -118,6 +118,7 @@ public:
     void ReleaseStreamForTest() noexcept;
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
     void* TargetContextForTest() const noexcept;
+    static void SetFailNextRegisterSendCompletionForTest(bool fail) noexcept;
 #endif
 
     ~TqStreamLifetime() noexcept;

@@ -29,6 +29,9 @@ std::atomic<uint64_t> g_nextSendNonce{1};
 std::atomic<uint64_t> g_sendCompletionPreSubmitRollbacks{0};
 std::atomic<uint64_t> g_sendCompletionUnknownClaims{0};
 std::atomic<uint64_t> g_sendCompletionDuplicateClaims{0};
+#if defined(TQ_UNIT_TESTING)
+std::atomic<bool> g_failNextRegisterSendCompletion{false};
+#endif
 thread_local TqStreamCallbackTarget* g_activeCallbackTarget = nullptr;
 
 QUIC_STATUS QUIC_API EmergencyAcceptedCallback(
@@ -147,6 +150,10 @@ void* TqStreamLifetime::TargetContextForTest() const noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     return Target_ != nullptr ? Target_->ContextForTest() : nullptr;
 }
+
+void TqStreamLifetime::SetFailNextRegisterSendCompletionForTest(bool fail) noexcept {
+    g_failNextRegisterSendCompletion.store(fail, std::memory_order_release);
+}
 #endif
 
 TqStreamLifetime::Phase TqStreamLifetime::GetPhase() const noexcept {
@@ -195,6 +202,11 @@ TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireApi() noexcept {
 void* TqStreamLifetime::RegisterSendCompletion(
     void* deliveredContext,
     std::function<void()> completionCleanup) noexcept {
+#if defined(TQ_UNIT_TESTING)
+    if (g_failNextRegisterSendCompletion.exchange(false, std::memory_order_acq_rel)) {
+        return nullptr;
+    }
+#endif
     RouteSnapshot route{};
     void* clientContext = nullptr;
     {

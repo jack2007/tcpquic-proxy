@@ -5346,14 +5346,63 @@ void ManagedRegisterRejectsTerminalOwnerBeforePublish() {
     harness.StopAndClosePeer();
 }
 
-// Task 3 / P1-2: completion key registered, then terminal seals binding before
-// active recheck — Send must not run and registry must roll back.
-void AfterRegisterSendCompletionTerminalHook(TqDarwinRelayWorker*, uint64_t) {
+// Task 3 / P1-2: completion key registered, then inject a pre-Send exit.
+enum class SendRegisterExitKind : int {
+    None = 0,
+    // binding null/inactive via terminal seal before active recheck
+    BindingInactiveViaTerminal = 1,
+    RelayClosing = 2,
+    StreamMismatch = 3,
+    TryMarkRegisteredFailure = 4,
+};
+
+std::atomic<int> g_SendRegisterExitKind{
+    static_cast<int>(SendRegisterExitKind::None)};
+
+void AfterRegisterSendCompletionExitHook(
+    TqDarwinRelayWorker* worker,
+    uint64_t relayId,
+    TqDarwinRelaySendOperation* operation) {
     g_SendRegisterBarrierFired.store(true, std::memory_order_release);
-    CHECK(g_SendRegisterBarrierOwner != nullptr);
-    QUIC_STREAM_EVENT terminal{};
-    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(g_SendRegisterBarrierOwner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    const auto kind = static_cast<SendRegisterExitKind>(
+        g_SendRegisterExitKind.load(std::memory_order_acquire));
+    switch (kind) {
+    case SendRegisterExitKind::BindingInactiveViaTerminal:
+        CHECK(g_SendRegisterBarrierOwner != nullptr);
+        {
+            QUIC_STREAM_EVENT terminal{};
+            terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+            CHECK(g_SendRegisterBarrierOwner->DispatchForTest(&terminal) ==
+                  QUIC_STATUS_SUCCESS);
+        }
+        break;
+    case SendRegisterExitKind::RelayClosing:
+        CHECK(worker != nullptr);
+        worker->MarkRelayClosingForTest(relayId);
+        break;
+    case SendRegisterExitKind::StreamMismatch:
+        CHECK(worker != nullptr);
+        worker->SetRelayStreamForTest(
+            relayId,
+            reinterpret_cast<MsQuicStream*>(static_cast<uintptr_t>(0xDEADBEEF)));
+        break;
+    case SendRegisterExitKind::TryMarkRegisteredFailure:
+        CHECK(operation != nullptr);
+        CHECK(operation->TryMarkRegistered());
+        break;
+    case SendRegisterExitKind::None:
+        break;
+    }
+}
+
+void AfterRegisterSendCompletionTerminalHook(
+    TqDarwinRelayWorker* worker,
+    uint64_t relayId,
+    TqDarwinRelaySendOperation* operation) {
+    g_SendRegisterExitKind.store(
+        static_cast<int>(SendRegisterExitKind::BindingInactiveViaTerminal),
+        std::memory_order_release);
+    AfterRegisterSendCompletionExitHook(worker, relayId, operation);
 }
 
 void ManagedSendRegisterThenTerminalBeforeActiveRecheckRollsBack() {
@@ -5371,9 +5420,14 @@ void ManagedSendRegisterThenTerminalBeforeActiveRecheckRollsBack() {
     CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
     g_SendRegisterBarrierOwner = harness.Owner;
     g_SendRegisterBarrierFired.store(false, std::memory_order_release);
+    g_SendRegisterExitKind.store(
+        static_cast<int>(SendRegisterExitKind::BindingInactiveViaTerminal),
+        std::memory_order_release);
     harness.Worker.SetStreamSendForTest(FakeStreamSend);
 
     const uint64_t dtorsBefore = harness.Worker.SendOperationDestructorCountForTest();
+    const uint64_t bufferBefore =
+        harness.Worker.PendingQuicSendBufferBytesForTest(harness.Result.RelayId);
     const char payload[] = "p1-2-barrier";
     CHECK(write(harness.Fds[0], payload, sizeof(payload) - 1) ==
           static_cast<ssize_t>(sizeof(payload) - 1));
@@ -5382,9 +5436,13 @@ void ManagedSendRegisterThenTerminalBeforeActiveRecheckRollsBack() {
     CHECK(g_SendRegisterBarrierFired.load(std::memory_order_acquire));
     CHECK(g_sendCalls.load(std::memory_order_acquire) == 0);
     CHECK(harness.Worker.SendOperationDestructorCountForTest() == dtorsBefore + 1);
+    CHECK(harness.Worker.InFlightQuicSendCountForTest(harness.Result.RelayId) == 0);
+    CHECK(harness.Worker.PendingQuicSendBufferBytesForTest(harness.Result.RelayId) ==
+          bufferBefore);
 
     const auto after = TqStreamLifetime::SnapshotSendCompletions();
     CHECK(after.ActiveCount == baseline.ActiveCount);
+    CHECK(after.PreSubmitRollbacks >= baseline.PreSubmitRollbacks + 1);
     CHECK(after.OldestAgeMs == 0 || after.ActiveCount == 0);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -5405,36 +5463,164 @@ void ManagedSendRegisterThenTerminalBeforeActiveRecheckRollsBack() {
     CHECK(finalSnap.ActiveSendReservations == 0);
     CHECK(finalSnap.SendReservationOldestAgeMs == 0);
     g_SendRegisterBarrierFired.store(false, std::memory_order_release);
+    g_SendRegisterExitKind.store(
+        static_cast<int>(SendRegisterExitKind::None),
+        std::memory_order_release);
 }
 
 void ManagedSendRegisterExitPointsRollBackRegistry() {
     enum class ExitKind {
-        TerminalBeforeSend,
-        SendSyncFailure,
+        BindingInactiveViaTerminal,
+        RelayClosing,
+        StreamMismatch,
+        TryMarkRegisteredFailure,
+        RegistryFailureAfterRegister,
+        // Fatal Send sync failure: destroys/cancels without OOM requeue.
+        SendSyncFailureFatal,
+        // OOM takes the requeue path — labeled separately from sync-failure rollback.
+        SendOomRequeue,
         CallbackBeforeReturn,
+        TerminalBeforeSend,
     };
     struct Case {
         const char* Name;
         ExitKind Kind;
         QUIC_STATUS SendStatus;
+        bool ExpectSendCalled;
+        bool ExpectOpDtor;
+        bool ExpectPreSubmitRollback;
+        bool NeedsFakeApi;
+        bool ExpectPendingRequeue;
     };
 
     const Case cases[] = {
-        {"binding_inactive_via_terminal", ExitKind::TerminalBeforeSend, QUIC_STATUS_SUCCESS},
-        {"send_sync_failure", ExitKind::SendSyncFailure, QUIC_STATUS_OUT_OF_MEMORY},
-        {"callback_before_return", ExitKind::CallbackBeforeReturn, QUIC_STATUS_SUCCESS},
+        {"binding_inactive_via_terminal",
+         ExitKind::BindingInactiveViaTerminal,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         false,
+         false},
+        {"relay_closing",
+         ExitKind::RelayClosing,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         true,
+         false},
+        {"stream_mismatch",
+         ExitKind::StreamMismatch,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         true,
+         false},
+        {"try_mark_registered_failure",
+         ExitKind::TryMarkRegisteredFailure,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         true,
+         false},
+        {"registry_failure_after_register",
+         ExitKind::RegistryFailureAfterRegister,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         true,
+         false},
+        {"send_sync_failure",
+         ExitKind::SendSyncFailureFatal,
+         QUIC_STATUS_INTERNAL_ERROR,
+         true,
+         true,
+         true,
+         true,
+         false},
+        {"send_oom_requeue",
+         ExitKind::SendOomRequeue,
+         QUIC_STATUS_OUT_OF_MEMORY,
+         true,
+         false,
+         true,
+         true,
+         true},
+        {"callback_before_return",
+         ExitKind::CallbackBeforeReturn,
+         QUIC_STATUS_SUCCESS,
+         true,
+         true,
+         false,
+         false,
+         false},
+        {"terminal_before_send",
+         ExitKind::TerminalBeforeSend,
+         QUIC_STATUS_SUCCESS,
+         false,
+         true,
+         true,
+         false,
+         false},
     };
 
     for (const auto& testCase : cases) {
+        std::unique_ptr<ScopedFakeMsQuicApi> fakeApi;
+        if (testCase.NeedsFakeApi) {
+            fakeApi = std::make_unique<ScopedFakeMsQuicApi>();
+        }
+
         ResetFakeStreamSend(testCase.SendStatus);
         TqDarwinRelaySendOperation::DestructorCount.store(0, std::memory_order_relaxed);
         const auto baseline = TqStreamLifetime::SnapshotSendCompletions();
 
         TqDarwinRelayWorkerConfig config{};
-        if (testCase.Kind == ExitKind::TerminalBeforeSend) {
+        switch (testCase.Kind) {
+        case ExitKind::BindingInactiveViaTerminal:
+        case ExitKind::TerminalBeforeSend:
+            g_SendRegisterExitKind.store(
+                static_cast<int>(SendRegisterExitKind::BindingInactiveViaTerminal),
+                std::memory_order_release);
             config.AfterRegisterSendCompletionHookForTest =
-                AfterRegisterSendCompletionTerminalHook;
+                AfterRegisterSendCompletionExitHook;
+            break;
+        case ExitKind::RelayClosing:
+            g_SendRegisterExitKind.store(
+                static_cast<int>(SendRegisterExitKind::RelayClosing),
+                std::memory_order_release);
+            config.AfterRegisterSendCompletionHookForTest =
+                AfterRegisterSendCompletionExitHook;
+            break;
+        case ExitKind::StreamMismatch:
+            g_SendRegisterExitKind.store(
+                static_cast<int>(SendRegisterExitKind::StreamMismatch),
+                std::memory_order_release);
+            config.AfterRegisterSendCompletionHookForTest =
+                AfterRegisterSendCompletionExitHook;
+            break;
+        case ExitKind::TryMarkRegisteredFailure:
+            g_SendRegisterExitKind.store(
+                static_cast<int>(SendRegisterExitKind::TryMarkRegisteredFailure),
+                std::memory_order_release);
+            config.AfterRegisterSendCompletionHookForTest =
+                AfterRegisterSendCompletionExitHook;
+            break;
+        case ExitKind::RegistryFailureAfterRegister:
+            config.FailNextSendCompletionRegisterForTest = true;
+            break;
+        case ExitKind::SendSyncFailureFatal:
+        case ExitKind::SendOomRequeue:
+        case ExitKind::CallbackBeforeReturn:
+            g_SendRegisterExitKind.store(
+                static_cast<int>(SendRegisterExitKind::None),
+                std::memory_order_release);
+            break;
         }
+
         ManagedRelayHarness harness(config);
         CHECK(harness.OpenSocketPair());
         CHECK(harness.Register(true));
@@ -5442,6 +5628,8 @@ void ManagedSendRegisterExitPointsRollBackRegistry() {
         harness.Stream = reinterpret_cast<MsQuicStream*>(harness.StreamStorage);
         CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
         g_SendRegisterBarrierOwner = harness.Owner;
+        g_SendRegisterBarrierFired.store(false, std::memory_order_release);
+
         if (testCase.Kind == ExitKind::CallbackBeforeReturn) {
             g_completeBeforeSendReturns.store(true, std::memory_order_release);
             harness.Worker.SetStreamSendForTest(FakeStreamSendViaOwner);
@@ -5449,15 +5637,48 @@ void ManagedSendRegisterExitPointsRollBackRegistry() {
             harness.Worker.SetStreamSendForTest(FakeStreamSend);
         }
 
+        const uint64_t dtorsBefore = harness.Worker.SendOperationDestructorCountForTest();
+        const uint64_t bufferBefore =
+            harness.Worker.PendingQuicSendBufferBytesForTest(harness.Result.RelayId);
+        const uint64_t inFlightBefore =
+            harness.Worker.InFlightQuicSendCountForTest(harness.Result.RelayId);
+
         const char payload[] = "exit-point";
         CHECK(write(harness.Fds[0], payload, sizeof(payload) - 1) ==
               static_cast<ssize_t>(sizeof(payload) - 1));
         CHECK(harness.Worker.InvokeTcpEventForTest(harness.Result.RelayId, EVFILT_READ, 0, 0));
 
-        if (testCase.Kind == ExitKind::TerminalBeforeSend) {
-            CHECK(g_sendCalls.load(std::memory_order_acquire) == 0);
-        } else {
+        if (testCase.Kind == ExitKind::StreamMismatch) {
+            // Restore a non-dangling Stream pointer before teardown/CloseRelay.
+            harness.Worker.SetRelayStreamForTest(harness.Result.RelayId, harness.Stream);
+        }
+
+        if (testCase.ExpectSendCalled) {
             CHECK(g_sendCalls.load(std::memory_order_acquire) >= 1);
+        } else {
+            CHECK(g_sendCalls.load(std::memory_order_acquire) == 0);
+        }
+
+        if (testCase.ExpectOpDtor) {
+            CHECK(harness.Worker.SendOperationDestructorCountForTest() == dtorsBefore + 1);
+        } else {
+            CHECK(harness.Worker.SendOperationDestructorCountForTest() == dtorsBefore);
+        }
+
+        CHECK(harness.Worker.InFlightQuicSendCountForTest(harness.Result.RelayId) ==
+              inFlightBefore);
+        if (!testCase.ExpectPendingRequeue) {
+            CHECK(harness.Worker.PendingQuicSendBufferBytesForTest(harness.Result.RelayId) ==
+                  bufferBefore);
+            CHECK(harness.Worker.PendingQuicSendCountForTest(harness.Result.RelayId) == 0);
+        } else {
+            CHECK(harness.Worker.PendingQuicSendCountForTest(harness.Result.RelayId) == 1);
+        }
+
+        const auto after = TqStreamLifetime::SnapshotSendCompletions();
+        CHECK(after.ActiveCount == baseline.ActiveCount);
+        if (testCase.ExpectPreSubmitRollback) {
+            CHECK(after.PreSubmitRollbacks >= baseline.PreSubmitRollbacks + 1);
         }
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -5466,10 +5687,10 @@ void ManagedSendRegisterExitPointsRollBackRegistry() {
             (void)harness.Worker.DrainOneEventForTest();
         }
 
-        const auto after = TqStreamLifetime::SnapshotSendCompletions();
-        CHECK(after.ActiveCount == baseline.ActiveCount);
-
-        if (testCase.Kind != ExitKind::TerminalBeforeSend) {
+        const bool alreadyTerminal =
+            testCase.Kind == ExitKind::BindingInactiveViaTerminal ||
+            testCase.Kind == ExitKind::TerminalBeforeSend;
+        if (!alreadyTerminal) {
             QUIC_STREAM_EVENT terminal{};
             terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
             CHECK(harness.Owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
@@ -5479,6 +5700,12 @@ void ManagedSendRegisterExitPointsRollBackRegistry() {
             }
         }
 
+        if (testCase.ExpectPendingRequeue) {
+            // Terminal/close should destroy the requeued operation.
+            CHECK(harness.Worker.SendOperationDestructorCountForTest() >= dtorsBefore + 1);
+            CHECK(harness.Worker.PendingQuicSendCountForTest(harness.Result.RelayId) == 0);
+        }
+
         std::weak_ptr<TqStreamLifetime> weakOwner = harness.Owner;
         g_SendRegisterBarrierOwner.reset();
         TqRelayStop(&harness.Handle);
@@ -5486,6 +5713,9 @@ void ManagedSendRegisterExitPointsRollBackRegistry() {
         harness.Owner.reset();
         harness.Worker.SetStreamSendForTest(nullptr);
         g_completeBeforeSendReturns.store(false, std::memory_order_release);
+        g_SendRegisterExitKind.store(
+            static_cast<int>(SendRegisterExitKind::None),
+            std::memory_order_release);
         harness.StopAndClosePeer();
         CHECK(weakOwner.expired());
         CHECK(harness.Worker.Snapshot().ActiveSendReservations == 0);

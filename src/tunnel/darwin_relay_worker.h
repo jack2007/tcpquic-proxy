@@ -221,7 +221,13 @@ struct TqDarwinRelayWorkerConfig {
     void (*BeforeTerminalHandoffHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
     // Fires after RegisterSendCompletion / ReserveSendCompletion succeeds and
     // before the binding-active recheck that gates MsQuic Send (P1-2 barrier).
-    void (*AfterRegisterSendCompletionHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // operation is the in-flight send being submitted (non-null).
+    void (*AfterRegisterSendCompletionHookForTest)(
+        TqDarwinRelayWorker*,
+        uint64_t,
+        TqDarwinRelaySendOperation*){nullptr};
+    // Next ReserveSendCompletion / RegisterSendCompletion returns nullptr once.
+    bool FailNextSendCompletionRegisterForTest{false};
 #endif
 };
 
@@ -355,6 +361,9 @@ public:
     uint64_t RelayStateDestructorCountForTest() const;
     uint64_t SendOperationDestructorCountForTest() const;
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
+    void MarkRelayClosingForTest(uint64_t relayId);
+    void SetRelayStreamForTest(uint64_t relayId, MsQuicStream* stream);
+    uint64_t PendingQuicSendBufferBytesForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
     uint64_t RetiredRelayCountForTest();
     std::shared_ptr<void> RetiredRelayOwnerForTest(uint64_t relayId);

@@ -859,6 +859,33 @@ std::shared_ptr<TqStreamLifetime> TqDarwinRelayWorker::StreamOwnerForTest(uint64
     return nullptr;
 }
 
+void TqDarwinRelayWorker::MarkRelayClosingForTest(uint64_t relayId) {
+    auto relay = FindRelay(relayId);
+    if (relay == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(relay->Mutex);
+    relay->Closing = true;
+}
+
+void TqDarwinRelayWorker::SetRelayStreamForTest(uint64_t relayId, MsQuicStream* stream) {
+    auto relay = FindRelay(relayId);
+    if (relay == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(relay->Mutex);
+    relay->Stream = stream;
+}
+
+uint64_t TqDarwinRelayWorker::PendingQuicSendBufferBytesForTest(uint64_t relayId) {
+    auto relay = FindRelay(relayId);
+    if (relay == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(relay->Mutex);
+    return relay->TcpReadBuffers.PendingBufferBytes.load(std::memory_order_relaxed);
+}
+
 uint64_t TqDarwinRelayWorker::RetiredStreamBindingCountForTest() {
     std::lock_guard<std::mutex> lock(RelayMutex);
     return RetiredStreamBindings.size();
@@ -2334,8 +2361,15 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         }
         completionKey = reservation.Key();
 #if defined(TCPQUIC_TESTING)
+        // Injectable post-register registry reject: reservation stays armed so
+        // RAII CancelSendCompletion restores the completion map on return.
+        if (Config.FailNextSendCompletionRegisterForTest) {
+            Config.FailNextSendCompletionRegisterForTest = false;
+            Errors.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
         if (Config.AfterRegisterSendCompletionHookForTest != nullptr) {
-            Config.AfterRegisterSendCompletionHookForTest(this, relay->Id);
+            Config.AfterRegisterSendCompletionHookForTest(this, relay->Id, raw);
         }
 #endif
     } else if (relay->Stream == nullptr) {
