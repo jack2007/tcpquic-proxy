@@ -50,7 +50,8 @@ bool TqSpeedConnectWaitShouldStop(uint32_t connected, uint32_t needed, bool dead
 void TqHandleServerSpeedControlStream(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,
-    HQUIC rawStream);
+    HQUIC rawStream,
+    const TqConfig& cfg);
 
 bool TqAttachServerSpeedControlStreamManaged(
     TqServerSpeedTestController& controller,

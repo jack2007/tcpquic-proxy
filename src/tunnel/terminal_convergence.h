@@ -148,6 +148,8 @@ public:
     static void UseRealClockForTest();
     static void FailNextAllocationForTest(uint32_t count) noexcept;
     static void FailNextThreadStartForTest() noexcept;
+    static void SetDiagnosticPollIntervalForTest(std::chrono::milliseconds interval);
+    static void SetDiagnosticNowForTest(std::chrono::steady_clock::time_point now);
 #endif
 };
 
@@ -202,6 +204,7 @@ std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter);
 const char* TqTerminalPhaseName(TerminalPhase phase) noexcept;
 const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept;
 const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexcept;
+std::string TqTerminalShutdownStatusName(QUIC_STATUS status);
 const char* TqTerminalEventName(TqTerminalEvent event) noexcept;
 void TqRecordTerminalExactlyOnceViolation() noexcept;
 uint64_t TqTerminalExactlyOnceViolationCount() noexcept;

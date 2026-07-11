@@ -2,8 +2,10 @@
 
 #include "config.h"
 #include "platform_socket.h"
+#include "quic_session.h"
 #include "trace.h"
 #include "tuning.h"
+#include "terminal_convergence.h"
 
 #include <array>
 #include <atomic>
@@ -31,6 +33,22 @@ uint32_t TqLookupServerConnectionId(MsQuicConnection* connection) {
 uint32_t TqLookupClientTraceConnId(MsQuicConnection* connection) {
     (void)connection;
     return 0;
+}
+
+bool TqLookupClientTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    key = {1, 1};
+    escalation.reset();
+    return true;
+}
+
+bool TqLookupServerTerminalConnection(
+    MsQuicConnection*, TqTerminalConnectionKey& key,
+    std::shared_ptr<TqTerminalEscalation>& escalation) noexcept {
+    key = {2, 1};
+    escalation.reset();
+    return true;
 }
 
 bool TqTraceEnabled() {

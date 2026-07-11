@@ -558,6 +558,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/trace_proxy_stub.cpp
         tunnel/relay.cpp
         tunnel/stream_lifetime.cpp
+        tunnel/terminal_convergence.cpp
         config/tuning.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/relay_buffer.cpp
@@ -696,6 +697,7 @@ add_executable(tcpquic_speed_test_test
     unittest/speed_test_test.cpp
     runtime/speed_test.cpp
     tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
     tunnel/tcp_tunnel.cpp
     tunnel/tcp_dialer.cpp
     tunnel/tunnel_registry.cpp
@@ -1194,6 +1196,8 @@ add_executable(tcpquic_client_peer_runtime_test
     tunnel/tunnel_registry.cpp
     tunnel/tunnel_reaper.cpp
     tunnel/relay.cpp
+    tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
     runtime/listen_socket.cpp
     runtime/relay_metrics.cpp
     runtime/thread_pool.cpp

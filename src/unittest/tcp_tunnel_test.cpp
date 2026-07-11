@@ -1743,10 +1743,17 @@ int TestServerIncomingSpeedControlDispatchesToController() {
     TqAcl acl;
     acl.AllowCidrs.push_back("127.0.0.0/8");
     TqConfig cfg{};
+    cfg.Tuning.TerminalWatchdogSeconds = 30;
     TqServerSpeedTestController controller;
 
     auto rawStream = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x7107));
     TqHandleServerIncomingStream(nullptr, rawStream, acl, cfg, &controller);
+    {
+        const auto retentions = TqSnapshotTerminalRetentions({});
+        if (std::none_of(retentions.begin(), retentions.end(), [](const auto& item) {
+                return item.WatchdogSeconds == 30;
+            })) return 290;
+    }
 
     const std::vector<uint8_t> speedStart =
         BuildSpeedStartBytes(88, TqSpeedDirection::Upload, 5, 1);

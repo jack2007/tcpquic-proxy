@@ -799,6 +799,90 @@ void TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal() {
     CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 0);
 }
 
+void TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity() {
+    Reset();
+    TqTerminalScheduler::UseRealClockForTest();
+    TqTerminalScheduler::SetDiagnosticPollIntervalForTest(std::chrono::milliseconds(1));
+    auto first = MakeStartedOwner(912);
+    auto second = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::CreatedNotStarted);
+    second->BindTerminalIdentity(
+        {912, 133, 3, 8, TqTunnelRole::ServerOpen,
+         TqRelayBackendType::DarwinWorker}, 5);
+    CHECK(second->BeginStart());
+    TqTerminalScheduler::SetDiagnosticNowForTest(
+        std::chrono::steady_clock::now() + std::chrono::seconds(31));
+    TqTerminalScheduler::Instance().Start();
+    for (unsigned i = 0; i != 200 &&
+         TqTerminalRetentionDiagnosticsForTest().CriticalLogs != 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto diagnostics = TqTerminalRetentionDiagnosticsForTest();
+    CHECK(diagnostics.WarningLogs == 2);
+    CHECK(diagnostics.CriticalLogs == 2);
+    CHECK(diagnostics.TrackedStreams == 2);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(first->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    for (unsigned i = 0; i != 200 &&
+         TqTerminalRetentionDiagnosticsForTest().TrackedStreams != 1; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 1);
+    CHECK(second->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    for (unsigned i = 0; i != 200 &&
+         TqTerminalRetentionDiagnosticsForTest().TrackedStreams != 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(TqTerminalRetentionDiagnosticsForTest().TrackedStreams == 0);
+    TqTerminalScheduler::Instance().Stop();
+}
+
+void TestShutdownStatusNamesAreStable() {
+    CHECK(TqTerminalShutdownStatusName(QUIC_STATUS_SUCCESS) == "success");
+    CHECK(TqTerminalShutdownStatusName(QUIC_STATUS_PENDING) == "pending");
+    CHECK(TqTerminalShutdownStatusName(QUIC_STATUS_OUT_OF_MEMORY) == "out_of_memory");
+    CHECK(TqTerminalShutdownStatusName(QUIC_STATUS_INVALID_STATE) == "invalid_state");
+    CHECK(TqTerminalShutdownStatusName(static_cast<QUIC_STATUS>(0x12345678)) ==
+          "unknown(305419896)");
+}
+
+void TestRetentionJsonUsesActualStatusAndUnixWallClock() {
+    Reset();
+    auto owner = MakeStartedOwner(913);
+    const auto ledger = owner->TerminalLedger();
+    const uint64_t before = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    const struct { QUIC_STATUS Status; const char* Name; bool Submitted; } cases[] = {
+        {QUIC_STATUS_SUCCESS, "success", true},
+        {QUIC_STATUS_PENDING, "pending", true},
+        {QUIC_STATUS_OUT_OF_MEMORY, "out_of_memory", false},
+        {QUIC_STATUS_INVALID_STATE, "invalid_state", false},
+        {static_cast<QUIC_STATUS>(0x12345678), "unknown(305419896)", false},
+    };
+    uint32_t attempt = 0;
+    for (const auto& item : cases) {
+        ledger->RecordShutdown(item.Status, ++attempt, item.Submitted);
+        const std::string json = TqTerminalRetentionsJson({});
+        CHECK(json.find(std::string("\"shutdown_status\":\"") + item.Name + "\"") !=
+              std::string::npos);
+    }
+    const auto submitted = ledger->Snapshot(std::chrono::steady_clock::now());
+    const uint64_t after = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    CHECK(submitted.ShutdownSubmittedAtMs >= before);
+    CHECK(submitted.ShutdownSubmittedAtMs <= after);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    const auto terminalSnapshot = ledger->Snapshot(std::chrono::steady_clock::now());
+    CHECK(terminalSnapshot.TerminalObservedAtMs >= submitted.ShutdownSubmittedAtMs);
+    CHECK(terminalSnapshot.TerminalObservedAtMs <= static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count()));
+}
+
 } // namespace
 
 int main() {
@@ -826,5 +910,8 @@ int main() {
     TestRetentionSnapshotCopiesLedgerBeforeReadingIt();
     TestRetentionAdminFilterIsStrictAndSchemaIsCanonical();
     TestRetentionAgeDiagnosticsLogThresholdsOnceAndClearOnTerminal();
+    TestRealSchedulerPollsEmptyHeapAndKeysDiagnosticsByFullIdentity();
+    TestShutdownStatusNamesAreStable();
+    TestRetentionJsonUsesActualStatusAndUnixWallClock();
     return 0;
 }

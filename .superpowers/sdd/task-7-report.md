@@ -36,3 +36,11 @@ rtk build/bin/Release/tcpquic_router_runtime_test
 - production 的三处 client/server owner factory 均传播 `Config.Tuning.TerminalWatchdogSeconds`；ledger snapshot 记录实际 watchdog 秒数，测试确定性覆盖 5/30。
 - scheduler 使用 fake clock 覆盖 retention oldest age `>5s` warning、`>30s` critical 各一次；扫描先复制 registry ledger，状态计算与日志均在 registry 锁外，terminal release 后清除 per-stream once 状态。
 - Task 9 runner failure gate 仍按计划 defer；Task 7 未修改 runner。
+
+## Review 修订（2026-07-12）
+
+- scheduler 在 task heap 为空时仍以 1 秒低频轮询 retention diagnostics；真实 worker 测试使用可控 poll interval/diagnostic clock，覆盖跨越 warning/critical 阈值及 terminal release 清理。
+- each-once 状态 key 扩展为 connection id、generation、stream id、role、backend 完整 identity；相同 stream id 的两个连接可独立告警和释放。
+- `shutdown_status` 直接序列化 ledger 的真实 `ShutdownStatus`，稳定名称覆盖 success、pending、out_of_memory、invalid_state 和 unknown numeric。
+- retention age/deadline 继续使用 steady clock；公开 submitted/terminal 时间戳改为 system clock Unix 毫秒，并验证 epoch 范围与先后顺序。
+- 独立 speed-control production handler 接收 `TqConfig` 并传播实际 watchdog；dispatcher speed-control 路径覆盖 override 30。补齐受 terminal convergence 影响的测试 target 源清单后，无 target 全量构建通过。

@@ -20,6 +20,15 @@ bool TqAttachServerSpeedControlStream(
     return false;
 }
 
+bool TqAttachServerSpeedControlStreamManaged(
+    TqServerSpeedTestController&,
+    MsQuicConnection*,
+    std::shared_ptr<TqStreamLifetime>,
+    std::vector<uint8_t>,
+    std::function<void()>) {
+    return false;
+}
+
 static int TestPrimaryPeerConfigUsesCliFields() {
     TqConfig cfg;
     cfg.QuicPeer = "10.0.0.1:4433";

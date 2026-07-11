@@ -1782,7 +1782,8 @@ cleanup:
 void TqHandleServerSpeedControlStream(
     TqServerSpeedTestController& controller,
     MsQuicConnection* conn,
-    HQUIC rawStream) {
+    HQUIC rawStream,
+    const TqConfig& cfg) {
     if (rawStream == nullptr) {
         return;
     }
@@ -1809,7 +1810,7 @@ void TqHandleServerSpeedControlStream(
             TqRelayBackendType::None
 #endif
         },
-        5);
+        cfg.Tuning.TerminalWatchdogSeconds);
     if (owner == nullptr) {
         return;
     }

@@ -91,7 +91,7 @@ std::atomic<uint64_t> g_connectionEscalation{0};
 std::atomic<uint64_t> g_terminalTimeoutPending{0};
 std::atomic<uint64_t> g_schedulerFailure{0};
 std::mutex g_retentionDiagnosticLock;
-std::unordered_map<uint64_t, uint8_t> g_retentionDiagnosticStates;
+std::unordered_map<std::string, uint8_t> g_retentionDiagnosticStates;
 std::atomic<uint64_t> g_retentionWarningLogs{0};
 std::atomic<uint64_t> g_retentionCriticalLogs{0};
 #if defined(TQ_UNIT_TESTING)
@@ -111,17 +111,25 @@ void ReleaseTerminalSinkPending() noexcept {
 void PollTerminalRetentionDiagnostics(
     std::chrono::steady_clock::time_point now) noexcept {
     const auto snapshots = TqSnapshotTerminalRetentionsAt({}, now);
-    std::unordered_map<uint64_t, uint64_t> ages;
+    struct DiagnosticValue { uint64_t StreamId; uint64_t AgeMs; };
+    std::unordered_map<std::string, DiagnosticValue> ages;
     try {
         ages.reserve(snapshots.size());
         for (const auto& snapshot : snapshots) {
-            ages[snapshot.Identity.StreamId] = snapshot.RetainedAgeMs;
+            const auto& id = snapshot.Identity;
+            const std::string key = std::to_string(id.ConnectionId) + ":" +
+                std::to_string(id.ConnectionGeneration) + ":" +
+                std::to_string(id.StreamId) + ":" +
+                std::to_string(static_cast<unsigned>(id.Role)) + ":" +
+                std::to_string(static_cast<unsigned>(id.Backend));
+            ages[key] = {id.StreamId, snapshot.RetainedAgeMs};
         }
     } catch (...) {
         g_schedulerFailure.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    std::vector<std::pair<uint64_t, const char*>> logs;
+    struct DiagnosticLog { uint64_t StreamId; uint64_t AgeMs; const char* Severity; };
+    std::vector<DiagnosticLog> logs;
     {
         std::lock_guard<std::mutex> guard(g_retentionDiagnosticLock);
         for (auto it = g_retentionDiagnosticStates.begin();
@@ -131,14 +139,14 @@ void PollTerminalRetentionDiagnostics(
         }
         for (const auto& item : ages) {
             uint8_t& state = g_retentionDiagnosticStates[item.first];
-            if (item.second > 5000 && (state & 1u) == 0) {
+            if (item.second.AgeMs > 5000 && (state & 1u) == 0) {
                 state |= 1u;
-                logs.emplace_back(item.first, "warning");
+                logs.push_back({item.second.StreamId, item.second.AgeMs, "warning"});
                 g_retentionWarningLogs.fetch_add(1, std::memory_order_relaxed);
             }
-            if (item.second > 30000 && (state & 2u) == 0) {
+            if (item.second.AgeMs > 30000 && (state & 2u) == 0) {
                 state |= 2u;
-                logs.emplace_back(item.first, "critical");
+                logs.push_back({item.second.StreamId, item.second.AgeMs, "critical"});
                 g_retentionCriticalLogs.fetch_add(1, std::memory_order_relaxed);
             }
         }
@@ -146,8 +154,8 @@ void PollTerminalRetentionDiagnostics(
     for (const auto& item : logs) {
         std::fprintf(stderr,
             "tcpquic-proxy: terminal retention %s stream_id=%llu oldest_age_ms=%llu\n",
-            item.second, static_cast<unsigned long long>(item.first),
-            static_cast<unsigned long long>(ages[item.first]));
+            item.Severity, static_cast<unsigned long long>(item.StreamId),
+            static_cast<unsigned long long>(item.AgeMs));
     }
 }
 
@@ -220,6 +228,9 @@ struct SchedulerState {
     std::function<void()> AfterEnqueue;
     uint32_t FailAllocations{0};
     bool FailThreadStart{false};
+    std::chrono::milliseconds DiagnosticPollInterval{std::chrono::seconds(1)};
+    bool HasDiagnosticNow{false};
+    std::chrono::steady_clock::time_point DiagnosticNow{};
 #endif
     ~SchedulerState() {
         {
@@ -255,6 +266,21 @@ std::chrono::steady_clock::time_point SchedulerNowLocked() {
     if (g_scheduler.FakeClock) return g_scheduler.FakeNow;
 #endif
     return std::chrono::steady_clock::now();
+}
+
+std::chrono::steady_clock::time_point DiagnosticNowLocked() {
+#if defined(TQ_UNIT_TESTING)
+    if (g_scheduler.HasDiagnosticNow) return g_scheduler.DiagnosticNow;
+#endif
+    return std::chrono::steady_clock::now();
+}
+
+std::chrono::milliseconds DiagnosticPollIntervalLocked() {
+#if defined(TQ_UNIT_TESTING)
+    return g_scheduler.DiagnosticPollInterval;
+#else
+    return std::chrono::seconds(1);
+#endif
 }
 
 void DecrementPendingTimeout() noexcept {
@@ -416,12 +442,18 @@ bool StartWorkerWithLifecycleLocked() noexcept {
         std::unique_lock<std::mutex> lock(g_scheduler.Mutex);
         while (!g_scheduler.Stopping) {
             if (g_scheduler.Tasks.empty()) {
-                g_scheduler.Wake.wait(lock);
+                const auto interval = DiagnosticPollIntervalLocked();
+                if (g_scheduler.Wake.wait_for(lock, interval) == std::cv_status::timeout) {
+                    const auto now = DiagnosticNowLocked();
+                    lock.unlock();
+                    PollTerminalRetentionDiagnostics(now);
+                    lock.lock();
+                }
                 continue;
             }
             const auto due = g_scheduler.Tasks.top().Due;
             const auto diagnosticDue = std::min(
-                due, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+                due, std::chrono::steady_clock::now() + DiagnosticPollIntervalLocked());
             if (g_scheduler.Wake.wait_until(lock, diagnosticDue) != std::cv_status::timeout) continue;
             if (std::chrono::steady_clock::now() < due) {
                 lock.unlock();
@@ -655,6 +687,8 @@ void TqTerminalScheduler::ResetForTest() {
     g_scheduler.AfterEnqueue = {};
     g_scheduler.FailAllocations = 0;
     g_scheduler.FailThreadStart = false;
+    g_scheduler.DiagnosticPollInterval = std::chrono::seconds(1);
+    g_scheduler.HasDiagnosticNow = false;
 }
 
 void TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds delta) {
@@ -717,6 +751,21 @@ void TqTerminalScheduler::FailNextThreadStartForTest() noexcept {
     std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
     g_scheduler.FailThreadStart = true;
 }
+
+void TqTerminalScheduler::SetDiagnosticPollIntervalForTest(
+    std::chrono::milliseconds interval) {
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    g_scheduler.DiagnosticPollInterval = interval;
+    g_scheduler.Wake.notify_all();
+}
+
+void TqTerminalScheduler::SetDiagnosticNowForTest(
+    std::chrono::steady_clock::time_point now) {
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    g_scheduler.DiagnosticNow = now;
+    g_scheduler.HasDiagnosticNow = true;
+    g_scheduler.Wake.notify_all();
+}
 #endif
 
 TqTerminalLedger::TqTerminalLedger(TqTerminalIdentity identity) noexcept {
@@ -749,7 +798,7 @@ void TqTerminalLedger::RecordEvent(TqTerminalEvent event) noexcept {
         }
         State_.TerminalObservedAtMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::system_clock::now().time_since_epoch()).count());
     }
 }
 
@@ -781,7 +830,7 @@ void TqTerminalLedger::RecordShutdown(
     if (submitted) {
         State_.ShutdownSubmittedAtMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
+                std::chrono::system_clock::now().time_since_epoch()).count());
     }
 }
 
@@ -942,6 +991,14 @@ const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexce
     return "unknown";
 }
 
+std::string TqTerminalShutdownStatusName(QUIC_STATUS status) {
+    if (status == QUIC_STATUS_SUCCESS) return "success";
+    if (status == QUIC_STATUS_PENDING) return "pending";
+    if (status == QUIC_STATUS_OUT_OF_MEMORY) return "out_of_memory";
+    if (status == QUIC_STATUS_INVALID_STATE) return "invalid_state";
+    return "unknown(" + std::to_string(static_cast<uint32_t>(status)) + ")";
+}
+
 const char* TqTerminalEventName(TqTerminalEvent event) noexcept {
     switch (event) {
     case TqTerminalEvent::None: return "none";
@@ -1032,7 +1089,7 @@ std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter) {
             << "\",\"terminal_phase\":\"" << TqTerminalPhaseName(snapshot.Phase)
             << "\",\"retained_age_ms\":" << snapshot.RetainedAgeMs
             << ",\"shutdown_intent\":\"" << TqTerminalShutdownIntentName(snapshot.ShutdownIntent)
-            << "\",\"shutdown_status\":\"" << (snapshot.Phase == TerminalPhase::ShutdownSubmitted ? "pending" : "none")
+            << "\",\"shutdown_status\":\"" << TqTerminalShutdownStatusName(snapshot.ShutdownStatus)
             << "\",\"shutdown_attempt\":" << snapshot.ShutdownAttempt
             << ",\"shutdown_submitted_at_ms\":" << snapshot.ShutdownSubmittedAtMs
             << ",\"terminal_observed_at_ms\":" << snapshot.TerminalObservedAtMs
