@@ -141,6 +141,30 @@ void TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut() {
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
 }
 
+void TestGracefulCompleteNeverArmsFatalWatchdog() {
+    Reset();
+    auto owner = MakeStartedOwner(190);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS flags) {
+            CHECK(flags == QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+            return QUIC_STATUS_PENDING;
+        });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(
+        0, sink, escalation, TqTerminalShutdownIntent::GracefulComplete).Submitted);
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::Idle);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(35));
+    const auto snapshot = owner->TerminalLedger()->Snapshot(
+        TqTerminalScheduler::NowForTest());
+    CHECK(snapshot.Watchdog == TqTerminalWatchdogState::Idle);
+    CHECK(escalation->Calls == 0);
+    CHECK(TqTerminalMetricsSnapshot().WatchdogArmed == 0);
+    CHECK(TqTerminalMetricsSnapshot().WatchdogTimeout == 0);
+    CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
+}
+
 void TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible() {
     Reset();
     auto owner = MakeStartedOwner(20);
@@ -561,9 +585,13 @@ void TestSinkPendingHandlesAlreadyTerminalAndMultipleSinks() {
     QUIC_STREAM_EVENT terminal{};
     terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
-    auto late = TqTerminalSink::Create(owner, ledger);
+    std::atomic<uint32_t> lateCallbacks{0};
+    auto late = TqTerminalSink::Create(owner, ledger, [&] { ++lateCallbacks; });
     CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 1);
     CHECK(owner->BeginTerminalShutdown(91, late, nullptr).AlreadyTerminal);
+    late->CompleteAlreadyTerminal();
+    CHECK(lateCallbacks == 1);
+    CHECK(ledger->Snapshot(std::chrono::steady_clock::now()).AccountingCompleted);
     late.reset();
     CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
 
@@ -581,6 +609,26 @@ void TestSinkPendingHandlesAlreadyTerminalAndMultipleSinks() {
     CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
     first.reset();
     second.reset();
+    CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
+}
+
+void TestSinkAndAlreadyTerminalCompletionRaceIsExactlyOnce() {
+    Reset();
+    auto owner = MakeStartedOwner(191);
+    auto ledger = owner->TerminalLedger();
+    std::atomic<uint32_t> callbacks{0};
+    auto sink = TqTerminalSink::Create(owner, ledger, [&] { ++callbacks; });
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    std::thread eventThread([&] {
+        CHECK(sink->OnStreamEvent(nullptr, &terminal, 1) == QUIC_STATUS_SUCCESS);
+    });
+    std::thread alreadyThread([&] { sink->CompleteAlreadyTerminal(); });
+    eventThread.join();
+    alreadyThread.join();
+    CHECK(callbacks == 1);
+    CHECK(ledger->Snapshot(std::chrono::steady_clock::now()).AccountingCompleted);
+    CHECK(TqTerminalMetricsSnapshot().TerminalObserved == 1);
     CHECK(TqTerminalMetricsSnapshot().TerminalSinkPending == 0);
 }
 
@@ -943,6 +991,7 @@ int main() {
     TestRetryBackoffAndWatchdogBoundaries();
     TestTerminalCancelsRetryAndWatchdog();
     TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut();
+    TestGracefulCompleteNeverArmsFatalWatchdog();
     TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible();
     TestTerminalBetweenOwnerCommitAndRetryScheduleIsIrreversible();
     TestCancelWinsAgainstTaskAlreadyRemovedFromHeap();
@@ -958,6 +1007,7 @@ int main() {
     TestSinkPendingRollsBackWhenNeverPublishedOrShutdownRejected();
     TestSinkControlBlockFailureDoesNotConsumeAnotherPendingObligation();
     TestSinkPendingHandlesAlreadyTerminalAndMultipleSinks();
+    TestSinkAndAlreadyTerminalCompletionRaceIsExactlyOnce();
     TestOwnerClaimsSendCompletionBeforeTerminalSink();
     TestSinkRecordsNonTerminalEvents();
     TestRetentionSnapshotFiltersFinalLedger();

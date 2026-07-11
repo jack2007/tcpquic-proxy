@@ -1013,6 +1013,26 @@ void TqTerminalSink::ArmPending() noexcept {
     Pending_.store(true, std::memory_order_release);
 }
 
+void TqTerminalSink::CompleteTerminalOnce() noexcept {
+    Ledger_->RecordEvent(TqTerminalEvent::ShutdownComplete);
+    if (Ledger_->CompleteAccountingOnce()) {
+        g_terminalObserved.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_duplicateTerminalSuppressed.fetch_add(1, std::memory_order_relaxed);
+    }
+    ReleasePendingOnce();
+    if (!TerminalCallbackInvoked_.exchange(true, std::memory_order_acq_rel) && OnTerminal_) {
+        auto callback = std::move(OnTerminal_);
+        callback();
+    }
+}
+
+void TqTerminalSink::CompleteAlreadyTerminal() noexcept {
+    if (Ledger_ != nullptr) {
+        CompleteTerminalOnce();
+    }
+}
+
 #if defined(TQ_UNIT_TESTING)
 void TqTerminalSink::SetFailNextControlBlockForTest(bool fail) noexcept {
     g_failNextTerminalSinkControlBlock.store(fail, std::memory_order_release);
@@ -1084,17 +1104,7 @@ QUIC_STATUS TqTerminalSink::OnStreamEvent(
         Ledger_->RecordEvent(TqTerminalEvent::SendShutdownComplete);
         break;
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
-        Ledger_->RecordEvent(TqTerminalEvent::ShutdownComplete);
-        if (Ledger_->CompleteAccountingOnce()) {
-            g_terminalObserved.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            g_duplicateTerminalSuppressed.fetch_add(1, std::memory_order_relaxed);
-        }
-        ReleasePendingOnce();
-        if (OnTerminal_) {
-            auto callback = std::move(OnTerminal_);
-            callback();
-        }
+        CompleteTerminalOnce();
         break;
     case QUIC_STREAM_EVENT_CANCEL_ON_LOSS:
         Ledger_->RecordEvent(TqTerminalEvent::CancelOnLoss);

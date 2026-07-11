@@ -125,6 +125,14 @@ extern "C" void TqTraceLinuxRelayIdealSendBufferEvent(
 
 namespace {
 
+void TryRecordTerminalHandoffCompleted(
+    const std::shared_ptr<TqTerminalHandoffControl>& handoff) noexcept {
+    if (handoff != nullptr && TqTerminalReleaseReady(handoff->Snapshot()) &&
+        !handoff->HandoffCompletedCounted.exchange(true, std::memory_order_acq_rel)) {
+        TqRecordTerminalHandoffCompleted();
+    }
+}
+
 #if defined(TQ_UNIT_TESTING)
 TqLinuxRelayStreamSendForTest g_linuxRelayStreamSendForTest = nullptr;
 #endif
@@ -659,6 +667,18 @@ bool TqLinuxRelayWorker::StartForTest() {
     return true;
 }
 
+#if defined(TQ_UNIT_TESTING)
+TqTerminalShutdownResult
+TqLinuxRelayWorker::BeginGracefulTerminalHandoffForTest(uint64_t relayId) {
+    auto relay = FindRelayById(relayId);
+    if (relay == nullptr) {
+        return TqTerminalShutdownResult{
+            QUIC_STATUS_INVALID_STATE, false, false, false, 0};
+    }
+    return BeginTerminalHandoff(relay.get(), "test_graceful_terminal", 0, true);
+}
+#endif
+
 void TqLinuxRelayWorker::Stop() {
     auto controlGuard = AcquireControlLockForMetrics();
     if (!Running.exchange(false)) {
@@ -1180,14 +1200,8 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
     auto sink = TqTerminalSink::Create(
         relay->StreamOwner, ledger,
         gracefulComplete ? std::function<void()>([handoff] {
-            handoff->DataPlaneStopped.store(true, std::memory_order_release);
-            handoff->LocalOperationOwnershipTransferredOrDrained.store(
-                true, std::memory_order_release);
             handoff->TerminalHandoffComplete.store(true, std::memory_order_release);
-            if (!handoff->HandoffCompletedCounted.exchange(
-                    true, std::memory_order_acq_rel)) {
-                TqRecordTerminalHandoffCompleted();
-            }
+            TryRecordTerminalHandoffCompleted(handoff);
         }) : std::function<void()>{});
     if (sink == nullptr) {
         if (!handoff->HandoffFailedCounted.exchange(true, std::memory_order_acq_rel)) {
@@ -1201,7 +1215,19 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
         gracefulComplete ? TqTerminalShutdownIntent::GracefulComplete
                          : TqTerminalShutdownIntent::AbortBothImmediate);
     AbortRelayAndRelease(relay, reason, false);
-    if (!gracefulComplete) {
+    if (gracefulComplete) {
+        handoff->DataPlaneStopped.store(true, std::memory_order_release);
+        handoff->LocalOperationOwnershipTransferredOrDrained.store(
+            true, std::memory_order_release);
+        if (result.AlreadyTerminal) {
+            sink->CompleteAlreadyTerminal();
+        }
+        TryRecordTerminalHandoffCompleted(handoff);
+        if (!result.Submitted && !result.AlreadyTerminal && !result.RetryScheduled &&
+            !handoff->HandoffFailedCounted.exchange(true, std::memory_order_acq_rel)) {
+            TqRecordTerminalHandoffFailed();
+        }
+    } else {
         handoff->DataPlaneStopped.store(true, std::memory_order_release);
         handoff->LocalOperationOwnershipTransferredOrDrained.store(
             true, std::memory_order_release);

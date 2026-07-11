@@ -4607,6 +4607,53 @@ int main() {
     }
 
     // A full callback queue uses the typed fatal handoff fallback lane.
+    // A real terminal published before the worker begins graceful handoff is
+    // accounted immediately and makes the release facts ready exactly once.
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+        TqLinuxRelayWorker worker({});
+        if (!worker.StartForTest()) return 5047;
+        int fds[2]{-1, -1};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) return 5048;
+        alignas(MsQuicStream) uint8_t storage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+        auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+        if (!owner->InstallDetachedStreamForTest(stream)) return 5049;
+        auto control = std::make_shared<TqRelayStopControl>();
+        TqLinuxRelayRegistration registration{};
+        registration.TcpFd = fds[0];
+        registration.Stream = stream;
+        registration.StreamOwner = owner;
+        registration.StopControl = control;
+        registration.ControlGeneration = control->Generation;
+        const auto registered = worker.RegisterRelayWithId(registration);
+        if (!registered.Ok) return 5060;
+        const auto before = TqTerminalMetricsSnapshot();
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        if (QUIC_FAILED(owner->DispatchForTest(&terminal)) ||
+            owner->GetTerminalPhase() != TerminalPhase::TerminalObserved) return 5061;
+        const auto result = worker.BeginGracefulTerminalHandoffForTest(registered.RelayId);
+        const auto handoff = std::atomic_load(&control->TerminalHandoff);
+        const auto after = TqTerminalMetricsSnapshot();
+        if (!result.AlreadyTerminal || handoff == nullptr ||
+            !TqTerminalReleaseReady(handoff->Snapshot()) ||
+            !owner->TerminalLedger()->Snapshot(std::chrono::steady_clock::now())
+                 .AccountingCompleted ||
+            after.HandoffCompleted != before.HandoffCompleted + 1 ||
+            after.TerminalObserved != before.TerminalObserved + 1) return 5062;
+        (void)worker.DrainForTest(16);
+        const auto finalMetrics = TqTerminalMetricsSnapshot();
+        if (finalMetrics.HandoffCompleted != after.HandoffCompleted ||
+            finalMetrics.TerminalObserved != after.TerminalObserved) return 5063;
+        worker.Stop();
+        registration.StreamOwner.reset();
+        owner.reset();
+        ::close(fds[1]);
+        MsQuic = nullptr;
+    }
+
     {
         const uint64_t retentionBaseline =
             TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount;

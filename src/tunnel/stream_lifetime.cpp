@@ -812,11 +812,12 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         schedulerErrorCode = TerminalErrorCode_;
         schedulerWatchdogSeconds = TerminalWatchdogSeconds_;
     }
-    if (result.Submitted) {
+    if (result.Submitted && !gracefulComplete) {
         TqTerminalScheduler::Instance().ArmWatchdog(
             weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode,
             std::chrono::seconds(schedulerWatchdogSeconds));
-    } else if (!result.AlreadyTerminal && QUIC_FAILED(result.Status)) {
+    } else if (!gracefulComplete && !result.AlreadyTerminal &&
+               QUIC_FAILED(result.Status)) {
         result.RetryScheduled = TqTerminalScheduler::Instance().ScheduleRetry(
             weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode,
             result.Attempt);

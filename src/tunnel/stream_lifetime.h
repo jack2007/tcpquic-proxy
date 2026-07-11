@@ -293,6 +293,7 @@ public:
     ~TqTerminalSink() noexcept override;
     QUIC_STATUS OnStreamEvent(
         MsQuicStream*, QUIC_STREAM_EVENT*, uint64_t) noexcept override;
+    void CompleteAlreadyTerminal() noexcept;
 
 private:
     TqTerminalSink(
@@ -300,11 +301,13 @@ private:
         std::shared_ptr<TqTerminalLedger> ledger,
         std::function<void()> onTerminal) noexcept;
     void ReleasePendingOnce() noexcept;
+    void CompleteTerminalOnce() noexcept;
     void ArmPending() noexcept;
     std::weak_ptr<TqStreamLifetime> Owner_;
     std::shared_ptr<TqTerminalLedger> Ledger_;
     std::function<void()> OnTerminal_;
     std::atomic<bool> Pending_{false};
+    std::atomic<bool> TerminalCallbackInvoked_{false};
 };
 
 // callback-safe target adapter。Detach 从外部线程调用时等待已经进入的 callback；

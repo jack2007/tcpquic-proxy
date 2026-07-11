@@ -373,6 +373,7 @@ public:
     uint32_t WorkerIndexForTest() const { return Config.WorkerIndex; }
     bool ArmTcpReadableForTest(uint64_t relayId, bool enabled);
     bool RelayIndexesConsistentForTest() const;
+    TqTerminalShutdownResult BeginGracefulTerminalHandoffForTest(uint64_t relayId);
 #endif
 
 private:
