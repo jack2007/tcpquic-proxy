@@ -244,7 +244,7 @@ static constexpr char kConsoleHtmlStorage[] =
 
 constexpr std::string_view kConsoleHtml(kConsoleHtmlStorage);
 
-// Same MSVC C2026 limit as kConsoleHtmlStorage above. Keep JS_PART1/2/3/4 separate;
+// Same MSVC C2026 limit as kConsoleHtmlStorage above. Keep JS parts separate;
 // do NOT collapse into one raw string literal.
 static constexpr char kConsoleJsStorage[] =
     R"JS_PART1(
@@ -512,6 +512,8 @@ static constexpr char kConsoleJsStorage[] =
         'column.reconnects': '重连次数',
         'column.last_error': '最近错误',
         'column.actions': '操作',
+)JS_PART1"
+    R"JS_PART1B(
         'column.connection_id': 'connection_id',
         'column.slot_index': 'slot_index',
         'column.generation': 'generation',
@@ -654,7 +656,8 @@ static constexpr char kConsoleJsStorage[] =
       ['#allocator-json strong', 'allocator.waiting'],
       ['#allocator-json span', 'allocator.waitingNote']
     ];
-
+)JS_PART1B"
+    R"JS_PART1C(
     function applyI18n() {
       document.documentElement.lang = consoleState.lang;
       if (languageSelect) languageSelect.value = consoleState.lang;
@@ -978,7 +981,7 @@ static constexpr char kConsoleJsStorage[] =
 
     async function renderClientTunnels() {
       const data = await api('/tunnels');
-)JS_PART1"
+)JS_PART1C"
     R"JS_PART2(      renderRows(document.getElementById('client-tunnels-rows'), data.tunnels || [], ['tunnel_id','peer_id','connection_id','target','state','role','ingress','compress','created_at','duration_ms','tcp_read_bytes','tcp_write_bytes','pending_bytes','relay_backend','worker_index','last_error']);
     }
 

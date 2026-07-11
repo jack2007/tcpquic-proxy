@@ -99,6 +99,10 @@ public:
         void* Key_{nullptr};
         bool Armed_{false};
     };
+    struct RegistrySnapshot {
+        uint64_t SendCompletionCount{0};
+        uint64_t TerminalApiSuppressedCount{0};
+    };
 
     static std::shared_ptr<TqStreamLifetime> OpenOutgoing(
         const MsQuicConnection& connection,
@@ -181,6 +185,10 @@ public:
     static SendCompletionSnapshot SnapshotSendCompletions() noexcept;
     static void RecordUnknownSendClaim() noexcept;
     static void RecordDuplicateSendClaim() noexcept;
+    static RegistrySnapshot SnapshotRegistries() noexcept;
+#if defined(TQ_UNIT_TESTING)
+    static void ResetLifecycleRegistriesForTest() noexcept;
+#endif
     QUIC_STATUS DispatchBufferedEvent(QUIC_STREAM_EVENT* event) noexcept;
 
 private:

@@ -1106,6 +1106,8 @@ if(WIN32)
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
         tunnel/windows_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
+        unittest/router_windows_trace_stub.cpp
     )
 endif()
 add_executable(tcpquic_router_runtime_test ${TCPQUIC_ROUTER_RUNTIME_TEST_SOURCES})

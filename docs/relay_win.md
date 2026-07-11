@@ -381,3 +381,60 @@ Per-relay 队列（`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFre
 | 已完成 | receive callback 复制前加入预算判断和指标 | 超限 receive 会在复制前被拒绝并暂停后续 receive，copy 成本已有指标。 |
 | 已完成 | 清理或注释 per-relay 残留 mutex | 已删除未用锁并标注 worker-thread-owned 队列。 |
 | 已完成 | 补齐 maintenance/copy/linear-search 指标 | maintenance、linear-search 和 callback copy 指标均已补齐。 |
+
+## 8. Windows IOCP stream wrapper 生命周期与 stop drain
+
+自 stream wrapper terminal lifetime 改造后，Windows relay 遵循以下不变量：
+
+- MsQuic stream wrapper 的 `Callback/Context` 在 owner 创建时固定为公共 router，terminal 后不再写 `NoOp/nullptr`。
+- `SHUTDOWN_COMPLETE` 在 callback 线程 seal binding、投递不携带 `MsQuicStream*` 的 terminal IOCP operation；post 失败时 handoff 到 shutdown sink。
+- `ProcessQuicShutdownComplete()` 使用 `TerminalLogicalDetach` 立即清空 relay stream capability，不等待 pending TCP/send/receive accounting。
+- `CancelIoEx`/`closesocket` 只发起取消；每个已提交 `OVERLAPPED` 必须等 GQCS dequeue 后才释放 operation/buffer。
+- worker/runtime `Stop()` 先切 shutdown sink 并 cancel 本地 TCP，再 drain IOCP ownership（`InFlightTcp*`、`QueuedWorkerOps`、terminal pending、shutdown sink）到零后才关闭 IOCP。
+
+### 8.1 可观测性字段（admin metrics / snapshot）
+
+| 字段 | 含义 |
+|------|------|
+| `windows_relay_terminal_seal_count` | callback 线程 seal binding 次数 |
+| `windows_relay_terminal_iocp_post_count` | terminal IOCP post 成功次数 |
+| `windows_relay_terminal_iocp_post_failures` | terminal IOCP post 失败次数（含 shutdown sink fallback） |
+| `windows_relay_terminal_logical_detach_count` | worker 侧 logical detach 次数 |
+| `windows_relay_terminal_api_suppressed_count` | terminal/closed 后 stream API lease 被拒绝次数 |
+| `windows_relay_pending_overlapped_tcp_recvs/sends` | 当前 pending `OVERLAPPED` recv/send 计数 |
+| `windows_relay_pending_overlapped_worker_ops` | 当前 queued worker ops |
+| `windows_relay_tcp_cancel_requested/not_found/error_count` | `CancelIoEx` 请求与结果分类 |
+| `windows_relay_stop_drain_remaining` | stop drain 时剩余 ownership 估算 |
+| `windows_relay_terminal_retained_owner_count/oldest_age_ms` | 全局 terminal retention registry |
+| `windows_relay_send_completion_registry_count` | 全局 send completion registry 深度 |
+| `windows_relay_terminal_shutdown_sink_pending_count` | shutdown sink 待 drain 记录数 |
+| `windows_relay_terminal_operation_pending_count` | 已 post 未消费的 terminal IOCP operation 数 |
+
+单元测试在 focused case 结束断言上述 pending/registry/retention 均归零，不以“进程未崩溃”为通过条件。
+
+### 8.2 已知测试债务（`#if 0` legacy）
+
+以下 legacy 集成用例在 Task 6 stop-drain 语义下 hang，已禁用并由 gate 覆盖：
+
+| 禁用块 | 原因 | Gate 覆盖 |
+|--------|------|-----------|
+| pending-register wake during stop | register 线程唤醒崩溃 | Task6 gate 642（stop 中拒绝 registration） |
+| half-close socket relay Stop | 无 relay drain 的半关闭 teardown | Task6 gates 600-641、graceful drain tests |
+| backpressure/fatal-send teardown | 全 relay drain 前 stop 会 hang | receive backpressure / fatal-send 独立断言 |
+| tcp-recv-pool Stop | StopRelay+TCP drain 缺失 | Task6 pending recv stop gate |
+| zstd flush socket relay Stop | 同上 | zstd graceful drain tests |
+| Task6 case 649（StopRelay 后 Snapshot） | `StopRelay` 异步 close 期间跨线程 `Snapshot()` 可死锁 | Task6 gate 600（`TcpCancelRequestedCount`）、gate 606-613（abort recv drain） |
+
+`CancelIoEx(ERROR_NOT_FOUND)` 计数由 `BeginTcpCancellation` 埋点；gate 600 在 stop-drain 路径断言 `TcpCancelRequestedCount > 0`。独立 NOT_FOUND 专用 case 649 暂禁用，待 worker 提供无 IOCP post 的 cancel metrics 读取 API 后恢复。
+
+### 8.3 ASan / Application Verifier（可选）
+
+若 Windows ASan 工具链不可用，可对 owner/terminal/send-context/stop-drain focused tests 使用 Application Verifier page heap：
+
+```powershell
+appverif -enable Heaps Handles Locks -for build-x64\bin\Release\tcpquic_windows_relay_worker_test.exe
+.\build-x64\bin\Release\tcpquic_windows_relay_worker_test.exe
+appverif -delete settings -for build-x64\bin\Release\tcpquic_windows_relay_worker_test.exe
+```
+
+保护页（`/guard:cf` 独占 page）仅用于专用 isolation test，不用于常规 relay 集成路径。

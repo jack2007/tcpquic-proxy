@@ -593,6 +593,24 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.Errors = snapshot.Errors;
     metrics.WindowsCallbackIocpPostCount = snapshot.WindowsCallbackIocpPostCount;
     metrics.WindowsCallbackIocpPostFailedCount = snapshot.WindowsCallbackIocpPostFailedCount;
+    metrics.WindowsTerminalSealCount = snapshot.WindowsTerminalSealCount;
+    metrics.WindowsTerminalIocpPostCount = snapshot.WindowsTerminalIocpPostCount;
+    metrics.WindowsTerminalIocpPostFailedCount = snapshot.WindowsTerminalIocpPostFailedCount;
+    metrics.WindowsTerminalLogicalDetachCount = snapshot.WindowsTerminalLogicalDetachCount;
+    metrics.WindowsTerminalApiSuppressedCount = snapshot.WindowsTerminalApiSuppressedCount;
+    metrics.WindowsPendingOverlappedTcpRecvs = snapshot.PendingOverlappedTcpRecvs;
+    metrics.WindowsPendingOverlappedTcpSends = snapshot.PendingOverlappedTcpSends;
+    metrics.WindowsPendingOverlappedWorkerOps = snapshot.PendingOverlappedWorkerOps;
+    metrics.WindowsTcpCancelRequestedCount = snapshot.TcpCancelRequestedCount;
+    metrics.WindowsTcpCancelNotFoundCount = snapshot.TcpCancelNotFoundCount;
+    metrics.WindowsTcpCancelErrorCount = snapshot.TcpCancelErrorCount;
+    metrics.WindowsRelayStopDrainRemaining = snapshot.StopDrainRemaining;
+    metrics.WindowsRelayTerminalRetainedOwnerCount = snapshot.TerminalRetainedOwnerCount;
+    metrics.WindowsRelayTerminalRetainedOldestAgeMs = snapshot.TerminalRetainedOldestAgeMs;
+    metrics.WindowsRelaySendCompletionRegistryCount = snapshot.SendCompletionRegistryCount;
+    metrics.WindowsRelayTerminalShutdownSinkPendingCount =
+        snapshot.TerminalShutdownSinkPendingCount;
+    metrics.WindowsRelayTerminalOperationPendingCount = snapshot.TerminalOperationPendingCount;
     metrics.WindowsReceiveReadyPostCount = snapshot.WindowsReceiveReadyPostCount;
     metrics.WindowsReceiveDrainScheduledCount = snapshot.WindowsReceiveDrainScheduledCount;
     metrics.WindowsReceiveDrainCoalescedCount = snapshot.WindowsReceiveDrainCoalescedCount;
@@ -1003,6 +1021,40 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.WindowsCallbackIocpPostCount;
     out << ",\"windows_relay_callback_iocp_post_failures\":"
         << metrics.WindowsCallbackIocpPostFailedCount;
+    out << ",\"windows_relay_terminal_seal_count\":"
+        << metrics.WindowsTerminalSealCount;
+    out << ",\"windows_relay_terminal_iocp_post_count\":"
+        << metrics.WindowsTerminalIocpPostCount;
+    out << ",\"windows_relay_terminal_iocp_post_failures\":"
+        << metrics.WindowsTerminalIocpPostFailedCount;
+    out << ",\"windows_relay_terminal_logical_detach_count\":"
+        << metrics.WindowsTerminalLogicalDetachCount;
+    out << ",\"windows_relay_terminal_api_suppressed_count\":"
+        << metrics.WindowsTerminalApiSuppressedCount;
+    out << ",\"windows_relay_pending_overlapped_tcp_recvs\":"
+        << metrics.WindowsPendingOverlappedTcpRecvs;
+    out << ",\"windows_relay_pending_overlapped_tcp_sends\":"
+        << metrics.WindowsPendingOverlappedTcpSends;
+    out << ",\"windows_relay_pending_overlapped_worker_ops\":"
+        << metrics.WindowsPendingOverlappedWorkerOps;
+    out << ",\"windows_relay_tcp_cancel_requested_count\":"
+        << metrics.WindowsTcpCancelRequestedCount;
+    out << ",\"windows_relay_tcp_cancel_not_found_count\":"
+        << metrics.WindowsTcpCancelNotFoundCount;
+    out << ",\"windows_relay_tcp_cancel_error_count\":"
+        << metrics.WindowsTcpCancelErrorCount;
+    out << ",\"windows_relay_stop_drain_remaining\":"
+        << metrics.WindowsRelayStopDrainRemaining;
+    out << ",\"windows_relay_terminal_retained_owner_count\":"
+        << metrics.WindowsRelayTerminalRetainedOwnerCount;
+    out << ",\"windows_relay_terminal_retained_oldest_age_ms\":"
+        << metrics.WindowsRelayTerminalRetainedOldestAgeMs;
+    out << ",\"windows_relay_send_completion_registry_count\":"
+        << metrics.WindowsRelaySendCompletionRegistryCount;
+    out << ",\"windows_relay_terminal_shutdown_sink_pending_count\":"
+        << metrics.WindowsRelayTerminalShutdownSinkPendingCount;
+    out << ",\"windows_relay_terminal_operation_pending_count\":"
+        << metrics.WindowsRelayTerminalOperationPendingCount;
     out << ",\"windows_relay_receive_ready_posts\":"
         << metrics.WindowsReceiveReadyPostCount;
     out << ",\"windows_relay_receive_drain_scheduled\":"

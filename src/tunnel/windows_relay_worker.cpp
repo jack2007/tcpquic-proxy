@@ -601,8 +601,24 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         CallbackIocpPostCount_.load(std::memory_order_relaxed);
     snapshot.WindowsCallbackIocpPostFailedCount =
         CallbackIocpPostFailedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsTerminalSealCount =
+        WindowsTerminalSealCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsTerminalIocpPostCount =
+        WindowsTerminalIocpPostCount_.load(std::memory_order_relaxed);
     snapshot.WindowsTerminalIocpPostFailedCount =
         WindowsTerminalIocpPostFailedCount_.load(std::memory_order_relaxed);
+    snapshot.WindowsTerminalLogicalDetachCount =
+        WindowsTerminalLogicalDetachCount_.load(std::memory_order_relaxed);
+    snapshot.TcpCancelRequestedCount =
+        TcpCancelRequestedCount_.load(std::memory_order_relaxed);
+    snapshot.TcpCancelNotFoundCount =
+        TcpCancelNotFoundCount_.load(std::memory_order_relaxed);
+    snapshot.TcpCancelErrorCount =
+        TcpCancelErrorCount_.load(std::memory_order_relaxed);
+    snapshot.TerminalShutdownSinkPendingCount =
+        TerminalShutdownSinkPendingCount_.load(std::memory_order_acquire);
+    snapshot.TerminalOperationPendingCount =
+        TerminalOperationPendingCount_.load(std::memory_order_acquire);
     snapshot.WindowsReceiveReadyPostCount =
         ReceiveReadyPostCount_.load(std::memory_order_relaxed);
     snapshot.WindowsReceiveDrainScheduledCount =
@@ -709,8 +725,27 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         active.MaxOutstandingQuicSendBytes =
             relay->MaxOutstandingQuicSendBytes.load(std::memory_order_relaxed);
         active.CallbackPendingQuicReceiveDepth = 0;
+        snapshot.PendingOverlappedTcpRecvs += active.InFlightTcpRecvs;
+        snapshot.PendingOverlappedTcpSends += active.InFlightTcpSends;
+        snapshot.PendingOverlappedWorkerOps += active.QueuedWorkerOps;
         snapshot.ActiveRelayStates.push_back(active);
     }
+
+    const auto retained = TqStreamLifetime::SnapshotTerminalRetentions();
+    snapshot.TerminalRetainedOwnerCount = retained.OwnerCount;
+    snapshot.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
+    const auto registries = TqStreamLifetime::SnapshotRegistries();
+    snapshot.SendCompletionRegistryCount = registries.SendCompletionCount;
+    snapshot.WindowsTerminalApiSuppressedCount = registries.TerminalApiSuppressedCount;
+    snapshot.StopDrainRemaining =
+        snapshot.ActiveRelays +
+        snapshot.PendingOverlappedTcpRecvs +
+        snapshot.PendingOverlappedTcpSends +
+        snapshot.PendingOverlappedWorkerOps +
+        snapshot.TerminalShutdownSinkPendingCount +
+        snapshot.TerminalOperationPendingCount +
+        snapshot.TerminalRetainedOwnerCount +
+        snapshot.SendCompletionRegistryCount;
 
     const uint64_t elapsedNanos = std::max<uint64_t>(1, NowSteadyNanos() - snapshotStartNanos);
     snapshot.SnapshotBuildNanos =
@@ -951,6 +986,7 @@ void TqWindowsRelayWorker::FinalizeWorkerStopOnWorkerThread() {
     }
 }
 
+#if defined(TQ_UNIT_TESTING)
 bool TqWindowsRelayWorker::TestInjectTcpIocpCompletionForTest(
     uint64_t relayId,
     bool tcpRecv,
@@ -998,6 +1034,7 @@ uint32_t TqWindowsRelayWorker::TestGetInFlightTcpSendsForTest(uint64_t relayId) 
     }
     return it->second->InFlightTcpSends.load(std::memory_order_acquire);
 }
+#endif
 
 void TqWindowsRelayWorker::DrainRelayReceives(const std::shared_ptr<RelayContext>& relay) {
     if (!relay) {
@@ -2236,6 +2273,7 @@ void TqWindowsRelayWorker::SealBindingAtTerminal(
     }
     binding->Closing.store(true, std::memory_order_release);
     binding->RelayHint.store(nullptr, std::memory_order_release);
+    WindowsTerminalSealCount_.fetch_add(1, std::memory_order_relaxed);
     if (relay != nullptr) {
         relay->StreamBinding = nullptr;
     }
@@ -2324,6 +2362,7 @@ bool TqWindowsRelayWorker::PostTerminalShutdownComplete(
                 }
 #endif
                 CallbackIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
+                WindowsTerminalIocpPostCount_.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
         }
@@ -3800,6 +3839,7 @@ void TqWindowsRelayWorker::ApplyTerminalLogicalDetach(
     if (!relay) {
         return;
     }
+    WindowsTerminalLogicalDetachCount_.fetch_add(1, std::memory_order_relaxed);
     relay->StreamShutdownComplete.store(true, std::memory_order_release);
     relay->StreamDetached.store(true, std::memory_order_release);
     relay->StreamBinding = nullptr;
@@ -3828,9 +3868,13 @@ void TqWindowsRelayWorker::BeginTcpCancellation(
     if (!relay || !TqSocketValid(relay->TcpFd)) {
         return;
     }
+    TcpCancelRequestedCount_.fetch_add(1, std::memory_order_relaxed);
     if (!::CancelIoEx(reinterpret_cast<HANDLE>(relay->TcpFd), nullptr)) {
         const DWORD cancelError = ::GetLastError();
-        if (cancelError != ERROR_NOT_FOUND) {
+        if (cancelError == ERROR_NOT_FOUND) {
+            TcpCancelNotFoundCount_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            TcpCancelErrorCount_.fetch_add(1, std::memory_order_relaxed);
             StoreTcpRecvErrno(relay, static_cast<uint64_t>(cancelError));
         }
     }
@@ -6047,7 +6091,26 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.QuicSendCompleteEvents += snapshot.QuicSendCompleteEvents;
         total.WindowsCallbackIocpPostCount += snapshot.WindowsCallbackIocpPostCount;
         total.WindowsCallbackIocpPostFailedCount += snapshot.WindowsCallbackIocpPostFailedCount;
+        total.WindowsTerminalSealCount += snapshot.WindowsTerminalSealCount;
+        total.WindowsTerminalIocpPostCount += snapshot.WindowsTerminalIocpPostCount;
         total.WindowsTerminalIocpPostFailedCount += snapshot.WindowsTerminalIocpPostFailedCount;
+        total.WindowsTerminalLogicalDetachCount += snapshot.WindowsTerminalLogicalDetachCount;
+        total.WindowsTerminalApiSuppressedCount += snapshot.WindowsTerminalApiSuppressedCount;
+        total.PendingOverlappedTcpRecvs += snapshot.PendingOverlappedTcpRecvs;
+        total.PendingOverlappedTcpSends += snapshot.PendingOverlappedTcpSends;
+        total.PendingOverlappedWorkerOps += snapshot.PendingOverlappedWorkerOps;
+        total.TcpCancelRequestedCount += snapshot.TcpCancelRequestedCount;
+        total.TcpCancelNotFoundCount += snapshot.TcpCancelNotFoundCount;
+        total.TcpCancelErrorCount += snapshot.TcpCancelErrorCount;
+        total.StopDrainRemaining += snapshot.StopDrainRemaining;
+        total.TerminalRetainedOwnerCount = std::max(
+            total.TerminalRetainedOwnerCount, snapshot.TerminalRetainedOwnerCount);
+        total.TerminalRetainedOldestAgeMs = std::max(
+            total.TerminalRetainedOldestAgeMs, snapshot.TerminalRetainedOldestAgeMs);
+        total.SendCompletionRegistryCount = std::max(
+            total.SendCompletionRegistryCount, snapshot.SendCompletionRegistryCount);
+        total.TerminalShutdownSinkPendingCount += snapshot.TerminalShutdownSinkPendingCount;
+        total.TerminalOperationPendingCount += snapshot.TerminalOperationPendingCount;
         total.WindowsReceiveReadyPostCount += snapshot.WindowsReceiveReadyPostCount;
         total.WindowsReceiveDrainScheduledCount += snapshot.WindowsReceiveDrainScheduledCount;
         total.WindowsReceiveDrainCoalescedCount += snapshot.WindowsReceiveDrainCoalescedCount;

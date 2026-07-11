@@ -26,6 +26,7 @@ struct SendCompletionRetention {
 std::mutex g_sendCompletionLock;
 std::unordered_map<void*, SendCompletionRetention> g_sendCompletions;
 std::unordered_map<void*, TqStreamLifetime*> g_claimedSendCompletions;
+std::atomic<uint64_t> g_terminalApiSuppressedCount{0};
 std::atomic<uint64_t> g_nextSendNonce{1};
 std::atomic<uint64_t> g_sendCompletionPreSubmitRollbacks{0};
 std::atomic<uint64_t> g_sendCompletionUnknownClaims{0};
@@ -264,6 +265,9 @@ TqStreamLifetime::ApiLease TqStreamLifetime::TryAcquireReceiveApi() noexcept {
     std::lock_guard<std::mutex> guard(ControlMutex_);
     if (Stream_ == nullptr ||
         (Phase_ != Phase::Starting && Phase_ != Phase::Started)) {
+        if (Phase_ == Phase::TerminalPublished || Phase_ == Phase::Closed) {
+            g_terminalApiSuppressedCount.fetch_add(1, std::memory_order_relaxed);
+        }
         return {};
     }
 #if defined(TQ_UNIT_TESTING)
@@ -727,6 +731,32 @@ void TqStreamLifetime::RecordUnknownSendClaim() noexcept {
 void TqStreamLifetime::RecordDuplicateSendClaim() noexcept {
     g_sendCompletionDuplicateClaims.fetch_add(1, std::memory_order_relaxed);
 }
+
+TqStreamLifetime::RegistrySnapshot TqStreamLifetime::SnapshotRegistries() noexcept {
+    RegistrySnapshot snapshot{};
+    snapshot.TerminalApiSuppressedCount =
+        g_terminalApiSuppressedCount.load(std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> guard(g_sendCompletionLock);
+        snapshot.SendCompletionCount = g_sendCompletions.size();
+    }
+    return snapshot;
+}
+
+#if defined(TQ_UNIT_TESTING)
+void TqStreamLifetime::ResetLifecycleRegistriesForTest() noexcept {
+    {
+        std::lock_guard<std::mutex> guard(g_terminalRetentionLock);
+        g_terminalRetentions.clear();
+    }
+    {
+        std::lock_guard<std::mutex> guard(g_sendCompletionLock);
+        g_sendCompletions.clear();
+        g_claimedSendCompletions.clear();
+    }
+    g_terminalApiSuppressedCount.store(0, std::memory_order_relaxed);
+}
+#endif
 
 QUIC_STATUS QUIC_API TqStreamLifetime::Callback(
     MsQuicStream* stream,
