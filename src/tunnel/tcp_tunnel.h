@@ -21,6 +21,7 @@ class TqStreamLifetime;
 struct TqRelayStopControl;
 struct TqRelayHandle;
 struct TqTunnelContext;
+class TqLinuxRelayWorker;
 
 enum class TqTunnelRole {
     ClientOpen,
@@ -81,7 +82,8 @@ TqTunnelContext* TqCreateTestLinuxRelayTunnel(
     TqSocketHandle tcpFd,
     std::shared_ptr<TqStreamLifetime> streamOwner,
     std::shared_ptr<TqRelayStopControl>* outControl,
-    const TqConfig* configOverride = nullptr);
+    const TqConfig* configOverride = nullptr,
+    TqLinuxRelayWorker* workerOverride = nullptr);
 bool TqTestDispatchLinuxOwnerEvent(
     TqTunnelContext* context, QUIC_STREAM_EVENT_TYPE type);
 TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext* context);

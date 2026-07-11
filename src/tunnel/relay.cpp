@@ -25,7 +25,8 @@ bool TqRelayStartImpl(
     TqRelayHandle* handle,
     const TqTuningConfig& profileTuning,
     TqCompressAlgo compressAlgo,
-    bool* tcpFdConsumed) {
+    bool* tcpFdConsumed,
+    TqLinuxRelayWorker* linuxWorkerOverride = nullptr) {
     if (tcpFdConsumed != nullptr) {
         *tcpFdConsumed = false;
     }
@@ -82,12 +83,13 @@ bool TqRelayStartImpl(
         TqRelayUnregisterActive();
         return false;
     }
-    if (!TqLinuxRelayRuntime::Instance().Start(tuning)) {
+    if (linuxWorkerOverride == nullptr && !TqLinuxRelayRuntime::Instance().Start(tuning)) {
         TqRelayUnregisterActive();
         return false;
     }
 
-    TqLinuxRelayWorker* worker = TqLinuxRelayRuntime::Instance().PickWorker();
+    TqLinuxRelayWorker* worker = linuxWorkerOverride != nullptr
+        ? linuxWorkerOverride : TqLinuxRelayRuntime::Instance().PickWorker();
     if (worker == nullptr) {
         TqRelayUnregisterActive();
         return false;
@@ -250,6 +252,23 @@ bool TqRelayStartManaged(
         compressAlgo,
         tcpFdConsumed);
 }
+
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
+bool TqRelayStartManagedOnLinuxWorkerForTest(
+    TqSocketHandle tcpFd,
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo,
+    bool* tcpFdConsumed,
+    TqLinuxRelayWorker* worker) {
+    return TqRelayStartImpl(tcpFd, stream, std::move(streamOwner), compressor,
+        decompressor, handle, tuning, compressAlgo, tcpFdConsumed, worker);
+}
+#endif
 
 namespace {
 bool TqRelayStartQuicReceiveSinkImpl(

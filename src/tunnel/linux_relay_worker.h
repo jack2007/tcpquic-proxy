@@ -141,6 +141,9 @@ struct TqLinuxRelayWorkerSnapshot {
     uint64_t PendingBytes{0};
     uint64_t RelayBufferBytesInUse{0};
     uint64_t ActiveRelays{0};
+#if defined(TQ_UNIT_TESTING)
+    uint64_t SuppressedTerminalCallbacksForTest{0};
+#endif
     uint64_t ActiveTcpRelays{0};
     uint64_t ActiveSinkRelays{0};
     uint64_t ActiveQuicSendRelays{0};
@@ -292,6 +295,26 @@ struct TqLinuxRelayWorkerSnapshot {
 };
 
 #if defined(TQ_UNIT_TESTING)
+struct TqLinuxRelayAsyncTestCompletion {
+    enum class Phase : uint8_t { Posted, EnteredProcess, AfterProcess, BeforeSignal, Done };
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    std::atomic<Phase> CurrentPhase{Phase::Posted};
+    bool Done{false};
+    bool Result{false};
+    bool ProcessReleased{false};
+    void ReleaseProcess() {
+        std::lock_guard<std::mutex> lock(Mutex);
+        ProcessReleased = true;
+        Cv.notify_all();
+    }
+    bool Wait() {
+        std::unique_lock<std::mutex> lock(Mutex);
+        Cv.wait(lock, [this] { return Done; });
+        return Result;
+    }
+};
+
 using TqLinuxRelayStreamSendForTest = QUIC_STATUS (*)(
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
@@ -329,6 +352,8 @@ public:
     bool EnqueueQuicReceiveForTest(int tcpFd, const uint8_t* data, size_t length, bool fin);
     bool FlushTcpWritableForTest(int tcpFd);
     bool DispatchTcpEventsForTest(uint64_t relayId, uint32_t events);
+    std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
+    PostTcpEventsForTestAsync(uint64_t relayId, uint32_t events);
     bool DispatchEncodedEpollEventForTest(uint64_t epollData, uint32_t events);
     QUIC_STATUS DispatchStreamEventForTest(MsQuicStream* stream, QUIC_STREAM_EVENT* event);
     size_t RetiredBindingCountForTest() const;
@@ -447,6 +472,12 @@ private:
         std::mutex Mutex;
         std::condition_variable Cv;
         bool Done{false};
+    };
+
+    struct DispatchTcpEventsAsyncForTestCommand {
+        uint64_t RelayId{0};
+        uint32_t Events{0};
+        std::shared_ptr<TqLinuxRelayAsyncTestCompletion> Completion;
     };
 
     struct ControlState {
@@ -656,6 +687,9 @@ private:
     std::thread::id WorkerThreadId;
     std::atomic<uint64_t> EventsProcessed{0};
     std::atomic<uint64_t> WakeupWrites{0};
+#if defined(TQ_UNIT_TESTING)
+    std::atomic<uint64_t> SuppressedTerminalCallbacksForTest{0};
+#endif
     std::deque<std::shared_ptr<RelayState>> Relays;
     std::deque<std::shared_ptr<RelayState>> RetiredRelays;
     std::unordered_map<uint64_t, std::shared_ptr<RelayState>> RelaysById;

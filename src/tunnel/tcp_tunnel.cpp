@@ -497,7 +497,7 @@ public:
     friend TqTunnelContext* TqCreateTestLinuxRelayTunnel(
         std::atomic<unsigned>*, TqTunnelRole, TqSocketHandle,
         std::shared_ptr<TqStreamLifetime>, std::shared_ptr<TqRelayStopControl>*,
-        const TqConfig*);
+        const TqConfig*, TqLinuxRelayWorker*);
     friend bool TqTestDispatchLinuxOwnerEvent(
         TqTunnelContext*, QUIC_STREAM_EVENT_TYPE);
     friend TqRelayHandle* TqTestLinuxTunnelRelayHandle(TqTunnelContext*);
@@ -622,7 +622,7 @@ public:
         return OpenOk;
     }
 
-    bool StartRelay(uint8_t flags) {
+    bool StartRelay(uint8_t flags, TqLinuxRelayWorker* linuxWorkerOverride = nullptr) {
         const TqCompressAlgo algo = TqAlgoFromFlags(flags);
         if (algo != TqCompressAlgo::None) {
             Compressor = TqCreateCompressor(algo, Config.CompressLevel);
@@ -653,6 +653,10 @@ public:
         const bool relayStarted = ReceiveSink
             ? TqRelayStartQuicReceiveSinkManaged(
                   stream, StreamOwner, &RelayHandle, Config.Tuning, ReceiveSinkBytes)
+            : linuxWorkerOverride != nullptr
+            ? TqRelayStartManagedOnLinuxWorkerForTest(
+                  tcpFd, stream, StreamOwner, Compressor.get(), Decompressor.get(),
+                  &RelayHandle, Config.Tuning, algo, &tcpFdConsumed, linuxWorkerOverride)
             : TqRelayStartManaged(
                   tcpFd,
                   stream,
@@ -3139,7 +3143,8 @@ TqTunnelContext* TqCreateTestLinuxRelayTunnel(
     TqSocketHandle tcpFd,
     std::shared_ptr<TqStreamLifetime> streamOwner,
     std::shared_ptr<TqRelayStopControl>* outControl,
-    const TqConfig* configOverride) {
+    const TqConfig* configOverride,
+    TqLinuxRelayWorker* workerOverride) {
     if (!TqSocketValid(tcpFd) || streamOwner == nullptr) return nullptr;
     TqConfig cfg = configOverride != nullptr ? *configOverride : TqConfig{};
     auto* context = new (std::nothrow) TqTunnelContext(
@@ -3149,7 +3154,7 @@ TqTunnelContext* TqCreateTestLinuxRelayTunnel(
     auto callbackTarget = std::make_shared<TqStableCallbackTarget>(
         TqTunnelContext::Callback, context);
     context->SetStreamOwner(std::move(streamOwner), std::move(callbackTarget));
-    if (!context->StartRelay(0)) { delete context; return nullptr; }
+    if (!context->StartRelay(0, workerOverride)) { delete context; return nullptr; }
     if (outControl != nullptr) *outControl = context->RelayHandle.Control;
     return context;
 }

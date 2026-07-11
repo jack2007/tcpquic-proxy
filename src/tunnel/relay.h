@@ -190,6 +190,22 @@ bool TqRelayStartManaged(
     TqCompressAlgo compressAlgo = TqCompressAlgo::None,
     bool* tcpFdConsumed = nullptr);
 
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
+// Test-only worker selection override.  The registration, publication and
+// handoff path is otherwise exactly TqRelayStartManaged's production path.
+bool TqRelayStartManagedOnLinuxWorkerForTest(
+    TqSocketHandle tcpFd,
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> streamOwner,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo,
+    bool* tcpFdConsumed,
+    TqLinuxRelayWorker* worker);
+#endif
+
 bool TqRelayStartQuicReceiveSink(
     MsQuicStream* stream,
     TqRelayHandle* handle,

@@ -1549,6 +1549,36 @@ size_t TqLinuxRelayWorker::DrainEvents(size_t budget) {
             CompleteDispatchTcpEventsForTestCommand(command, result);
             break;
         }
+        case TqLinuxRelayEventType::DispatchTcpEventsAsyncForTest: {
+            auto* command = static_cast<DispatchTcpEventsAsyncForTestCommand*>(event.Control);
+            if (command != nullptr && command->Completion != nullptr) {
+                command->Completion->CurrentPhase.store(
+                    TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess,
+                    std::memory_order_release);
+                std::unique_lock<std::mutex> lock(command->Completion->Mutex);
+                command->Completion->Cv.wait(lock, [&] {
+                    return command->Completion->ProcessReleased;
+                });
+            }
+            const bool result = command != nullptr &&
+                DispatchTcpEventsForTestLocal(command->RelayId, command->Events);
+            if (command != nullptr && command->Completion != nullptr) {
+                command->Completion->CurrentPhase.store(
+                    TqLinuxRelayAsyncTestCompletion::Phase::AfterProcess,
+                    std::memory_order_release);
+                std::lock_guard<std::mutex> lock(command->Completion->Mutex);
+                command->Completion->CurrentPhase.store(
+                    TqLinuxRelayAsyncTestCompletion::Phase::BeforeSignal,
+                    std::memory_order_release);
+                command->Completion->Result = result;
+                command->Completion->Done = true;
+                command->Completion->CurrentPhase.store(
+                    TqLinuxRelayAsyncTestCompletion::Phase::Done,
+                    std::memory_order_release);
+                command->Completion->Cv.notify_all();
+            }
+            break;
+        }
         case TqLinuxRelayEventType::DispatchEncodedEpollEventForTest: {
             auto* command =
                 static_cast<DispatchEncodedEpollEventForTestCommand*>(event.Control);
@@ -3959,6 +3989,24 @@ bool TqLinuxRelayWorker::DispatchTcpEventsForTest(uint64_t relayId, uint32_t eve
     }
 }
 
+std::shared_ptr<TqLinuxRelayAsyncTestCompletion>
+TqLinuxRelayWorker::PostTcpEventsForTestAsync(uint64_t relayId, uint32_t events) {
+    std::unique_lock<std::mutex> controlGuard(ControlLock);
+    if (!Running.load(std::memory_order_acquire)) return {};
+    auto completion = std::make_shared<TqLinuxRelayAsyncTestCompletion>();
+    auto command = std::make_shared<DispatchTcpEventsAsyncForTestCommand>();
+    command->RelayId = relayId;
+    command->Events = events;
+    command->Completion = completion;
+    TqLinuxRelayEvent event{};
+    event.Type = TqLinuxRelayEventType::DispatchTcpEventsAsyncForTest;
+    event.Control = command.get();
+    event.ControlOwner = command;
+    if (!Enqueue(std::move(event))) return {};
+    controlGuard.unlock();
+    return completion;
+}
+
 bool TqLinuxRelayWorker::DispatchTcpEventsForTestLocal(uint64_t relayId, uint32_t events) {
     if (FindRelayById(relayId) == nullptr) {
         return false;
@@ -4455,6 +4503,10 @@ TqLinuxRelayWorkerSnapshot TqLinuxRelayWorker::SnapshotLocal() const {
     snapshot.SnapshotComplete = true;
     snapshot.EventsProcessed = EventsProcessed.load();
     snapshot.WakeupWrites = WakeupWrites.load();
+#if defined(TQ_UNIT_TESTING)
+    snapshot.SuppressedTerminalCallbacksForTest =
+        SuppressedTerminalCallbacksForTest.load(std::memory_order_relaxed);
+#endif
     snapshot.PendingEvents = EventQueue.SizeApprox();
     snapshot.EventQueueCapacity = EventQueue.Capacity();
     const TqLinuxRelayEventQueueStats queueStats = EventQueue.Stats();
@@ -4884,6 +4936,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
     if (event->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
 #if defined(TQ_UNIT_TESTING)
         if (Config.SuppressTerminalCallbackForTest) {
+            SuppressedTerminalCallbacksForTest.fetch_add(1, std::memory_order_relaxed);
             return QUIC_STATUS_SUCCESS;
         }
 #endif

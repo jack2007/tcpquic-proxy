@@ -4,7 +4,9 @@
 
 #include <arpa/inet.h>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -47,6 +49,16 @@ QUIC_STATUS CaptureSend(MsQuicStream*, const QUIC_BUFFER*, uint32_t,
 struct GlobalGuard {
     QUIC_API_TABLE Api{};
     GlobalGuard() {
+        const auto beforeMetrics = TqTerminalMetricsSnapshot();
+        const auto beforeRegistries = TqStreamLifetime::SnapshotRegistries();
+        if (TqGetActiveRelayCount() != 0 || beforeMetrics.TerminalSinkPending != 0 ||
+            beforeMetrics.TerminalTimeoutPending != 0 ||
+            TqStreamLifetime::SnapshotSendCompletions().ActiveCount != 0 ||
+            TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount != 0 ||
+            beforeRegistries.SendCompletionCount != 0) {
+            std::fprintf(stderr, "dirty terminal baseline before case\n");
+            std::abort();
+        }
         TqTerminalScheduler::ResetForTest();
         TqResetTerminalMetricsForTest();
         TqStreamLifetime::ResetLifecycleRegistriesForTest();
@@ -112,10 +124,12 @@ struct RelayFixture {
     std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
     uint64_t RelayId{0};
     bool Consumed{false};
+    bool RealThread{false};
 
-    explicit RelayFixture(TqLinuxRelayWorkerConfig config = {}) : Worker(config) {}
+    explicit RelayFixture(TqLinuxRelayWorkerConfig config = {}, bool realThread = false)
+        : Worker(config), RealThread(realThread) {}
     bool Start() {
-        if (!Worker.StartForTest()) return false;
+        if (!(RealThread ? Worker.Start() : Worker.StartForTest())) return false;
         Tcp = LoopbackPair();
         if (Tcp.Relay < 0) return false;
         Stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
@@ -170,11 +184,13 @@ bool TestReaperAtAllHandoffBoundaries() {
     CHECK(tcp.Relay >= 0);
     alignas(MsQuicStream) unsigned char storage[sizeof(MsQuicStream)]{};
     auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
     auto serverOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
     CHECK(serverOwner->InstallDetachedStreamForTest(stream));
     std::shared_ptr<TqRelayStopControl> control;
     auto* context = TqCreateTestLinuxRelayTunnel(
-        &destroys, TqTunnelRole::ServerOpen, tcp.Relay, serverOwner, &control);
+        &destroys, TqTunnelRole::ServerOpen, tcp.Relay, serverOwner, &control,
+        nullptr);
     CHECK(context != nullptr && control != nullptr);
     tcp.Relay = -1;
     auto* handle = TqTestLinuxTunnelRelayHandle(context);
@@ -182,17 +198,45 @@ bool TestReaperAtAllHandoffBoundaries() {
     CHECK(committed && committed->Control.get() == control.get());
     std::vector<TqStreamLifetime::TerminalBoundaryForTest> seen;
     bool hookOk = true;
+    std::mutex boundaryLock;
+    std::condition_variable boundaryCv;
+    size_t reached = 0;
+    size_t released = 0;
     serverOwner->SetTerminalBoundaryHookForTest([&](auto boundary) {
+        std::unique_lock<std::mutex> lock(boundaryLock);
         seen.push_back(boundary);
         auto handoff = std::atomic_load(&control->TerminalHandoff);
-        if (handoff == nullptr) { hookOk = false; return; }
-        if (boundary != TqStreamLifetime::TerminalBoundaryForTest::AfterSubmit)
+        if (handoff == nullptr) { hookOk = false; }
+        if (handoff != nullptr && boundary != TqStreamLifetime::TerminalBoundaryForTest::AfterSubmit) {
             hookOk = hookOk && !TqTerminalReleaseReady(handoff->Snapshot());
+        }
+        reached = seen.size();
+        boundaryCv.notify_all();
+        boundaryCv.wait(lock, [&] { return released >= reached; });
     });
     CHECK(ResetPeer(tcp));
     CHECK(committed->Control->WorkerEndpointAlive.load());
     auto* worker = reinterpret_cast<TqLinuxRelayWorker*>(committed->WorkerIdentity);
-    CHECK(worker->DispatchTcpEventsForTest(committed->RelayId, EPOLLERR | EPOLLHUP));
+    bool dispatched = false;
+    std::thread fatal([&] {
+        dispatched = worker->DispatchTcpEventsForTest(
+            committed->RelayId, EPOLLERR | EPOLLHUP);
+    });
+    for (size_t boundary = 1; boundary <= 3; ++boundary) {
+        {
+            std::unique_lock<std::mutex> lock(boundaryLock);
+            boundaryCv.wait(lock, [&] { return reached >= boundary; });
+        }
+        CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 0);
+        CHECK(destroys == 0);
+        {
+            std::lock_guard<std::mutex> lock(boundaryLock);
+            released = boundary;
+        }
+        boundaryCv.notify_all();
+    }
+    fatal.join();
+    CHECK(dispatched);
     CHECK(hookOk && destroys == 0);
     CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 1);
     CHECK(destroys == 1);
@@ -205,6 +249,129 @@ bool TestReaperAtAllHandoffBoundaries() {
     PublishTerminal(clientOwner);
     CHECK(serverOwner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
     CHECK(clientOwner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
+
+    // Exact production chain: two real workers, owners and tunnel contexts.
+    TqLinuxRelayWorker clientWorker({}), serverWorker({});
+    CHECK(clientWorker.Start() && serverWorker.Start());
+    TcpPair clientTcp = LoopbackPair(), targetTcp = LoopbackPair();
+    CHECK(clientTcp.Relay >= 0 && targetTcp.Relay >= 0);
+    auto exactClientOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    auto exactServerOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    auto* clientStream = new (std::nothrow) MsQuicStream(
+        reinterpret_cast<HQUIC>(static_cast<uintptr_t>(11)), CleanUpManual,
+        TqStreamLifetime::Callback, exactClientOwner.get());
+    auto* serverStream = new (std::nothrow) MsQuicStream(
+        reinterpret_cast<HQUIC>(static_cast<uintptr_t>(12)), CleanUpManual,
+        TqStreamLifetime::Callback, exactServerOwner.get());
+    CHECK(clientStream != nullptr && serverStream != nullptr);
+    CHECK(exactClientOwner->InstallStreamForTest(clientStream));
+    CHECK(exactServerOwner->InstallStreamForTest(serverStream));
+    std::atomic<unsigned> clientDestroys{0}, serverDestroys{0};
+    std::shared_ptr<TqRelayStopControl> clientControl, serverControl;
+    auto* clientContext = TqCreateTestLinuxRelayTunnel(
+        &clientDestroys, TqTunnelRole::ClientOpen, clientTcp.Relay,
+        exactClientOwner, &clientControl, nullptr, &clientWorker);
+    auto* serverContext = TqCreateTestLinuxRelayTunnel(
+        &serverDestroys, TqTunnelRole::ServerOpen, targetTcp.Relay,
+        exactServerOwner, &serverControl, nullptr, &serverWorker);
+    CHECK(clientContext != nullptr && serverContext != nullptr);
+    clientTcp.Relay = targetTcp.Relay = -1;
+    auto clientCommitted = TqRelayLinuxCommittedSnapshot(
+        TqTestLinuxTunnelRelayHandle(clientContext));
+    auto serverCommitted = TqRelayLinuxCommittedSnapshot(
+        TqTestLinuxTunnelRelayHandle(serverContext));
+    CHECK(clientCommitted != nullptr && serverCommitted != nullptr);
+
+    size_t sendsBefore = 0;
+    { std::lock_guard<std::mutex> lock(g_sendLock); sendsBefore = g_sendFlags.size(); }
+    CHECK(::shutdown(clientTcp.Peer, SHUT_WR) == 0);
+    auto clientFinEvent = clientWorker.PostTcpEventsForTestAsync(
+        clientCommitted->RelayId, EPOLLRDHUP | EPOLLIN);
+    CHECK(clientFinEvent != nullptr);
+    const auto clientAdmission = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (clientFinEvent->CurrentPhase.load(std::memory_order_acquire) <
+               TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess &&
+           std::chrono::steady_clock::now() < clientAdmission) std::this_thread::yield();
+    CHECK(clientFinEvent->CurrentPhase.load(std::memory_order_acquire) >=
+          TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess);
+    clientFinEvent->ReleaseProcess();
+    CHECK(clientFinEvent->Wait());
+    const auto finDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    void* finContext = nullptr;
+    while (std::chrono::steady_clock::now() < finDeadline) {
+        std::lock_guard<std::mutex> lock(g_sendLock);
+        if (g_sendFlags.size() > sendsBefore &&
+            (g_sendFlags.back() & QUIC_SEND_FLAG_FIN) != 0) {
+            finContext = g_sendContexts.back();
+            break;
+        }
+        std::this_thread::yield();
+    }
+    if (finContext == nullptr) {
+        const auto clientSnapshot = clientWorker.Snapshot();
+        std::lock_guard<std::mutex> lock(g_sendLock);
+        std::fprintf(stderr, "FIN missing before=%zu after=%zu active=%llu tcp_read_closed=%d fin_submitted=%d closing=%d\n",
+            sendsBefore, g_sendFlags.size(),
+            static_cast<unsigned long long>(clientSnapshot.ActiveRelays),
+            clientSnapshot.ActiveRelayStates.empty() ? -1 : clientSnapshot.ActiveRelayStates.front().TcpReadClosed,
+            clientSnapshot.ActiveRelayStates.empty() ? -1 : clientSnapshot.ActiveRelayStates.front().QuicSendFinSubmitted,
+            clientSnapshot.ActiveRelayStates.empty() ? -1 : clientSnapshot.ActiveRelayStates.front().Closing);
+        return false;
+    }
+    QUIC_STREAM_EVENT finComplete{};
+    finComplete.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    finComplete.SEND_COMPLETE.ClientContext = finContext;
+    CHECK(QUIC_SUCCEEDED(exactClientOwner->DispatchForTest(&finComplete)));
+
+    const int serverTcpFd = serverWorker.Snapshot().HotRelayTcpFd;
+    CHECK(serverTcpFd >= 0);
+    const uint8_t emptyReceive = 0;
+    CHECK(serverWorker.EnqueueQuicReceiveForTest(serverTcpFd, &emptyReceive, 0, true));
+    CHECK(TqSetNonBlocking(targetTcp.Peer));
+    const auto eofDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    char eofByte{};
+    ssize_t eofResult = -1;
+    while (std::chrono::steady_clock::now() < eofDeadline) {
+        eofResult = ::read(targetTcp.Peer, &eofByte, 1);
+        if (eofResult == 0) break;
+        if (eofResult < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            std::this_thread::yield();
+            continue;
+        }
+        break;
+    }
+    CHECK(eofResult == 0);
+
+    auto serverFatal = serverWorker.PostTcpEventsForTestAsync(
+        serverCommitted->RelayId, EPOLLERR | EPOLLHUP);
+    CHECK(serverFatal != nullptr);
+    const auto fatalAdmission = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (serverFatal->CurrentPhase.load(std::memory_order_acquire) <
+               TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess &&
+           std::chrono::steady_clock::now() < fatalAdmission) std::this_thread::yield();
+    CHECK(serverFatal->CurrentPhase.load(std::memory_order_acquire) >=
+          TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess);
+    CHECK(ResetPeer(targetTcp));
+    serverFatal->ReleaseProcess();
+    CHECK(serverFatal->Wait());
+    CHECK(serverWorker.Snapshot().LastTcpWriteErrno == ECONNRESET);
+    CHECK((g_lastFlags.load() & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
+    CHECK((g_lastFlags.load() & QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE) != 0);
+    CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 1);
+    CHECK(serverDestroys == 1);
+    PublishTerminal(exactServerOwner);
+
+    QUIC_STREAM_EVENT peerAbort{};
+    peerAbort.Type = QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED;
+    peerAbort.PEER_RECEIVE_ABORTED.ErrorCode = TqRelayStreamErrorCancelOnLoss;
+    (void)clientWorker.DispatchStreamEventForTest(clientStream, &peerAbort);
+    CHECK(TqTestDispatchLinuxOwnerEvent(clientContext, QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE));
+    clientWorker.UnregisterRelay(clientCommitted->RelayId);
+    CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 1);
+    CHECK(clientDestroys == 1);
+    exactClientOwner.reset(); exactServerOwner.reset();
+    clientWorker.Stop(); serverWorker.Stop();
+    if (clientTcp.Peer >= 0) { ::close(clientTcp.Peer); clientTcp.Peer = -1; }
     return true;
 }
 
@@ -230,18 +397,31 @@ bool TestTerminalReentersShutdown() {
 }
 
 bool TestTcpAdminWorkerConnectionRace() {
-    RelayFixture f;
+    RelayFixture f({}, true);
     CHECK(f.Start());
+    auto fatal = f.Worker.PostTcpEventsForTestAsync(f.RelayId, EPOLLERR | EPOLLHUP);
+    CHECK(fatal != nullptr);
+    const auto admissionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (fatal->CurrentPhase.load(std::memory_order_acquire) <
+               TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess &&
+           std::chrono::steady_clock::now() < admissionDeadline) std::this_thread::yield();
+    if (fatal->CurrentPhase.load(std::memory_order_acquire) <
+        TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess) {
+        fatal->ReleaseProcess();
+        std::fprintf(stderr, "async fatal admission timeout phase=%u\n",
+            static_cast<unsigned>(fatal->CurrentPhase.load(std::memory_order_acquire)));
+        return false;
+    }
     CHECK(ResetPeer(f.Tcp));
-    CHECK(f.Worker.DispatchTcpEventsForTest(f.RelayId, EPOLLERR | EPOLLHUP));
     std::atomic<bool> go{false};
     auto wait = [&] { while (!go.load(std::memory_order_acquire)) std::this_thread::yield(); };
-    std::thread tcp([&] { wait(); (void)f.Owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 113); });
+    std::thread tcp([&] { wait(); fatal->ReleaseProcess(); });
     std::thread admin([&] { wait(); (void)f.Control->SignalStop(f.Control->Generation); });
     std::thread worker([&] { wait(); (void)f.Control->SignalStop(f.Control->Generation); });
-    std::thread connection([&] { wait(); PublishTerminal(f.Owner); });
+    std::thread connection([&] { wait(); (void)fatal->Wait(); PublishTerminal(f.Owner); });
     go.store(true, std::memory_order_release);
     tcp.join(); admin.join(); worker.join(); connection.join();
+    CHECK(fatal->Wait());
     PublishTerminal(f.Owner);
     f.Worker.UnregisterRelay(f.RelayId);
     (void)f.Worker.DrainForTest(128);
@@ -254,16 +434,44 @@ bool TestTcpAdminWorkerConnectionRace() {
 bool TestQueueFullSinkAfterTunnelRelease() {
     TqLinuxRelayWorkerConfig config{};
     config.ForceTerminalQueueFullForTest = true;
-    RelayFixture f(config);
-    CHECK(f.Start());
-    QUIC_STREAM_EVENT terminal{};
-    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
-    CHECK(QUIC_SUCCEEDED(f.Owner->DispatchForTest(&terminal)));
-    auto released = std::move(f.Owner);
-    released.reset();
-    CHECK(f.Control->Stop.load(std::memory_order_acquire));
-    f.Worker.UnregisterRelay(f.RelayId);
-    CHECK(f.Worker.Snapshot().ActiveRelays == 0);
+    GlobalGuard globals;
+    TqTunnelReaper::Instance().Stop();
+    TqLinuxRelayWorker worker(config);
+    CHECK(worker.Start());
+    TcpPair tcp = LoopbackPair();
+    CHECK(tcp.Relay >= 0);
+    alignas(MsQuicStream) unsigned char storage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(3));
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    CHECK(owner->InstallDetachedStreamForTest(stream));
+    std::atomic<unsigned> destroys{0};
+    std::shared_ptr<TqRelayStopControl> control;
+    auto* context = TqCreateTestLinuxRelayTunnel(
+        &destroys, TqTunnelRole::ServerOpen, tcp.Relay, owner, &control, nullptr, &worker);
+    CHECK(context != nullptr && control != nullptr);
+    tcp.Relay = -1;
+    CHECK(TqTestDispatchLinuxOwnerEvent(context, QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE));
+    for (int i = 0; i != 111; ++i) {
+        QUIC_STREAM_EVENT late{};
+        late.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)worker.DispatchStreamEventForTest(stream, &late);
+    }
+    (void)worker.DrainForTest(256);
+    const auto queueFullDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!control->Stop.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < queueFullDeadline) std::this_thread::yield();
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    size_t reaped = 0;
+    while (reaped == 0 && std::chrono::steady_clock::now() < queueFullDeadline) {
+        reaped = TqTunnelReaper::Instance().ReapReadyForTest();
+        if (reaped == 0) std::this_thread::yield();
+    }
+    CHECK(reaped == 1);
+    CHECK(destroys == 1);
+    owner.reset();
+    worker.Stop();
+    ::close(tcp.Peer); tcp.Peer = -1;
     return true;
 }
 
@@ -280,51 +488,90 @@ bool TestLateTerminalFdAndGenerationReuse() {
     replacement.Relay = oldFd;
     TqLinuxRelayRegistration reg{};
     reg.TcpFd = replacement.Relay;
-    reg.EnableQuicSends = false;
+    alignas(MsQuicStream) unsigned char freshStorage[sizeof(MsQuicStream)]{};
+    auto* freshStream = reinterpret_cast<MsQuicStream*>(freshStorage);
+    freshStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(2));
+    auto freshOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    CHECK(freshOwner->InstallDetachedStreamForTest(freshStream));
+    auto freshControl = std::make_shared<TqRelayStopControl>();
+    reg.Stream = freshStream;
+    reg.StreamOwner = freshOwner;
+    reg.StopControl = freshControl;
+    reg.ControlGeneration = freshControl->Generation;
+    reg.EnableQuicSends = true;
     auto fresh = old.Worker.RegisterRelayWithId(reg);
     CHECK(fresh.Ok && fresh.TcpFdConsumed && fresh.RelayId != old.RelayId);
     replacement.Relay = -1;
     CHECK(old.Worker.DispatchEncodedEpollEventForTest(oldToken, EPOLLERR));
+    PublishTerminal(old.Owner);
     CHECK(old.Worker.Snapshot().ActiveRelays == 1);
+    CHECK(!freshControl->Stop.load(std::memory_order_acquire));
+    CHECK(freshOwner->GetTerminalPhase() != TerminalPhase::TerminalObserved);
     old.Worker.UnregisterRelay(fresh.RelayId);
+    PublishTerminal(freshOwner);
     ::close(replacement.Peer);
     return true;
 }
 
 bool TestSuppressedTerminalEscalatesOnlyConnection() {
-    GlobalGuard guard;
-    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
-    alignas(MsQuicStream) unsigned char storage[sizeof(MsQuicStream)]{};
-    CHECK(owner->InstallDetachedStreamForTest(reinterpret_cast<MsQuicStream*>(storage)));
-    owner->SetShutdownHookForTest([](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+    TqLinuxRelayWorkerConfig config{};
+    config.SuppressTerminalCallbackForTest = true;
+    RelayFixture f(config);
+    CHECK(f.Start());
+    f.Owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+        QUIC_STREAM_EVENT suppressed{};
+        suppressed.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)f.Worker.DispatchStreamEventForTest(f.Stream, &suppressed);
         return QUIC_STATUS_PENDING;
     });
-    auto escalation = std::make_shared<Escalation>();
-    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
-    CHECK(owner->BeginTerminalShutdown(114, sink, escalation).Submitted);
+    CHECK(ResetPeer(f.Tcp));
+    CHECK(f.Worker.DispatchTcpEventsForTest(f.RelayId, EPOLLERR | EPOLLHUP));
+    CHECK(f.Worker.Snapshot().SuppressedTerminalCallbacksForTest == 1);
+    CHECK(f.Owner->GetTerminalPhase() != TerminalPhase::TerminalObserved);
     TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(5));
-    CHECK(escalation->Calls == 1 && g_closes == 0);
+    CHECK(g_closes == 0);
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 1);
     TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(30));
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0 && g_closes == 0);
-    PublishTerminal(owner);
+    PublishTerminal(f.Owner);
     CHECK(TqStreamLifetime::SnapshotTerminalRetentions().OwnerCount == 0);
     return true;
 }
 
 bool TestDuplicateAbortStopTerminalReaper() {
-    RelayFixture f;
-    CHECK(f.Start());
-    CHECK(ResetPeer(f.Tcp));
+    GlobalGuard globals;
+    TqTunnelReaper::Instance().Stop();
+    TqLinuxRelayWorker worker({});
+    CHECK(worker.Start());
+    TcpPair tcp = LoopbackPair();
+    CHECK(tcp.Relay >= 0);
+    alignas(MsQuicStream) unsigned char storage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(storage);
+    stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(4));
+    auto owner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
+    CHECK(owner->InstallDetachedStreamForTest(stream));
+    std::atomic<unsigned> destroys{0};
+    std::shared_ptr<TqRelayStopControl> control;
+    auto* context = TqCreateTestLinuxRelayTunnel(
+        &destroys, TqTunnelRole::ServerOpen, tcp.Relay, owner, &control, nullptr, &worker);
+    CHECK(context != nullptr && control != nullptr);
+    tcp.Relay = -1;
+    auto committed = TqRelayLinuxCommittedSnapshot(TqTestLinuxTunnelRelayHandle(context));
+    CHECK(committed != nullptr);
+    CHECK(ResetPeer(tcp));
     for (int i = 0; i != 4; ++i) {
-        (void)f.Owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 115);
-        (void)f.Control->SignalStop(f.Control->Generation);
-        (void)f.Worker.DispatchTcpEventsForTest(f.RelayId, EPOLLERR);
-        PublishTerminal(f.Owner);
-        f.Worker.UnregisterRelay(f.RelayId);
+        (void)owner->RequestShutdown(TqStreamLifetime::ShutdownIntent::AbortBothImmediate, 115);
+        (void)control->SignalStop(control->Generation);
+        (void)worker.DispatchTcpEventsForTest(committed->RelayId, EPOLLERR);
     }
     CHECK(g_shutdowns == 1);
-    CHECK(f.Worker.Snapshot().ActiveRelays == 0);
+    (void)TqTestDispatchLinuxOwnerEvent(context, QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE);
+    worker.UnregisterRelay(committed->RelayId);
+    CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 1);
+    CHECK(TqTunnelReaper::Instance().ReapReadyForTest() == 0);
+    CHECK(destroys == 1);
+    owner.reset();
+    worker.Stop();
     CHECK(TqTerminalMetricsSnapshot().ExactlyOnceViolation == 0);
     return true;
 }
