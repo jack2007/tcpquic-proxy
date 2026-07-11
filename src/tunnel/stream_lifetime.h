@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <vector>
 
 // relay-capable QUIC stream 的唯一 wrapper 生命周期与 callback 路由器。
@@ -212,6 +213,8 @@ public:
     static RegistrySnapshot SnapshotRegistries() noexcept;
 #if defined(TQ_UNIT_TESTING)
     static void ResetLifecycleRegistriesForTest() noexcept;
+    static void SetBeforeTerminalRetentionSnapshotForTest(
+        std::function<void()> hook) noexcept;
 #endif
     QUIC_STATUS DispatchBufferedEvent(QUIC_STREAM_EVENT* event) noexcept;
 
@@ -267,6 +270,7 @@ public:
     static std::shared_ptr<TqTerminalSink> Create(
         std::weak_ptr<TqStreamLifetime> owner,
         std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+    ~TqTerminalSink() noexcept override;
     QUIC_STATUS OnStreamEvent(
         MsQuicStream*, QUIC_STREAM_EVENT*, uint64_t) noexcept override;
 
@@ -274,8 +278,10 @@ private:
     TqTerminalSink(
         std::weak_ptr<TqStreamLifetime> owner,
         std::shared_ptr<TqTerminalLedger> ledger) noexcept;
+    void ReleasePendingOnce() noexcept;
     std::weak_ptr<TqStreamLifetime> Owner_;
     std::shared_ptr<TqTerminalLedger> Ledger_;
+    std::atomic<bool> Pending_{true};
 };
 
 // callback-safe target adapter。Detach 从外部线程调用时等待已经进入的 callback；

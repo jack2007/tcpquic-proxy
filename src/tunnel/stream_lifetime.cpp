@@ -37,6 +37,8 @@ std::atomic<uint64_t> g_detachedOwnerDestroyCount{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextRegisterSendCompletion{false};
 std::atomic<uint64_t> g_nextTestTerminalId{1};
+std::mutex g_terminalSnapshotHookLock;
+std::function<void()> g_beforeTerminalSnapshotHook;
 #endif
 thread_local TqStreamCallbackTarget* g_activeCallbackTarget = nullptr;
 
@@ -948,6 +950,17 @@ std::vector<TqTerminalLedgerSnapshot> TqSnapshotTerminalRetentions(
         }
     }
 
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> beforeSnapshot;
+    {
+        std::lock_guard<std::mutex> guard(g_terminalSnapshotHookLock);
+        beforeSnapshot = g_beforeTerminalSnapshotHook;
+    }
+    if (beforeSnapshot) {
+        beforeSnapshot();
+    }
+#endif
+
     std::vector<TqTerminalLedgerSnapshot> snapshots;
     snapshots.reserve(ledgers.size());
     const auto now = std::chrono::steady_clock::now();
@@ -1031,6 +1044,13 @@ void TqStreamLifetime::ResetLifecycleRegistriesForTest() noexcept {
     }
     g_terminalApiSuppressedCount.store(0, std::memory_order_relaxed);
     TqResetTerminalMetricsForTest();
+    SetBeforeTerminalRetentionSnapshotForTest({});
+}
+
+void TqStreamLifetime::SetBeforeTerminalRetentionSnapshotForTest(
+    std::function<void()> hook) noexcept {
+    std::lock_guard<std::mutex> guard(g_terminalSnapshotHookLock);
+    g_beforeTerminalSnapshotHook = std::move(hook);
 }
 #endif
 

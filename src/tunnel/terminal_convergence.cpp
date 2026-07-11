@@ -8,6 +8,16 @@ std::atomic<uint64_t> g_terminalExactlyOnceViolations{0};
 std::atomic<uint64_t> g_terminalObserved{0};
 std::atomic<uint64_t> g_terminalSinkPending{0};
 std::atomic<uint64_t> g_duplicateTerminalSuppressed{0};
+
+void ReleaseTerminalSinkPending() noexcept {
+    auto pending = g_terminalSinkPending.load(std::memory_order_relaxed);
+    while (pending != 0 &&
+           !g_terminalSinkPending.compare_exchange_weak(
+               pending, pending - 1,
+               std::memory_order_relaxed,
+               std::memory_order_relaxed)) {
+    }
+}
 }
 
 TqTerminalLedger::TqTerminalLedger(TqTerminalIdentity identity) noexcept {
@@ -84,6 +94,16 @@ TqTerminalSink::TqTerminalSink(
     std::shared_ptr<TqTerminalLedger> ledger) noexcept
     : Owner_(std::move(owner)), Ledger_(std::move(ledger)) {}
 
+TqTerminalSink::~TqTerminalSink() noexcept {
+    ReleasePendingOnce();
+}
+
+void TqTerminalSink::ReleasePendingOnce() noexcept {
+    if (Pending_.exchange(false, std::memory_order_acq_rel)) {
+        ReleaseTerminalSinkPending();
+    }
+}
+
 std::shared_ptr<TqTerminalSink> TqTerminalSink::Create(
     std::weak_ptr<TqStreamLifetime> owner,
     std::shared_ptr<TqTerminalLedger> ledger) noexcept {
@@ -102,7 +122,7 @@ std::shared_ptr<TqTerminalSink> TqTerminalSink::Create(
         g_terminalSinkPending.fetch_add(1, std::memory_order_relaxed);
         return sink;
     } catch (...) {
-        delete raw;
+        // shared_ptr 的 pointer constructor 分配 control block 失败时负责 delete raw。
         return nullptr;
     }
 }
@@ -143,10 +163,10 @@ QUIC_STATUS TqTerminalSink::OnStreamEvent(
         Ledger_->RecordEvent(TqTerminalEvent::ShutdownComplete);
         if (Ledger_->CompleteAccountingOnce()) {
             g_terminalObserved.fetch_add(1, std::memory_order_relaxed);
-            g_terminalSinkPending.fetch_sub(1, std::memory_order_relaxed);
         } else {
             g_duplicateTerminalSuppressed.fetch_add(1, std::memory_order_relaxed);
         }
+        ReleasePendingOnce();
         break;
     case QUIC_STREAM_EVENT_CANCEL_ON_LOSS:
         Ledger_->RecordEvent(TqTerminalEvent::CancelOnLoss);
