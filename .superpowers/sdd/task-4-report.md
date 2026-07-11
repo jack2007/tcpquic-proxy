@@ -60,3 +60,11 @@
 - Stop 由独立 Stop mutex 串行化；join 不持 task mutex。Stop drain 前把所有 indexed ledger 显式、once-only 转为 Canceled，成功入队的 task 不再被无声清除。
 - terminal event 首次把 watchdog 转为 Canceled 时直接累计 `WatchdogCanceled`；heap/index 清理不参与该 metric。重复 terminal、Cancel 或 Stop 不重复累计。
 - `SchedulerFailure` 只在 container allocation/injection、thread creation/injection 的底层失败点累计；调用方只做 rollback/escalation 策略。container 与 thread 两类注入测试均严格断言增量为 1。
+
+## 最终复审修复（2026-07-11）
+
+- RED：扩展 Stop/join 窗口测试，要求 retry 与 arm fallback escalation 各保留 timeout obligation；最初 generation 为 0 且 pending task 为 0，测试按预期失败。测试随后还捕获 arm fallback timeout 错误地从原 watchdog due（5 秒）再加 30 秒，而非从 escalation 时刻计 30 秒。
+- scheduler 内部现在严格只有一个 mutex 和一个 CV；移除了 LifecycleMutex/StopMutex。`LifecycleGeneration` 与 `Ready/Running/Stopping/Stopped` 在同一 state/task mutex 下串行化 Start、Stop、enqueue。
+- Stop 在锁内切 Stopping、递增 generation、move 出旧 worker/heap/index，随后解锁做 cancel/join；join 完成后按相同 generation 在锁内完成 Stopped 或 restart 转换。并发 Stop 使用同一个 CV 等待 state 转换，不需要第二把 mutex。
+- Stopping/join 窗口发生的 escalation 可将 30 秒 timeout 入新 heap，并设置 `RestartRequested`；Stop join 后启动新 worker 接管。terminal cancel 仍可删除该 obligation。测试推进 30 秒后 retry 与 arm ledger 均进入 `TerminalTimeout`。
+- timeout due 统一以实际 escalation 时刻为基准，避免 arm fallback 产生 35 秒期限。

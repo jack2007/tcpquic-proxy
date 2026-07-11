@@ -123,6 +123,8 @@ public:
         uint64_t CanceledStreams{0};
         bool Running{false};
         bool Joinable{false};
+        uint64_t LifecycleGeneration{0};
+        bool RestartRequested{false};
     };
     static void ResetForTest();
     static void AdvanceForTest(std::chrono::milliseconds delta);

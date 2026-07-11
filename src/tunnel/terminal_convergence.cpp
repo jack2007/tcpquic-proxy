@@ -140,11 +140,16 @@ public:
         return std::any_of(c.begin(), c.end(),
             [&](const auto& task) { return task.StreamId == streamId; });
     }
+    std::vector<ScheduledTask> TakeAll() noexcept {
+        return std::move(c);
+    }
+    void ShiftEarlier(std::chrono::milliseconds delta) noexcept {
+        for (auto& task : c) task.Due -= delta;
+        std::make_heap(c.begin(), c.end(), comp);
+    }
 };
 
 struct SchedulerState {
-    std::mutex LifecycleMutex;
-    std::mutex StopMutex;
     std::mutex Mutex;
     std::condition_variable Wake;
     TaskQueue Tasks;
@@ -154,6 +159,8 @@ struct SchedulerState {
     bool Stopping{false};
     enum class Lifecycle : uint8_t { Ready, Running, Stopping, Stopped };
     Lifecycle State{Lifecycle::Ready};
+    uint64_t LifecycleGeneration{0};
+    bool RestartRequested{false};
     uint64_t Sequence{0};
 #if defined(TQ_UNIT_TESTING)
     bool FakeClock{false};
@@ -206,8 +213,7 @@ void DecrementPendingTimeout() noexcept {
         value, value - 1, std::memory_order_relaxed, std::memory_order_relaxed)) {}
 }
 
-bool EnqueueTask(ScheduledTask task) noexcept {
-    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+bool EnqueueTaskLocked(ScheduledTask task) noexcept {
     if (InjectAllocationFailureLocked()) return false;
     const auto streamId = task.StreamId;
     const bool existed = g_scheduler.Ledgers.find(streamId) != g_scheduler.Ledgers.end();
@@ -223,31 +229,32 @@ bool EnqueueTask(ScheduledTask task) noexcept {
     }
 }
 
-void RunAfterEnqueueHookForTest() noexcept {
+void RunAfterEnqueueHookForTestLocked() noexcept {
 #if defined(TQ_UNIT_TESTING)
     std::function<void()> hook;
-    {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-        try { hook = g_scheduler.AfterEnqueue; } catch (...) {}
-    }
+    try { hook = g_scheduler.AfterEnqueue; } catch (...) {}
     if (hook) hook();
 #endif
 }
 
 bool QueueTimeout(const ScheduledTask& source) noexcept {
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
-    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping ||
-        g_scheduler.State == SchedulerState::Lifecycle::Stopped) return false;
+    std::unique_lock<std::mutex> guard(g_scheduler.Mutex);
     ScheduledTask timeout = source;
     timeout.Kind = ScheduledKind::Timeout;
-    timeout.Due += std::chrono::seconds(30);
-    if (!EnqueueTask(std::move(timeout))) {
+    timeout.Due = SchedulerNowLocked() + std::chrono::seconds(30);
+    if (!EnqueueTaskLocked(std::move(timeout))) {
         return false;
     }
     g_terminalTimeoutPending.fetch_add(1, std::memory_order_relaxed);
-    RunAfterEnqueueHookForTest();
+    RunAfterEnqueueHookForTestLocked();
+    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping) {
+        g_scheduler.RestartRequested = true;
+        return true;
+    }
+    if (g_scheduler.State == SchedulerState::Lifecycle::Stopped) {
+        g_scheduler.State = SchedulerState::Lifecycle::Ready;
+    }
     if (!StartWorkerWithLifecycleLocked()) {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
         g_scheduler.Tasks.Erase(source.StreamId);
         CleanupIndexLocked(source.StreamId);
         DecrementPendingTimeout();
@@ -333,24 +340,17 @@ TqTerminalScheduler& TqTerminalScheduler::Instance() {
 
 bool StartWorkerWithLifecycleLocked() noexcept {
 #if defined(TQ_UNIT_TESTING)
-    {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-        if (g_scheduler.FakeClock) {
-            g_scheduler.State = SchedulerState::Lifecycle::Running;
-            return true;
-        }
+    if (g_scheduler.FakeClock) {
+        g_scheduler.State = SchedulerState::Lifecycle::Running;
+        return true;
     }
 #endif
-    {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-        if (g_scheduler.Running) {
-            g_scheduler.State = SchedulerState::Lifecycle::Running;
-            return true;
-        }
+    if (g_scheduler.Running) {
+        g_scheduler.State = SchedulerState::Lifecycle::Running;
+        return true;
     }
-    if (g_scheduler.Worker.joinable()) g_scheduler.Worker.join();
+    if (g_scheduler.Worker.joinable()) return false;
     try {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
         if (InjectAllocationFailureLocked()) return false;
 #if defined(TQ_UNIT_TESTING)
         if (g_scheduler.FailThreadStart) {
@@ -390,7 +390,6 @@ bool StartWorkerWithLifecycleLocked() noexcept {
 #endif
     });
     } catch (...) {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
         g_scheduler.Running = false;
         g_scheduler.State = SchedulerState::Lifecycle::Ready;
         g_schedulerFailure.fetch_add(1, std::memory_order_relaxed);
@@ -400,8 +399,11 @@ bool StartWorkerWithLifecycleLocked() noexcept {
 }
 
 void TqTerminalScheduler::Start() {
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
-    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping) return;
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping) {
+        g_scheduler.RestartRequested = true;
+        return;
+    }
     if (g_scheduler.State == SchedulerState::Lifecycle::Stopped) {
         g_scheduler.State = SchedulerState::Lifecycle::Ready;
     }
@@ -409,31 +411,54 @@ void TqTerminalScheduler::Start() {
 }
 
 void TqTerminalScheduler::Stop() {
-    std::lock_guard<std::mutex> stop(g_scheduler.StopMutex);
+    std::vector<ScheduledTask> stoppedTasks;
+    std::unordered_map<uint64_t, std::shared_ptr<TqTerminalLedger>> stoppedLedgers;
+    std::thread stoppedWorker;
+    uint64_t generation = 0;
     {
-        std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
+        std::unique_lock<std::mutex> guard(g_scheduler.Mutex);
+        while (g_scheduler.State == SchedulerState::Lifecycle::Stopping) {
+            g_scheduler.Wake.wait(guard);
+        }
         if (g_scheduler.State == SchedulerState::Lifecycle::Stopped) return;
         g_scheduler.State = SchedulerState::Lifecycle::Stopping;
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        generation = ++g_scheduler.LifecycleGeneration;
         g_scheduler.Stopping = true;
+        g_scheduler.RestartRequested = false;
+        stoppedTasks = g_scheduler.Tasks.TakeAll();
+        stoppedLedgers = std::move(g_scheduler.Ledgers);
+        if (g_scheduler.Worker.joinable()) {
+            stoppedWorker = std::move(g_scheduler.Worker);
+        }
     }
     g_scheduler.Wake.notify_all();
-    if (g_scheduler.Worker.joinable()) g_scheduler.Worker.join();
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
-    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-    while (!g_scheduler.Tasks.empty()) {
-        if (g_scheduler.Tasks.top().Kind == ScheduledKind::Timeout) {
+    for (const auto& task : stoppedTasks) {
+        if (task.Kind == ScheduledKind::Timeout) {
             DecrementPendingTimeout();
         }
-        g_scheduler.Tasks.pop();
     }
-    for (const auto& item : g_scheduler.Ledgers) {
+    for (const auto& item : stoppedLedgers) {
         if (TqTerminalSchedulerInternals::Cancel(item.second)) {
             g_watchdogCanceled.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    g_scheduler.Ledgers.clear();
-    g_scheduler.State = SchedulerState::Lifecycle::Stopped;
+    if (stoppedWorker.joinable()) stoppedWorker.join();
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        if (g_scheduler.LifecycleGeneration == generation &&
+            g_scheduler.State == SchedulerState::Lifecycle::Stopping) {
+            g_scheduler.Running = false;
+            g_scheduler.Stopping = false;
+            if (g_scheduler.RestartRequested || !g_scheduler.Tasks.empty()) {
+                g_scheduler.RestartRequested = false;
+                g_scheduler.State = SchedulerState::Lifecycle::Ready;
+                (void)StartWorkerWithLifecycleLocked();
+            } else {
+                g_scheduler.State = SchedulerState::Lifecycle::Stopped;
+            }
+        }
+    }
+    g_scheduler.Wake.notify_all();
 }
 
 bool TqTerminalScheduler::ScheduleRetry(
@@ -472,18 +497,19 @@ bool TqTerminalScheduler::ScheduleRetry(
         task.Due = SchedulerNowLocked() + delays[completedAttempt - 1];
     }
     const auto streamId = task.StreamId;
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
-    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping ||
-        g_scheduler.State == SchedulerState::Lifecycle::Stopped) return false;
     const bool queued = TqTerminalSchedulerInternals::RetryAndEnqueue(
-        task.Ledger, [&] { return EnqueueTask(std::move(task)); });
-    if (queued) RunAfterEnqueueHookForTest();
-    if (!queued || !StartWorkerWithLifecycleLocked()) {
-        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-        g_scheduler.Tasks.Erase(streamId);
-        CleanupIndexLocked(streamId);
-        return false;
-    }
+        task.Ledger, [&] {
+            std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+            if (g_scheduler.State == SchedulerState::Lifecycle::Stopping ||
+                g_scheduler.State == SchedulerState::Lifecycle::Stopped) return false;
+            if (!EnqueueTaskLocked(std::move(task))) return false;
+            RunAfterEnqueueHookForTestLocked();
+            if (StartWorkerWithLifecycleLocked()) return true;
+            g_scheduler.Tasks.Erase(streamId);
+            CleanupIndexLocked(streamId);
+            return false;
+        });
+    if (!queued) return false;
     g_scheduler.Wake.notify_all();
     return true;
 }
@@ -508,23 +534,19 @@ void TqTerminalScheduler::ArmWatchdog(
     }
     const auto failedTask = task;
     const auto streamId = task.StreamId;
-    std::unique_lock<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
-    if (g_scheduler.State == SchedulerState::Lifecycle::Stopping ||
-        g_scheduler.State == SchedulerState::Lifecycle::Stopped) {
-        lifecycle.unlock();
-        Escalate(failedTask);
-        return;
-    }
     const bool queued = TqTerminalSchedulerInternals::ArmAndEnqueue(
-        task.Ledger, [&] { return EnqueueTask(std::move(task)); });
-    if (queued) RunAfterEnqueueHookForTest();
-    if (!queued || !StartWorkerWithLifecycleLocked()) {
-        {
+        task.Ledger, [&] {
             std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+            if (g_scheduler.State == SchedulerState::Lifecycle::Stopping ||
+                g_scheduler.State == SchedulerState::Lifecycle::Stopped) return false;
+            if (!EnqueueTaskLocked(std::move(task))) return false;
+            RunAfterEnqueueHookForTestLocked();
+            if (StartWorkerWithLifecycleLocked()) return true;
             g_scheduler.Tasks.Erase(streamId);
             CleanupIndexLocked(streamId);
-        }
-        lifecycle.unlock();
+            return false;
+        });
+    if (!queued) {
         Escalate(failedTask);
         return;
     }
@@ -555,7 +577,6 @@ void TqTerminalScheduler::Cancel(uint64_t streamId) noexcept {
 #if defined(TQ_UNIT_TESTING)
 void TqTerminalScheduler::ResetForTest() {
     Instance().Stop();
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
     std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
     g_scheduler.Tasks = {};
     g_scheduler.Ledgers.clear();
@@ -574,7 +595,11 @@ void TqTerminalScheduler::ResetForTest() {
 void TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds delta) {
     {
         std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
-        g_scheduler.FakeNow += delta;
+        if (g_scheduler.FakeClock) {
+            g_scheduler.FakeNow += delta;
+        } else {
+            g_scheduler.Tasks.ShiftEarlier(delta);
+        }
     }
     RunDueTasksForTest();
 }
@@ -585,7 +610,6 @@ std::chrono::steady_clock::time_point TqTerminalScheduler::NowForTest() {
 }
 
 TqTerminalScheduler::TestSnapshot TqTerminalScheduler::SnapshotForTest() {
-    std::lock_guard<std::mutex> lifecycle(g_scheduler.LifecycleMutex);
     std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
     TestSnapshot snapshot{};
     snapshot.PendingTasks = g_scheduler.Tasks.size();
@@ -593,6 +617,8 @@ TqTerminalScheduler::TestSnapshot TqTerminalScheduler::SnapshotForTest() {
     snapshot.CanceledStreams = 0;
     snapshot.Running = g_scheduler.Running;
     snapshot.Joinable = g_scheduler.Worker.joinable();
+    snapshot.LifecycleGeneration = g_scheduler.LifecycleGeneration;
+    snapshot.RestartRequested = g_scheduler.RestartRequested;
     return snapshot;
 }
 

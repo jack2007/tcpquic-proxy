@@ -344,6 +344,14 @@ void TestStopJoinRejectsScheduleAndEscalatesOnce() {
     cv.notify_all();
     stopper.join();
     TqTerminalScheduler::SetBeforeWorkerReturnForTest({});
+    const auto restarted = TqTerminalScheduler::SnapshotForTest();
+    CHECK(restarted.LifecycleGeneration != 0);
+    CHECK(restarted.PendingTasks == 2);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(30));
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::TerminalTimeout);
+    CHECK(armOwner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::TerminalTimeout);
 }
 
 void TestStopCannotSplitEnqueueFromWorkerStart() {
@@ -442,9 +450,6 @@ void TestStartWaitsForJoinableOldWorkerAndStopDrainsTasks() {
     stopper.join();
     starter.join();
     CHECK(startReturned.load(std::memory_order_acquire));
-    const auto stoppedAfterRace = TqTerminalScheduler::SnapshotForTest();
-    CHECK(!stoppedAfterRace.Running && !stoppedAfterRace.Joinable);
-    TqTerminalScheduler::Instance().Start();
     const auto running = TqTerminalScheduler::SnapshotForTest();
     CHECK(running.Running && running.Joinable);
     TqTerminalScheduler::SetBeforeWorkerReturnForTest({});
