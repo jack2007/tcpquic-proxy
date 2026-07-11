@@ -252,6 +252,16 @@ Darwin Runtime 已接入公共 `TqRelayRuntimeSnapshotSupport` + `TqRelayRuntime
 
 ## 3. 目前代码问题和建议
 
+### P0：HTTP CONNECT 浏览器关闭后 tunnel/relay 不收敛 — **待修复**
+
+现象：client HTTP CONNECT 代理下浏览器关闭后，admin 仍显示大量 active tunnel/relay；进程持有已 `CLOSED` 的 ingress TCP FD 未释放。
+
+根因：Darwin 缺少 Linux `MaybeStopFullyClosedRelay` 等价路径；双向半关闭完成后不 `SignalStop`，干等 MsQuic `SHUTDOWN_COMPLETE`。
+
+完整现象、对照表、次要现象与修复建议见：
+
+- `docs/2026-07-11-darwin-http-connect-zombie-relay.md`
+
 ### P0：Darwin 配置复用 Linux 字段，语义和用户接口不清晰 — **第一阶段已完成**
 
 第一阶段已增加 `relay.common.*` / `--relay-*` 平台中性配置入口，并新增 `relay_*` metrics alias；旧 `relay.linux.*`、`--linux-relay-*` 和 `linux_relay_*` key 保留兼容。后续仍可继续清理内部 legacy `LinuxRelay*` 字段命名，但不再要求 macOS 用户通过 Linux 命名调优 Darwin relay。
