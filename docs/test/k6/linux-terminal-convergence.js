@@ -1,15 +1,15 @@
 import http from 'k6/http';
-import { check, sleep } from 'k6';
-import { Counter, Trend } from 'k6/metrics';
+import { check } from 'k6';
+import { Counter, Rate, Trend } from 'k6/metrics';
 
 const fatalTerminalLatency = new Trend('fatal_terminal_latency', true);
 const rstCount = new Counter('rst_count');
 const finReverseFlowChecks = new Counter('fin_reverse_flow_checks');
+const rstExpected = new Counter('rst_expected');
+const resetObserved = new Rate('reset_observed');
 
 const scenario = __ENV.SCENARIO || 'baseline';
 const target = __ENV.TARGET_URL || 'https://127.0.0.1:18080';
-const adminUrl = __ENV.CLIENT_ADMIN_URL || '';
-const adminToken = __ENV.ADMIN_TOKEN || '';
 
 const scenarios = {
   baseline: { executor: 'constant-vus', vus: 100, duration: '5m' },
@@ -31,11 +31,12 @@ export const options = {
   insecureSkipTLSVerify: true,
   scenarios: { [scenario]: scenarios[scenario] },
   thresholds: {
-    checks: ['rate>0.999'],
-    http_req_failed: ['rate<0.001'],
+    'checks{workload_normal:true}': ['rate>0.999'],
+    'http_req_failed{workload_normal:true}': ['rate<0.001'],
     dropped_iterations: ['count==0'],
-    http_req_duration: ['p(95)<500', 'p(99)<1000'],
+    'http_req_duration{workload_normal:true}': ['p(95)<500', 'p(99)<1000'],
     fatal_terminal_latency: ['p(95)<1000', 'p(99)<5000'],
+    reset_observed: ['rate>0.999'],
   },
 };
 
@@ -49,35 +50,22 @@ function payloadSize() {
 export default function () {
   const rst = ((__VU + __ITER) % 5) === 0; // deterministic 20% RST / 80% FIN
   const body = 'x'.repeat(payloadSize());
-  let terminalBefore = null;
-  if (rst && adminUrl && adminToken) {
-    const snapshot = http.get(`${adminUrl}/api/v1/relay/metrics`, {
-      headers: { Authorization: `Bearer ${adminToken}` }, tags: { control_plane: 'true' },
-    });
-    if (snapshot.status === 200) terminalBefore = snapshot.json('terminal_observed');
-  }
-  const started = Date.now();
   const response = http.post(`${target}/${rst ? 'rst' : 'fin'}`, body, {
     headers: { 'Content-Type': 'application/octet-stream' },
+    tags: rst ? { expected_reset: 'true' } : { workload_normal: 'true' },
     timeout: '10s',
   });
-  const ok = check(response, {
+  const ok = rst ? false : check(response, {
     'terminal request accepted': (r) => r.status === 200,
-    'FIN preserves reverse flow': (r) => rst || r.body === 'reverse-flow-ok',
-  });
+    'FIN preserves reverse flow': (r) => r.body === 'reverse-flow-ok',
+  }, { workload_normal: 'true' });
   if (rst) {
+    rstExpected.add(1);
+    resetObserved.add(response.status === 0);
     rstCount.add(1);
-    let observed = false;
-    for (let attempt = 0; attempt < 50 && terminalBefore !== null; attempt += 1) {
-      const snapshot = http.get(`${adminUrl}/api/v1/relay/metrics`, {
-        headers: { Authorization: `Bearer ${adminToken}` }, tags: { control_plane: 'true' },
-      });
-      if (snapshot.status === 200 && snapshot.json('terminal_observed') > terminalBefore) {
-        observed = true; break;
-      }
-      sleep(0.1);
-    }
-    if (observed) fatalTerminalLatency.add(Date.now() - started);
+    // A reset has no tunnel id visible to k6. Do not attribute a process-global
+    // terminal counter to this iteration; the runner rejects the missing
+    // one-to-one latency samples until a tunnel-correlated Admin/trace API exists.
   } else if (ok) {
     finReverseFlowChecks.add(1);
   }
@@ -93,6 +81,8 @@ export function handleSummary(data) {
     terminal_convergence: {
       fatal_terminal_latency: data.metrics.fatal_terminal_latency || null,
       rst_count: data.metrics.rst_count || null,
+      rst_expected: data.metrics.rst_expected || null,
+      reset_observed: data.metrics.reset_observed || null,
       fin_reverse_flow_checks: data.metrics.fin_reverse_flow_checks || null,
     },
     metrics: data.metrics,

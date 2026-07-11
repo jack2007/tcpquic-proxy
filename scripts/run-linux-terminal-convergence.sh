@@ -37,10 +37,10 @@ done
 self_test() {
   bash -n "$0"
   test -r "$WORKLOAD"
-  grep -Fq "checks: ['rate>0.999']" "$WORKLOAD"
-  grep -Fq "http_req_failed: ['rate<0.001']" "$WORKLOAD"
+  grep -Fq "'checks{workload_normal:true}': ['rate>0.999']" "$WORKLOAD"
+  grep -Fq "'http_req_failed{workload_normal:true}': ['rate<0.001']" "$WORKLOAD"
   grep -Fq "dropped_iterations: ['count==0']" "$WORKLOAD"
-  grep -Fq "http_req_duration: ['p(95)<500', 'p(99)<1000']" "$WORKLOAD"
+  grep -Fq "'http_req_duration{workload_normal:true}': ['p(95)<500', 'p(99)<1000']" "$WORKLOAD"
   grep -Fq "fatal_terminal_latency" "$WORKLOAD"
   grep -Fq "rst_count" "$WORKLOAD"
   grep -Fq "fin_reverse_flow_checks" "$WORKLOAD"
@@ -48,12 +48,21 @@ self_test() {
   for name in baseline peak spike stress soak; do grep -Eq "^[[:space:]]*$name:" "$WORKLOAD"; done
   local fixture
   fixture=$(mktemp -d); trap 'rm -rf "$fixture"' RETURN
-  printf '%s\n' '{"active_relays":0,"terminal_sink_pending":0,"terminal_timeout_pending":0,"terminal_exactly_once_violation":0,"terminal_retained_owner_count":0,"linux_relay_outstanding_quic_sends":0,"linux_relay_pending_events":0,"linux_relay_pending_tcp_write_queue":0,"terminal_shutdown_submitted":1,"terminal_observed":1}' >"$fixture/good.json"
+  printf '%s\n' '{"active_relays":0,"terminal_sink_pending":0,"terminal_timeout_pending":0,"terminal_exactly_once_violation":0,"terminal_retained_owner_count":0,"linux_relay_outstanding_quic_sends":0,"linux_relay_pending_events":0,"linux_relay_pending_tcp_write_queue":0,"terminal_shutdown_submitted":1,"terminal_observed":1,"terminal_watchdog_armed":1,"terminal_watchdog_canceled":1,"terminal_watchdog_timeout":0}' >"$fixture/good.json"
   jq -e 'has("active_relays") and has("terminal_sink_pending") and has("linux_relay_outstanding_quic_sends")' "$fixture/good.json" >/dev/null
   if jq -e 'has("missing_required")' "$fixture/good.json" >/dev/null; then echo "self-test accepted missing field" >&2; return 1; fi
   jq '.linux_relay_outstanding_quic_sends=1' "$fixture/good.json" >"$fixture/pending.json"
   if jq -e '.linux_relay_outstanding_quic_sends==0' "$fixture/pending.json" >/dev/null; then echo "self-test accepted pending send" >&2; return 1; fi
   if jq -n -e --argjson rst_rc 0 '$rst_rc != 0' >/dev/null; then echo "self-test accepted successful RST curl" >&2; return 1; fi
+  jq '.terminal_timeout_pending=1' "$fixture/good.json" >"$fixture/timeout.json"
+  if jq -e '.terminal_timeout_pending==0' "$fixture/timeout.json" >/dev/null; then echo "self-test accepted timeout pending" >&2; return 1; fi
+  jq '.terminal_watchdog_armed=2' "$fixture/good.json" >"$fixture/watchdog.json"
+  if jq -e '(.terminal_watchdog_armed-.terminal_watchdog_canceled-.terminal_watchdog_timeout)==0' "$fixture/watchdog.json" >/dev/null; then echo "self-test accepted watchdog pending" >&2; return 1; fi
+  if jq -n -e --argjson pre 4 --argjson final 4 '($final-$pre)>0' >/dev/null; then echo "self-test attributed FIN-only metric to RST" >&2; return 1; fi
+  printf '%s\n' '{"terminal_convergence":{"rst_count":{"values":{"count":2}},"fatal_terminal_latency":{"values":{"count":1}}}}' >"$fixture/uncorrelated.json"
+  if jq -e '.terminal_convergence.rst_count.values.count==.terminal_convergence.fatal_terminal_latency.values.count' "$fixture/uncorrelated.json" >/dev/null; then echo "self-test accepted uncorrelated fatal samples" >&2; return 1; fi
+  printf '%s\n' '{"terminal_retained_owner_count":0}' '{"terminal_retained_owner_count":1}' '{"terminal_retained_owner_count":2}' >"$fixture/monotonic.jsons"
+  if jq -s '[.[].terminal_retained_owner_count] as $v | any(range(1;$v|length); $v[.] < $v[.-1]) or (($v|max)==($v|min))' "$fixture/monotonic.jsons" | grep -qx true; then echo "self-test accepted monotonic retention growth" >&2; return 1; fi
   echo "linux terminal convergence runner self-test passed"
 }
 
@@ -69,8 +78,8 @@ if [[ "$SCENARIO" != incident ]] && ! command -v k6 >/dev/null; then
   echo "k6 is required for performance scenarios; install: https://grafana.com/docs/k6/latest/set-up/install-k6/" >&2
   exit 69
 fi
-if [[ "$SCENARIO" != incident ]] && [[ ! -r "$BASELINE_SUMMARY" ]]; then
-  echo "performance scenarios require --baseline-summary PATH with an accepted historical baseline" >&2
+if [[ "$SCENARIO" != incident && "$SCENARIO" != baseline ]] && [[ ! -r "$BASELINE_SUMMARY" ]]; then
+  echo "non-baseline performance scenarios require --baseline-summary PATH with an accepted historical baseline" >&2
   exit 66
 fi
 
@@ -201,7 +210,7 @@ snapshot_role() {
     --slurpfile t "$OUT/metrics/$role-$tag-retentions.json" '
       ($r[0]) as $m |
       if (($c[0].tunnels|type)!="array" or ($a[0].relays|type)!="array" or ($t[0].retentions|type)!="array") then error("invalid admin collection schema") else
-      ["active_relays","terminal_sink_pending","terminal_timeout_pending","terminal_exactly_once_violation","terminal_retained_owner_count","linux_relay_outstanding_quic_sends","linux_relay_pending_events","linux_relay_pending_tcp_write_queue","terminal_shutdown_submitted","terminal_observed","terminal_connection_escalation"] as $required |
+      ["active_relays","terminal_sink_pending","terminal_timeout_pending","terminal_exactly_once_violation","terminal_retained_owner_count","linux_relay_outstanding_quic_sends","linux_relay_pending_events","linux_relay_pending_tcp_write_queue","terminal_shutdown_submitted","terminal_observed","terminal_connection_escalation","terminal_watchdog_armed","terminal_watchdog_canceled","terminal_watchdog_timeout"] as $required |
       if ($required|any(.[]; . as $key|$m|has($key)|not)) then error("missing required relay metric") else {
         active_tunnels:($c[0].tunnels|length),
         active_relays:$m.active_relays,
@@ -214,6 +223,7 @@ snapshot_role() {
         retention_records:($t[0].retentions|length),
         terminal_timeout_pending:$m.terminal_timeout_pending,
         exactly_once_violation:$m.terminal_exactly_once_violation,
+        watchdog_pending:($m.terminal_watchdog_armed-$m.terminal_watchdog_canceled-$m.terminal_watchdog_timeout),
         terminal_shutdown_submitted:$m.terminal_shutdown_submitted,
         terminal_observed:$m.terminal_observed,
         terminal_connection_escalation:$m.terminal_connection_escalation
@@ -227,6 +237,7 @@ sample_metrics() {
   while ((stop_sampler == 0)); do
     admin_get "$CLIENT_ADMIN_PORT" /relay/metrics >"$OUT/metrics/client-sample-$(printf '%04d' "$n").json" 2>/dev/null || true
     admin_get "$SERVER_ADMIN_PORT" /relay/metrics >"$OUT/metrics/server-sample-$(printf '%04d' "$n").json" 2>/dev/null || true
+    printf '%s\t%s\n' "$(date +%s)" "$n" >>"$OUT/metrics/sample-index.tsv"
     ps -o pid=,pcpu=,rss=,nlwp= -p "${PIDS[1]},${PIDS[2]}" >>"$OUT/process-samples.txt" 2>/dev/null || true
     n=$((n+1)); sleep 5
   done
@@ -239,6 +250,11 @@ if [[ "$SCENARIO" == incident ]]; then
   set +e
   curl -kfsS --max-time 10 --noproxy '' --proxy "http://$CLIENT_HTTP" -X POST --data-binary @<(head -c 1024 /dev/zero) "$TARGET_URL/fin" >"$OUT/fin-response.txt" 2>"$OUT/logs/fin-curl.log"
   fin_rc=$?
+  set -e
+  snapshot_role client "$CLIENT_ADMIN_PORT" pre-rst
+  snapshot_role server "$SERVER_ADMIN_PORT" pre-rst
+  rst_started=$(date +%s%3N)
+  set +e
   curl -ksS --max-time 10 --noproxy '' --proxy "http://$CLIENT_HTTP" -X POST --data-binary @<(head -c 65536 /dev/zero) "$TARGET_URL/rst" >"$OUT/rst-response.txt" 2>"$OUT/logs/rst-curl.log"
   rst_rc=$?
   set -e
@@ -258,18 +274,19 @@ while ((SECONDS <= deadline)); do
       .active_relay_records==$b[0].active_relay_records and .terminal_sink_pending==$b[0].terminal_sink_pending and
       .send_completion_pending==$b[0].send_completion_pending and .relay_pending_events==$b[0].relay_pending_events and
       .pending_tcp_write_queue==$b[0].pending_tcp_write_queue and .retained_owner==$b[0].retained_owner and
-      .retention_records==$b[0].retention_records and .terminal_timeout_pending==$b[0].terminal_timeout_pending and
-      .exactly_once_violation==$b[0].exactly_once_violation' "$OUT/metrics/client-final.json" >/dev/null && \
+      .retention_records==$b[0].retention_records and .terminal_timeout_pending==0 and $b[0].terminal_timeout_pending==0 and
+      .exactly_once_violation==0 and $b[0].exactly_once_violation==0 and .watchdog_pending==0 and $b[0].watchdog_pending==0' "$OUT/metrics/client-final.json" >/dev/null && \
      jq -e --slurpfile b "$OUT/metrics/server-baseline.json" '
       .active_tunnels==$b[0].active_tunnels and .active_relays==$b[0].active_relays and
       .active_relay_records==$b[0].active_relay_records and .terminal_sink_pending==$b[0].terminal_sink_pending and
       .send_completion_pending==$b[0].send_completion_pending and .relay_pending_events==$b[0].relay_pending_events and
       .pending_tcp_write_queue==$b[0].pending_tcp_write_queue and .retained_owner==$b[0].retained_owner and
-      .retention_records==$b[0].retention_records and .terminal_timeout_pending==$b[0].terminal_timeout_pending and
-      .exactly_once_violation==$b[0].exactly_once_violation' "$OUT/metrics/server-final.json" >/dev/null; then converged=1; break; fi
+      .retention_records==$b[0].retention_records and .terminal_timeout_pending==0 and $b[0].terminal_timeout_pending==0 and
+      .exactly_once_violation==0 and $b[0].exactly_once_violation==0 and .watchdog_pending==0 and $b[0].watchdog_pending==0' "$OUT/metrics/server-final.json" >/dev/null; then converged=1; break; fi
   sleep 1
 done
 elapsed_ms=$(( $(date +%s%3N) - started ))
+fatal_latency_ms=$(( $(date +%s%3N) - ${rst_started:-started} ))
 ss -tanp >"$OUT/ss-final.txt"
 close_wait=$(awk -v p=":$TARGET_PORT" '$1=="CLOSE-WAIT" && index($0,p){n++} END{print n+0}' "$OUT/ss-final.txt")
 jq -n --slurpfile b "$OUT/metrics/client-baseline.json" --slurpfile f "$OUT/metrics/client-final.json" \
@@ -284,32 +301,45 @@ if [[ "$SCENARIO" == incident ]] && { [[ "${fin_rc:-1}" != 0 ]] || [[ "${rst_rc:
    [[ "$(cat "$OUT/fin-response.txt")" != reverse-flow-ok ]] || ((fin_hits < 1 || rst_hits < 1)); }; then
   incident_io_ok=false
 fi
-terminal_delta=$(jq -s 'map(.delta.terminal_observed + .delta.terminal_shutdown_submitted + .delta.terminal_connection_escalation)|add' \
-  "$OUT/summary/client-resources.json" "$OUT/summary/server-resources.json")
+if [[ "$SCENARIO" == incident ]]; then
+  terminal_delta=$(jq -n --slurpfile ci "$OUT/metrics/client-pre-rst.json" --slurpfile cf "$OUT/metrics/client-final.json" \
+    --slurpfile si "$OUT/metrics/server-pre-rst.json" --slurpfile sf "$OUT/metrics/server-final.json" \
+    '($cf[0].terminal_observed-$ci[0].terminal_observed)+($cf[0].terminal_shutdown_submitted-$ci[0].terminal_shutdown_submitted)+($cf[0].terminal_connection_escalation-$ci[0].terminal_connection_escalation)+($sf[0].terminal_observed-$si[0].terminal_observed)+($sf[0].terminal_shutdown_submitted-$si[0].terminal_shutdown_submitted)+($sf[0].terminal_connection_escalation-$si[0].terminal_connection_escalation)')
+else
+  terminal_delta=$(jq -s 'map(.delta.terminal_observed + .delta.terminal_shutdown_submitted + .delta.terminal_connection_escalation)|add' \
+    "$OUT/summary/client-resources.json" "$OUT/summary/server-resources.json")
+fi
 performance='null'
 performance_ok=true
 if [[ "$SCENARIO" != incident ]]; then
-  if ! jq -e '.passed==true and (.terminal_convergence.fatal_terminal_latency.values["p(95)"] < 1000) and (.terminal_convergence.fatal_terminal_latency.values["p(99)"] < 5000)' "$OUT/summary.json" >/dev/null; then performance_ok=false; fi
+  if ! jq -e '.passed==true and (.terminal_convergence.fatal_terminal_latency.values["p(95)"] < 1000) and (.terminal_convergence.fatal_terminal_latency.values["p(99)"] < 5000) and (.terminal_convergence.fatal_terminal_latency.values.count == .terminal_convergence.rst_count.values.count) and (.terminal_convergence.rst_expected.values.count == .terminal_convergence.rst_count.values.count) and (.terminal_convergence.reset_observed.values.rate > 0.999)' "$OUT/summary.json" >/dev/null; then performance_ok=false; fi
   process_stats=$(awk 'NF==4{if($2>cpu)cpu=$2;if($3>rss)rss=$3;if($4>thr)thr=$4}END{printf "{\"cpu_peak\":%.3f,\"rss_peak_kb\":%d,\"thread_peak\":%d}",cpu,rss,thr}' "$OUT/process-samples.txt")
-  performance=$(jq -n --argjson ps "$process_stats" --slurpfile k "$OUT/summary.json" '{establish_p95_ms:$k[0].metrics.http_req_duration.values["p(95)"],establish_p99_ms:$k[0].metrics.http_req_duration.values["p(99)"],throughput_per_sec:$k[0].metrics.iterations.values.rate,cpu_peak:$ps.cpu_peak,rss_peak_kb:$ps.rss_peak_kb,thread_peak:$ps.thread_peak}')
-  if ! jq -e --argjson p "$performance" '
+  performance=$(jq -n --argjson ps "$process_stats" --slurpfile k "$OUT/summary.json" '{establish_p95_ms:$k[0].metrics["http_req_duration{workload_normal:true}"].values["p(95)"],establish_p99_ms:$k[0].metrics["http_req_duration{workload_normal:true}"].values["p(99)"],throughput_per_sec:$k[0].metrics.iterations.values.rate,cpu_peak:$ps.cpu_peak,rss_peak_kb:$ps.rss_peak_kb,thread_peak:$ps.thread_peak}')
+  if [[ "$SCENARIO" != baseline ]] && ! jq -e --argjson p "$performance" '
       (.performance|type)=="object" and
       $p.establish_p95_ms <= (.performance.establish_p95_ms*1.05) and
       $p.establish_p99_ms <= (.performance.establish_p99_ms*1.10) and
       $p.throughput_per_sec >= (.performance.throughput_per_sec*0.95) and
       $p.cpu_peak <= (.performance.cpu_peak*1.10) and $p.rss_peak_kb <= (.performance.rss_peak_kb*1.10) and
       $p.thread_peak <= .performance.thread_peak' "$BASELINE_SUMMARY" >/dev/null; then performance_ok=false; fi
-  if [[ "$SCENARIO" == soak ]] && jq -s '[.[].terminal_retained_owner_count] as $v | any(range(1;$v|length); $v[.] < $v[.-1]) or (($v|max)==($v|min))' "$OUT"/metrics/client-sample-*.json "$OUT"/metrics/server-sample-*.json | grep -qx false; then performance_ok=false; fi
+  if [[ "$SCENARIO" == soak ]]; then
+    sample_count=$(wc -l <"$OUT/metrics/sample-index.tsv")
+    sample_span=$(awk 'NR==1{first=$1} {last=$1} END{print last-first}' "$OUT/metrics/sample-index.tsv")
+    if ((sample_count < 360 || sample_span < 1795 || elapsed_ms < 1800000)); then performance_ok=false; fi
+    for role in client server; do
+      if ! jq -s '[.[].terminal_retained_owner_count] as $v | (($v|length)>=360) and (any(range(1;$v|length); $v[.] < $v[.-1]) or (($v|max)==($v|min)))' "$OUT"/metrics/$role-sample-*.json | grep -qx true; then performance_ok=false; fi
+    done
+  fi
 fi
 if ((converged)) && [[ "$close_wait" == 0 ]] && [[ "$incident_io_ok" == true ]] && [[ "$performance_ok" == true ]]; then
-  if [[ "$SCENARIO" != incident ]] || ((elapsed_ms <= 10000 && terminal_delta > 0)); then passed=true; fi
+  if [[ "$SCENARIO" != incident ]] || ((fatal_latency_ms <= 10000 && terminal_delta > 0)); then passed=true; fi
 fi
 jq -n --arg scenario "$SCENARIO" --argjson passed "$passed" --argjson close_wait "$close_wait" \
   --argjson fin_rc "${fin_rc:-0}" --argjson rst_rc "${rst_rc:-0}" \
   --argjson fin_hits "$fin_hits" --argjson rst_hits "$rst_hits" --argjson terminal_delta "$terminal_delta" --argjson performance "$performance" \
-  --argjson elapsed_ms "$elapsed_ms" --slurpfile client "$OUT/summary/client-resources.json" \
+  --argjson elapsed_ms "$elapsed_ms" --argjson fatal_latency_ms "$fatal_latency_ms" --slurpfile client "$OUT/summary/client-resources.json" \
   --slurpfile server "$OUT/summary/server-resources.json" \
-  '{scenario:$scenario,passed:$passed,close_wait:$close_wait,convergence_ms:$elapsed_ms,fin_rc:$fin_rc,rst_rc:$rst_rc,target_hits:{fin:$fin_hits,rst:$rst_hits},terminal_metric_delta:$terminal_delta,performance:$performance,client_resources:$client[0],server_resources:$server[0]}' \
+  '{scenario:$scenario,passed:$passed,close_wait:$close_wait,convergence_ms:$elapsed_ms,fatal_terminal_latency_ms:$fatal_latency_ms,fin_rc:$fin_rc,rst_rc:$rst_rc,target_hits:{fin:$fin_hits,rst:$rst_hits},terminal_metric_delta:$terminal_delta,performance:$performance,client_resources:$client[0],server_resources:$server[0]}' \
   >"$OUT/summary/result.json"
 stop_sampler=1
 kill "$SAMPLER_PID" 2>/dev/null || true
