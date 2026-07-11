@@ -256,6 +256,11 @@ bool StopRelayWorkerAndAssertZeroForTest(TqWindowsRelayWorker& worker) {
     return AssertWorkerLocalLifecycleZeroForTest(worker);
 }
 
+bool AssertGateTeardownZeroForTest(TqWindowsRelayWorker& worker) {
+    TqStreamLifetime::ResetLifecycleRegistriesForTest();
+    return AssertWorkerLifecycleZeroForTest(worker);
+}
+
 void ReleaseTestStreamOwnerForLifecycleAssert(
     const std::shared_ptr<TqStreamLifetime>& owner) {
     if (!owner) {
@@ -266,6 +271,21 @@ void ReleaseTestStreamOwnerForLifecycleAssert(
         QUIC_STREAM_EVENT terminal{};
         terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
         (void)owner->DispatchForTest(&terminal);
+    }
+}
+
+void FinalizeTestStreamOwnerForGateTeardownForTest(
+    TqWindowsRelayWorker& worker,
+    const std::shared_ptr<TqStreamLifetime>& owner) {
+    if (!owner) {
+        return;
+    }
+    const bool needsTerminalDrain =
+        owner->GetPhase() != TqStreamLifetime::Phase::TerminalPublished &&
+        owner->GetPhase() != TqStreamLifetime::Phase::Closed;
+    ReleaseTestStreamOwnerForLifecycleAssert(owner);
+    if (needsTerminalDrain && worker.TestHasIocpForTest()) {
+        (void)worker.TestDrainPostedCallbackOperationsForTest(1);
     }
 }
 
@@ -3352,6 +3372,9 @@ bool TestWindowsRelayActiveReceiveLeaseFailFinRetryForTest() {
         g_StreamReceiveCompleteBytes == sizeof(data) &&
         afterRetry.PendingQuicReceiveQueueDepth == 0 &&
         afterRetry.PendingQuicReceiveBytes == 0;
+    worker.StopRelay(handle.WindowsRelayId);
+    FinalizeTestStreamOwnerForGateTeardownForTest(worker, owner);
+    owner.reset();
     worker.Stop();
     MsQuic = nullptr;
     return ok;
@@ -3420,7 +3443,18 @@ int RunWindowsRelayTask5GateTestsForTest() {
             MsQuic = nullptr;
             return 605;
         }
+        if (!task5Worker.TestDrainPostedCallbackOperationsForTest(1)) {
+            task5Worker.Stop();
+            MsQuic = nullptr;
+            return 606;
+        }
+        FinalizeTestStreamOwnerForGateTeardownForTest(task5Worker, owner);
+        owner.reset();
         task5Worker.Stop();
+        if (!AssertGateTeardownZeroForTest(task5Worker)) {
+            MsQuic = nullptr;
+            return 645;
+        }
         MsQuic = nullptr;
     }
     if (!TestWindowsRelayActiveReceiveLeaseFailFinRetryForTest()) {
@@ -3478,7 +3512,12 @@ int RunWindowsRelayTask5GateTestsForTest() {
             terminalFirstWorker.Stop();
             return 617;
         }
+        FinalizeTestStreamOwnerForGateTeardownForTest(terminalFirstWorker, owner);
+        owner.reset();
         terminalFirstWorker.Stop();
+        if (!AssertGateTeardownZeroForTest(terminalFirstWorker)) {
+            return 645;
+        }
     }
     {
         TqWindowsRelayWorker sendFirstWorker;
@@ -3531,7 +3570,12 @@ int RunWindowsRelayTask5GateTestsForTest() {
             sendFirstWorker.Stop();
             return 627;
         }
+        FinalizeTestStreamOwnerForGateTeardownForTest(sendFirstWorker, owner);
+        owner.reset();
         sendFirstWorker.Stop();
+        if (!AssertGateTeardownZeroForTest(sendFirstWorker)) {
+            return 646;
+        }
     }
     {
         TqWindowsRelayWorker abaWorker;
@@ -3608,7 +3652,12 @@ int RunWindowsRelayTask5GateTestsForTest() {
             abaWorker.Stop();
             return 640;
         }
+        FinalizeTestStreamOwnerForGateTeardownForTest(abaWorker, owner);
+        owner.reset();
         abaWorker.Stop();
+        if (!AssertGateTeardownZeroForTest(abaWorker)) {
+            return 647;
+        }
     }
     return 0;
 }
@@ -3729,6 +3778,10 @@ int RunWindowsRelayTask6GateTestsForTest() {
                 return 605;
             }
         }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            TqCloseSocket(pair[1]);
+            return 655;
+        }
         TqCloseSocket(pair[1]);
     }
     {
@@ -3783,6 +3836,10 @@ int RunWindowsRelayTask6GateTestsForTest() {
             TqCloseSocket(pair[1]);
             return 613;
         }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            TqCloseSocket(pair[1]);
+            return 656;
+        }
         TqCloseSocket(pair[1]);
     }
     {
@@ -3821,6 +3878,9 @@ int RunWindowsRelayTask6GateTestsForTest() {
         worker.Stop();
         if (worker.TestHasIocpForTest() || worker.Snapshot().ActiveRelays != 0) {
             return 619;
+        }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            return 657;
         }
     }
     {
@@ -3880,6 +3940,9 @@ int RunWindowsRelayTask6GateTestsForTest() {
         if (worker.TestHasIocpForTest() || worker.Snapshot().ActiveRelays != 0) {
             return 630;
         }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            return 658;
+        }
     }
     {
         TqWindowsRelayWorker worker;
@@ -3922,6 +3985,9 @@ int RunWindowsRelayTask6GateTestsForTest() {
         if (worker.TestHasIocpForTest() || worker.Snapshot().ActiveRelays != 0) {
             return 635;
         }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            return 659;
+        }
     }
     {
         TqWindowsRelayWorker worker;
@@ -3958,6 +4024,9 @@ int RunWindowsRelayTask6GateTestsForTest() {
         if (worker.TestHasIocpForTest() || worker.Snapshot().ActiveRelays != 0) {
             return 641;
         }
+        if (!AssertGateTeardownZeroForTest(worker)) {
+            return 660;
+        }
     }
     {
         {
@@ -3982,6 +4051,9 @@ int RunWindowsRelayTask6GateTestsForTest() {
                 return 643;
             }
             worker.Stop();
+            if (!AssertGateTeardownZeroForTest(worker)) {
+                return 661;
+            }
         }
 #if 0  // pending-register wake crashes — covered by sync reject above
         {

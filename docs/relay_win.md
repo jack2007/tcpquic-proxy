@@ -410,7 +410,7 @@ Per-relay 队列（`PendingReceives`、`PendingQuicSendRetries`、`TcpRecvOpsFre
 | `windows_relay_terminal_shutdown_sink_pending_count` | shutdown sink 待 drain 记录数 |
 | `windows_relay_terminal_operation_pending_count` | 已 post 未消费的 terminal IOCP operation 数 |
 
-单元测试在 focused case 结束断言上述 pending/registry/retention 均归零，不以“进程未崩溃”为通过条件。
+单元测试在 focused case 结束断言上述 pending/registry/retention 均归零，不以“进程未崩溃”为通过条件。Task 5/6 gate 在 `Stop()` 后调用 `AssertGateTeardownZeroForTest`（worker-local + 全局 registry/retention）；`TestCreateIocpForCallbackPostOnly` 的 FIN lease-retry case（gate 641）仅断言 inline pending receive 归零，因无 worker 线程运行完整 stop-drain，`ActiveRelays` 由 `FinalizeTestStreamOwnerForGateTeardownForTest` + terminal IOCP drain 单独收敛。
 
 ### 8.2 已知测试债务（`#if 0` legacy）
 
@@ -438,3 +438,96 @@ appverif -delete settings -for build-x64\bin\Release\tcpquic_windows_relay_worke
 ```
 
 保护页（`/guard:cf` 独占 page）仅用于专用 isolation test，不用于常规 relay 集成路径。
+
+### 8.4 Task 7 延期执行的系统/压测门禁
+
+Task 7 交付范围以单元测试、metrics 暴露和文档为主。以下系统测试与性能门禁**未在本轮执行**，原因与后续复现命令如下。完整矩阵定义见 `docs/superpowers/specs/2026-07-10-relay-stream-wrapper-terminal-lifetime-system-test-design.md` 与 `docs/test/windows-performance-stress-test-design_cn.md`。
+
+| 延期项 | 未执行原因 | 后续执行命令（Windows） |
+|--------|-----------|------------------------|
+| System Test F01–F18 矩阵 | 需双端 live proxy + 证据目录；Task 7 以 focused unit gate 为主 | 见下方 F01–F18 命令块 |
+| k6 short-tunnel baseline | 无提交到 `docs/test/k6/` 的基线脚本与固定 origin SHA | 见下方 k6 命令块 |
+| raw TCP 吞吐基线 | 需 T0/T1 双端与改造前同机 baseline 存档 | 见下方 raw TCP 命令块 |
+| 30 min churn soak + worker-stop 恢复 | 长稳需专用证据目录与进程监控，超出 Task 7 CI 窗口 | 见下方 soak 命令块 |
+| 延迟 ≤5% / 吞吐 ≤3% 回归门禁 | 依赖上述 k6/吞吐 baseline 与固定 binary SHA256 | 对比 k6 summary 与 `--download-test` 三轮均值 |
+| AppVerifier / ASan | 可选门禁；单元路径见 §8.3 | 见 §8.3 |
+
+**前置：记录 git SHA 与 binary SHA256**
+
+```powershell
+cd C:\src\tcpquic-proxy
+git rev-parse HEAD
+Get-FileHash .\build-x64\bin\Release\raypx2.exe -Algorithm SHA256
+```
+
+**F01–F18（Windows 矩阵，T0 loopback 起步）**
+
+```powershell
+# F01 loopback smoke（HTTP CONNECT + SOCKS5 + port-forward）
+.\scripts\test-tcpquic-proxy-windows.ps1 -Bin .\build-x64\bin\Release\raypx2.exe -Compress off
+.\scripts\test-tcpquic-proxy-windows.ps1 -Bin .\build-x64\bin\Release\raypx2.exe -Compress zstd -Trace
+
+# F02–F05 内置吞吐 / zstd 对照（T0，每轮 60s × 3）
+$Bin = ".\build-x64\bin\Release\raypx2.exe"
+# 终端 1: server
+& $Bin server --listen 127.0.0.1:18443 --cert cert\server\server.crt --key cert\server\server.key --allow-targets 127.0.0.0/8 --compress off
+# 终端 2: client download/upload
+& $Bin client --peer 127.0.0.1:18443 --ca cert\ca.crt --connections 1 --compress off --download-test 60
+& $Bin client --peer 127.0.0.1:18443 --ca cert\ca.crt --connections 1 --compress off --upload-test 60
+& $Bin client --peer 127.0.0.1:18443 --ca cert\ca.crt --connections 1 --compress zstd --download-test 60
+
+# F07 并发短隧道建立（100/256 隧道，Git Bash 或移植 PS1）
+# bash scripts/test-tcpquic-concurrent.sh  # 参数按 windows-performance-stress-test-design_cn.md §3.2 F07
+
+# F09/F10 iperf3 长流（T1 示例，需远端 iperf3 server）
+# iperf3 -c <origin> -p 16001 -t 600 -P 1
+# iperf3 -c <origin> -p 16001 -t 600 -P 4
+
+# F14 soak 30 min（T1，iperf3 或 download-test）
+# iperf3 -c <origin> -p 16001 -t 1800 -P 4
+# 或: & $Bin client --peer <peer> --ca cert\ca.crt --connections 4 --compress off --download-test 1800
+
+# F17 churn/soak 30 min @ 100 req/s — 与 k6 churn-soak scenario 合并执行（见下）
+
+# F18 内存安全 — 见 §8.3 AppVerifier；ASan 构建可用时替换 verifier
+```
+
+**k6 short-tunnel baseline（`noConnectionReuse: true`，5 min @ 20 req/s）**
+
+```powershell
+# 需 k6、本地 client proxy :18080、HTTPS origin；脚本待提交 docs/test/k6/
+$env:HTTP_PROXY = "http://127.0.0.1:18080"
+k6 run --vus 20 --duration 5m --env HTTP_PROXY=$env:HTTP_PROXY docs/test/k6/baseline-short.js
+# 门禁 thresholds（设计文档 §5）:
+#   http_req_failed: rate<0.001
+#   http_req_duration: p(95)<500, p(99)<1000
+# 与改造前同机 baseline 比较: p95/p99 回归 <= 5%
+```
+
+**raw TCP 吞吐（改造前/后同配置对比，门禁 ≤3%）**
+
+```powershell
+# 内置 speed test 三轮均值（T0）
+1..3 | ForEach-Object { & $Bin client --peer 127.0.0.1:18443 --ca cert\ca.crt --connections 1 --compress off --download-test 60 }
+
+# 或 iperf3 HTTP proxy 模式 / scripts/bench-tcpquic-multi-curl.sh（Git Bash）
+# 记录每轮 Mbps；与 baseline SHA256 存档对比，吞吐回归 <= 3%
+```
+
+**30 min churn soak + worker-stop 恢复**
+
+```powershell
+# churn: k6 constant-arrival-rate 100 req/s × 30m（F17）
+k6 run --scenario churn-soak docs/test/k6/churn-soak.js
+
+# worker-stop 恢复: 压测期间触发 runtime Stop() 或 admin stop，再验证 10 个新 HTTP CONNECT
+# 证据: Admin /metrics 中 windows_relay_terminal_retained_owner_count、
+#       windows_relay_send_completion_registry_count、stop_drain_remaining 在恢复后归零
+curl.exe -s http://127.0.0.1:<admin>/relay/metrics | jq .
+```
+
+**回归门禁汇总**
+
+- 延迟：k6 `http_req_duration` p95/p99 相对改造前 baseline **≤ 5%**
+- 吞吐：`--download-test` 或 iperf3 均值相对 baseline **≤ 3%**
+- 每次压测保存：config、git SHA、binary SHA256、Admin JSON、`log\*.log`、k6 summary、typeperf CPU/Working Set

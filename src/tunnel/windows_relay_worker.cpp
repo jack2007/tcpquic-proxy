@@ -6095,7 +6095,8 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot() const {
         total.WindowsTerminalIocpPostCount += snapshot.WindowsTerminalIocpPostCount;
         total.WindowsTerminalIocpPostFailedCount += snapshot.WindowsTerminalIocpPostFailedCount;
         total.WindowsTerminalLogicalDetachCount += snapshot.WindowsTerminalLogicalDetachCount;
-        total.WindowsTerminalApiSuppressedCount += snapshot.WindowsTerminalApiSuppressedCount;
+        total.WindowsTerminalApiSuppressedCount = std::max(
+            total.WindowsTerminalApiSuppressedCount, snapshot.WindowsTerminalApiSuppressedCount);
         total.PendingOverlappedTcpRecvs += snapshot.PendingOverlappedTcpRecvs;
         total.PendingOverlappedTcpSends += snapshot.PendingOverlappedTcpSends;
         total.PendingOverlappedWorkerOps += snapshot.PendingOverlappedWorkerOps;
