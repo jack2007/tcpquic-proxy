@@ -938,13 +938,11 @@ uint64_t TqDarwinRelayWorker::PendingQuicSendCountFromRelayForTest(
 
 uint64_t TqDarwinRelayWorker::CompleteOneInFlightSendForTest(uint64_t relayId) {
     TqDarwinRelaySendOperation* operation = nullptr;
-    uint64_t bytes = 0;
     {
         std::lock_guard<std::mutex> lock(KnownSendMutex);
         for (const auto& entry : KnownSendOperations) {
             if (entry.first != nullptr && entry.second.RelayId == relayId) {
                 operation = entry.first;
-                bytes = entry.second.TotalBytes;
                 break;
             }
         }
@@ -954,7 +952,6 @@ uint64_t TqDarwinRelayWorker::CompleteOneInFlightSendForTest(uint64_t relayId) {
         for (const auto& entry : ActiveSendOperations) {
             if (entry.first != nullptr && entry.second.RelayId == relayId) {
                 operation = entry.first;
-                bytes = entry.second.TotalBytes;
                 break;
             }
         }
@@ -962,6 +959,7 @@ uint64_t TqDarwinRelayWorker::CompleteOneInFlightSendForTest(uint64_t relayId) {
     if (operation == nullptr) {
         return 0;
     }
+    const uint64_t bytes = operation->TotalBytes;
     CompleteQuicSend(operation);
     return bytes;
 }
@@ -1001,6 +999,27 @@ uint64_t TqDarwinRelayWorker::CallbackPendingReceiveBytesForTest(uint64_t relayI
         return 0;
     }
     return relay->Binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
+}
+
+void TqDarwinRelayWorker::SetCallbackPendingReceiveForTest(uint64_t relayId, uint64_t bytes) {
+    AssertWorkerThreadForRelayState();
+    auto relay = FindRelayLocal(relayId);
+    if (relay == nullptr || relay->Binding == nullptr || bytes == 0) {
+        return;
+    }
+    relay->Binding->CallbackPendingReceiveEvents.store(1, std::memory_order_release);
+    relay->Binding->CallbackPendingReceiveBytes.store(bytes, std::memory_order_release);
+}
+
+void TqDarwinRelayWorker::DrainCallbackPendingReceiveForTest(uint64_t relayId) {
+    AssertWorkerThreadForRelayState();
+    auto relay = FindRelayLocal(relayId);
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return;
+    }
+    relay->Binding->CallbackPendingReceiveEvents.store(0, std::memory_order_release);
+    relay->Binding->CallbackPendingReceiveBytes.store(0, std::memory_order_release);
+    MaybePublishFullyClosedStopLocal(relay, "pending_drained");
 }
 
 uint64_t TqDarwinRelayWorker::PendingTcpWriteBytesForTest(uint64_t relayId) {

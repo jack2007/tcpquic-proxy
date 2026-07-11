@@ -6015,6 +6015,144 @@ void FullyClosedOffWorkerFinSetsConvergenceStickyThenStops() {
     harness.StopAndClosePeer();
 }
 
+void FullyClosedStopPeerFinBeforeTcpEof() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register(false));
+    auto control = harness.Handle.Control;
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+    CHECK(!control->Stop.load(std::memory_order_acquire)); // missing TcpReadClosed
+
+    CHECK(::shutdown(harness.Fds[0], SHUT_WR) == 0);
+    CHECK(harness.Worker.InvokeTcpEventForTest(
+        harness.Result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    harness.StopAndClosePeer();
+}
+
+void FullyClosedCallbackPendingBlocksStopUntilDrained() {
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register(/*enableQuicSends=*/false));
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+
+    harness.Worker.SetCallbackPendingReceiveForTest(harness.Result.RelayId, 64);
+    CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) > 0);
+
+    CHECK(::shutdown(harness.Fds[0], SHUT_WR) == 0);
+    CHECK(harness.Worker.InvokeTcpEventForTest(
+        harness.Result.RelayId, EVFILT_READ, 0, 0));
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+    CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) > 0);
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+
+    harness.Worker.DrainCallbackPendingReceiveForTest(harness.Result.RelayId);
+    CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) == 0);
+    CHECK(control->Stop.load(std::memory_order_acquire));
+
+    harness.StopAndClosePeer();
+}
+
+void FullyClosedDuplicatePeerFinStopIdempotent() {
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    ManagedRelayHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register(/*enableQuicSends=*/false));
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+
+    const uint64_t stopBefore =
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed);
+
+    CHECK(::shutdown(harness.Fds[0], SHUT_WR) == 0);
+    CHECK(harness.Worker.InvokeTcpEventForTest(
+        harness.Result.RelayId, EVFILT_READ, 0, 0));
+
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(2)));
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.PeerSendShutdownStickyForTest(harness.Result.RelayId));
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.PeerSendShutdownStickyForTest(harness.Result.RelayId));
+
+    while (harness.Worker.DrainOneEventForTest()) {
+    }
+    CHECK(harness.Worker.DrainWakeForTest() >= 0);
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    CHECK(
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed) == stopBefore + 1);
+
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    while (harness.Worker.DrainOneEventForTest()) {
+    }
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    CHECK(
+        TqRelayControlStopSignaledCount().load(std::memory_order_relaxed) == stopBefore + 1);
+
+    harness.StopAndClosePeer();
+}
+
+void FullyClosedCanceledFinDoesNotCompleteOrStop() {
+    ResetFakeStreamSend(QUIC_STATUS_SUCCESS);
+    ManagedRelayHarness harness;
+    CHECK(harness.OpenSocketPair());
+    harness.Worker.SetStreamSendForTest(FakeStreamSend);
+    CHECK(harness.Register(/*enableQuicSends=*/true));
+    CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+
+    CHECK(::shutdown(harness.Fds[0], SHUT_WR) == 0);
+    CHECK(harness.Worker.InvokeTcpEventForTest(
+        harness.Result.RelayId, EVFILT_READ, 0, 0));
+    CHECK(g_sendCalls.load(std::memory_order_acquire) == 1);
+    CHECK(harness.Worker.InFlightQuicSendCountForTest(harness.Result.RelayId) == 1);
+
+    void* sendContext = g_lastSendContext.load(std::memory_order_acquire);
+    CHECK(sendContext != nullptr);
+
+    QUIC_STREAM_EVENT canceledFin{};
+    canceledFin.Type = QUIC_STREAM_EVENT_SEND_COMPLETE;
+    canceledFin.SEND_COMPLETE.Canceled = true;
+    canceledFin.SEND_COMPLETE.ClientContext = sendContext;
+    CHECK(harness.DispatchViaRouter(canceledFin) == QUIC_STATUS_SUCCESS);
+    (void)harness.Worker.DrainOneEventForTest();
+    CHECK(harness.Worker.InFlightQuicSendCountForTest(harness.Result.RelayId) == 0);
+
+    CHECK(harness.Worker.Snapshot().QuicSendFinCompletedRelays == 0);
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+
+    QUIC_STREAM_EVENT peerShutdown{};
+    peerShutdown.Type = QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN;
+    CHECK(harness.DispatchViaRouter(peerShutdown) == QUIC_STATUS_SUCCESS);
+    CHECK(harness.Worker.DrainOneEventForTest());
+    CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
+    CHECK(!control->Stop.load(std::memory_order_acquire));
+
+    harness.Owner->ReleaseStreamForTest();
+    harness.Worker.SetStreamSendForTest(nullptr);
+    harness.StopAndClosePeer();
+}
+
 void ManagedReceiveAllocationFailureQueueFullKeepsOwnerViaSink() {
     ResetFakeReceiveComplete();
     TqDarwinRelayWorkerConfig config{};
@@ -7335,6 +7473,10 @@ int main() {
     ManagedQueuedPeerAbortBeforeTerminalPreservesOwnerUntilTerminal();
     ManagedNonTerminalHalfCloseEventsDoNotPublishTerminal();
     FullyClosedStopAfterEofAndPeerFinWithoutShutdownComplete();
+    FullyClosedStopPeerFinBeforeTcpEof();
+    FullyClosedCallbackPendingBlocksStopUntilDrained();
+    FullyClosedDuplicatePeerFinStopIdempotent();
+    FullyClosedCanceledFinDoesNotCompleteOrStop();
     FullyClosedPeerSendShutdownStickySurvivesQueueFull();
     FullyClosedOffWorkerFinSetsConvergenceStickyThenStops();
     ManagedStopRetentionMetricsSurfaceTerminalRetainedOwners();
