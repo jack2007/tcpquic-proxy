@@ -138,6 +138,15 @@ void TqTraceRelayStopCondition(
     uint32_t workerIndex,
     const char* trigger,
     const TqTraceLinuxRelayStreamState& state);
+// Darwin half-close diagnostics only: never implies SignalStop / convergence fix.
+void TqTraceRelayHalfClose(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state,
+    const char* blockers,
+    bool tcpReadArmed,
+    bool tcpReadPausedByQuicBacklog);
 void TqTraceRelayReceiveViewEvent(
     const char* backend,
     uint32_t workerIndex,

@@ -514,6 +514,16 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.CurrentPendingQuicReceiveBytes = snapshot.CurrentPendingQuicReceiveBytes;
     metrics.TcpReadArmedRelays = snapshot.TcpReadArmedRelays;
     metrics.TcpWriteArmedRelays = snapshot.TcpWriteArmedRelays;
+    metrics.ClosingRelays = snapshot.ClosingRelays;
+    metrics.TcpReadClosedRelays = snapshot.TcpReadClosedRelays;
+    metrics.TcpWriteShutdownQueuedRelays = snapshot.TcpWriteShutdownQueuedRelays;
+    metrics.TcpWriteClosedRelays = snapshot.TcpWriteClosedRelays;
+    metrics.QuicSendFinSubmittedRelays = snapshot.QuicSendFinSubmittedRelays;
+    metrics.QuicSendFinCompletedRelays = snapshot.QuicSendFinCompletedRelays;
+    metrics.QuicSendShutdownCompleteRelays = snapshot.QuicSendShutdownCompleteRelays;
+    metrics.TcpReadPausedByQuicBacklogRelays = snapshot.TcpReadPausedByQuicBacklogRelays;
+    metrics.FullyClosedPredicateReadyRelays = snapshot.FullyClosedPredicateReadyRelays;
+    metrics.TcpReadDisabledRelays = snapshot.TcpReadPausedByQuicBacklogRelays;
     metrics.OutstandingQuicSends = snapshot.OutstandingQuicSends;
     metrics.OutstandingQuicSendBytes = snapshot.OutstandingQuicSendBytes;
     metrics.PendingTcpWriteQueue = snapshot.PendingTcpWriteQueue;
@@ -938,6 +948,17 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
     out << ",\"linux_relay_tcp_read_closed_relays\":" << metrics.TcpReadClosedRelays;
     out << ",\"linux_relay_tcp_write_shutdown_queued_relays\":"
         << metrics.TcpWriteShutdownQueuedRelays;
+    out << ",\"linux_relay_tcp_write_closed_relays\":" << metrics.TcpWriteClosedRelays;
+    out << ",\"linux_relay_quic_send_fin_submitted_relays\":"
+        << metrics.QuicSendFinSubmittedRelays;
+    out << ",\"linux_relay_quic_send_fin_completed_relays\":"
+        << metrics.QuicSendFinCompletedRelays;
+    out << ",\"linux_relay_quic_send_shutdown_complete_relays\":"
+        << metrics.QuicSendShutdownCompleteRelays;
+    out << ",\"linux_relay_tcp_read_paused_by_quic_backlog_relays\":"
+        << metrics.TcpReadPausedByQuicBacklogRelays;
+    out << ",\"linux_relay_fully_closed_predicate_ready_relays\":"
+        << metrics.FullyClosedPredicateReadyRelays;
     out << ",\"linux_relay_outstanding_quic_sends\":" << metrics.OutstandingQuicSends;
     out << ",\"linux_relay_outstanding_quic_send_bytes\":" << metrics.OutstandingQuicSendBytes;
     out << ",\"linux_relay_max_buffered_quic_send_bytes\":"

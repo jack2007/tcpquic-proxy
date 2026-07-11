@@ -269,6 +269,17 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t ActiveRelays{0};
     uint64_t TcpReadArmedRelays{0};
     uint64_t TcpWriteArmedRelays{0};
+    // Half-close diagnostics (root-cause evidence; not a convergence fix).
+    uint64_t ClosingRelays{0};
+    uint64_t TcpReadClosedRelays{0};
+    uint64_t TcpWriteClosedRelays{0};
+    uint64_t TcpWriteShutdownQueuedRelays{0};
+    uint64_t QuicSendFinSubmittedRelays{0};
+    uint64_t QuicSendFinCompletedRelays{0};
+    uint64_t QuicSendShutdownCompleteRelays{0};
+    uint64_t TcpReadPausedByQuicBacklogRelays{0};
+    // Linux-like fully-closed predicate true while still in Relays map (H1).
+    uint64_t FullyClosedPredicateReadyRelays{0};
     uint64_t QuicReceivePausedCount{0};
     uint64_t QuicReceiveResumedCount{0};
     uint64_t CurrentPendingQuicReceiveBytes{0};
@@ -627,6 +638,9 @@ private:
     void InstallShutdownSinksForStop();
     void ProcessPeerSendShutdown(const std::shared_ptr<RelayState>& relay);
     void ProcessSendShutdownComplete(const std::shared_ptr<RelayState>& relay);
+    // Half-close diagnostics only — never SignalStop.
+    static bool FullyClosedPredicateReady(const RelayState& relay);
+    void TraceHalfClose(const RelayState& relay, const char* trigger) const;
     void RequestRelayShutdown(
         const std::shared_ptr<RelayState>& relay,
         TqStreamLifetime::ShutdownIntent intent);

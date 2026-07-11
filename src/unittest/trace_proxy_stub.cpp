@@ -138,6 +138,16 @@ void TqTraceRelayStopCondition(
     const char*, uint32_t, const char*, const TqTraceLinuxRelayStreamState&) {
 }
 
+void TqTraceRelayHalfClose(
+    const char*,
+    uint32_t,
+    const char*,
+    const TqTraceLinuxRelayStreamState&,
+    const char*,
+    bool,
+    bool) {
+}
+
 void TqTraceRelayReceiveViewEvent(
     const char*,
     uint32_t,

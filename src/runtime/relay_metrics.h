@@ -26,6 +26,13 @@ struct TqRelayMetricsSnapshot {
     uint64_t ClosingRelays{0};
     uint64_t TcpReadClosedRelays{0};
     uint64_t TcpWriteShutdownQueuedRelays{0};
+    // Darwin half-close diagnostics (root-cause evidence).
+    uint64_t TcpWriteClosedRelays{0};
+    uint64_t QuicSendFinSubmittedRelays{0};
+    uint64_t QuicSendFinCompletedRelays{0};
+    uint64_t QuicSendShutdownCompleteRelays{0};
+    uint64_t TcpReadPausedByQuicBacklogRelays{0};
+    uint64_t FullyClosedPredicateReadyRelays{0};
     uint64_t OutstandingQuicSends{0};
     uint64_t OutstandingQuicSendBytes{0};
     uint64_t MaxBufferedQuicSendBytes{0};

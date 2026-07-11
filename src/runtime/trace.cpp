@@ -318,6 +318,26 @@ void DumpPeriodicStats() {
 
     const TqRelayMetricsSnapshot relayMetrics = TqSnapshotRelayMetrics();
     LogInfo("event=stats_relay %s", TqFormatRelayMetricsSnapshotLine(relayMetrics).c_str());
+#if defined(__APPLE__)
+    LogInfo(
+        "event=stats_darwin_half_close active_relays=%llu closing=%llu "
+        "tcp_read_closed=%llu tcp_write_closed=%llu tcp_write_shutdown_queued=%llu "
+        "quic_fin_submitted=%llu quic_fin_completed=%llu quic_send_shutdown_complete=%llu "
+        "tcp_read_paused=%llu tcp_read_armed=%llu fully_closed_predicate_ready=%llu "
+        "event_queue_full_errors=%llu",
+        static_cast<unsigned long long>(relayMetrics.ActiveRelays),
+        static_cast<unsigned long long>(relayMetrics.ClosingRelays),
+        static_cast<unsigned long long>(relayMetrics.TcpReadClosedRelays),
+        static_cast<unsigned long long>(relayMetrics.TcpWriteClosedRelays),
+        static_cast<unsigned long long>(relayMetrics.TcpWriteShutdownQueuedRelays),
+        static_cast<unsigned long long>(relayMetrics.QuicSendFinSubmittedRelays),
+        static_cast<unsigned long long>(relayMetrics.QuicSendFinCompletedRelays),
+        static_cast<unsigned long long>(relayMetrics.QuicSendShutdownCompleteRelays),
+        static_cast<unsigned long long>(relayMetrics.TcpReadPausedByQuicBacklogRelays),
+        static_cast<unsigned long long>(relayMetrics.TcpReadArmedRelays),
+        static_cast<unsigned long long>(relayMetrics.FullyClosedPredicateReadyRelays),
+        static_cast<unsigned long long>(relayMetrics.EventQueueFullErrors));
+#endif
 
     const std::vector<TqRelayActiveSnapshot> activeRelays = TqSnapshotActiveRelays();
 
@@ -1034,6 +1054,28 @@ void TqTraceRelayStopCondition(
         "%s trigger=%s",
         TqFormatTraceRelayStateLine("relay_stop_condition", backend, traceState).c_str(),
         trigger != nullptr ? trigger : "?");
+}
+
+void TqTraceRelayHalfClose(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state,
+    const char* blockers,
+    bool tcpReadArmed,
+    bool tcpReadPausedByQuicBacklog) {
+    if (!TqTraceEnabled()) {
+        return;
+    }
+    TqTraceLinuxRelayStreamState traceState = state;
+    traceState.WorkerIndex = workerIndex;
+    LogInfo(
+        "%s trigger=%s blockers=%s tcp_read_armed=%d tcp_read_paused_by_quic_backlog=%d",
+        TqFormatTraceRelayStateLine("relay_half_close", backend, traceState).c_str(),
+        trigger != nullptr ? trigger : "?",
+        blockers != nullptr && blockers[0] != '\0' ? blockers : "none",
+        tcpReadArmed ? 1 : 0,
+        tcpReadPausedByQuicBacklog ? 1 : 0);
 }
 
 void TqTraceRelayReceiveViewEvent(

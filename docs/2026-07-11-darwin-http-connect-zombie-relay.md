@@ -3,7 +3,7 @@
 **日期：** 2026-07-11  
 **平台：** macOS / Darwin kqueue relay（client）  
 **入口：** HTTP CONNECT ingress（本例 `amazon-sgp` → `0.0.0.0:18080`）  
-**状态：** 已确认代码收敛缺口；现场根因尚待 per-relay 状态证据闭环；修复方案评审中
+**状态：** 取证完成 — H1 已证据闭环；收敛设计已确认（语义 B + sticky），见 `docs/superpowers/specs/2026-07-11-darwin-fully-closed-convergence-design.md`；实现计划待写
 
 相关代码：
 
@@ -362,3 +362,85 @@ Darwin event queue 满时，QUIC receive 会暂存在 `StreamBinding::CallbackPe
 - stop signal trigger、generation mismatch、unregister、FD close 时间戳
 
 只有当 stuck relay 快照显示完整谓词已满足却未 signal stop，才能把现场根因从“首要假设”升级为“证据闭环”。
+
+---
+
+## 9. 根因取证计划（本阶段：只观测，不修收敛）
+
+### 9.1 约束
+
+- **禁止**在本阶段实现 `MaybeStopFullyClosedRelay` / `SignalStop` 收敛修复。
+- 只通过诊断日志、snapshot 半关闭计数与可复现实验区分 H1–H5。
+- **仅当** stuck relay 满足 H1 谓词且未 stop，才升级为“根因证实”并另开修复计划（须同时满足 §8）。
+
+### 9.2 假设矩阵
+
+| ID | 假设 | 若成立时关键证据 |
+|----|------|----------------|
+| H1 | 双向半关闭已完成，缺 `SignalStop`（首要） | `tcp_read_closed=1 tcp_write_closed=1 quic_send_fin_submitted=1 quic_send_fin_completed=1` 且 pending/inflight=0，`fully_closed_predicate_ready` 上升，长期无 `relay_stopping` |
+| H2 | 未观察到 TCP EOF（背压 disarm / 漏 EV_EOF） | FD 已 `CLOSED`，但 `tcp_read_closed=0`，`tcp_read_armed=0`，可见 `tcp_read_backpressure_on` 且无后续 `tcp_eof` |
+| H3 | 已 EOF+本地 FIN，对端 QUIC FIN 未到 | `tcp_read_closed=1`，`quic_send_fin_*=1`，`tcp_write_closed=0`，`tcp_write_shutdown_queued=0`，无 `peer_send_shutdown`/`tcp_shut_wr` |
+| H4 | peer FIN 事件在 queue 满时丢失 | 出现 `peer_shutdown_enqueue_failed`，且长期 `tcp_write_closed=0` |
+| H5 | FIN `SEND_COMPLETE` 与 `SEND_SHUTDOWN_COMPLETE` 语义混淆 | 有 `quic_fin_buffer_released`，长期无 `send_shutdown_complete`；若误按 H1 修复会过早 abort |
+
+```mermaid
+flowchart TD
+  browserClose[BrowserClose] --> h2{TcpReadClosed?}
+  h2 -->|no| H2[H2_missed_EOF]
+  h2 -->|yes| h3{PeerQuicFin_and_ShutWr?}
+  h3 -->|no| H3[H3_wait_peer_fin]
+  h3 -->|yes| h1{QueuesEmpty_FinDone?}
+  h1 -->|yes_no_SignalStop| H1[H1_missing_SignalStop]
+  h1 -->|fin_buffer_only| H5[H5_fin_semantics]
+  enqueueFail[PeerFinEnqueueFail] --> H4[H4_event_drop]
+```
+
+### 9.3 诊断埋点（trigger 名固定）
+
+| trigger | 含义 |
+|---------|------|
+| `tcp_eof` | 本地 TCP `read()==0`，已尝试提交 QUIC FIN |
+| `quic_fin_buffer_released` | worker 路径 FIN 的 `SEND_COMPLETE`（buffer 可释放） |
+| `quic_fin_buffer_released_off_worker` | 非 worker fallback 路径的 FIN completion（§8.3） |
+| `peer_send_shutdown` | 收到对端 QUIC send shutdown |
+| `tcp_shut_wr` | 本地 `shutdown(SHUT_WR)` 完成 |
+| `send_shutdown_complete` | MsQuic `SEND_SHUTDOWN_COMPLETE` |
+| `peer_shutdown_enqueue_failed` | peer FIN 入队失败（H4） |
+| `tcp_read_backpressure_on` / `tcp_read_backpressure_off` | TCP read interest 因 QUIC 背压变化 |
+
+日志行复用 `TqTraceRelayStopCondition` 形态，并附加 `blockers=`（如 `need_tcp_read_closed,need_peer_fin,pending_recv=N`）。**埋点路径绝不 `SignalStop`。**
+
+Admin / `stats_relay` / `event=stats_darwin_half_close` 聚合字段：
+
+- `tcp_read_closed_relays` / `tcp_write_closed_relays` / `tcp_write_shutdown_queued_relays`
+- `quic_send_fin_submitted_relays` / `quic_send_fin_completed_relays`
+- `tcp_read_paused_by_quic_backlog_relays`
+- `fully_closed_predicate_ready_relays`（满足 Linux 同类谓词但仍 active — H1 聚合证据）
+- `closing_relays`
+
+### 9.4 复现步骤
+
+1. 使用带诊断埋点的 Release client，开启既有 trace（`<exe>/log/client.log`）。
+2. HTTP CONNECT 代理打开若干 HTTPS 站点，再关闭浏览器。
+3. 对照：
+   - `lsof`：`:18080` 上 `CLOSED` vs `ESTABLISHED`
+   - `GET /api/v1/relay/metrics`：上列半关闭计数
+   - `rg 'trigger=(tcp_eof|peer_send_shutdown|tcp_shut_wr|quic_fin|send_shutdown|peer_shutdown_enqueue|backpressure)' log/client.log`
+   - `rg 'event=stats_darwin_half_close' log/client.log`
+
+### 9.5 判读规则
+
+- 多数 stuck 满足 H1 谓词（`fully_closed_predicate_ready_relays` ≈ stuck 数）→ **根因证实为缺 SignalStop**，再开修复（含 §8）。
+- 多数 `tcp_read_closed=0` 且有 backpressure、无 `tcp_eof` → **H2**。
+- 多数卡在无 `peer_send_shutdown`/`tcp_shut_wr` → **H3**；若同时有 `peer_shutdown_enqueue_failed` → **H4**。
+- 仅有 `quic_fin_buffer_released`、无 `send_shutdown_complete` → **H5**，修复谓词不能照搬 Linux 字面量。
+
+### 9.6 证据结论（复现后填写）
+
+| 项 | 内容 |
+|----|------|
+| 复现时间 | 2026-07-11 14:44（诊断埋点构建；curl `-x :18080` 打开 example.com/google 后强制关闭） |
+| 主导假设 | **H1 成立（证据闭环）** |
+| 关键计数 / 日志摘录 | Admin：`active_relays=8`，`tcp_read_closed_relays=8`，`tcp_write_closed_relays=8`，`quic_send_fin_submitted/completed_relays=8`，`quic_send_shutdown_complete_relays=8`，`fully_closed_predicate_ready_relays=8`，`tcp_read_armed_relays=0`，`relay_control_stop_signaled=0`。日志多条 `trigger=tcp_shut_wr blockers=predicate_ready_no_signal_stop`。隧道仍 `state=active`。 |
+| H2–H5 | H2 排除（全部 `tcp_read_closed=1`）；H3/H4 排除（已见 `peer_send_shutdown`→`tcp_shut_wr`，无 enqueue fail）；H5 本场景 `send_shutdown_complete` 已到达，非阻塞项 |
+| 是否允许进入收敛修复 | **是** — 在满足 §8（worker 线程归属、事件可靠交付、谓词含 callback pending）前提下，可实施 Darwin `MaybeStopFullyClosedRelay` / `SignalStop` 等价收敛 |
