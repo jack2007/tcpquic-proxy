@@ -34,6 +34,7 @@ public:
 #if defined(TQ_UNIT_TESTING)
     using ShutdownHookForTest = std::function<QUIC_STATUS(
         uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS)>;
+    using BeforeTerminalLedgerRecordHookForTest = std::function<void()>;
 #endif
 
     class Target {
@@ -139,6 +140,9 @@ public:
     bool SendDirectionCompleteForTest() const noexcept;
     uint64_t CancelOnLossErrorCodeForTest() const noexcept;
     void SetShutdownHookForTest(ShutdownHookForTest hook) noexcept;
+    void SetBeforeTerminalLedgerRecordHookForTest(
+        BeforeTerminalLedgerRecordHookForTest hook) noexcept;
+    bool TerminalRetryOwnedForTest() const noexcept;
 #endif
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
     QUIC_STATUS DispatchForTest(QUIC_STREAM_EVENT* event) noexcept;
@@ -237,6 +241,9 @@ private:
     bool DesiredReceiveAbort_{false};
     bool SubmittedReceiveAbort_{false};
     bool ReservedReceiveAbort_{false};
+    bool DesiredImmediate_{false};
+    bool SubmittedImmediate_{false};
+    bool ReservedImmediate_{false};
     bool SendDirectionComplete_{false};
     uint64_t CancelOnLossErrorCode_{0};
     std::shared_ptr<TqTerminalLedger> TerminalLedger_;
@@ -251,6 +258,7 @@ private:
 #if defined(TQ_UNIT_TESTING)
     uint32_t DenyReceiveApiLeasesForTest_{0};
     ShutdownHookForTest ShutdownHookForTest_;
+    BeforeTerminalLedgerRecordHookForTest BeforeTerminalLedgerRecordHookForTest_;
 #endif
 };
 

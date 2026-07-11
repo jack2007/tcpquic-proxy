@@ -243,6 +243,17 @@ void TqStreamLifetime::SetShutdownHookForTest(ShutdownHookForTest hook) noexcept
     std::lock_guard<std::mutex> guard(ControlMutex_);
     ShutdownHookForTest_ = std::move(hook);
 }
+
+void TqStreamLifetime::SetBeforeTerminalLedgerRecordHookForTest(
+    BeforeTerminalLedgerRecordHookForTest hook) noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    BeforeTerminalLedgerRecordHookForTest_ = std::move(hook);
+}
+
+bool TqStreamLifetime::TerminalRetryOwnedForTest() const noexcept {
+    std::lock_guard<std::mutex> guard(ControlMutex_);
+    return TerminalRetryOwned_;
+}
 #endif
 
 #if defined(TQ_UNIT_TESTING) || defined(TCPQUIC_TUNNEL_TESTING)
@@ -534,7 +545,7 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
         case ShutdownIntent::AbortBothImmediate:
             DesiredSendShutdown_ = 2;
             DesiredReceiveAbort_ = true;
-            immediateRequest = true;
+            DesiredImmediate_ = true;
             break;
         case ShutdownIntent::AbortBoth:
             DesiredSendShutdown_ = 2;
@@ -549,6 +560,14 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
         if (DesiredReceiveAbort_ && !SubmittedReceiveAbort_ && !ReservedReceiveAbort_) {
             receiveRequest = true;
             ReservedReceiveAbort_ = true;
+        }
+        if (DesiredImmediate_ && !SubmittedImmediate_ && !ReservedImmediate_) {
+            immediateRequest = true;
+            ReservedImmediate_ = true;
+            // IMMEDIATE is a strength upgrade of abort-both, so it must carry
+            // both directions even if an ordinary abort-both is in flight.
+            sendRequest = 2;
+            receiveRequest = true;
         }
         if (sendRequest == 0 && !receiveRequest) {
             return QUIC_STATUS_SUCCESS;
@@ -598,6 +617,12 @@ QUIC_STATUS TqStreamLifetime::RequestShutdown(
             ReservedReceiveAbort_ = false;
             if (QUIC_SUCCEEDED(status)) {
                 SubmittedReceiveAbort_ = true;
+            }
+        }
+        if (immediateRequest && ReservedImmediate_) {
+            ReservedImmediate_ = false;
+            if (QUIC_SUCCEEDED(status)) {
+                SubmittedImmediate_ = true;
             }
         }
     }
@@ -662,6 +687,7 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         TerminalEscalation_ = std::move(escalation);
         TerminalErrorCode_ = errorCode;
         TerminalPhase_ = TerminalPhase::ShutdownReserved;
+        TerminalRetryOwned_ = false;
         ++TerminalShutdownAttempt_;
         result.Attempt = TerminalShutdownAttempt_;
         {
@@ -694,6 +720,16 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
             TerminalRetryOwned_ = true;
         }
     }
+#if defined(TQ_UNIT_TESTING)
+    BeforeTerminalLedgerRecordHookForTest beforeLedgerRecord;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        beforeLedgerRecord = BeforeTerminalLedgerRecordHookForTest_;
+    }
+    if (beforeLedgerRecord) {
+        beforeLedgerRecord();
+    }
+#endif
     ledger->RecordShutdown(result.Status, result.Attempt, result.Submitted);
     return result;
 }

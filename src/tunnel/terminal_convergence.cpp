@@ -40,9 +40,15 @@ void TqTerminalLedger::RecordShutdown(
     uint32_t attempt,
     bool submitted) noexcept {
     std::lock_guard<std::mutex> guard(Mutex_);
+    if (attempt < State_.ShutdownAttempt) {
+        return;
+    }
     State_.ShutdownStatus = status;
     State_.ShutdownAttempt = attempt;
-    State_.Phase = submitted ? TerminalPhase::ShutdownSubmitted : TerminalPhase::Active;
+    if (State_.Phase != TerminalPhase::TerminalObserved &&
+        State_.Phase != TerminalPhase::Closed) {
+        State_.Phase = submitted ? TerminalPhase::ShutdownSubmitted : TerminalPhase::Active;
+    }
     if (submitted) {
         State_.ShutdownSubmittedAtMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
