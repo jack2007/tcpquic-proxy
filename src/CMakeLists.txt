@@ -614,6 +614,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         tunnel/stream_lifetime.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
+        tunnel/relay.cpp
         config/tuning.cpp
         ${TCPQUIC_PLATFORM_SOURCES}
     )

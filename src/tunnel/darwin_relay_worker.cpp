@@ -4303,11 +4303,4 @@ TqDarwinRelayWorker* TqDarwinRelayRuntime::PickWorker() {
     return worker;
 }
 
-void TqDarwinRelayRuntime::StopRelay(TqRelayHandle* handle) {
-    if (handle == nullptr || handle->DarwinWorker == nullptr || handle->DarwinRelayId == 0) {
-        return;
-    }
-    handle->DarwinWorker->UnregisterRelay(handle->DarwinRelayId);
-}
-
 #endif

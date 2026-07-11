@@ -592,7 +592,6 @@ public:
     void Stop();
     TqDarwinRelayWorkerSnapshot Snapshot() const;
     TqDarwinRelayWorker* PickWorker();
-    void StopRelay(TqRelayHandle* handle);
 
 private:
     TqDarwinRelayRuntime() = default;

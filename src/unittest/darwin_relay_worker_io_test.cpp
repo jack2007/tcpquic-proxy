@@ -5377,7 +5377,10 @@ CompetitionCleanupSnapshot RunCompetitionCleanup(CompetitionStopPath path) {
     return out;
 }
 
-void CompetitionPathsRecoverExactlyOnce() {
+// Serial harness coverage for each stop path in isolation. Does not claim
+// arbitrary concurrent interleaving — see CompetitionQueueFullHandoffRacesTqRelayStopOnce.
+// Full reaper lost-terminal coverage lives in tcp_tunnel_test.
+void CompetitionEachPathCleansExactlyOnceSerial() {
     const auto normal = RunCompetitionCleanup(CompetitionStopPath::NormalTerminal);
     CHECK(normal.ControlStopped);
     CHECK(normal.AccountingReleased);
@@ -5411,6 +5414,114 @@ void CompetitionPathsRecoverExactlyOnce() {
     CHECK(normal.FdClosed == queueFull.FdClosed);
     CHECK(normal.HandleCleared == queueFull.HandleCleared);
     CHECK(normal.ActiveRelays == queueFull.ActiveRelays);
+}
+
+struct CompetitionHandoffRaceState {
+    std::mutex Mutex;
+    std::condition_variable Cv;
+    bool Entered{false};
+    bool Released{false};
+    TqDarwinRelayWorker* Worker{nullptr};
+    uint64_t RelayId{0};
+
+    void Reset() {
+        Entered = false;
+        Released = false;
+        Worker = nullptr;
+        RelayId = 0;
+    }
+};
+
+CompetitionHandoffRaceState g_CompetitionHandoffRace{};
+
+void CompetitionHandoffRaceBeforeHook(TqDarwinRelayWorker* worker, uint64_t relayId) {
+    std::unique_lock<std::mutex> lock(g_CompetitionHandoffRace.Mutex);
+    if (g_CompetitionHandoffRace.Worker != worker || g_CompetitionHandoffRace.RelayId != relayId) {
+        return;
+    }
+    g_CompetitionHandoffRace.Entered = true;
+    g_CompetitionHandoffRace.Cv.notify_all();
+    g_CompetitionHandoffRace.Cv.wait(lock, [] { return g_CompetitionHandoffRace.Released; });
+}
+
+// Barrier-driven race: queue-full terminal handoff (production callback path) vs
+// TqRelayStop (production explicit stop). No sleep-based interleaving.
+void CompetitionQueueFullHandoffRacesTqRelayStopOnce() {
+    const uint32_t accountingBaseline = TqGetActiveRelayCount();
+    (void)TqRelayRegisterActive();
+
+    TqDarwinRelayWorkerConfig config{};
+    config.EventQueueCapacity = 2;
+    config.BeforeTerminalHandoffHookForTest = CompetitionHandoffRaceBeforeHook;
+    ManagedRelayHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    const int relayFd = harness.Fds[1];
+    auto control = harness.Handle.Control;
+    CHECK(control != nullptr);
+
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(1)));
+    CHECK(harness.Worker.EnqueueForTest(TestMarkerEvent(2)));
+    CHECK(harness.Worker.PendingEventsForTest() == 2);
+
+    g_CompetitionHandoffRace.Reset();
+    g_CompetitionHandoffRace.Worker = &harness.Worker;
+    g_CompetitionHandoffRace.RelayId = harness.Result.RelayId;
+
+    std::atomic<bool> terminalReturned{false};
+    std::atomic<bool> terminalOk{false};
+    std::thread terminalThread([&] {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        terminalOk.store(
+            harness.DispatchViaRouter(terminal) == QUIC_STATUS_SUCCESS,
+            std::memory_order_release);
+        terminalReturned.store(true, std::memory_order_release);
+    });
+
+    {
+        std::unique_lock<std::mutex> lock(g_CompetitionHandoffRace.Mutex);
+        CHECK(g_CompetitionHandoffRace.Cv.wait_for(lock, std::chrono::seconds(2), [] {
+            return g_CompetitionHandoffRace.Entered;
+        }));
+    }
+
+    // Production explicit stop while terminal handoff is paused mid-callback.
+    TqRelayStop(&harness.Handle);
+
+    {
+        std::lock_guard<std::mutex> lock(g_CompetitionHandoffRace.Mutex);
+        g_CompetitionHandoffRace.Released = true;
+        g_CompetitionHandoffRace.Cv.notify_all();
+    }
+    terminalThread.join();
+    CHECK(terminalReturned.load(std::memory_order_acquire));
+    CHECK(terminalOk.load(std::memory_order_acquire));
+
+    CHECK(control->Stop.load(std::memory_order_acquire));
+    CHECK(control->ActiveAccountingReleased.load(std::memory_order_acquire));
+    CHECK(!control->ReleaseActiveAccountingOnce());
+    CHECK(TqGetActiveRelayCount() == accountingBaseline);
+    CHECK(TcpRelayFdClosedOnce(relayFd));
+    CHECK(harness.Handle.Backend == TqRelayBackendType::None);
+    CHECK(harness.Handle.DarwinWorker == nullptr);
+    CHECK(harness.Handle.DarwinRelayId == 0);
+    CHECK(harness.Handle.Control == nullptr);
+    CHECK(harness.Handle.ControlGeneration == 0);
+    CHECK(harness.Worker.Snapshot().ActiveRelays == 0);
+
+    // Second unregister after once-cleanup must be a no-op (no double-close crash).
+    harness.Worker.UnregisterRelay(harness.Result.RelayId);
+    CHECK(TcpRelayFdClosedOnce(relayFd));
+    CHECK(TqGetActiveRelayCount() == accountingBaseline);
+
+    while (harness.Worker.PendingEventsForTest() != 0) {
+        if (!harness.Worker.DrainOneEventForTest()) {
+            break;
+        }
+    }
+    harness.StopAndClosePeer();
+    g_CompetitionHandoffRace.Reset();
 }
 
 void CompetitionLostTerminalStillCleansViaControlStop() {
@@ -5591,7 +5702,8 @@ int main() {
     ManagedLateKqueueEventAfterFdReuseMissesNewRelay();
     ManagedEmergencyAcceptedRejectClosesOnce();
     SignalStopGenerationMismatchRecordsDiagnostic();
-    CompetitionPathsRecoverExactlyOnce();
+    CompetitionEachPathCleansExactlyOnceSerial();
+    CompetitionQueueFullHandoffRacesTqRelayStopOnce();
     CompetitionLostTerminalStillCleansViaControlStop();
     return 0;
 }
