@@ -1,0 +1,181 @@
+# Nightly / workflow_dispatch gate for relay runtime snapshot lease & workers Admin.
+#
+# PR CI covers feature unit tests. This workflow covers longer stress, sanitizers
+# where available, and documents release-lab manual gates that are NOT automated here.
+#
+# Release-lab manual prerequisites (must pass on each platform before release):
+#   - 4,096 active relays under Admin polling
+#   - k6 SCENARIO=console_baseline / console_peak / breaking_point
+#   - data-plane throughput vs baseline (<=3% regression)
+#   - worker freeze under console polling
+#   - SIGKILL / TerminateProcess + supervisor restart within T0+90s
+# See tests/scripts/run_relay_runtime_snapshot_recovery.py and tests/k6/relay_workers.js.
+
+name: Relay Runtime Snapshot Nightly
+
+on:
+  schedule:
+    - cron: "27 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-sanitizers:
+    name: Linux ASan/TSAN feature tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Configure and build
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            FLAGS="-fsanitize=address -fno-omit-frame-pointer"
+          else
+            FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          fi
+          cmake -S . -B build-nightly-${{ matrix.sanitizer }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="${FLAGS}" \
+            -DCMAKE_CXX_FLAGS="${FLAGS}"
+          cmake --build build-nightly-${{ matrix.sanitizer }} --target \
+            tcpquic_relay_runtime_snapshot_test \
+            tcpquic_linux_relay_worker_io_test \
+            tcpquic_router_runtime_test \
+            tcpquic_server_admin_test \
+            tcpquic_admin_http_test --parallel "$(nproc)"
+      - name: Run feature tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export ASAN_OPTIONS=detect_leaks=0:halt_on_error=1
+          export TSAN_OPTIONS=halt_on_error=1
+          bin=build-nightly-${{ matrix.sanitizer }}/bin/Release
+          "$bin/tcpquic_relay_runtime_snapshot_test"
+          "$bin/tcpquic_linux_relay_worker_io_test"
+          "$bin/tcpquic_router_runtime_test"
+          "$bin/tcpquic_server_admin_test"
+          "$bin/tcpquic_admin_http_test"
+      - name: 100-round Snapshot/Stop/Start stress (Linux IO test embeds coverage)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Re-run the worker IO suite as a deterministic stress proxy; dedicated
+          # 100-round harness hooks live inside platform unit tests.
+          for i in $(seq 1 5); do
+            build-nightly-${{ matrix.sanitizer }}/bin/Release/tcpquic_linux_relay_worker_io_test
+          done
+
+  macos-asan:
+    name: macOS ASan feature tests
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Configure, build, run
+        shell: bash
+        run: |
+          set -euxo pipefail
+          brew install ninja || true
+          FLAGS="-fsanitize=address -fno-omit-frame-pointer"
+          cmake -S . -B build-nightly-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="${FLAGS}" \
+            -DCMAKE_CXX_FLAGS="${FLAGS}"
+          cmake --build build-nightly-asan --target \
+            tcpquic_relay_runtime_snapshot_test \
+            tcpquic_darwin_relay_worker_queue_test \
+            tcpquic_darwin_relay_worker_io_test \
+            tcpquic_darwin_relay_metrics_test \
+            tcpquic_router_runtime_test \
+            tcpquic_server_admin_test \
+            tcpquic_admin_http_test --parallel "$(sysctl -n hw.logicalcpu)"
+          export ASAN_OPTIONS=detect_leaks=0:halt_on_error=1
+          bin=build-nightly-asan/bin/Release
+          "$bin/tcpquic_relay_runtime_snapshot_test"
+          "$bin/tcpquic_darwin_relay_worker_queue_test"
+          "$bin/tcpquic_darwin_relay_worker_io_test"
+          "$bin/tcpquic_darwin_relay_metrics_test"
+          "$bin/tcpquic_router_runtime_test"
+          "$bin/tcpquic_server_admin_test"
+          "$bin/tcpquic_admin_http_test"
+
+  windows-appverifier:
+    name: Windows feature tests (+ AppVerifier when available)
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          cmake -S . -B build-nightly-win -G "Visual Studio 17 2022" -A x64
+          cmake --build build-nightly-win --config Release --target `
+            tcpquic_relay_runtime_snapshot_test `
+            tcpquic_windows_relay_worker_test `
+            tcpquic_router_runtime_test `
+            tcpquic_server_admin_test `
+            tcpquic_admin_http_test --parallel
+      - name: Run feature tests
+        shell: pwsh
+        run: |
+          $bin = "build-nightly-win\bin\Release"
+          & "$bin\tcpquic_relay_runtime_snapshot_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_windows_relay_worker_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_router_runtime_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_server_admin_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$bin\tcpquic_admin_http_test.exe"; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Optional Application Verifier pass
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $exe = Resolve-Path "build-nightly-win\bin\Release\tcpquic_windows_relay_worker_test.exe"
+          $appverif = Get-Command appverif.exe -ErrorAction SilentlyContinue
+          if (-not $appverif) {
+            Write-Host "appverif.exe not installed; skipping"
+            exit 0
+          }
+          & appverif.exe -enable Heaps Handles Locks -for $exe
+          try {
+            & $exe
+            if ($LASTEXITCODE -ne 0) { throw "AppVerifier run failed: $LASTEXITCODE" }
+          } finally {
+            & appverif.exe -delete settings -for $exe
+          }
+      - name: Recovery harness self-test
+        shell: pwsh
+        run: |
+          python -m py_compile tests/scripts/run_relay_runtime_snapshot_recovery.py
+          python tests/scripts/test_run_relay_runtime_snapshot_recovery.py
+
+  release-lab-reminder:
+    name: Release-lab manual gate reminder
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Print manual gates
+        run: |
+          cat <<'EOF'
+          Release-lab (manual, not in this workflow):
+            - 4096 active relays + Admin workers polling
+            - k6: console_baseline, console_peak, breaking_point (tests/k6/relay_workers.js)
+            - data-plane throughput / payload correctness vs baseline
+            - worker freeze + console polling
+            - SIGKILL/TerminateProcess + supervisor restart (tests/scripts/run_relay_runtime_snapshot_recovery.py)
+          Recent release-lab results on Linux/macOS/Windows are a release prerequisite.
+          EOF

@@ -100,7 +100,7 @@ static void TqAppendJsonString(std::ostringstream& out, const char* name, const 
 
 namespace {
 
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
     const std::vector<TqRelayWorkerSnapshot>& workers,
     const char* backend,
@@ -123,24 +123,6 @@ TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
 }
 #endif
 
-#if defined(_WIN32)
-TqRelayWorkerSnapshot MakeLegacyAggregateRelayWorkerSnapshot() {
-    const auto metrics = TqSnapshotRelayMetrics();
-    TqRelayWorkerSnapshot aggregate{};
-    aggregate.Backend = metrics.Backend;
-    aggregate.WorkerIndex = 0;
-    aggregate.WorkerId = "aggregate";
-    aggregate.ActiveRelays = metrics.ActiveRelays;
-    aggregate.PendingBytes = metrics.PendingBytes;
-    aggregate.TcpReadBytes = metrics.TcpReadBytes;
-    aggregate.TcpWriteBytes = metrics.TcpWriteBytes;
-    aggregate.Errors = metrics.Errors;
-    aggregate.EventQueueCapacity = metrics.RelayEventQueueCapacity;
-    aggregate.SnapshotComplete = metrics.SnapshotComplete;
-    return aggregate;
-}
-#endif
-
 #if defined(__linux__)
 TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSnapshot& snapshot) {
     TqRelayWorkerSnapshot worker{};
@@ -156,7 +138,27 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
     worker.SnapshotComplete = snapshot.SnapshotComplete;
     return worker;
 }
+#endif
 
+#if defined(_WIN32)
+TqRelayWorkerSnapshot ConvertWindowsRelayWorkerSnapshot(
+    const TqWindowsRelayWorkerSnapshot& snapshot) {
+    TqRelayWorkerSnapshot worker{};
+    worker.Backend = "windows";
+    worker.WorkerIndex = snapshot.WorkerIndex;
+    worker.WorkerId = "windows-" + std::to_string(snapshot.WorkerIndex);
+    worker.ActiveRelays = snapshot.ActiveRelays;
+    worker.PendingBytes = snapshot.PendingBytes;
+    worker.TcpReadBytes = snapshot.TcpReadBytes;
+    worker.TcpWriteBytes = snapshot.TcpWriteBytes;
+    worker.Errors = snapshot.Errors;
+    worker.EventQueueCapacity = 0;
+    worker.SnapshotComplete = snapshot.SnapshotComplete;
+    return worker;
+}
+#endif
+
+#if defined(__linux__)
 TqRelayActiveSnapshot ConvertLinuxRelaySnapshot(const TqLinuxRelayActiveSnapshot& relay) {
     TqRelayActiveSnapshot active{};
     active.Backend = "linux";
@@ -569,8 +571,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     }
 #elif defined(_WIN32)
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
-    uint64_t tcpReadBytes = 0;
-    uint64_t tcpWriteBytes = 0;
     uint64_t outstandingQuicSends = 0;
     uint64_t inflightTcpSends = 0;
     uint64_t closingRelays = 0;
@@ -580,8 +580,6 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     const TqWindowsRelayActiveSnapshot* hotRelay = nullptr;
     for (const auto& relay : snapshot.ActiveRelayStates) {
         const TqRelayActiveSnapshot active = ConvertWindowsRelaySnapshot(relay);
-        tcpReadBytes += active.TcpReadBytes;
-        tcpWriteBytes += active.TcpWriteBytes;
         outstandingQuicSends += active.InFlightQuicSends;
         inflightTcpSends += active.InFlightTcpSends;
         if (active.Closing) {
@@ -602,18 +600,18 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         }
     }
     metrics.Backend = "iocp";
-    // Windows has not yet adopted the bounded result type on this branch.
-    metrics.SnapshotComplete = true;
+    metrics.SnapshotComplete = snapshot.SnapshotComplete;
     metrics.EventsProcessed = snapshot.EventsProcessed;
     metrics.PendingEvents = 0;
     metrics.EventQueueFullErrors = 0;
+    metrics.RelayEventQueueCapacity = 0;
     metrics.ActiveRelays = snapshot.ActiveRelays;
-    metrics.PendingBytes = snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
+    metrics.PendingBytes = snapshot.PendingBytes;
     metrics.RelayBufferBytesInUse = snapshot.RelayBufferBytesInUse;
     metrics.CurrentPendingQuicReceiveBytes = snapshot.PendingQuicReceiveBytes;
     metrics.CurrentPendingQuicReceiveQueue = snapshot.PendingQuicReceiveQueueDepth;
-    metrics.TcpReadBytes = tcpReadBytes;
-    metrics.TcpWriteBytes = tcpWriteBytes;
+    metrics.TcpReadBytes = snapshot.TcpReadBytes;
+    metrics.TcpWriteBytes = snapshot.TcpWriteBytes;
     metrics.ClosingRelays = closingRelays;
     metrics.TcpReadClosedRelays = tcpReadClosedRelays;
     metrics.TcpWriteShutdownQueuedRelays = closeAfterDrainedRelays;
@@ -737,12 +735,23 @@ TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers() {
     result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
         workers, "kqueue", result.SnapshotComplete));
     result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
+#elif defined(_WIN32)
+    const auto windowsWorkers = TqWindowsRelayRuntime::Instance().SnapshotWorkers();
+    result.SnapshotComplete =
+        windowsWorkers.SnapshotComplete && windowsWorkers.IdentitiesComplete;
+    result.IdentitiesComplete = windowsWorkers.IdentitiesComplete;
+    std::vector<TqRelayWorkerSnapshot> workers;
+    workers.reserve(windowsWorkers.Workers.size());
+    for (const auto& snapshot : windowsWorkers.Workers) {
+        workers.push_back(ConvertWindowsRelayWorkerSnapshot(snapshot));
+    }
+    result.Workers.reserve(workers.size() + 1);
+    result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
+        workers, "iocp", result.SnapshotComplete));
+    result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
 #else
-    // Windows Task 5/6 SnapshotWorkers not landed yet — keep legacy aggregate path.
-    const TqRelayWorkerSnapshot aggregate = MakeLegacyAggregateRelayWorkerSnapshot();
-    result.SnapshotComplete = aggregate.SnapshotComplete;
+    result.SnapshotComplete = true;
     result.IdentitiesComplete = true;
-    result.Workers.push_back(aggregate);
 #endif
     return result;
 }

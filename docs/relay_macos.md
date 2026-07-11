@@ -380,6 +380,17 @@ Darwin Runtime 已接入公共 `TqRelayRuntimeSnapshotSupport` + `TqRelayRuntime
 
 multi-worker 聚合对全局 terminal retention / send reservation / shutdown sink 使用 max，避免重复计算；per-worker 计数与本地 gauge 使用 sum。
 
+### Admin `/relay/workers` 与 snapshot 契约（目标态）
+
+目标契约与 Linux/Windows 对齐：`SnapshotWorkers(deadline)` 单次采样返回 `aggregate + darwin-N`；
+`event_queue_capacity` 上报规范化后的 `EventQueue.Capacity()`（而非配置原始值）；
+Runtime 使用 `TqRelayRuntimeSnapshotSupport` lease + `TqRelayRuntimeSnapshotExecutionGate`
+限制 outstanding late snapshot command `<=1`，`Stop()` 在 lease 归零前不析构 worker。
+
+当前实现状态：macOS 仍可能只返回跨平台 `aggregate` 行，完整 per-worker Admin 上报与
+execution permit 改造见 `docs/superpowers/plans/2026-07-11-relay-runtime-snapshot-workers-admin.md`
+Task 3–4。在落地前，不要把仅有 `aggregate` 误判为“只有 1 个 worker”。
+
 后续工作不再是新增基础平台中性 alias，而是：
 
 1. 梳理是否还有未覆盖的细粒度指标需要补充 `relay_*` alias。

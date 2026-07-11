@@ -331,7 +331,7 @@ admin API 行为：
 
 ### 3.4 runtime snapshot 持锁范围已收敛
 
-当前状态：Runtime 在 lock 内创建带 slot identity 的 snapshot lease，随后释放 runtime lock，再逐个调用 `worker->Snapshot(deadline)`。lease 未释放前 `Stop()` 保持 runtime lock 并等待，不能停止或析构已借出的 worker；worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。
+当前状态：Runtime 通过组合成员 `TqRelayRuntimeSnapshotSupport` 管理 snapshot lease / in-flight；在 runtime lock 内创建带 slot identity 的 lease，随后释放 runtime lock，再逐个调用 `worker->Snapshot(deadline)`。Linux 仍允许并发 snapshot（不经 Windows/Darwin 的 execution gate）。lease 未释放前 `Stop()` 保持 runtime lock 并等待，不能停止或析构已借出的 worker；worker snapshot 仍会投递同步 event 并等待 owner worker 完成，但不再把该等待放大为 runtime 全局锁等待。旧的 `AcquireSnapshotWorkers` / `ReleaseSnapshotWorkers` 手工路径已迁入该 helper，对外 `SnapshotWorkers()` 与 legacy metrics 语义保持不变。
 
 影响：
 

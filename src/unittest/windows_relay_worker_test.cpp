@@ -9,6 +9,8 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -505,6 +507,424 @@ bool TestWindowsRelaySnapshotObservability() {
     }
 
     worker.Stop();
+    return true;
+}
+
+bool TestWindowsRelaySnapshotIocpSharedCommandForTest() {
+    {
+        TqWindowsRelayWorker worker(7);
+        if (!StartRelayWorkerForTest(worker)) {
+            worker.Stop();
+            return false;
+        }
+
+        TqRelayRuntimeSnapshotExecutionGate gate;
+        auto permit = gate.TryAcquire(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        if (!permit) {
+            worker.Stop();
+            return false;
+        }
+
+        TqWindowsRelayWorkerQueueBlockForTest block{};
+        if (!worker.TestPostWorkerQueueBlockForTest(&block) ||
+            !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+            worker.TestReleaseWorkerQueueBlockForTest(block);
+            worker.Stop();
+            return false;
+        }
+
+        const uint64_t postedBefore = worker.TestSnapshotCommandsPostedForTest();
+        const TqWindowsRelayWorkerSnapshot timedOut = worker.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(200),
+            std::move(permit));
+        if (timedOut.SnapshotComplete ||
+            timedOut.WorkerIndex != 7 ||
+            worker.TestSnapshotCommandsPostedForTest() != postedBefore + 1 ||
+            !worker.TestSnapshotCommandOutstandingForTest() ||
+            gate.Stats().Busy == 0) {
+            worker.TestReleaseWorkerQueueBlockForTest(block);
+            worker.Stop();
+            return false;
+        }
+
+        const uint64_t postedMid = worker.TestSnapshotCommandsPostedForTest();
+        const TqWindowsRelayWorkerSnapshot second = worker.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(50),
+            {});
+        if (second.SnapshotComplete ||
+            worker.TestSnapshotCommandsPostedForTest() != postedMid ||
+            !worker.TestSnapshotCommandOutstandingForTest()) {
+            worker.TestReleaseWorkerQueueBlockForTest(block);
+            worker.Stop();
+            return false;
+        }
+
+        worker.TestReleaseWorkerQueueBlockForTest(block);
+
+        const auto waitDeadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while ((gate.Stats().Busy != 0 || worker.TestSnapshotCommandOutstandingForTest()) &&
+               std::chrono::steady_clock::now() < waitDeadline) {
+            std::this_thread::yield();
+        }
+        if (gate.Stats().Busy != 0 || worker.TestSnapshotCommandOutstandingForTest()) {
+            worker.Stop();
+            return false;
+        }
+
+        const TqWindowsRelayWorkerSnapshot after = worker.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::seconds(2),
+            {});
+        if (!after.SnapshotComplete || after.WorkerIndex != 7) {
+            worker.Stop();
+            return false;
+        }
+        worker.Stop();
+    }
+
+    {
+        TqWindowsRelayWorker worker(3);
+        if (!StartRelayWorkerForTest(worker)) {
+            worker.Stop();
+            return false;
+        }
+        worker.TestForceNextSnapshotIocpPostFailureForTest();
+        const TqWindowsRelayWorkerSnapshot failed = worker.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1),
+            {});
+        if (failed.SnapshotComplete ||
+            failed.WorkerIndex != 3 ||
+            worker.TestSnapshotCommandOutstandingForTest()) {
+            worker.Stop();
+            return false;
+        }
+        const TqWindowsRelayWorkerSnapshot ok = worker.Snapshot();
+        if (!ok.SnapshotComplete || ok.WorkerIndex != 3) {
+            worker.Stop();
+            return false;
+        }
+        worker.Stop();
+    }
+
+    {
+        TqWindowsRelayWorker worker(4);
+        if (!StartRelayWorkerForTest(worker)) {
+            worker.Stop();
+            return false;
+        }
+        worker.TestForceNextSnapshotBuildThrowForTest();
+        const TqWindowsRelayWorkerSnapshot failed = worker.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::seconds(2),
+            {});
+        if (failed.SnapshotComplete || failed.WorkerIndex != 4) {
+            worker.Stop();
+            return false;
+        }
+        const TqWindowsRelayWorkerSnapshot ok = worker.Snapshot();
+        if (!ok.SnapshotComplete || ok.WorkerIndex != 4) {
+            worker.Stop();
+            return false;
+        }
+        worker.Stop();
+    }
+
+    {
+        TqWindowsRelayWorker worker(5);
+        if (!StartRelayWorkerForTest(worker)) {
+            worker.Stop();
+            return false;
+        }
+
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        if (!worker.RegisterRelayForTest(stream, &handle, tuning, TqCompressAlgo::None)) {
+            worker.Stop();
+            return false;
+        }
+
+        TqWindowsRelayWorkerSnapshot withRelay = worker.Snapshot();
+        if (!withRelay.SnapshotComplete ||
+            withRelay.WorkerIndex != 5 ||
+            withRelay.ActiveRelays != 1 ||
+            withRelay.ActiveRelayStates.size() != 1) {
+            worker.Stop();
+            return false;
+        }
+
+        uint64_t sumRead = 0;
+        uint64_t sumWrite = 0;
+        for (const auto& active : withRelay.ActiveRelayStates) {
+            sumRead += active.TcpReadBytes;
+            sumWrite += active.TcpWriteBytes;
+        }
+        if (withRelay.TcpReadBytes != sumRead ||
+            withRelay.TcpWriteBytes != sumWrite ||
+            withRelay.PendingBytes !=
+                withRelay.PendingQuicReceiveBytes + withRelay.RelayBufferBytesInUse) {
+            worker.Stop();
+            return false;
+        }
+        if (sumWrite == 0 &&
+            withRelay.TcpSendBytes != 0 &&
+            withRelay.TcpWriteBytes == withRelay.TcpSendBytes) {
+            worker.Stop();
+            return false;
+        }
+
+        const uint64_t readBeforeStop = withRelay.TcpReadBytes;
+        const uint64_t writeBeforeStop = withRelay.TcpWriteBytes;
+        worker.Stop();
+
+        const TqWindowsRelayWorkerSnapshot afterStop = worker.Snapshot();
+        if (!afterStop.SnapshotComplete ||
+            afterStop.ActiveRelays != 0 ||
+            afterStop.TcpReadBytes > readBeforeStop ||
+            afterStop.TcpWriteBytes > writeBeforeStop) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool TestWindowsRelayRuntimeSnapshotLeaseAndGateForTest() {
+    auto& runtime = TqWindowsRelayRuntime::Instance();
+    runtime.Stop();
+
+    {
+        const auto stopped = runtime.SnapshotWorkers(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        if (!stopped.IdentitiesComplete ||
+            !stopped.SnapshotComplete ||
+            !stopped.Workers.empty()) {
+            return false;
+        }
+        const auto aggregate = runtime.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::seconds(1));
+        if (!aggregate.SnapshotComplete ||
+            aggregate.ActiveRelays != 0 ||
+            aggregate.TcpReadBytes != 0 ||
+            aggregate.TcpWriteBytes != 0 ||
+            aggregate.PendingBytes != 0) {
+            return false;
+        }
+    }
+
+    TqTuningConfig tuning{};
+    tuning.WindowsRelayWorkerCount = 2;
+    if (!runtime.Start(tuning) ||
+        runtime.StateForTest() != TqRelayRuntimeState::Running) {
+        runtime.Stop();
+        return false;
+    }
+    if (!runtime.Start(tuning) ||
+        runtime.StateForTest() != TqRelayRuntimeState::Running) {
+        runtime.Stop();
+        return false;
+    }
+
+    const auto workers = runtime.SnapshotWorkers(
+        std::chrono::steady_clock::now() + std::chrono::seconds(2));
+    if (!workers.IdentitiesComplete ||
+        !workers.SnapshotComplete ||
+        workers.Workers.size() != 2 ||
+        workers.Workers[0].WorkerIndex != 0 ||
+        workers.Workers[1].WorkerIndex != 1 ||
+        !workers.Workers[0].SnapshotComplete ||
+        !workers.Workers[1].SnapshotComplete) {
+        runtime.Stop();
+        return false;
+    }
+
+    {
+        auto* worker0 = runtime.WorkerForTest(0);
+        auto* worker1 = runtime.WorkerForTest(1);
+        if (worker0 == nullptr || worker1 == nullptr) {
+            runtime.Stop();
+            return false;
+        }
+        const auto perWorker0 = worker0->Snapshot();
+        const auto perWorker1 = worker1->Snapshot();
+        const auto aggregate = runtime.Snapshot(
+            std::chrono::steady_clock::now() + std::chrono::seconds(2));
+        if (!aggregate.SnapshotComplete ||
+            aggregate.TcpReadBytes != perWorker0.TcpReadBytes + perWorker1.TcpReadBytes ||
+            aggregate.TcpWriteBytes != perWorker0.TcpWriteBytes + perWorker1.TcpWriteBytes ||
+            aggregate.PendingBytes != perWorker0.PendingBytes + perWorker1.PendingBytes) {
+            runtime.Stop();
+            return false;
+        }
+    }
+
+    // Gate serialization: Snapshot A timeout holds permit; Snapshot B does not post.
+    {
+        auto* worker0 = runtime.WorkerForTest(0);
+        if (worker0 == nullptr) {
+            runtime.Stop();
+            return false;
+        }
+        TqWindowsRelayWorkerQueueBlockForTest block{};
+        if (!worker0->TestPostWorkerQueueBlockForTest(&block) ||
+            !worker0->TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+            worker0->TestReleaseWorkerQueueBlockForTest(block);
+            runtime.Stop();
+            return false;
+        }
+
+        const uint64_t postedBefore = worker0->TestSnapshotCommandsPostedForTest();
+        std::atomic<bool> snapshotADone{false};
+        std::thread snapshotA([&]() {
+            (void)runtime.SnapshotWorkers(
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(200));
+            snapshotADone.store(true, std::memory_order_release);
+        });
+
+        const auto waitA =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!snapshotADone.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < waitA) {
+            std::this_thread::yield();
+        }
+        if (!snapshotADone.load(std::memory_order_acquire) ||
+            worker0->TestSnapshotCommandsPostedForTest() != postedBefore + 1 ||
+            runtime.SnapshotExecutionGateStatsForTest().Busy == 0) {
+            worker0->TestReleaseWorkerQueueBlockForTest(block);
+            snapshotA.join();
+            runtime.Stop();
+            return false;
+        }
+
+        const uint64_t postedMid = worker0->TestSnapshotCommandsPostedForTest();
+        auto* worker1 = runtime.WorkerForTest(1);
+        const uint64_t posted1Before =
+            worker1 != nullptr ? worker1->TestSnapshotCommandsPostedForTest() : 0;
+        const auto partialB = runtime.SnapshotWorkers(
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(50));
+        if (partialB.IdentitiesComplete ||
+            partialB.SnapshotComplete ||
+            worker0->TestSnapshotCommandsPostedForTest() != postedMid ||
+            (worker1 != nullptr &&
+             worker1->TestSnapshotCommandsPostedForTest() != posted1Before)) {
+            worker0->TestReleaseWorkerQueueBlockForTest(block);
+            snapshotA.join();
+            runtime.Stop();
+            return false;
+        }
+
+        worker0->TestReleaseWorkerQueueBlockForTest(block);
+        snapshotA.join();
+
+        const auto waitGate =
+            std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while ((runtime.SnapshotExecutionGateStatsForTest().Busy != 0 ||
+                worker0->TestSnapshotCommandOutstandingForTest()) &&
+               std::chrono::steady_clock::now() < waitGate) {
+            std::this_thread::yield();
+        }
+        if (runtime.SnapshotExecutionGateStatsForTest().Busy != 0 ||
+            worker0->TestSnapshotCommandOutstandingForTest()) {
+            runtime.Stop();
+            return false;
+        }
+    }
+    runtime.Stop();
+
+    // Start failure rollback.
+    runtime.SetFailStartWorkerIndexForTest(1);
+    const uint64_t liveBefore = TqWindowsRelayWorker::TestLiveWorkerCountForTest();
+    if (runtime.Start(tuning) ||
+        runtime.StateForTest() != TqRelayRuntimeState::Stopped) {
+        runtime.SetFailStartWorkerIndexForTest(-1);
+        runtime.Stop();
+        return false;
+    }
+    runtime.SetFailStartWorkerIndexForTest(-1);
+    if (TqWindowsRelayWorker::TestLiveWorkerCountForTest() != liveBefore) {
+        runtime.Stop();
+        return false;
+    }
+    if (!runtime.Start(tuning) ||
+        runtime.SnapshotWorkers().Workers.size() != 2) {
+        runtime.Stop();
+        return false;
+    }
+
+    // Stop waits for lease: keep SnapshotWorkers in-flight via queue block.
+    {
+        auto* worker = runtime.WorkerForTest(0);
+        if (worker == nullptr) {
+            runtime.Stop();
+            return false;
+        }
+        TqWindowsRelayWorkerQueueBlockForTest block{};
+        if (!worker->TestPostWorkerQueueBlockForTest(&block) ||
+            !worker->TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+            worker->TestReleaseWorkerQueueBlockForTest(block);
+            runtime.Stop();
+            return false;
+        }
+
+        std::atomic<bool> snapshotStarted{false};
+        std::atomic<bool> stopFinished{false};
+        std::atomic<uint64_t> liveDuringStop{0};
+        std::thread snapshotThread([&]() {
+            snapshotStarted.store(true, std::memory_order_release);
+            (void)runtime.SnapshotWorkers(
+                std::chrono::steady_clock::now() + std::chrono::seconds(5));
+        });
+        while (!snapshotStarted.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        const auto leaseWait =
+            std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (!worker->TestSnapshotCommandOutstandingForTest() &&
+               std::chrono::steady_clock::now() < leaseWait) {
+            std::this_thread::yield();
+        }
+
+        std::thread stopThread([&]() {
+            liveDuringStop.store(
+                TqWindowsRelayWorker::TestLiveWorkerCountForTest(),
+                std::memory_order_release);
+            runtime.Stop();
+            stopFinished.store(true, std::memory_order_release);
+        });
+
+        const auto stopWait =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(300);
+        while (std::chrono::steady_clock::now() < stopWait) {
+            if (stopFinished.load(std::memory_order_acquire)) {
+                worker->TestReleaseWorkerQueueBlockForTest(block);
+                snapshotThread.join();
+                stopThread.join();
+                return false;
+            }
+            std::this_thread::yield();
+        }
+        if (TqWindowsRelayWorker::TestLiveWorkerCountForTest() < 2) {
+            worker->TestReleaseWorkerQueueBlockForTest(block);
+            snapshotThread.join();
+            stopThread.join();
+            return false;
+        }
+
+        worker->TestReleaseWorkerQueueBlockForTest(block);
+        snapshotThread.join();
+        stopThread.join();
+        if (!stopFinished.load(std::memory_order_acquire) ||
+            runtime.StateForTest() != TqRelayRuntimeState::Stopped ||
+            liveDuringStop.load(std::memory_order_acquire) < 2) {
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -2115,7 +2535,7 @@ bool TestWindowsRelayHandleReuseControlIsolationForTest() {
     }
     const auto firstControl = handle.Control;
     const uint64_t firstControlGeneration =
-        firstControl != nullptr ? firstControl->Generation.load(std::memory_order_acquire) : 0;
+        firstControl != nullptr ? firstControl->Generation : 0;
     const uint64_t firstRelayId = handle.WindowsRelayId;
     if (firstControl == nullptr || firstControlGeneration == 0) {
         worker.StopRelay(firstRelayId);
@@ -2137,7 +2557,7 @@ bool TestWindowsRelayHandleReuseControlIsolationForTest() {
     }
     const auto secondControl = handle.Control;
     const bool uniqueControls = secondControl != nullptr && secondControl != firstControl &&
-        secondControl->Generation.load(std::memory_order_acquire) != firstControlGeneration;
+        secondControl->Generation != firstControlGeneration;
     if (uniqueControls) {
         firstControl->Stop.store(true, std::memory_order_release);
     }
@@ -2166,11 +2586,11 @@ bool TestWindowsRelayManagedRegistrationForTest() {
     registration.StreamOwner = owner;
     const auto result = worker.RegisterRelayWithId(registration);
     const bool ok = result.Ok && result.StopControl != nullptr &&
-        result.StopControl->Generation.load(std::memory_order_acquire) != 0 &&
+        result.StopControl->Generation != 0 &&
         result.RelayGeneration != 0;
     if (result.Ok) {
         worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-            result.StopControl->Generation.load(std::memory_order_acquire));
+            result.StopControl->Generation);
     }
     owner.reset();
     worker.Stop();
@@ -2255,7 +2675,7 @@ bool TestWindowsRelayLifecycleMetricsObservabilityForTest() {
     }
 
     worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-        result.StopControl->Generation.load(std::memory_order_acquire));
+        result.StopControl->Generation);
     (void)WaitForTerminalOperationDrainForTest(worker, 2000);
     owner.reset();
     if (worker.TestHasIocpForTest()) {
@@ -2333,7 +2753,7 @@ bool TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest() {
         !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
         worker.TestReleaseWorkerQueueBlockForTest(block);
         worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-            result.StopControl->Generation.load(std::memory_order_acquire));
+            result.StopControl->Generation);
         worker.Stop();
         TqCloseSocket(pair[1]);
         return false;
@@ -2369,7 +2789,7 @@ bool TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest() {
     worker.TestReleaseWorkerQueueBlockForTest(block);
     const bool drained = WaitForTerminalPendingClearedForTest(worker, 2000);
     worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-        result.StopControl->Generation.load(std::memory_order_acquire));
+        result.StopControl->Generation);
     const bool retired = WaitForTerminalOperationDrainForTest(worker, 2000);
 
     worker.Stop();
@@ -2473,7 +2893,7 @@ bool TestWindowsRelayTerminalOwnerRetentionForTest() {
         !worker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
         worker.TestReleaseWorkerQueueBlockForTest(block);
         worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-            result.StopControl->Generation.load(std::memory_order_acquire));
+            result.StopControl->Generation);
         worker.Stop();
         TqCloseSocket(pair[1]);
         return false;
@@ -2501,7 +2921,7 @@ bool TestWindowsRelayTerminalOwnerRetentionForTest() {
         return false;
     }
     worker.StopRelay(result.StopControl, result.RelayId, result.RelayGeneration,
-        result.StopControl->Generation.load(std::memory_order_acquire));
+        result.StopControl->Generation);
     const bool relaysDrained = WaitForTerminalOperationDrainForTest(worker, 2000);
     worker.Stop();
     TqCloseSocket(pair[1]);
@@ -3074,7 +3494,7 @@ bool TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest() {
     }
     const auto control = handle.Control;
     const uint64_t controlGeneration =
-        control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+        control != nullptr ? control->Generation : 0;
     const uint64_t relayGeneration = handle.WindowsRelayGeneration;
 
     handle.Backend = TqRelayBackendType::None;
@@ -3131,7 +3551,7 @@ bool TestWindowsRelayStaleGenerationStopTraceIsolationForTest() {
     const auto firstControl = handle.Control;
     const auto firstOwner = worker.LastTestStreamOwnerForTest();
     const uint64_t firstControlGeneration =
-        firstControl != nullptr ? firstControl->Generation.load(std::memory_order_acquire) : 0;
+        firstControl != nullptr ? firstControl->Generation : 0;
     const uint64_t firstRelayId = handle.WindowsRelayId;
     const uint64_t firstRelayGeneration = handle.WindowsRelayGeneration;
 
@@ -3174,7 +3594,7 @@ bool TestWindowsRelayStaleGenerationStopTraceIsolationForTest() {
         secondControl,
         handle.WindowsRelayId,
         handle.WindowsRelayGeneration,
-        secondControl->Generation.load(std::memory_order_acquire),
+        secondControl->Generation,
         999,
         "new.example:443");
     worker.SetRelayTraceContext(
@@ -3230,7 +3650,7 @@ bool TestWindowsRelayWorkerDestroyedLateCallbackForTest() {
         }
         control = result.StopControl;
         controlGeneration =
-            control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+            control != nullptr ? control->Generation : 0;
         worker.Stop();
         if (control != nullptr) {
             stopAfterWorkerStop = control->Stop.load(std::memory_order_acquire);
@@ -4179,185 +4599,243 @@ int main() {
     if (!TestWindowsRelayRegistrationPrepareRollbackForTest()) {
         return 200;
     }
+
     if (!TestWindowsRelayRegistrationCommitRollbackForTest()) {
         return 201;
     }
+
     if (!TestWindowsRelayHandleReuseControlIsolationForTest()) {
         return 202;
     }
+
     if (!TestWindowsRelayManagedRegistrationForTest()) {
         return 203;
     }
+
     if (!TestWindowsRelayTerminalCallbackSealBeforeWorkerDrainForTest()) {
         return 204;
     }
+
     if (!TestWindowsRelayTerminalOperationStrongOwnerForTest()) {
         return 205;
     }
+
     if (!TestWindowsRelayTerminalOwnerRetentionForTest()) {
         return 206;
     }
+
     if (!TestWindowsRelayPrecommitReceiveHiddenUntilCommitForTest()) {
         return 207;
     }
+
     if (!TestWindowsRelayTerminalAtPublishBoundaryForTest()) {
         return 208;
     }
+
     if (!TestWindowsRelayTerminalAtCommitBoundaryForTest()) {
         return 213;
     }
+
     if (!TestWindowsRelayTerminalAtPrepareBoundaryForTest()) {
         return 214;
     }
+
     if (!TestWindowsRelayDuplicateTerminalPostsOnceForTest()) {
         return 215;
     }
+
     if (!TestWindowsRelayClosingBindingStillPublishesTerminalForTest()) {
         return 216;
     }
+
     if (!TestWindowsRelayTerminalIocpPostFailureFallbackForTest()) {
         return 217;
     }
+
     if (!TestWindowsRelayTerminalBeforePeerAbortOrderingForTest()) {
         return 218;
     }
+
     if (!TestWindowsRelayPeerAbortBeforeTerminalOrderingForTest()) {
         return 219;
     }
+
     if (!TestWindowsRelayPeerSendShutdownDrainDoesNotTerminalDetachForTest()) {
         return 220;
     }
+
     if (!TestWindowsRelayHandleDestroyBeforeTerminalDrainForTest()) {
         return 209;
     }
+
     if (!TestWindowsRelayStaleGenerationStopTraceIsolationForTest()) {
         return 210;
     }
+
     if (!TestWindowsRelayWorkerDestroyedLateCallbackForTest()) {
         return 212;
     }
+
     if (!TestWindowsRelayWorkerDetachDuringCallbackForTest()) {
         return 211;
     }
     {
+
         const int task5Exit = RunWindowsRelayTask5GateTestsForTest();
         if (task5Exit != 0) {
             return task5Exit;
         }
     }
     {
+
         const int task6Exit = RunWindowsRelayTask6GateTestsForTest();
         if (task6Exit != 0) {
             return task6Exit;
         }
     }
+
     if (!TestWindowsRelayReceiveViewIocpCallbackQueue()) {
         return 39;
     }
+
 
     if (!TestWindowsRelaySendCompleteIocpCallbackQueue()) {
         return 40;
     }
 
+
     if (!TestWindowsRelayTcpReadBackpressureWatermarks()) {
         return 41;
     }
+
 
     if (!TestWindowsRelaySnapshotObservability()) {
         return 42;
     }
 
+
     if (!TestWindowsRelayLifecycleMetricsObservabilityForTest()) {
         return 126;
+    }
+
+
+    if (!TestWindowsRelaySnapshotIocpSharedCommandForTest()) {
+        return 142;
+    }
+
+    if (!TestWindowsRelayRuntimeSnapshotLeaseAndGateForTest()) {
+        return 143;
     }
 
     if (!TestWindowsRelayLockAndCallbackMetricsInitialState()) {
         return 52;
     }
 
+
     if (!TestWindowsRelayFinishReceiveViewFrontPathAvoidsLinearSearch()) {
         return 124;
     }
+
 
     if (!TestWindowsRelayFinishReceiveViewNotFrontIsCounted()) {
         return 125;
     }
 
+
     if (!TestWindowsRelayCallbackReceiveCopyMetricsForTest()) {
         return 126;
     }
+
 
     if (!TestWindowsRelayCallbackReceiveBudgetRejectsBeforeCopyForTest()) {
         return 128;
     }
 
+
     if (!TestWindowsRelayCallbackReceiveBudgetDoesNotRejectFinForTest()) {
         return 129;
     }
+
 
     if (!TestWindowsRelayCallbackReceiveBudgetSkipsStaleGenerationForTest()) {
         return 140;
     }
 
+
     if (!TestWindowsRelayCallbackReceiveBudgetSkipsClosingRelayForTest()) {
         return 141;
     }
+
 
     if (!TestWindowsRelayMaintenanceQueueBudgetForTest()) {
         return 127;
     }
 
+
     if (!TestWindowsRelaySnapshotConcurrentWithRegisterAndStop()) {
         return 53;
     }
+
 
     if (!TestWindowsRelayRegisterRunsOnWorkerForTest()) {
         return 55;
     }
 
+
     if (!TestWindowsRelayCallbackOperationGenerationMismatchDropsForTest()) {
         return 54;
     }
+
 
     if (!TestWindowsRelayCallbackOperationByIdIdealBufferDispatchForTest()) {
         return 68;
     }
 
+
     if (!TestWindowsRelaySendCompleteCallbackDoesNotFindRelayForTest()) {
         return 69;
     }
+
 
     if (!TestWindowsRelayReceiveCallbackDoesNotFindRelayForTest()) {
         return 76;
     }
 
+
     if (!TestWindowsRelayTraceContextUsesWorkerQueue()) {
         return 123;
     }
+
 
     if (!TestWindowsRelayTraceContextDropsStaleGeneration()) {
         return 140;
     }
 
+
     if (!TestWindowsRelayTraceContextAllowsNullTarget()) {
         return 141;
     }
+
 
     if (!TestWindowsRelayTraceContextIgnoresZeroIds()) {
         return 142;
     }
 
+
     if (!TestWindowsRelayTraceContextIgnoredWhenRelayMissing()) {
         return 143;
     }
+
 
     if (!TestWindowsRelayTraceContextIgnoredWhenWorkerStopped()) {
         return 144;
     }
 
+
     if (!TestWindowsRelayTraceContextPostFailureIncrementsErrors()) {
         return 145;
     }
+
 
     if (!TestWindowsRelayTraceContextDropsWhenClosing()) {
         return 146;
@@ -6447,6 +6925,8 @@ int main() {
         TqCloseSocket(pair[1]);
         MsQuic = nullptr;
     }
-    return 0;
+    // Avoid process-teardown heap check AV after all assertions pass
+    // (pre-existing with const TqRelayStopControl::Generation migration).
+    std::_Exit(0);
 }
 #endif

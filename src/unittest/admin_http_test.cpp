@@ -359,14 +359,14 @@ int main() {
         if (js.find("const navPages = pageDefs[consoleState.role].filter(([id]) => consoleState.token ? id !== 'login' : id === 'login');") == std::string_view::npos) return 528;
         if (js.find("renderRows(document.getElementById('client-overview-peers')") != std::string_view::npos) return 584;
         if (js.find("renderRows(document.getElementById('server-overview-peers')") != std::string_view::npos) return 589;
-        if (js.find("renderNav();\n      showPage('login');") == std::string_view::npos) return 529;
+        if (js.find("renderNav();\n\n      showPage('login');") == std::string_view::npos) return 529;
         if (js.find("GET /api/v1/admin") != std::string_view::npos) return 312;
         if (js.find("api('/admin'") == std::string_view::npos) return 313;
         if (js.find("setInterval(refreshCurrentPage, 3000)") == std::string_view::npos) return 314;
         if (js.find("JSON.stringify") == std::string_view::npos) return 315;
         if (js.find("typeof data.error === 'string'") == std::string_view::npos) return 316;
         if (js.find("refreshCurrentPageNow") == std::string_view::npos) return 317;
-        if (js.find("catch (error) {\n        setHealth(tr('status.degraded'), 'warn');\n        setRefresh(error.message);") == std::string_view::npos) return 318;
+        if (js.find("catch (error) {\n\n        setHealth(tr('status.degraded'), 'warn');\n\n        setRefresh(error.message);") == std::string_view::npos) return 318;
         if (js.find("button.onclick = () => runClientAction(() => deletePeer(button.dataset.deletePeer));") == std::string_view::npos) return 319;
         if (js.find("peerMode: 'create'") == std::string_view::npos) return 321;
         if (js.find("function beginCreatePeer()") == std::string_view::npos) return 322;
@@ -394,8 +394,8 @@ int main() {
         if (!TqCssRuleHasDeclaration(css, ".hidden", "display:none!important")) return 444;
         if (js.find("function showPeerForm()") == std::string_view::npos) return 445;
         if (js.find("function hidePeerForm()") == std::string_view::npos) return 446;
-        if (js.find("setPeerForm();\n      showPeerForm();\n      consoleState.peerMode = 'create';") == std::string_view::npos) return 447;
-        if (js.find("if (peer) {\n            setPeerForm(peer);\n            showPeerForm();\n          }") == std::string_view::npos) return 448;
+        if (js.find("setPeerForm();\n\n      showPeerForm();\n\n      consoleState.peerMode = 'create';") == std::string_view::npos) return 447;
+        if (js.find("if (peer) {\n\n            setPeerForm(peer);\n\n            showPeerForm();\n\n          }") == std::string_view::npos) return 448;
         if (js.find("document.getElementById('peer-cancel').onclick = () => hidePeerForm();") == std::string_view::npos) return 449;
         if (html.find("id=\"diagnostics-save\"") == std::string_view::npos) return 530;
         if (html.find("diagnostics-layout") == std::string_view::npos) return 543;
