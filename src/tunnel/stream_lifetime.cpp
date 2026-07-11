@@ -20,11 +20,15 @@ struct SendCompletionRetention {
     TqStreamLifetime::RouteSnapshot Route;
     void* DeliveredContext{nullptr};
     std::function<void()> Cleanup;
+    std::chrono::steady_clock::time_point Since{std::chrono::steady_clock::now()};
 };
 
 std::mutex g_sendCompletionLock;
 std::unordered_map<void*, SendCompletionRetention> g_sendCompletions;
 std::atomic<uint64_t> g_nextSendNonce{1};
+std::atomic<uint64_t> g_sendCompletionPreSubmitRollbacks{0};
+std::atomic<uint64_t> g_sendCompletionUnknownClaims{0};
+std::atomic<uint64_t> g_sendCompletionDuplicateClaims{0};
 thread_local TqStreamCallbackTarget* g_activeCallbackTarget = nullptr;
 
 QUIC_STATUS QUIC_API EmergencyAcceptedCallback(
@@ -215,8 +219,81 @@ void* TqStreamLifetime::RegisterSendCompletion(
             shared_from_this(),
             std::move(route),
             deliveredContext,
-            std::move(completionCleanup)}).second;
+            std::move(completionCleanup),
+            std::chrono::steady_clock::now()}).second;
     return inserted ? clientContext : nullptr;
+}
+
+TqStreamLifetime::SendCompletionReservation TqStreamLifetime::ReserveSendCompletion(
+    void* deliveredContext,
+    std::function<void()> completionCleanup) noexcept {
+    void* key = RegisterSendCompletion(deliveredContext, std::move(completionCleanup));
+    if (key == nullptr) {
+        return {};
+    }
+    return SendCompletionReservation(shared_from_this(), key);
+}
+
+TqStreamLifetime::SendCompletionReservation::SendCompletionReservation(
+    std::shared_ptr<TqStreamLifetime> owner,
+    void* key) noexcept
+    : Owner_(std::move(owner)), Key_(key), Armed_(Owner_ != nullptr && Key_ != nullptr) {}
+
+TqStreamLifetime::SendCompletionReservation::SendCompletionReservation(
+    SendCompletionReservation&& other) noexcept
+    : Owner_(std::move(other.Owner_)), Key_(other.Key_), Armed_(other.Armed_) {
+    other.Key_ = nullptr;
+    other.Armed_ = false;
+}
+
+TqStreamLifetime::SendCompletionReservation&
+TqStreamLifetime::SendCompletionReservation::operator=(
+    SendCompletionReservation&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    if (Armed_ && Owner_ != nullptr && Key_ != nullptr) {
+        if (Owner_->CancelSendCompletion(Key_)) {
+            g_sendCompletionPreSubmitRollbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    Owner_ = std::move(other.Owner_);
+    Key_ = other.Key_;
+    Armed_ = other.Armed_;
+    other.Key_ = nullptr;
+    other.Armed_ = false;
+    return *this;
+}
+
+TqStreamLifetime::SendCompletionReservation::~SendCompletionReservation() noexcept {
+    if (Armed_ && Owner_ != nullptr && Key_ != nullptr) {
+        if (Owner_->CancelSendCompletion(Key_)) {
+            g_sendCompletionPreSubmitRollbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+}
+
+void TqStreamLifetime::SendCompletionReservation::Dismiss() noexcept {
+    Armed_ = false;
+    Key_ = nullptr;
+    Owner_.reset();
+}
+
+bool TqStreamLifetime::SendCompletionReservation::Cancel() noexcept {
+    if (!Armed_ || Owner_ == nullptr || Key_ == nullptr) {
+        Armed_ = false;
+        Key_ = nullptr;
+        Owner_.reset();
+        return false;
+    }
+    const bool canceled = Owner_->CancelSendCompletion(Key_);
+    if (canceled) {
+        g_sendCompletionPreSubmitRollbacks.fetch_add(1, std::memory_order_relaxed);
+    }
+    Armed_ = false;
+    Key_ = nullptr;
+    Owner_.reset();
+    return canceled;
 }
 
 void TqStreamLifetime::RejectAccepted(HQUIC rawStream) noexcept {
@@ -237,6 +314,7 @@ QUIC_STATUS TqStreamLifetime::DispatchBufferedEvent(QUIC_STREAM_EVENT* event) no
 
 bool TqStreamLifetime::CancelSendCompletion(void* clientContext) noexcept {
     std::shared_ptr<TqStreamLifetime> released;
+    std::function<void()> cleanup;
     {
         std::lock_guard<std::mutex> guard(g_sendCompletionLock);
         auto it = g_sendCompletions.find(clientContext);
@@ -244,7 +322,11 @@ bool TqStreamLifetime::CancelSendCompletion(void* clientContext) noexcept {
             return false;
         }
         released = std::move(it->second.Owner);
+        cleanup = std::move(it->second.Cleanup);
         g_sendCompletions.erase(it);
+    }
+    if (cleanup) {
+        cleanup();
     }
     return true;
 }
@@ -471,6 +553,38 @@ TqStreamLifetime::SnapshotTerminalRetentions() noexcept {
             age > 0 ? static_cast<uint64_t>(age) : 0);
     }
     return snapshot;
+}
+
+TqStreamLifetime::SendCompletionSnapshot
+TqStreamLifetime::SnapshotSendCompletions() noexcept {
+    SendCompletionSnapshot snapshot{};
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> guard(g_sendCompletionLock);
+        snapshot.ActiveCount = g_sendCompletions.size();
+        for (const auto& item : g_sendCompletions) {
+            const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - item.second.Since).count();
+            snapshot.OldestAgeMs = std::max<uint64_t>(
+                snapshot.OldestAgeMs,
+                age > 0 ? static_cast<uint64_t>(age) : 0);
+        }
+    }
+    snapshot.PreSubmitRollbacks =
+        g_sendCompletionPreSubmitRollbacks.load(std::memory_order_relaxed);
+    snapshot.UnknownClaims =
+        g_sendCompletionUnknownClaims.load(std::memory_order_relaxed);
+    snapshot.DuplicateClaims =
+        g_sendCompletionDuplicateClaims.load(std::memory_order_relaxed);
+    return snapshot;
+}
+
+void TqStreamLifetime::RecordUnknownSendClaim() noexcept {
+    g_sendCompletionUnknownClaims.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TqStreamLifetime::RecordDuplicateSendClaim() noexcept {
+    g_sendCompletionDuplicateClaims.fetch_add(1, std::memory_order_relaxed);
 }
 
 QUIC_STATUS QUIC_API TqStreamLifetime::Callback(

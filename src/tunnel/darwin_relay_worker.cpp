@@ -841,6 +841,10 @@ uint64_t TqDarwinRelayWorker::RelayStateDestructorCountForTest() const {
     return RelayStateDestructorCount.load(std::memory_order_relaxed);
 }
 
+uint64_t TqDarwinRelayWorker::SendOperationDestructorCountForTest() const {
+    return TqDarwinRelaySendOperation::DestructorCount.load(std::memory_order_relaxed);
+}
+
 std::shared_ptr<TqStreamLifetime> TqDarwinRelayWorker::StreamOwnerForTest(uint64_t relayId) {
     std::lock_guard<std::mutex> lock(RelayMutex);
     const auto it = Relays.find(relayId);
@@ -2310,7 +2314,11 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
     if (relay->Closing) {
         return true;
     }
+
+    // Fixed establish order: lease -> reservation -> (later) known-op + in-flight.
+    // Pre-submit returns rely on reservation RAII; do not scatter CancelSendCompletion.
     TqStreamLifetime::ApiLease lease;
+    TqStreamLifetime::SendCompletionReservation reservation;
     void* completionKey = raw;
     if (relay->StreamOwner != nullptr) {
         lease = relay->StreamOwner->TryAcquireApi();
@@ -2319,16 +2327,23 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
             return false;
         }
         stream = lease.Stream();
-        completionKey = relay->StreamOwner->RegisterSendCompletion(raw);
-        if (completionKey == nullptr) {
+        reservation = relay->StreamOwner->ReserveSendCompletion(raw);
+        if (!reservation) {
             Errors.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
+        completionKey = reservation.Key();
+#if defined(TCPQUIC_TESTING)
+        if (Config.AfterRegisterSendCompletionHookForTest != nullptr) {
+            Config.AfterRegisterSendCompletionHookForTest(this, relay->Id);
+        }
+#endif
     } else if (relay->Stream == nullptr) {
         return false;
     } else {
         stream = relay->Stream;
     }
+
     std::shared_ptr<StreamBinding> binding = relay->Binding;
     if (binding == nullptr || !binding->Active.load(std::memory_order_acquire)) {
         return true;
@@ -2352,9 +2367,6 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         RegisterKnownSendOperation(raw, info);
     }
     if (!binding->Active.load(std::memory_order_acquire) || relay->Closing || relay->Stream != stream) {
-        if (relay->StreamOwner != nullptr && completionKey != nullptr) {
-            (void)relay->StreamOwner->CancelSendCompletion(completionKey);
-        }
         KnownSendOperationInfo removedInfo{};
         if (workerThread) {
             (void)UnregisterKnownSendOperationLocal(raw, &removedInfo);
@@ -2394,15 +2406,15 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         (void)DrainEvents(1);
     }
     if (completionAlreadyRan) {
+        // Callback claimed the registry entry; dismiss so RAII does not cancel.
+        reservation.Dismiss();
         (void)operation.release();
         return true;
     }
 
     if (QUIC_FAILED(status)) {
-        if (relay->StreamOwner != nullptr && completionKey != nullptr) {
-            (void)relay->StreamOwner->CancelSendCompletion(completionKey);
-        }
         if (submittedInfo.CompletionEventClaimed) {
+            reservation.Dismiss();
             (void)operation.release();
             return true;
         }
@@ -2420,6 +2432,8 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
             : 0;
         if (status == QUIC_STATUS_OUT_OF_MEMORY || status == QUIC_STATUS_BUFFER_TOO_SMALL) {
             QuicSendBackpressureEvents.fetch_add(1, std::memory_order_relaxed);
+            // Roll back the unsubmitted completion key before re-queueing.
+            (void)reservation.Cancel();
             if (!SetTcpReadBackpressure(relay, true)) {
                 return false;
             }
@@ -2437,6 +2451,8 @@ bool TqDarwinRelayWorker::TrySubmitQuicSendOperation(
         return false;
     }
 
+    // Send accepted: keep registry entry until SEND_COMPLETE claims it.
+    reservation.Dismiss();
     (void)operation.release();
     return true;
 }
@@ -4263,6 +4279,12 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
     const auto retained = TqStreamLifetime::SnapshotTerminalRetentions();
     snapshot.TerminalRetainedOwnerCount = retained.OwnerCount;
     snapshot.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
+    const auto sendCompletions = TqStreamLifetime::SnapshotSendCompletions();
+    snapshot.ActiveSendReservations = sendCompletions.ActiveCount;
+    snapshot.PreSubmitSendRollbacks = sendCompletions.PreSubmitRollbacks;
+    snapshot.UnknownSendClaims = sendCompletions.UnknownClaims;
+    snapshot.DuplicateSendClaims = sendCompletions.DuplicateClaims;
+    snapshot.SendReservationOldestAgeMs = sendCompletions.OldestAgeMs;
     {
         std::lock_guard<std::mutex> lock(RelayMutex);
         snapshot.StopRemaining = Relays.size() + RetiredRelays.size();
@@ -4343,6 +4365,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         KnownSendOperationInfo info{};
         if (worker != nullptr && worker->TryClaimKnownSendCompletionEvent(operation, &info)) {
             if (info.CompletionEventClaimed) {
+                TqStreamLifetime::RecordDuplicateSendClaim();
                 return QUIC_STATUS_SUCCESS;
             }
             if (worker->EnqueueQuicSendCompleteFromCallback(info.RelayId, operation)) {
@@ -4354,6 +4377,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         if (CompleteDetachedQuicSend(binding, operation)) {
             return QUIC_STATUS_SUCCESS;
         }
+        TqStreamLifetime::RecordUnknownSendClaim();
         if (worker != nullptr) {
             worker->Errors.fetch_add(1, std::memory_order_relaxed);
         }

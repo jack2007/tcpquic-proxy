@@ -63,6 +63,42 @@ public:
         uint64_t OwnerCount{0};
         uint64_t OldestAgeMs{0};
     };
+    struct SendCompletionSnapshot {
+        uint64_t ActiveCount{0};
+        uint64_t OldestAgeMs{0};
+        uint64_t PreSubmitRollbacks{0};
+        uint64_t UnknownClaims{0};
+        uint64_t DuplicateClaims{0};
+    };
+
+    // Move-only RAII guard for a registered send completion key. Armed
+    // destructor calls CancelSendCompletion(); Dismiss() only after Send is
+    // submitted or the completion callback has claimed the operation.
+    class SendCompletionReservation {
+    public:
+        SendCompletionReservation() noexcept = default;
+        SendCompletionReservation(SendCompletionReservation&& other) noexcept;
+        SendCompletionReservation& operator=(SendCompletionReservation&& other) noexcept;
+        ~SendCompletionReservation() noexcept;
+        SendCompletionReservation(const SendCompletionReservation&) = delete;
+        SendCompletionReservation& operator=(const SendCompletionReservation&) = delete;
+
+        explicit operator bool() const noexcept {
+            return Armed_ && Key_ != nullptr && Owner_ != nullptr;
+        }
+        void* Key() const noexcept { return Key_; }
+        void Dismiss() noexcept;
+        bool Cancel() noexcept;
+
+    private:
+        friend class TqStreamLifetime;
+        SendCompletionReservation(
+            std::shared_ptr<TqStreamLifetime> owner,
+            void* key) noexcept;
+        std::shared_ptr<TqStreamLifetime> Owner_;
+        void* Key_{nullptr};
+        bool Armed_{false};
+    };
 
     static std::shared_ptr<TqStreamLifetime> OpenOutgoing(
         const MsQuicConnection& connection,
@@ -100,6 +136,12 @@ public:
     void* RegisterSendCompletion(
         void* deliveredContext,
         std::function<void()> completionCleanup = {}) noexcept;
+    // Registers a completion key and returns an armed reservation. Prefer this
+    // over bare RegisterSendCompletion for pre-submit paths that may return
+    // before MsQuic Send / callback claim.
+    SendCompletionReservation ReserveSendCompletion(
+        void* deliveredContext,
+        std::function<void()> completionCleanup = {}) noexcept;
     bool CancelSendCompletion(void* clientContext) noexcept;
     QUIC_STATUS RequestShutdown(ShutdownIntent intent, uint64_t errorCode = 0) noexcept;
 
@@ -116,6 +158,9 @@ public:
         QUIC_STREAM_EVENT* event) noexcept;
     static void RejectAccepted(HQUIC rawStream) noexcept;
     static RetentionSnapshot SnapshotTerminalRetentions() noexcept;
+    static SendCompletionSnapshot SnapshotSendCompletions() noexcept;
+    static void RecordUnknownSendClaim() noexcept;
+    static void RecordDuplicateSendClaim() noexcept;
     QUIC_STATUS DispatchBufferedEvent(QUIC_STREAM_EVENT* event) noexcept;
 
 private:

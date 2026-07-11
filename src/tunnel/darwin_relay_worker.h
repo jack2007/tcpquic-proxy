@@ -77,6 +77,12 @@ struct TqDarwinRelaySendOperation {
     uint64_t CompletionTotalBytes{0};
     bool CompletionFin{false};
     std::shared_ptr<void> CompletionBindingOwner;
+#if defined(TCPQUIC_TESTING)
+    inline static std::atomic<uint64_t> DestructorCount{0};
+    ~TqDarwinRelaySendOperation() {
+        DestructorCount.fetch_add(1, std::memory_order_relaxed);
+    }
+#endif
 
     bool TryTransition(TqDarwinSendOperationState expected, TqDarwinSendOperationState desired) {
         uint32_t value = static_cast<uint32_t>(expected);
@@ -213,6 +219,9 @@ struct TqDarwinRelayWorkerConfig {
     // Invoked at the start of queue-full terminal/active handoff so tests can
     // destroy and reuse handle storage before the fallback touches control.
     void (*BeforeTerminalHandoffHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
+    // Fires after RegisterSendCompletion / ReserveSendCompletion succeeds and
+    // before the binding-active recheck that gates MsQuic Send (P1-2 barrier).
+    void (*AfterRegisterSendCompletionHookForTest)(TqDarwinRelayWorker*, uint64_t){nullptr};
 #endif
 };
 
@@ -261,6 +270,11 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t QuicReceiveViewBackpressureQueued{0};
     uint64_t TerminalRetainedOwnerCount{0};
     uint64_t TerminalRetainedOldestAgeMs{0};
+    uint64_t ActiveSendReservations{0};
+    uint64_t PreSubmitSendRollbacks{0};
+    uint64_t UnknownSendClaims{0};
+    uint64_t DuplicateSendClaims{0};
+    uint64_t SendReservationOldestAgeMs{0};
     uint64_t StopRemaining{0};
 };
 
@@ -339,6 +353,7 @@ public:
     uint64_t MapPublicationCountForTest() const;
     uint64_t StreamBindingDestructorCountForTest() const;
     uint64_t RelayStateDestructorCountForTest() const;
+    uint64_t SendOperationDestructorCountForTest() const;
     std::shared_ptr<TqStreamLifetime> StreamOwnerForTest(uint64_t relayId);
     uint64_t RetiredStreamBindingCountForTest();
     uint64_t RetiredRelayCountForTest();
