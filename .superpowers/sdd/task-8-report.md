@@ -140,3 +140,22 @@ tunnel reaper、tcp tunnel 三个测试进程，退出码均为 0。
   前由 `unique_ptr` 回收；context 创建/第二端创建/commit snapshot/async admission/transport
   pump/terminal/reaper 任一点失败，均已有先于该 CHECK 建立的 owner/thread/context guard。
 - 修复后新 target 在 `timeout -k` 下再次连续运行三次，三次均八项 PASS。
+
+## Reviewer 最终 async/RAII 配对修复（2026-07-12）
+
+- boundary fatal thread 创建后的下一步立即建立 release-all-boundaries + notify + join guard；
+  boundary context 也在创建返回后的第一个 CHECK 前建立 nullable cleanup guard。失败 cleanup
+  保持 owner 存活，先 terminal/unregister，再 actual reap/fallback delete，最后 reset owner。
+- 全文件 async envelope 配对审计如下：
+  - A client FIN：`PostTcpEventsForTestAsync` 后立即 `clientFinRelease`；admission 成功后显式
+    `ReleaseProcess` 并 dismiss。
+  - A server fatal：`PostTcpEventsForTestAsync` 后立即 `serverFatalRelease`；包括 ResetPeer
+    失败在内的任意早退都会 release；显式 release 后 dismiss。
+  - C TCP fatal：`PostTcpEventsForTestAsync` 后立即 `fatalRelease`；race cleanup 析构前该
+    guard 必先 release。TCP route 显式 release、四线程 join 后 dismiss。
+  - C worker unregister：`PostUnregisterRelayForTestAsync` 创建时 `ProcessReleased=true`，
+    handler 不等待 admission barrier，直接走 worker queue unregister 并 signal，因此没有
+    `WaitForEntered/ReleaseProcess` 配对需求。
+- transport atomic unpublish 后仍先 Stop/join worker，最后才释放 shared keepalive；任何已在
+  unpublish 前 acquire 裸指针的 callback 都在 transport 析构前退出。
+- 最终修复后新 target 再次在 `timeout -k` 下连续运行三次，均八项 PASS。

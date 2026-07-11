@@ -233,13 +233,34 @@ bool TestReaperAtAllHandoffBoundaries() {
     auto serverOwner = TqStreamLifetime::CreateForTest(TqStreamLifetime::Phase::Started);
     CHECK(serverOwner->InstallDetachedStreamForTest(stream));
     std::shared_ptr<TqRelayStopControl> control;
-    auto* context = TqCreateTestLinuxRelayTunnel(
+    TqTunnelContext* context = TqCreateTestLinuxRelayTunnel(
         &destroys, TqTunnelRole::ServerOpen, tcp.Relay, serverOwner, &control,
         nullptr);
+    std::shared_ptr<const TqRelayLinuxCommittedState> committed;
+    ScopeGuard boundaryContextCleanup([&] {
+        if (serverOwner != nullptr &&
+            serverOwner->GetTerminalPhase() != TerminalPhase::TerminalObserved) {
+            PublishTerminal(serverOwner);
+        }
+        auto cleanupCommitted = committed;
+        if (cleanupCommitted == nullptr && context != nullptr) {
+            cleanupCommitted = TqRelayLinuxCommittedSnapshot(TqTestLinuxTunnelRelayHandle(context));
+        }
+        if (cleanupCommitted != nullptr) {
+            auto* cleanupWorker = reinterpret_cast<TqLinuxRelayWorker*>(cleanupCommitted->WorkerIdentity);
+            if (cleanupWorker != nullptr) cleanupWorker->UnregisterRelay(cleanupCommitted->RelayId);
+        }
+        (void)TqTunnelReaper::Instance().ReapReadyForTest();
+        if (context != nullptr && destroys == 0) {
+            TqTunnelReaper::Instance().Unregister(context);
+            TqReapTunnelContext(context);
+        }
+        serverOwner.reset();
+    });
     CHECK(context != nullptr && control != nullptr);
     tcp.Relay = -1;
     auto* handle = TqTestLinuxTunnelRelayHandle(context);
-    auto committed = TqRelayLinuxCommittedSnapshot(handle);
+    committed = TqRelayLinuxCommittedSnapshot(handle);
     CHECK(committed && committed->Control.get() == control.get());
     std::vector<TqStreamLifetime::TerminalBoundaryForTest> seen;
     bool hookOk = true;
@@ -303,6 +324,7 @@ bool TestReaperAtAllHandoffBoundaries() {
     PublishTerminal(clientOwner);
     CHECK(serverOwner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
     CHECK(clientOwner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
+    boundaryContextCleanup.Dismiss();
 
     // Exact production chain: two real workers, owners and tunnel contexts.
     TqLinuxRelayWorker clientWorker({}), serverWorker({});
@@ -455,6 +477,9 @@ bool TestReaperAtAllHandoffBoundaries() {
     CHECK(::shutdown(clientTcp.Peer, SHUT_WR) == 0);
     auto clientFinEvent = clientWorker.PostTcpEventsForTestAsync(
         clientCommitted->RelayId, EPOLLRDHUP | EPOLLIN);
+    ScopeGuard clientFinRelease([&] {
+        if (clientFinEvent != nullptr) clientFinEvent->ReleaseProcess();
+    });
     CHECK(clientFinEvent != nullptr);
     const auto clientAdmission = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (clientFinEvent->CurrentPhase.load(std::memory_order_acquire) <
@@ -463,6 +488,7 @@ bool TestReaperAtAllHandoffBoundaries() {
     CHECK(clientFinEvent->CurrentPhase.load(std::memory_order_acquire) >=
           TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess);
     clientFinEvent->ReleaseProcess();
+    clientFinRelease.Dismiss();
     CHECK(clientFinEvent->Wait());
     CHECK(transport->PumpClientFin(std::chrono::steady_clock::now() + std::chrono::seconds(2)));
     CHECK(TqSetNonBlocking(targetTcp.Peer));
@@ -482,6 +508,9 @@ bool TestReaperAtAllHandoffBoundaries() {
 
     auto serverFatal = serverWorker.PostTcpEventsForTestAsync(
         serverCommitted->RelayId, EPOLLERR | EPOLLHUP);
+    ScopeGuard serverFatalRelease([&] {
+        if (serverFatal != nullptr) serverFatal->ReleaseProcess();
+    });
     CHECK(serverFatal != nullptr);
     const auto fatalAdmission = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (serverFatal->CurrentPhase.load(std::memory_order_acquire) <
@@ -491,6 +520,7 @@ bool TestReaperAtAllHandoffBoundaries() {
           TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess);
     CHECK(ResetPeer(targetTcp));
     serverFatal->ReleaseProcess();
+    serverFatalRelease.Dismiss();
     CHECK(serverFatal->Wait());
     CHECK(serverWorker.Snapshot().LastTcpWriteErrno == ECONNRESET);
     CHECK((g_lastFlags.load() & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
@@ -573,6 +603,9 @@ bool TestTcpAdminWorkerConnectionRace() {
     committed = TqRelayLinuxCommittedSnapshot(TqTestLinuxTunnelRelayHandle(context));
     CHECK(committed != nullptr);
     auto fatal = worker.PostTcpEventsForTestAsync(committed->RelayId, EPOLLERR | EPOLLHUP);
+    ScopeGuard fatalRelease([&] {
+        if (fatal != nullptr) fatal->ReleaseProcess();
+    });
     CHECK(fatal != nullptr);
     const auto admissionDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (fatal->CurrentPhase.load(std::memory_order_acquire) <
@@ -580,7 +613,6 @@ bool TestTcpAdminWorkerConnectionRace() {
            std::chrono::steady_clock::now() < admissionDeadline) std::this_thread::yield();
     if (fatal->CurrentPhase.load(std::memory_order_acquire) <
         TqLinuxRelayAsyncTestCompletion::Phase::EnteredProcess) {
-        fatal->ReleaseProcess();
         std::fprintf(stderr, "async fatal admission timeout phase=%u\n",
             static_cast<unsigned>(fatal->CurrentPhase.load(std::memory_order_acquire)));
         return false;
@@ -597,6 +629,7 @@ bool TestTcpAdminWorkerConnectionRace() {
     std::thread connection([&] { wait(); PublishTerminal(owner); });
     go.store(true, std::memory_order_release);
     tcpRoute.join(); admin.join(); workerStopThread.join(); connection.join();
+    fatalRelease.Dismiss();
     CHECK(adminOk);
     CHECK(fatal->Wait());
     CHECK(workerStop->Wait());
