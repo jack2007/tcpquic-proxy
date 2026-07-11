@@ -3466,6 +3466,25 @@ void TqLinuxRelayWorker::CompleteDeferredQuicReceive(MsQuicStream* stream, uint6
     }
 }
 
+bool TqLinuxRelayWorker::CompleteZeroLengthFinReceive(TqPendingQuicReceive& view) {
+    if (!view.ZeroLengthFinCompletionPending) return false;
+    MsQuicStream* stream = nullptr;
+    TqStreamLifetime::ApiLease lease;
+    if (view.StreamOwner != nullptr) {
+        lease = view.StreamOwner->TryAcquireApi();
+        stream = lease ? lease.Stream() : nullptr;
+    } else {
+        stream = view.Stream;
+    }
+    if (MsQuic == nullptr || MsQuic->StreamReceiveComplete == nullptr ||
+        stream == nullptr || stream->Handle == nullptr) return false;
+    stream->ReceiveComplete(0);
+    view.ZeroLengthFinCompletionPending = false;
+    DeferredReceiveCompletes.fetch_add(1);
+    DeferredReceiveCompletionFlushes.fetch_add(1);
+    return true;
+}
+
 void TqLinuxRelayWorker::FlushDeferredReceiveCompletion(
     TqPendingQuicReceive& view,
     bool force) {
@@ -3621,6 +3640,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
                         : 0;
             }
             FlushDeferredReceiveCompletion(*view, true);
+            (void)CompleteZeroLengthFinReceive(*view);
             if (view->Fin) {
                 SetRelayStop(relay, "quic_receive_fin_sink");
             }
@@ -3633,6 +3653,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
             relay->Decompressor != nullptr && relay->CompressAlgo == TqCompressAlgo::Zstd;
         if (needsDecompress) {
             if (DrainCompressedQuicReceiveView(relay, *view)) {
+                (void)CompleteZeroLengthFinReceive(*view);
                 if (view->Fin) {
                     relay->TcpWriteShutdownQueued = true;
                 }
@@ -3680,19 +3701,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
         }
 
         if (iov.empty()) {
-            if (view->ZeroLengthFinCompletionPending) {
-                if (view->StreamOwner != nullptr) {
-                    auto lease = view->StreamOwner->TryAcquireApi();
-                    if (lease && lease.Stream() != nullptr) {
-                        lease.Stream()->ReceiveComplete(0);
-                    }
-                } else if (view->Stream != nullptr) {
-                    view->Stream->ReceiveComplete(0);
-                }
-                view->ZeroLengthFinCompletionPending = false;
-                DeferredReceiveCompletes.fetch_add(1);
-                DeferredReceiveCompletionFlushes.fetch_add(1);
-            }
+            (void)CompleteZeroLengthFinReceive(*view);
             FlushDeferredReceiveCompletion(*view, true);
             if (view->Fin) {
                 relay->TcpWriteShutdownQueued = true;
@@ -3745,6 +3754,7 @@ void TqLinuxRelayWorker::FlushDeferredQuicReceives(RelayState* relay) {
             MaybeResumeQuicReceive(relay);
 
             if (viewComplete) {
+                (void)CompleteZeroLengthFinReceive(*view);
                 if (view->Fin) {
                     relay->TcpWriteShutdownQueued = true;
                 }

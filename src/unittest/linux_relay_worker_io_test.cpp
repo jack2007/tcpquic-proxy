@@ -2198,6 +2198,10 @@ int main() {
 
         alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
         MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(0x2200));
+        const MsQuicApi* previousMsQuic = MsQuic;
+        QUIC_API_TABLE zeroFinApi{};
+        InstallFakeMsQuicForSend(zeroFinApi);
 
         TqLinuxRelayRegistration registration{};
         registration.TcpFd = fds[0];
@@ -2216,6 +2220,7 @@ int main() {
         finEvent.RECEIVE.BufferCount = 0;
         finEvent.RECEIVE.Buffers = nullptr;
         finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+        const uint64_t completionsBefore = worker.Snapshot().DeferredReceiveCompletes;
 
         if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
             worker.Stop();
@@ -2239,7 +2244,8 @@ int main() {
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
         if (handle.Stop.load(std::memory_order_acquire) ||
             snapshot.Errors != 0 ||
-            snapshot.QuicReceiveViewEmptyFailures != 0) {
+            snapshot.QuicReceiveViewEmptyFailures != 0 ||
+            snapshot.DeferredReceiveCompletes != completionsBefore + 1) {
             std::fprintf(stderr,
                 "FIN-only receive should be graceful, stop=%d errors=%llu empty=%llu\n",
                 handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
@@ -2249,9 +2255,16 @@ int main() {
             ::close(fds[1]);
             return 1;
         }
+        (void)worker.DrainForTest(config.EventBudget);
+        if (worker.Snapshot().DeferredReceiveCompletes != completionsBefore + 1) {
+            worker.Stop();
+            ::close(fds[1]);
+            return 1;
+        }
 
         worker.Stop();
         ::close(fds[1]);
+        MsQuic = previousMsQuic;
     }
 
     {

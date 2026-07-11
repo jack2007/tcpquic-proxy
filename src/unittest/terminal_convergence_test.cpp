@@ -179,7 +179,7 @@ void TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible() {
     CHECK(escalation->Calls == 0);
     const auto ledger = owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest());
     CHECK(ledger.Phase == TerminalPhase::TerminalObserved);
-    CHECK(ledger.Watchdog == TqTerminalWatchdogState::Canceled);
+    CHECK(ledger.Watchdog == TqTerminalWatchdogState::Idle);
     CHECK(TqTerminalScheduler::SnapshotForTest().PendingTasks == 0);
 }
 
@@ -205,7 +205,7 @@ void TestTerminalBetweenOwnerCommitAndRetryScheduleIsIrreversible() {
     TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(40));
     CHECK(escalation->Calls == 0);
     CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
-          TqTerminalWatchdogState::Canceled);
+          TqTerminalWatchdogState::Idle);
     CHECK(TqTerminalScheduler::SnapshotForTest().PendingTasks == 0);
 }
 

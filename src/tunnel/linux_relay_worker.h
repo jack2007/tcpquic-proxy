@@ -642,6 +642,7 @@ private:
     void FlushDeferredQuicReceives(RelayState* relay);
     bool DrainCompressedQuicReceiveView(RelayState* relay, TqPendingQuicReceive& view);
     void CompleteDeferredQuicReceive(MsQuicStream* stream, uint64_t bytes);
+    bool CompleteZeroLengthFinReceive(TqPendingQuicReceive& view);
     void FlushDeferredReceiveCompletion(TqPendingQuicReceive& view, bool force);
     bool QueueDeferredQuicReceiveFromOffset(
         RelayState* relay,
