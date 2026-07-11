@@ -1,13 +1,67 @@
 #include "stream_lifetime.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <queue>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <new>
+
+struct TqTerminalSchedulerInternals {
+    static TqTerminalShutdownResult Retry(
+        const std::shared_ptr<TqStreamLifetime>& owner) noexcept {
+        return owner->RetryTerminalShutdown();
+    }
+    static void MarkEscalated(
+        const std::shared_ptr<TqTerminalLedger>& ledger,
+        bool& call,
+        QUIC_STATUS& status) noexcept {
+        std::lock_guard<std::mutex> guard(ledger->Mutex_);
+        if (ledger->State_.Watchdog != TqTerminalWatchdogState::Canceled &&
+            ledger->State_.Watchdog != TqTerminalWatchdogState::TerminalTimeout &&
+            !ledger->State_.ConnectionEscalated) {
+            ledger->State_.Watchdog = TqTerminalWatchdogState::Escalated;
+            ledger->State_.ConnectionEscalated = true;
+            status = ledger->State_.ShutdownStatus;
+            call = true;
+        }
+    }
+    static bool MarkTimedOut(const std::shared_ptr<TqTerminalLedger>& ledger) noexcept {
+        std::lock_guard<std::mutex> guard(ledger->Mutex_);
+        if (ledger->State_.Watchdog != TqTerminalWatchdogState::Escalated) return false;
+        ledger->State_.Watchdog = TqTerminalWatchdogState::TerminalTimeout;
+        return true;
+    }
+    static bool Arm(const std::shared_ptr<TqTerminalLedger>& ledger) noexcept {
+        std::lock_guard<std::mutex> guard(ledger->Mutex_);
+        if (ledger->State_.Watchdog != TqTerminalWatchdogState::Idle) return false;
+        ledger->State_.Watchdog = TqTerminalWatchdogState::Armed;
+        return true;
+    }
+    static bool Cancel(const std::shared_ptr<TqTerminalLedger>& ledger) noexcept {
+        std::lock_guard<std::mutex> guard(ledger->Mutex_);
+        if (ledger->State_.Watchdog != TqTerminalWatchdogState::Armed &&
+            ledger->State_.Watchdog != TqTerminalWatchdogState::Escalated) return false;
+        ledger->State_.Watchdog = TqTerminalWatchdogState::Canceled;
+        return true;
+    }
+};
 
 namespace {
 std::atomic<uint64_t> g_terminalExactlyOnceViolations{0};
 std::atomic<uint64_t> g_terminalObserved{0};
 std::atomic<uint64_t> g_terminalSinkPending{0};
 std::atomic<uint64_t> g_duplicateTerminalSuppressed{0};
+std::atomic<uint64_t> g_shutdownSubmitted{0};
+std::atomic<uint64_t> g_shutdownPending{0};
+std::atomic<uint64_t> g_shutdownSyncFailure{0};
+std::atomic<uint64_t> g_shutdownRetry{0};
+std::atomic<uint64_t> g_watchdogArmed{0};
+std::atomic<uint64_t> g_watchdogCanceled{0};
+std::atomic<uint64_t> g_watchdogTimeout{0};
+std::atomic<uint64_t> g_connectionEscalation{0};
+std::atomic<uint64_t> g_terminalTimeoutPending{0};
 #if defined(TQ_UNIT_TESTING)
 std::atomic<bool> g_failNextTerminalSinkControlBlock{false};
 #endif
@@ -21,7 +75,299 @@ void ReleaseTerminalSinkPending() noexcept {
                std::memory_order_relaxed)) {
     }
 }
+
+enum class ScheduledKind : uint8_t { Retry, Watchdog, Timeout };
+
+struct ScheduledTask {
+    std::chrono::steady_clock::time_point Due{};
+    uint64_t Sequence{0};
+    ScheduledKind Kind{ScheduledKind::Retry};
+    uint64_t StreamId{0};
+    uint64_t ErrorCode{0};
+    uint32_t CompletedAttempt{0};
+    std::weak_ptr<TqStreamLifetime> Owner;
+    std::shared_ptr<TqTerminalLedger> Ledger;
+    std::shared_ptr<TqTerminalEscalation> Escalation;
+};
+
+struct LaterTask {
+    bool operator()(const ScheduledTask& left, const ScheduledTask& right) const {
+        return left.Due > right.Due ||
+            (left.Due == right.Due && left.Sequence > right.Sequence);
+    }
+};
+
+struct SchedulerState {
+    std::mutex Mutex;
+    std::condition_variable Wake;
+    std::priority_queue<ScheduledTask, std::vector<ScheduledTask>, LaterTask> Tasks;
+    std::unordered_set<uint64_t> Canceled;
+    std::unordered_map<uint64_t, std::shared_ptr<TqTerminalLedger>> Ledgers;
+    std::thread Worker;
+    bool Running{false};
+    bool Stopping{false};
+    uint64_t Sequence{0};
+#if defined(TQ_UNIT_TESTING)
+    bool FakeClock{false};
+    std::chrono::steady_clock::time_point FakeNow{std::chrono::steady_clock::now()};
+#endif
+    ~SchedulerState() {
+        {
+            std::lock_guard<std::mutex> guard(Mutex);
+            Stopping = true;
+        }
+        Wake.notify_all();
+        if (Worker.joinable()) Worker.join();
+    }
+};
+
+SchedulerState g_scheduler;
+
+std::chrono::steady_clock::time_point SchedulerNowLocked() {
+#if defined(TQ_UNIT_TESTING)
+    if (g_scheduler.FakeClock) return g_scheduler.FakeNow;
+#endif
+    return std::chrono::steady_clock::now();
 }
+
+void DecrementPendingTimeout() noexcept {
+    auto value = g_terminalTimeoutPending.load(std::memory_order_relaxed);
+    while (value != 0 && !g_terminalTimeoutPending.compare_exchange_weak(
+        value, value - 1, std::memory_order_relaxed, std::memory_order_relaxed)) {}
+}
+
+void QueueTimeout(const ScheduledTask& source) {
+    ScheduledTask timeout = source;
+    timeout.Kind = ScheduledKind::Timeout;
+    timeout.Due += std::chrono::seconds(30);
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    timeout.Sequence = ++g_scheduler.Sequence;
+    g_scheduler.Ledgers[timeout.StreamId] = timeout.Ledger;
+    g_scheduler.Tasks.push(std::move(timeout));
+    g_terminalTimeoutPending.fetch_add(1, std::memory_order_relaxed);
+    g_scheduler.Wake.notify_all();
+}
+
+void Escalate(const ScheduledTask& task) noexcept {
+    bool call = false;
+    QUIC_STATUS status = QUIC_STATUS_SUCCESS;
+    TqTerminalSchedulerInternals::MarkEscalated(task.Ledger, call, status);
+    if (!call) return;
+    g_connectionEscalation.fetch_add(1, std::memory_order_relaxed);
+    if (task.Escalation) {
+        const auto& identity = task.Ledger->Identity();
+        task.Escalation->RequestConnectionShutdown(
+            identity.ConnectionId, identity.StreamId, status, task.ErrorCode);
+    }
+    QueueTimeout(task);
+}
+
+void ExecuteTask(ScheduledTask task) noexcept {
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        if (g_scheduler.Canceled.count(task.StreamId) != 0) return;
+    }
+    if (task.Kind == ScheduledKind::Retry) {
+        auto owner = task.Owner.lock();
+        if (owner) (void)TqTerminalSchedulerInternals::Retry(owner);
+        return;
+    }
+    if (task.Kind == ScheduledKind::Watchdog) {
+        Escalate(task);
+        return;
+    }
+    const bool timedOut = TqTerminalSchedulerInternals::MarkTimedOut(task.Ledger);
+    DecrementPendingTimeout();
+    if (timedOut) g_watchdogTimeout.fetch_add(1, std::memory_order_relaxed);
+}
+
+#if defined(TQ_UNIT_TESTING)
+void RunDueTasksForTest() {
+    for (;;) {
+        ScheduledTask task;
+        {
+            std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+            if (g_scheduler.Tasks.empty() ||
+                g_scheduler.Tasks.top().Due > SchedulerNowLocked()) return;
+            task = g_scheduler.Tasks.top();
+            g_scheduler.Tasks.pop();
+        }
+        ExecuteTask(std::move(task));
+    }
+}
+#endif
+}
+
+TqTerminalScheduler& TqTerminalScheduler::Instance() {
+    static TqTerminalScheduler scheduler;
+    return scheduler;
+}
+
+void TqTerminalScheduler::Start() {
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+#if defined(TQ_UNIT_TESTING)
+    if (g_scheduler.FakeClock) return;
+#endif
+    if (g_scheduler.Running) return;
+    g_scheduler.Stopping = false;
+    g_scheduler.Running = true;
+    g_scheduler.Worker = std::thread([] {
+        std::unique_lock<std::mutex> lock(g_scheduler.Mutex);
+        while (!g_scheduler.Stopping) {
+            if (g_scheduler.Tasks.empty()) {
+                g_scheduler.Wake.wait(lock);
+                continue;
+            }
+            const auto due = g_scheduler.Tasks.top().Due;
+            if (g_scheduler.Wake.wait_until(lock, due) != std::cv_status::timeout) continue;
+            ScheduledTask task = g_scheduler.Tasks.top();
+            g_scheduler.Tasks.pop();
+            lock.unlock();
+            ExecuteTask(std::move(task));
+            lock.lock();
+        }
+        g_scheduler.Running = false;
+    });
+}
+
+void TqTerminalScheduler::Stop() {
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        g_scheduler.Stopping = true;
+    }
+    g_scheduler.Wake.notify_all();
+    if (g_scheduler.Worker.joinable()) g_scheduler.Worker.join();
+}
+
+bool TqTerminalScheduler::ScheduleRetry(
+    std::weak_ptr<TqStreamLifetime> owner,
+    std::shared_ptr<TqTerminalLedger> ledger,
+    std::shared_ptr<TqTerminalEscalation> escalation,
+    uint64_t errorCode,
+    uint32_t completedAttempt) noexcept {
+    if (!ledger || completedAttempt == 0) return false;
+    if (completedAttempt >= 4) {
+        ScheduledTask task{};
+        task.StreamId = ledger->Identity().StreamId;
+        task.ErrorCode = errorCode;
+        task.Ledger = std::move(ledger);
+        task.Escalation = std::move(escalation);
+        {
+            std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+            task.Due = SchedulerNowLocked();
+        }
+        Escalate(task);
+        return false;
+    }
+    static constexpr std::chrono::milliseconds delays[] = {
+        std::chrono::milliseconds(10), std::chrono::milliseconds(50),
+        std::chrono::milliseconds(250)};
+    ScheduledTask task{};
+    task.Kind = ScheduledKind::Retry;
+    task.StreamId = ledger->Identity().StreamId;
+    task.ErrorCode = errorCode;
+    task.CompletedAttempt = completedAttempt;
+    task.Owner = std::move(owner);
+    task.Ledger = std::move(ledger);
+    task.Escalation = std::move(escalation);
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        g_scheduler.Canceled.erase(task.StreamId);
+        g_scheduler.Ledgers[task.StreamId] = task.Ledger;
+        task.Due = SchedulerNowLocked() + delays[completedAttempt - 1];
+        task.Sequence = ++g_scheduler.Sequence;
+        g_scheduler.Tasks.push(std::move(task));
+    }
+    Start();
+    g_scheduler.Wake.notify_all();
+    return true;
+}
+
+void TqTerminalScheduler::ArmWatchdog(
+    std::weak_ptr<TqStreamLifetime> owner,
+    std::shared_ptr<TqTerminalLedger> ledger,
+    std::shared_ptr<TqTerminalEscalation> escalation,
+    uint64_t errorCode,
+    std::chrono::seconds deadline) noexcept {
+    if (!ledger) return;
+    if (!TqTerminalSchedulerInternals::Arm(ledger)) return;
+    ScheduledTask task{};
+    task.Kind = ScheduledKind::Watchdog;
+    task.StreamId = ledger->Identity().StreamId;
+    task.ErrorCode = errorCode;
+    task.Owner = std::move(owner);
+    task.Ledger = std::move(ledger);
+    task.Escalation = std::move(escalation);
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        g_scheduler.Canceled.erase(task.StreamId);
+        g_scheduler.Ledgers[task.StreamId] = task.Ledger;
+        task.Due = SchedulerNowLocked() + deadline;
+        task.Sequence = ++g_scheduler.Sequence;
+        g_scheduler.Tasks.push(std::move(task));
+    }
+    g_watchdogArmed.fetch_add(1, std::memory_order_relaxed);
+    Start();
+    g_scheduler.Wake.notify_all();
+}
+
+void TqTerminalScheduler::Cancel(uint64_t streamId) noexcept {
+    std::shared_ptr<TqTerminalLedger> ledger;
+    uint64_t removedTimeouts = 0;
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        const auto found = g_scheduler.Ledgers.find(streamId);
+        if (found != g_scheduler.Ledgers.end()) ledger = found->second;
+        g_scheduler.Canceled.insert(streamId);
+    }
+    if (ledger && TqTerminalSchedulerInternals::Cancel(ledger)) {
+        g_watchdogCanceled.fetch_add(1, std::memory_order_relaxed);
+    }
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        std::vector<ScheduledTask> kept;
+        while (!g_scheduler.Tasks.empty()) {
+            auto task = g_scheduler.Tasks.top();
+            g_scheduler.Tasks.pop();
+            if (task.StreamId == streamId) {
+                if (task.Kind == ScheduledKind::Timeout) ++removedTimeouts;
+            } else {
+                kept.push_back(std::move(task));
+            }
+        }
+        for (auto& task : kept) g_scheduler.Tasks.push(std::move(task));
+        g_scheduler.Ledgers.erase(streamId);
+    }
+    while (removedTimeouts-- != 0) DecrementPendingTimeout();
+    g_scheduler.Wake.notify_all();
+}
+
+#if defined(TQ_UNIT_TESTING)
+void TqTerminalScheduler::ResetForTest() {
+    Instance().Stop();
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    g_scheduler.Tasks = {};
+    g_scheduler.Canceled.clear();
+    g_scheduler.Ledgers.clear();
+    g_scheduler.Sequence = 0;
+    g_scheduler.Stopping = false;
+    g_scheduler.FakeClock = true;
+    g_scheduler.FakeNow = std::chrono::steady_clock::now();
+}
+
+void TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds delta) {
+    {
+        std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+        g_scheduler.FakeNow += delta;
+    }
+    RunDueTasksForTest();
+}
+
+std::chrono::steady_clock::time_point TqTerminalScheduler::NowForTest() {
+    std::lock_guard<std::mutex> guard(g_scheduler.Mutex);
+    return SchedulerNowLocked();
+}
+#endif
 
 TqTerminalLedger::TqTerminalLedger(TqTerminalIdentity identity) noexcept {
     State_.Identity = identity;
@@ -56,6 +402,15 @@ void TqTerminalLedger::RecordShutdown(
     QUIC_STATUS status,
     uint32_t attempt,
     bool submitted) noexcept {
+    if (submitted) {
+        g_shutdownSubmitted.fetch_add(1, std::memory_order_relaxed);
+        if (status == QUIC_STATUS_PENDING) {
+            g_shutdownPending.fetch_add(1, std::memory_order_relaxed);
+        }
+    } else if (QUIC_FAILED(status)) {
+        g_shutdownSyncFailure.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (attempt > 1) g_shutdownRetry.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> guard(Mutex_);
     if (attempt < State_.ShutdownAttempt) {
         return;
@@ -249,6 +604,17 @@ uint64_t TqTerminalExactlyOnceViolationCount() noexcept {
 TqTerminalMetrics TqTerminalMetricsSnapshot() noexcept {
     TqTerminalMetrics snapshot{};
     snapshot.TerminalObserved = g_terminalObserved.load(std::memory_order_relaxed);
+    snapshot.ShutdownSubmitted = g_shutdownSubmitted.load(std::memory_order_relaxed);
+    snapshot.ShutdownPending = g_shutdownPending.load(std::memory_order_relaxed);
+    snapshot.ShutdownSyncFailure = g_shutdownSyncFailure.load(std::memory_order_relaxed);
+    snapshot.ShutdownRetry = g_shutdownRetry.load(std::memory_order_relaxed);
+    snapshot.WatchdogArmed = g_watchdogArmed.load(std::memory_order_relaxed);
+    snapshot.WatchdogCanceled = g_watchdogCanceled.load(std::memory_order_relaxed);
+    snapshot.WatchdogTimeout = g_watchdogTimeout.load(std::memory_order_relaxed);
+    snapshot.ConnectionEscalation =
+        g_connectionEscalation.load(std::memory_order_relaxed);
+    snapshot.TerminalTimeoutPending =
+        g_terminalTimeoutPending.load(std::memory_order_relaxed);
     snapshot.TerminalSinkPending =
         g_terminalSinkPending.load(std::memory_order_relaxed);
     snapshot.DuplicateTerminalSuppressed =
@@ -264,6 +630,15 @@ void TqResetTerminalMetricsForTest() noexcept {
     g_terminalObserved.store(0, std::memory_order_relaxed);
     g_terminalSinkPending.store(0, std::memory_order_relaxed);
     g_duplicateTerminalSuppressed.store(0, std::memory_order_relaxed);
+    g_shutdownSubmitted.store(0, std::memory_order_relaxed);
+    g_shutdownPending.store(0, std::memory_order_relaxed);
+    g_shutdownSyncFailure.store(0, std::memory_order_relaxed);
+    g_shutdownRetry.store(0, std::memory_order_relaxed);
+    g_watchdogArmed.store(0, std::memory_order_relaxed);
+    g_watchdogCanceled.store(0, std::memory_order_relaxed);
+    g_watchdogTimeout.store(0, std::memory_order_relaxed);
+    g_connectionEscalation.store(0, std::memory_order_relaxed);
+    g_terminalTimeoutPending.store(0, std::memory_order_relaxed);
     g_failNextTerminalSinkControlBlock.store(false, std::memory_order_relaxed);
 }
 #endif

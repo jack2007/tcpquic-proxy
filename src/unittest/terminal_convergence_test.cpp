@@ -5,11 +5,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <thread>
 
-#define CHECK(condition) do { if (!(condition)) std::abort(); } while (false)
+#define CHECK(condition) do { if (!(condition)) { std::fprintf(stderr, "CHECK failed at %s:%d: %s\n", __FILE__, __LINE__, #condition); std::abort(); } } while (false)
 
 const MsQuicApi* MsQuic = nullptr;
 
@@ -50,7 +51,90 @@ public:
 };
 
 void Reset() {
+    TqTerminalScheduler::ResetForTest();
     TqStreamLifetime::ResetLifecycleRegistriesForTest();
+}
+
+std::shared_ptr<TqStreamLifetime> MakeStartedOwner(uint64_t streamId) {
+    static QUIC_API_TABLE fakeApi{};
+    static bool initialized = false;
+    if (!initialized) {
+        fakeApi.SetCallbackHandler = FakeSetCallbackHandler;
+        fakeApi.StreamClose = FakeStreamClose;
+        initialized = true;
+    }
+    MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+    return TqStreamLifetime::AdoptAccepted(
+        reinterpret_cast<HQUIC>(static_cast<uintptr_t>(streamId + 1)),
+        std::make_shared<CapturingTarget>(),
+        TqTerminalIdentity{
+            streamId, 133, 2, 7, TqTunnelRole::ClientOpen,
+            TqRelayBackendType::LinuxWorker}, 5);
+}
+
+void TestRetryBackoffAndWatchdogBoundaries() {
+    Reset();
+    auto owner = MakeStartedOwner(44);
+    uint32_t shutdownCalls = 0;
+    owner->SetShutdownHookForTest(
+        [&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+            ++shutdownCalls;
+            return QUIC_STATUS_OUT_OF_MEMORY;
+        });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    const auto first = owner->BeginTerminalShutdown(91, sink, escalation);
+    CHECK(first.RetryScheduled);
+    CHECK(shutdownCalls == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(9));
+    CHECK(shutdownCalls == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+    CHECK(shutdownCalls == 2);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(50));
+    CHECK(shutdownCalls == 3);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(250));
+    CHECK(shutdownCalls == 4);
+    CHECK(escalation->Calls == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(30));
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::TerminalTimeout);
+}
+
+void TestTerminalCancelsRetryAndWatchdog() {
+    Reset();
+    auto owner = MakeStartedOwner(9);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(91, sink, escalation).Submitted);
+    QUIC_STREAM_EVENT terminal{};
+    terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+    CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(40));
+    CHECK(escalation->Calls == 0);
+    CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
+}
+
+void TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut() {
+    Reset();
+    auto owner = MakeStartedOwner(19);
+    owner->SetShutdownHookForTest(
+        [](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) { return QUIC_STATUS_PENDING; });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(91, sink, escalation).Submitted);
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::Armed);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(4999));
+    CHECK(escalation->Calls == 0);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::milliseconds(1));
+    CHECK(escalation->Calls == 1);
+    CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 1);
+    TqTerminalScheduler::AdvanceForTest(std::chrono::seconds(30));
+    CHECK(owner->TerminalLedger()->Snapshot(TqTerminalScheduler::NowForTest()).Watchdog ==
+          TqTerminalWatchdogState::TerminalTimeout);
+    CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
 }
 
 void TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce() {
@@ -340,6 +424,9 @@ void TestRetentionSnapshotCopiesLedgerBeforeReadingIt() {
 } // namespace
 
 int main() {
+    TestRetryBackoffAndWatchdogBoundaries();
+    TestTerminalCancelsRetryAndWatchdog();
+    TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut();
     TestTerminalSinkDoesNotOwnOwnerAndAccountsOnce();
     TestIdentityRebindKeepsOriginalLedger();
     TestSinkRejectsMissingOrMismatchedOwnerLedger();

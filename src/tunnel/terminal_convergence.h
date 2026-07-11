@@ -81,6 +81,7 @@ public:
 private:
     friend class TqStreamLifetime;
     friend class TqTerminalScheduler;
+    friend struct TqTerminalSchedulerInternals;
     mutable std::mutex Mutex_;
     TqTerminalLedgerSnapshot State_{};
     std::chrono::steady_clock::time_point RetainedSince_{std::chrono::steady_clock::now()};
@@ -94,6 +95,31 @@ public:
         uint64_t streamId,
         QUIC_STATUS streamStatus,
         uint64_t errorCode) noexcept = 0;
+};
+
+class TqTerminalScheduler final {
+public:
+    static TqTerminalScheduler& Instance();
+    void Start();
+    void Stop();
+    bool ScheduleRetry(
+        std::weak_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqTerminalLedger> ledger,
+        std::shared_ptr<TqTerminalEscalation> escalation,
+        uint64_t errorCode,
+        uint32_t completedAttempt) noexcept;
+    void ArmWatchdog(
+        std::weak_ptr<TqStreamLifetime> owner,
+        std::shared_ptr<TqTerminalLedger> ledger,
+        std::shared_ptr<TqTerminalEscalation> escalation,
+        uint64_t errorCode,
+        std::chrono::seconds deadline) noexcept;
+    void Cancel(uint64_t streamId) noexcept;
+#if defined(TQ_UNIT_TESTING)
+    static void ResetForTest();
+    static void AdvanceForTest(std::chrono::milliseconds delta);
+    static std::chrono::steady_clock::time_point NowForTest();
+#endif
 };
 
 struct TqTerminalShutdownResult {

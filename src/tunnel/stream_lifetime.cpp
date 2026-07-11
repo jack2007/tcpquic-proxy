@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include <utility>
 
+#if defined(TQ_DEFINE_MSQUIC_API)
+const MsQuicApi* MsQuic = nullptr;
+#endif
+
 namespace {
 
 std::mutex g_terminalRetentionLock;
@@ -670,7 +674,7 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     std::shared_ptr<TqTerminalLedger> ledger;
     MsQuicStream* stream = nullptr;
     {
-        std::lock_guard<std::mutex> guard(ControlMutex_);
+        std::unique_lock<std::mutex> guard(ControlMutex_);
         if (TerminalPhase_ == TerminalPhase::TerminalObserved ||
             Phase_ == Phase::TerminalPublished) {
             result.AlreadyTerminal = true;
@@ -689,6 +693,26 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
             (Phase_ != Phase::Starting && Phase_ != Phase::Started) ||
             terminalSink == nullptr) {
             result.Status = QUIC_STATUS_INVALID_STATE;
+            const auto illegalLedger = TerminalLedger_;
+            guard.unlock();
+            if (escalation != nullptr && illegalLedger != nullptr) {
+                bool call = false;
+                {
+                    std::lock_guard<std::mutex> ledgerGuard(illegalLedger->Mutex_);
+                    if (!illegalLedger->State_.ConnectionEscalated) {
+                        illegalLedger->State_.ConnectionEscalated = true;
+                        illegalLedger->State_.Watchdog =
+                            TqTerminalWatchdogState::Escalated;
+                        call = true;
+                    }
+                }
+                if (call) {
+                    const auto& identity = illegalLedger->Identity();
+                    escalation->RequestConnectionShutdown(
+                        identity.ConnectionId, identity.StreamId,
+                        result.Status, errorCode);
+                }
+            }
             return result;
         }
         Target_ = std::move(terminalSink);
@@ -741,7 +765,38 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     }
 #endif
     ledger->RecordShutdown(result.Status, result.Attempt, result.Submitted);
+    std::shared_ptr<TqTerminalEscalation> schedulerEscalation;
+    uint64_t schedulerErrorCode = 0;
+    uint32_t schedulerWatchdogSeconds = 5;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        schedulerEscalation = TerminalEscalation_;
+        schedulerErrorCode = TerminalErrorCode_;
+        schedulerWatchdogSeconds = TerminalWatchdogSeconds_;
+    }
+    if (result.Submitted) {
+        TqTerminalScheduler::Instance().ArmWatchdog(
+            weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode,
+            std::chrono::seconds(schedulerWatchdogSeconds));
+    } else if (!result.AlreadyTerminal && QUIC_FAILED(result.Status)) {
+        result.RetryScheduled = TqTerminalScheduler::Instance().ScheduleRetry(
+            weak_from_this(), ledger, schedulerEscalation, schedulerErrorCode,
+            result.Attempt);
+    }
     return result;
+}
+
+TqTerminalShutdownResult TqStreamLifetime::RetryTerminalShutdown() noexcept {
+    std::shared_ptr<Target> sink;
+    std::shared_ptr<TqTerminalEscalation> escalation;
+    uint64_t errorCode = 0;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        sink = TerminalSink_;
+        escalation = TerminalEscalation_;
+        errorCode = TerminalErrorCode_;
+    }
+    return BeginTerminalShutdown(errorCode, std::move(sink), std::move(escalation));
 }
 
 TqStreamCallbackTarget::TqStreamCallbackTarget(
@@ -849,6 +904,9 @@ TqStreamLifetime::RouteSnapshot TqStreamLifetime::PublishTerminalAndTakeTarget()
         }
         snapshot.TargetOwner = std::move(Target_);
         snapshot.Generation = RouteGeneration_;
+    }
+    if (TerminalLedger_ != nullptr) {
+        TqTerminalScheduler::Instance().Cancel(TerminalLedger_->Identity().StreamId);
     }
     ReleaseTerminalRetention();
     return snapshot;

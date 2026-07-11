@@ -219,6 +219,8 @@ public:
     QUIC_STATUS DispatchBufferedEvent(QUIC_STREAM_EVENT* event) noexcept;
 
 private:
+    friend class TqTerminalScheduler;
+    friend struct TqTerminalSchedulerInternals;
     TqStreamLifetime(Phase phase, std::shared_ptr<Target> initialTarget) noexcept;
     bool InstallStream(MsQuicStream* stream) noexcept;
     void RetainUntilTerminal();
@@ -228,6 +230,7 @@ private:
         MsQuicStream* stream,
         uint64_t errorCode,
         QUIC_STREAM_SHUTDOWN_FLAGS flags) noexcept;
+    TqTerminalShutdownResult RetryTerminalShutdown() noexcept;
     QUIC_STATUS Dispatch(MsQuicStream* stream, QUIC_STREAM_EVENT* event) noexcept;
 
     mutable std::mutex ControlMutex_;
