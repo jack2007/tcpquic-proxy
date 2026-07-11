@@ -34,6 +34,13 @@ Darwin kqueue、Windows IOCP、nlohmann/json、CMake、GitHub Actions、k6、Pyt
 - Darwin/Windows timeout 后 request 可以 detach，但 shared command 必须持有 execution permit，
   直到 Completed/Cancelled；outstanding late command 始终不超过 1。
 - Windows worker/Admin 的 TCP read/write 保持 active-only 语义，不改用累计 `TcpSendBytes`。
+- **relay worker index 是端到端 identity，不只是 workers snapshot 字段。**每个平台在
+  `PickWorker()` 选中 worker 后，必须把稳定 slot 写入 `TqRelayHandle`，并原样传递到 tunnel
+  registry metadata、trace `relay_started`/`relay_stopping` 和 `/tunnels` JSON。不得从 worker
+  指针重新推断，也不得让 `WorkerIndex{0}` 的默认值作为非 aggregate relay 的回退值。
+  Linux 现场曾出现 workers API 正确显示 8 个 worker、active relays 实际分散，但所有 tunnel
+  因 handle/registry 未赋值而显示 `worker_index:0`；Darwin 和 Windows 必须在实现前防止同类
+  control-plane observability 假象。
 - helper 必须 header-only；若实现者改成 `.cpp`，必须先审计所有直接编译平台 worker 源文件的
   executable target，不能只接主程序。
 - 本计划不扩大 Stop 对 `PickWorker()` 返回裸指针或 relay handle 的保护范围；上层 shutdown
@@ -65,7 +72,12 @@ Darwin kqueue、Windows IOCP、nlohmann/json、CMake、GitHub Actions、k6、Pyt
   - 添加公共 helper test target，并纳入 `TCPQUIC_TEST_TARGETS`。
 - Modify: `src/tunnel/linux_relay_worker.h`
 - Modify: `src/tunnel/linux_relay_worker.cpp`
+- Modify: `src/tunnel/relay.h`
+- Modify: `src/tunnel/relay.cpp`
+- Modify: `src/tunnel/tcp_tunnel.cpp`
 - Modify: `src/unittest/linux_relay_worker_io_test.cpp`
+- Modify: `src/unittest/relay_backend_selection_test.cpp`
+- Modify: `src/unittest/tcp_tunnel_test.cpp`
   - Linux helper 迁移、deadline、staged Start、Stop barrier、identity 与 legacy metrics 回归。
 - Modify: `src/tunnel/darwin_relay_event_queue.h`
 - Modify: `src/tunnel/darwin_relay_worker.h`
@@ -211,6 +223,9 @@ Expected: build 成功，测试退出 0。
 在现有 runtime 测试附近增加 `TQ_UNIT_TESTING` one-shot hooks，并先写以下断言：
 
 - `SnapshotWorkers(deadline)` 启动 2 个 worker 时返回两个唯一 slot `0/1`；
+- 用至少两个实际 tunnel 覆盖 `PickWorker -> TqRelayHandle -> TqTunnelRegistryMetadata ->
+  /tunnels`：每条 tunnel 的 `worker_index` 必须等于创建它的 relay slot，不能因为 metadata 默认值
+  全部展示为 0；同时验证 `relay_started` 与 `relay_stopping` trace 使用同一 index；
 - 非 0 worker timeout/fallback 后仍为 `linux-1`，不能退化为重复 `linux-0`；
 - 共享 absolute deadline，两个 blocked worker 的总耗时不接近 `2 * 5s`；
 - lease acquire 后阻塞，Stop 已进入但 worker 未析构；释放后 Stop 完成；
@@ -254,6 +269,9 @@ in-flight counter，新增 `TqRelayRuntimeSnapshotSupport SnapshotSupport` 和
 - 逐 worker 使用同一 absolute deadline；无论 worker result 是否完整，都用 lease slot 覆盖
   `WorkerIndex`。
 - Stopped 空集合的 aggregate 与 workers result 显式 complete。
+- 在 `relay.h` 为 Linux 增加 `LinuxWorkerIndex`（Windows 已有等价字段；Darwin 也必须补齐）；
+  `TqRelayStart*()` 写入 `worker->WorkerIndex()`，`TqRelayStop()` 清零。`tcp_tunnel.cpp` 更新
+  registry metadata 与 trace 时必须读取 handle 中保存的 index，不能遗漏 Linux 分支。
 
 - [ ] **Step 5: 保留 Linux compatibility metrics**
 
@@ -340,6 +358,8 @@ Expected: 两个测试退出 0，无 timeout hang。
 使用 `tuning.RelayWorkerCount=2`、非默认 `RelayEventQueueCapacity`，断言：
 
 - `SnapshotWorkers(deadline)` 返回 N 个连续唯一 index 和真实 normalized capacity；
+- 启动至少两个 Darwin relay 后，`/tunnels` 的每条 `worker_index` 与 `darwin-N`/worker snapshot
+  对应；不得因 handle 或 registry metadata 未赋值而全部为 0；
 - aggregate capacity 取 max，Stopped 两条 snapshot 路径都 complete；
 - Snapshot A timeout 后 permit 由 late command 持有，Snapshot B 不 enqueue，outstanding `<=1`；
 - Snapshot 与 Stop 并发时 Stop 在 lease release 前不调用任何 worker Stop；
@@ -366,6 +386,8 @@ Stopped。Running 重复 Start 仍立即 true。
 - Stop 不等待 permit，但持 Runtime mutex 等 lease 归零，再 worker Stop/clear；queued command
   必须由 worker Stop cancel。
 - slot identity 由 lease 覆盖；runtime lock deadline 前失败时 identity incomplete。
+- 为 `TqRelayHandle` 增加 Darwin worker index，Darwin relay start/sink start 写入该 slot，stop 清零；
+  `tcp_tunnel.cpp` registry metadata 和 trace 读取该字段，并通过 client/server tunnel API 回归测试。
 
 - [ ] **Step 5: 运行 Darwin Runtime/metrics tests**
 
@@ -440,6 +462,8 @@ Expected: 测试退出 0，Application Verifier 留到 Task 12。
 必须设置 `tuning.WindowsRelayWorkerCount=2`，断言：
 
 - per-worker result size/index/identity 正确；
+- 启动至少两个 Windows relay 后，`/tunnels` 中每条 `worker_index` 与 `windows-N` 和 handle
+  中保存的 `WindowsWorkerIndex` 一致；不得因 registry metadata 漏传而回退为 0；
 - Stop 等待 lease，且 lease release 前 worker destructor count 为 0；
 - Snapshot A timeout 后 B 不产生第二 IOCP snapshot operation；
 - Start index k failure/throw 完整回滚，Running 重复 Start 不替换一代；
@@ -457,6 +481,9 @@ lease 只负责 worker lifetime。
 Start 在 Runtime lock 下 staged 构造 `TqWindowsRelayWorker(i)`，全部成功后 swap；失败停止局部
 workers 并恢复 Stopped。实现 `Snapshot(deadline)` / `SnapshotWorkers(deadline)`，identity 永远
 来自 slot，所有 worker 共用绝对 deadline。
+
+审计 `TqRelayStart*()`、receive-sink start、`TqRelayStop()`、tunnel registry metadata 和 trace：
+现有 `WindowsWorkerIndex` 必须在所有路径写入、使用和清零，不能只修 workers Admin snapshot。
 
 - [ ] **Step 4: 改造 Stop**
 
@@ -490,6 +517,9 @@ Expected: 测试退出 0。
 - Running N worker 返回 `aggregate + N`，Stopped 只有 complete aggregate；
 - 完整响应 sum/max 不变量成立；
 - `/relay/workers` 一次请求每 worker 只执行一次 Snapshot；
+- 同一批运行中的多 worker relay 同时请求 `/relay/workers` 与 `/tunnels` 时，非 aggregate
+  tunnel 的 `worker_index` 必须能对应其 handle/trace 的 slot；允许负载不均，但不允许所有
+  tunnel 因默认值集中显示为 0；
 - Darwin actual capacity、Windows active-only 字段、Linux prefix 均正确；
 - `/relay/metrics` 有 `snapshot_complete` 与 neutral runtime snapshot metrics；
 - runtime lock deadline 前失败时 `IdentitiesComplete=false`，空 aggregate 不能 vacuous true。
@@ -882,6 +912,8 @@ Expected:
   `/relay/metrics` 也不把 fallback 伪装为 complete。
 - Darwin 上报 normalized `EventQueue.Capacity()`；Windows read/write/pending 保持 active-only。
 - console 一次 refresh 只触发一轮 worker snapshot，并能显示 incomplete。
+- workers 表与 Tunnels 表的 worker index 可交叉核对：workers 的 active relay 分布和 tunnels
+  的 index 分布在同一稳定采样窗口内一致（聚合行 `aggregate` 的 index 0 不参与此比较）。
 - neutral snapshot stats、legacy aliases、slow Stop/deadline 日志可查询，pressure 后全部归零。
 - PR、nightly、release-lab 三层门禁通过，Admin/data-plane 性能和 60s/90s 恢复目标满足。
 - 所有实现、Admin API、平台文档、console 文档与 source design 一致。

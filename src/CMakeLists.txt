@@ -545,6 +545,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         unittest/relay_backend_selection_test.cpp
         unittest/trace_proxy_stub.cpp
         tunnel/relay.cpp
+        tunnel/stream_lifetime.cpp
         config/tuning.cpp
         tunnel/linux_relay_worker.cpp
         tunnel/relay_buffer.cpp

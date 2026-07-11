@@ -307,6 +307,7 @@ public:
     bool Start();
     bool StartForTest();
     void Stop();
+    uint32_t WorkerIndex() const noexcept { return Config.WorkerIndex; }
     bool Enqueue(TqLinuxRelayEvent event);
     bool EnqueueForTest(TqLinuxRelayEvent event);
     size_t DrainForTest(size_t budget);

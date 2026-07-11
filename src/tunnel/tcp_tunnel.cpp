@@ -633,6 +633,7 @@ public:
         const void* relayWorker = nullptr;
         if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
             relayId = RelayHandle.LinuxRelayId;
+            relayWorkerIndex = RelayHandle.LinuxWorkerIndex;
             relayWorker = RelayHandle.LinuxWorker;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             relayId = RelayHandle.WindowsRelayId;
@@ -756,6 +757,7 @@ public:
         uint64_t relayId = 0;
         if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
             backend = "linux";
+            workerIndex = RelayHandle.LinuxWorkerIndex;
             relayId = RelayHandle.LinuxRelayId;
         } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
             backend = "windows";
@@ -1096,6 +1098,11 @@ public:
         metadata.Ingress = TraceIngressProto == 2 ? "http" : (TraceIngressProto == 1 ? "socks" : "");
         metadata.Compress = TqCompressName(algo);
         metadata.RelayBackend = TqRelayBackendName(RelayHandle);
+        if (RelayHandle.Backend == TqRelayBackendType::LinuxWorker) {
+            metadata.WorkerIndex = RelayHandle.LinuxWorkerIndex;
+        } else if (RelayHandle.Backend == TqRelayBackendType::WindowsWorker) {
+            metadata.WorkerIndex = RelayHandle.WindowsWorkerIndex;
+        }
         TqUpdateConnectionTunnelMetadata(QuicConn, this, metadata);
     }
 

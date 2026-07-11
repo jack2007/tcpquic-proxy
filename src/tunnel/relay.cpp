@@ -86,6 +86,7 @@ bool TqRelayStartImpl(
     handle->Backend = TqRelayBackendType::LinuxWorker;
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
+    handle->LinuxWorkerIndex = worker->WorkerIndex();
     return true;
 #elif defined(__APPLE__)
     if (streamOwner == nullptr) {
@@ -223,6 +224,7 @@ bool TqRelayStartQuicReceiveSinkImpl(
     handle->Backend = TqRelayBackendType::LinuxWorker;
     handle->LinuxWorker = worker;
     handle->LinuxRelayId = registered.RelayId;
+    handle->LinuxWorkerIndex = worker->WorkerIndex();
     return true;
 #else
     (void)streamOwner;
@@ -293,6 +295,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         handle->Backend = TqRelayBackendType::None;
         handle->LinuxWorker = nullptr;
         handle->LinuxRelayId = 0;
+        handle->LinuxWorkerIndex = 0;
         handle->Stop.store(true);
         if (handle->Control != nullptr) handle->Control->Stop.store(true);
         if (worker != nullptr && relayId != 0) {

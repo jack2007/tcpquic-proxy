@@ -31,6 +31,7 @@ struct TqRelayHandle {
     TqRelayBackendType Backend{TqRelayBackendType::None};
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};
+    uint32_t LinuxWorkerIndex{0};
     TqWindowsRelayWorker* WindowsWorker{nullptr};
     uint64_t WindowsRelayId{0};
     uint32_t WindowsWorkerIndex{0};
