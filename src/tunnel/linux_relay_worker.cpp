@@ -1149,7 +1149,8 @@ void TqLinuxRelayWorker::AbortRelayAndRelease(
 TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
     RelayState* relay,
     const char* reason,
-    uint64_t errorCode) noexcept {
+    uint64_t errorCode,
+    bool gracefulComplete) noexcept {
     if (relay == nullptr || relay->StreamOwner == nullptr || relay->StopControl == nullptr) {
         if (relay != nullptr) {
             AbortRelayAndRelease(relay, reason, false);
@@ -1180,7 +1181,9 @@ TqTerminalShutdownResult TqLinuxRelayWorker::BeginTerminalHandoff(
     }
 
     const auto result = relay->StreamOwner->BeginTerminalShutdown(
-        errorCode, sink, handoff->Escalation);
+        errorCode, sink, handoff->Escalation,
+        gracefulComplete ? TqTerminalShutdownIntent::GracefulComplete
+                         : TqTerminalShutdownIntent::AbortBothImmediate);
     AbortRelayAndRelease(relay, reason, false);
     handoff->DataPlaneStopped.store(true, std::memory_order_release);
     handoff->LocalOperationOwnershipTransferredOrDrained.store(
@@ -2612,7 +2615,7 @@ void TqLinuxRelayWorker::MaybeStopFullyClosedRelay(RelayState* relay, const char
         relay->PendingQuicReceiveBytes != 0) {
         return;
     }
-    SetRelayStop(relay, trigger);
+    (void)BeginTerminalHandoff(relay, trigger, 0, true);
 }
 
 bool TqLinuxRelayWorker::HasPendingAfterStreamShutdown(RelayState* relay) const {

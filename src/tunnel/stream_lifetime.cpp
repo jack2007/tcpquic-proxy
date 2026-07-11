@@ -676,7 +676,8 @@ QUIC_STATUS TqStreamLifetime::CallTerminalShutdown(
 TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     uint64_t errorCode,
     std::shared_ptr<Target> terminalSink,
-    std::shared_ptr<TqTerminalEscalation> escalation) noexcept {
+    std::shared_ptr<TqTerminalEscalation> escalation,
+    TqTerminalShutdownIntent intent) noexcept {
     TqTerminalShutdownResult result{};
     std::shared_ptr<TqStreamLifetime> lease;
     std::shared_ptr<TqTerminalLedger> ledger;
@@ -728,6 +729,7 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         ++RouteGeneration_;
         TerminalEscalation_ = std::move(escalation);
         TerminalErrorCode_ = errorCode;
+        TerminalShutdownIntent_ = intent;
         TerminalPhase_ = TerminalPhase::ShutdownReserved;
         TerminalRetryOwned_ = false;
         ++TerminalShutdownAttempt_;
@@ -754,9 +756,13 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     }
 #endif
 
+    const bool gracefulComplete =
+        intent == TqTerminalShutdownIntent::GracefulComplete;
     const auto flags = static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
         QUIC_STREAM_SHUTDOWN_FLAG_ABORT | QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE);
-    result.Status = CallTerminalShutdown(stream, errorCode, flags);
+    result.Status = gracefulComplete
+        ? QUIC_STATUS_SUCCESS
+        : CallTerminalShutdown(stream, errorCode, flags);
 
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
@@ -797,7 +803,13 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
         result.Status,
         result.Attempt,
         result.Submitted,
-        TqTerminalShutdownIntent::AbortBothImmediate);
+        intent);
+    if (gracefulComplete) {
+        QUIC_STREAM_EVENT terminal{};
+        terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
+        (void)Dispatch(stream, &terminal);
+        return result;
+    }
     std::shared_ptr<TqTerminalEscalation> schedulerEscalation;
     uint64_t schedulerErrorCode = 0;
     uint32_t schedulerWatchdogSeconds = 5;
@@ -827,13 +839,16 @@ TqTerminalShutdownResult TqStreamLifetime::RetryTerminalShutdown() noexcept {
     std::shared_ptr<Target> sink;
     std::shared_ptr<TqTerminalEscalation> escalation;
     uint64_t errorCode = 0;
+    TqTerminalShutdownIntent intent = TqTerminalShutdownIntent::AbortBothImmediate;
     {
         std::lock_guard<std::mutex> guard(ControlMutex_);
         sink = TerminalSink_;
         escalation = TerminalEscalation_;
         errorCode = TerminalErrorCode_;
+        intent = TerminalShutdownIntent_;
     }
-    return BeginTerminalShutdown(errorCode, std::move(sink), std::move(escalation));
+    return BeginTerminalShutdown(
+        errorCode, std::move(sink), std::move(escalation), intent);
 }
 
 TqStreamCallbackTarget::TqStreamCallbackTarget(

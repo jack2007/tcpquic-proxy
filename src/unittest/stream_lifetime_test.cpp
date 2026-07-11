@@ -155,6 +155,25 @@ void TestBeginTerminalShutdownPendingIsSubmittedOnce() {
     CHECK(owner->DispatchForTest(&terminal) == QUIC_STATUS_SUCCESS);
 }
 
+void TestGracefulCompleteUsesOnlyGracefulShutdown() {
+    auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
+    uint32_t calls = 0;
+    owner->SetShutdownHookForTest([&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
+        ++calls;
+        return QUIC_STATUS_INTERNAL_ERROR;
+    });
+    const auto result = owner->BeginTerminalShutdown(
+        0, std::make_shared<CountingTarget>(), nullptr,
+        TqTerminalShutdownIntent::GracefulComplete);
+    CHECK(result.Submitted);
+    CHECK(calls == 0);
+    const auto snapshot = owner->TerminalLedger()->Snapshot(std::chrono::steady_clock::now());
+    CHECK(snapshot.ShutdownIntent == TqTerminalShutdownIntent::GracefulComplete);
+    CHECK(snapshot.Phase == TerminalPhase::TerminalObserved);
+    CHECK(snapshot.Watchdog == TqTerminalWatchdogState::Idle);
+    CHECK(owner->GetTerminalPhase() == TerminalPhase::TerminalObserved);
+}
+
 void TestBeginTerminalShutdownFailureReturnsToActive() {
     auto owner = MakeDetachedStartedOwner(std::make_shared<CountingTarget>());
     owner->SetShutdownHookForTest([](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS) {
@@ -466,6 +485,7 @@ int main() {
     TestTerminalPublicInterfaceDefaults();
     TestBindTerminalIdentityCreatesExactlyOneLedger();
     TestBeginTerminalShutdownPendingIsSubmittedOnce();
+    TestGracefulCompleteUsesOnlyGracefulShutdown();
     TestBeginTerminalShutdownFailureReturnsToActive();
     TestTerminalObservedCannotBeDowngradedByLateShutdownRecord();
     TestTerminalShutdownFailureCanRetryAndSubmit();

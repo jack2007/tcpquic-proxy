@@ -562,7 +562,8 @@ private:
     TqTerminalShutdownResult BeginTerminalHandoff(
         RelayState* relay,
         const char* reason,
-        uint64_t errorCode) noexcept;
+        uint64_t errorCode,
+        bool gracefulComplete = false) noexcept;
     void AbortRelayAndRelease(RelayState* relay, const char* trigger, bool abortStream);
     bool CanAbortCallbackStream(
         uint64_t relayId,

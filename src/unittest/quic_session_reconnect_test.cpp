@@ -642,6 +642,8 @@ static int TestConnectionSnapshotAndSlotControls() {
     snapshots = session.SnapshotConnections();
     if (snapshots.size() != 3) return 87;
     if (snapshots[2].ConnectionId != "conn-2") return 88;
+    if (snapshots[2].Generation != 1 || snapshots[2].NumericConnectionId == 0) return 98;
+    const uint64_t removedNumericId = snapshots[2].NumericConnectionId;
 
     if (session.StopHighestConnection("conn-0", err)) return 89;
     if (err.find("highest") == std::string::npos) return 90;
@@ -654,6 +656,12 @@ static int TestConnectionSnapshotAndSlotControls() {
     if (!session.StopHighestConnection("conn-2", err)) return 93;
     snapshots = session.SnapshotConnections();
     if (snapshots.size() != 2) return 94;
+
+    if (!session.SetDesiredConnectionCount(3, err)) return 99;
+    snapshots = session.SnapshotConnections();
+    if (snapshots.size() != 3 || snapshots[2].Generation != 1 ||
+        snapshots[2].NumericConnectionId == 0 ||
+        snapshots[2].NumericConnectionId == removedNumericId) return 100;
 
     if (!session.AbortConnectionTunnels("conn-1", err)) return 95;
     session.Stop();
@@ -903,7 +911,7 @@ static int TestStartSlotDoesNotOverwriteChangedGeneration() {
         (void)session.ReconnectConnection("conn-0", err);
     };
     hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
-        if (index == 0 && generation == 1) {
+        if (index == 0 && generation == 2) {
             deletedStaleGeneration.store(true, std::memory_order_release);
         }
     };
@@ -941,7 +949,7 @@ static int TestStartSlotCleansUnpublishedContextOnLocalBindFailure() {
     std::atomic<int> deletedContexts{0};
     QuicClientSession::ReconnectTestHooks hooks;
     hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
-        if (index == 0 && generation == 1) {
+        if (index == 0 && generation == 2) {
             deletedContexts.fetch_add(1, std::memory_order_acq_rel);
         }
     };
@@ -987,7 +995,7 @@ static int TestConnectionStartFailureCleansContextAndSchedulesRetry() {
         return index == 0 ? QUIC_STATUS_ABORTED : QUIC_STATUS_SUCCESS;
     };
     hooks.ContextDeleted = [&](size_t index, uint64_t generation) {
-        if (index == 0 && generation == 1) {
+        if (index == 0 && generation == 2) {
             deletedContexts.fetch_add(1, std::memory_order_acq_rel);
         }
     };

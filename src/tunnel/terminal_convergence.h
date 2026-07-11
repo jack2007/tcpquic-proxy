@@ -33,6 +33,7 @@ enum class TqTerminalWatchdogState : uint8_t {
 
 enum class TqTerminalShutdownIntent : uint8_t {
     None,
+    GracefulComplete,
     AbortBothImmediate,
 };
 

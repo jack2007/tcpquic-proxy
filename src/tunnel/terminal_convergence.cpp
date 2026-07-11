@@ -927,8 +927,8 @@ void TqTerminalLedger::RecordEvent(TqTerminalEvent event) noexcept {
     State_.LastStreamEvent = event;
     if (event == TqTerminalEvent::ShutdownComplete) {
         State_.Phase = TerminalPhase::TerminalObserved;
-        if (State_.Watchdog != TqTerminalWatchdogState::Canceled &&
-            State_.Watchdog != TqTerminalWatchdogState::TerminalTimeout) {
+        if (State_.Watchdog == TqTerminalWatchdogState::Armed ||
+            State_.Watchdog == TqTerminalWatchdogState::Escalated) {
             State_.Watchdog = TqTerminalWatchdogState::Canceled;
             g_watchdogCanceled.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1122,6 +1122,7 @@ const char* TqTerminalWatchdogStateName(TqTerminalWatchdogState state) noexcept 
 const char* TqTerminalShutdownIntentName(TqTerminalShutdownIntent intent) noexcept {
     switch (intent) {
     case TqTerminalShutdownIntent::None: return "none";
+    case TqTerminalShutdownIntent::GracefulComplete: return "graceful_complete";
     case TqTerminalShutdownIntent::AbortBothImmediate: return "abort_both_immediate";
     }
     return "unknown";

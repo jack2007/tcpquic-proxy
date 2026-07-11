@@ -200,7 +200,9 @@ public:
     TqTerminalShutdownResult BeginTerminalShutdown(
         uint64_t errorCode,
         std::shared_ptr<TqStreamLifetime::Target> terminalSink,
-        std::shared_ptr<TqTerminalEscalation> escalation) noexcept;
+        std::shared_ptr<TqTerminalEscalation> escalation,
+        TqTerminalShutdownIntent intent =
+            TqTerminalShutdownIntent::AbortBothImmediate) noexcept;
 
     bool PublishTarget(
         uint64_t expectedGeneration,
@@ -264,6 +266,8 @@ private:
     TerminalPhase TerminalPhase_{TerminalPhase::Active};
     std::shared_ptr<TqTerminalEscalation> TerminalEscalation_;
     uint64_t TerminalErrorCode_{0};
+    TqTerminalShutdownIntent TerminalShutdownIntent_{
+        TqTerminalShutdownIntent::AbortBothImmediate};
     uint32_t TerminalShutdownAttempt_{0};
     bool TerminalRetryOwned_{false};
     uint32_t TerminalWatchdogSeconds_{5};
