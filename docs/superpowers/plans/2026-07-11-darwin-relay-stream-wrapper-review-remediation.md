@@ -147,7 +147,7 @@ Task 5 必须统一收口前面产生的 control、operation 和 active-failure 
 **Files:** `relay.h`, `relay.cpp`, `tcp_tunnel.cpp`, `darwin_relay_worker.h/.cpp`,
 `tcp_tunnel_test.cpp`, `tunnel_reaper_test.cpp`, `darwin_relay_worker_io_test.cpp`.
 
-- [ ] **Step 1: 先增加正常 terminal -> reaper 失败测试**
+- [x] **Step 1: 先增加正常 terminal -> reaper 失败测试**
   - 使用真实 `TqTunnelContext`/reaper harness，不只检查 worker relay map。
   - 启动 managed Darwin relay，记录 context destructor、`OnComplete`、active-relay count
     和 control stop 次数。
@@ -156,7 +156,7 @@ Task 5 必须统一收口前面产生的 control、operation 和 active-failure 
   - 断言 reaper 回收 context，destructor/`OnComplete` 各一次，active count 恢复
     基线，owner/control weak ref 最终失效。
 
-- [ ] **Step 2: 增加真实 handle storage 释放与原地复用测试**
+- [x] **Step 2: 增加真实 handle storage 释放与原地复用测试**
   - 用 placement new 在同一块 storage 构造 handle A，注册 relay A。
   - 在 callback fallback barrier 上暂停，销毁 A，在同一 storage 构造 handle B
     并注册 relay B。
@@ -164,14 +164,14 @@ Task 5 必须统一收口前面产生的 control、operation 和 active-failure 
     worker、relay id、Stop 和 generation 不变。
   - ASan 必须 0 UAF；测试不得保留 A 的 handle owner 伪造安全。
 
-- [ ] **Step 3: 定义 `TqRelayControl` 契约**
+- [x] **Step 3: 定义 `TqRelayControl` 契约**
   - control 含 immutable `Generation`、atomic `Stop`、once-only
     `ActiveAccountingReleased`。
   - 增加 `SignalStop(expectedGeneration)` 和 `ReleaseActiveAccountingOnce()` helper；
     generation mismatch 只记诊断，不改状态。
   - control 不强持 worker、relay、binding、tunnel context 或 stream owner。
 
-- [ ] **Step 4: 重写 Darwin start/publication 边界**
+- [x] **Step 4: 重写 Darwin start/publication 边界**
   - `TqRelayStartImpl()` 在 registration 前创建 control/accounting token，registration
     只接收 control + generation，不接收 handle pointer。
   - worker commit 成功后，只由 caller 将 Backend/worker/relay id/control/generation
@@ -179,19 +179,19 @@ Task 5 必须统一收口前面产生的 control、operation 和 active-failure 
   - 发布前或发布后立即观察到 control Stop 时，收敛为 start failure/
     immediate stop，FD 和 accounting 只归还一次。
 
-- [ ] **Step 5: 删除 Darwin worker 的 `PublicHandle`**
+- [x] **Step 5: 删除 Darwin worker 的 `PublicHandle`**
   - 删除 `RelayState::PublicHandle`、`ClearPublicHandle()` 及 callback/fallback 对
     `RelayHandle.Stop` 的写入。
   - terminal、active shutdown、queue fallback、worker stop 只调用 control helper。
   - `TqRelayStop()` 由 tunnel-owned handle 捕获 Backend/worker/id/control，清空 handle，
     同步 unregister，并通过 control 释放 accounting 一次。
 
-- [ ] **Step 6: 验证 normal terminal、explicit stop、queue full 和 runtime stop 竞争**
+- [x] **Step 6: 验证 normal terminal、explicit stop、queue full 和 runtime stop 竞争**
   - 四条路径任意排列均只回收 context、FD、accounting 一次。
   - terminal event 丢失时 control 仍使 reaper 完成本地 cleanup；正常 terminal
     与 queue-full terminal 最终结果一致。
 
-- [ ] **Step 7: 独立提交**
+- [x] **Step 7: 独立提交**
 
 ```bash
 rtk git add src/tunnel/relay.h src/tunnel/relay.cpp src/tunnel/tcp_tunnel.cpp src/tunnel/darwin_relay_worker.h src/tunnel/darwin_relay_worker.cpp src/unittest/tcp_tunnel_test.cpp src/unittest/tunnel_reaper_test.cpp src/unittest/darwin_relay_worker_io_test.cpp
@@ -205,7 +205,7 @@ rtk git commit -m "fix(darwin): replace relay public handle callbacks with share
 **Files:** `darwin_relay_worker.h/.cpp`, `darwin_relay_event_queue.h`,
 `darwin_relay_worker_io_test.cpp`, `darwin_relay_worker_queue_test.cpp`.
 
-- [ ] **Step 1: 增加 publish 入口确定性 callback 测试**
+- [x] **Step 1: 增加 publish 入口确定性 callback 测试**
   - 在 `PublishTarget()` 完成但 registration 尚未执行下一条语句的 barrier
     上分别注入 RECEIVE、terminal 和 peer abort。
   - RECEIVE 必须看到非零 relay id、正确 generation、可 lock 的 weak owner，
@@ -213,21 +213,21 @@ rtk git commit -m "fix(darwin): replace relay public handle callbacks with share
   - terminal 必须使 registration 返回 `Ok=false, TcpFdConsumed=true`，不发布
     public handle，FD 只 close 一次。
 
-- [ ] **Step 2: 增加 commit 最终线性化对照测试**
+- [x] **Step 2: 增加 commit 最终线性化对照测试**
   - barrier A：terminal 在最终 commit check 前发布，预期 rollback。
   - barrier B：terminal 在 `Prepared -> Active` 线性化点后发布，registration
     可返回成功，但 control 立即 Stop 并走正常 terminal cleanup。
   - 两条路径均断言 filter install/delete、FD close、precommit discard/drain 和
     map publication 各一次。
 
-- [ ] **Step 3: 一次性初始化 callback-visible identity**
+- [x] **Step 3: 一次性初始化 callback-visible identity**
   - publish 前分配 relay id，设置 immutable route generation、weak relay、weak
     stream owner、control/generation、completion state 和 precommit limit。
   - `binding->Relay`/`binding->StreamOwner` 发布后不再 reset。terminal/retire 只修改
     atomics/activation phase，weak pointer 随对象自然析构变 expired。
   - pending receive 从 binding weak owner 取得强 owner，不从 map 中的 relay 推导。
 
-- [ ] **Step 4: 引入 prepared token 和单一 activation mutex**
+- [x] **Step 4: 引入 prepared token 和单一 activation mutex**
   - token 拥有 FD disposition、filter-installed bit、map publication、binding、precommit
     queue 和 rollback once flag。
   - target publish 成功时 token 不可逆接管 FD；caller 立即将自己的 FD
@@ -236,14 +236,14 @@ rtk git commit -m "fix(darwin): replace relay public handle callbacks with share
     `Prepared` 竞争进入 `Active|Terminal|Failed`。
   - mutex 内不调用 MsQuic、kevent、close、wait 或 destructor；只产生 disposition。
 
-- [ ] **Step 5: 实现 commit 最终校验与 rollback**
+- [x] **Step 5: 实现 commit 最终校验与 rollback**
   - 先安装 inactive filter，再在 activation mutex 内校验 owner phase、route generation、
     control generation、map identity 和 terminal bit。
   - commit 赢得后启用 filter、标记 `Committed` 并 drain precommit；terminal/failed
     赢得后删 filter、清 queue、request active shutdown、close FD 一次，不恢复旧 target。
   - public result 只在 commit 成功后生成。
 
-- [ ] **Step 6: 结构审计与独立提交**
+- [x] **Step 6: 结构审计与独立提交**
   - 用 `rtk rg` 列出 binding 所有 shared/weak pointer 写入点，确认 publish 后零写入。
   - 增加 weak expiry/destructor 计数，证明 owner/router/binding/relay 无强引用环。
 
@@ -259,30 +259,30 @@ rtk git commit -m "fix(darwin): make relay target publication transactional"
 **Files:** `stream_lifetime.h/.cpp`, `darwin_relay_worker.h/.cpp`,
 `stream_lifetime_test.cpp`, `darwin_relay_worker_io_test.cpp`.
 
-- [ ] **Step 1: 加入“注册后、active recheck 前 terminal”失败测试**
+- [x] **Step 1: 加入“注册后、active recheck 前 terminal”失败测试**
   - completion key 注册后触发 barrier，另一线程发布 terminal 并 seal binding。
   - 断言 Send 次数为 0，registry active count 恢复基线，cleanup/operation
     析构各一次，最后一个外部 owner 释放后 weak owner 失效。
 
-- [ ] **Step 2: 穷举 completion registration 后的所有退出点**
+- [x] **Step 2: 穷举 completion registration 后的所有退出点**
   - binding null/inactive、relay closing、stream mismatch、operation state failure、registry failure、
     Send synchronous failure、callback-before-return、terminal-before-Send。
   - 每个退出点都断言 registry count、operation destructor、buffer accounting 和
     owner weak expiry。
 
-- [ ] **Step 3: 实现 move-only completion reservation**
+- [x] **Step 3: 实现 move-only completion reservation**
   - reservation 持有 owner + key + armed bit；destructor 在 armed 时调用
     `CancelSendCompletion()`。
   - 只有 Send 成功提交或 callback 已 claim 并接管 operation 时才 dismiss。
   - callback-before-return 时 cancel 可返回 false，但 cleanup/operation 只结算一次。
   - reservation 不写入 owner completion record，禁止 owner self-cycle。
 
-- [ ] **Step 4: 改写 `TrySubmitQuicSendOperation()` 为单一 cleanup 协议**
+- [x] **Step 4: 改写 `TrySubmitQuicSendOperation()` 为单一 cleanup 协议**
   - lease、reservation、known-operation registration、in-flight accounting 按固定顺序建立。
   - pre-submit return 不再手写分散 cancel；operation ownership 在 unique_ptr、callback
     claim 和 worker completion 之间只能有一方持有。
 
-- [ ] **Step 5: 可观测性与独立提交**
+- [x] **Step 5: 可观测性与独立提交**
   - snapshot 增加 active reservation、pre-submit rollback、unknown/duplicate claim、oldest age；
     测试结束 active/oldest 为 0。
 
@@ -298,7 +298,7 @@ rtk git commit -m "fix(darwin): roll back unsubmitted send completion reservatio
 **Files:** `darwin_relay_event_queue.h`, `darwin_relay_worker.h/.cpp`,
 `darwin_relay_worker_io_test.cpp`, `darwin_relay_worker_queue_test.cpp`.
 
-- [ ] **Step 1: 增加 allocation failure 对照测试**
+- [x] **Step 1: 增加 allocation failure 对照测试**
   - 用精确 fault hook 仅使 pending receive allocation 失败，不影响其他分配。
   - callback 后断言 owner phase 仍为 `Starting|Started`，binding terminal=false，
     `QuicShutdownComplete` event 数为 0，active-shutdown reason 为 allocation failure。
@@ -306,30 +306,30 @@ rtk git commit -m "fix(darwin): roll back unsubmitted send completion reservatio
     `ReceiveComplete()`，shutdown intent 只提交一次。
   - 随后注入真正 terminal，断言此时才执行 `TerminalLogicalDetach`。
 
-- [ ] **Step 2: 增加 allocation failure + queue full/worker stopped 组合测试**
+- [x] **Step 2: 增加 allocation failure + queue full/worker stopped 组合测试**
   - active-failure event 入队失败时，worker-independent sink/control 保留 owner
     并请求 shutdown，callback 不等待 queue。
   - worker 已退出时不访问 worker pointer，terminal 后 owner/control 归零。
 
-- [ ] **Step 3: 引入 typed active-failure reason/disposition**
+- [x] **Step 3: 引入 typed active-failure reason/disposition**
   - 新增 `QuicActiveShutdown` 或等价 typed event，携带 relay owner/control generation、
     `ReceiveAllocationFailed|ReceiveBudgetExceeded|ReceiveQueueFull` reason 和 shutdown intent。
   - `QuicShutdownComplete` 只能由真正 `SHUTDOWN_COMPLETE` callback 产生；增加
     debug invariant counter/assertion 阻止其他调用点。
 
-- [ ] **Step 4: 删除 pending receive 的裸 stream capability**
+- [x] **Step 4: 删除 pending receive 的裸 stream capability**
   - 删除 `TqDarwinPendingQuicReceive::ReceiveCompleteStream`。
   - callback 内同步 `ReceiveSetEnabled(false)` 仅使用当次 callback 参数，不保存。
   - deferred active completion 只从 `receive->StreamOwner->TryAcquireApi()` 取得 stream；
     owner terminal/abort discard 不调用 stream API。
 
-- [ ] **Step 5: 固化 callback 失败契约**
+- [x] **Step 5: 固化 callback 失败契约**
   - allocation failure 未接管 buffer：将 consumed length 设为 0，通过 owner ledger 请求
     `AbortBoth`，返回 `QUIC_STATUS_OUT_OF_MEMORY`，不先调用 `ReceiveComplete()`。
   - callback budget 拒绝与 event queue full 分开定义：已返回 `PENDING` 的 buffer
     由 pending record once-only complete/discard，未接管 buffer 不伪造 deferred complete。
 
-- [ ] **Step 6: 独立提交**
+- [x] **Step 6: 独立提交**
 
 ```bash
 rtk git add src/tunnel/darwin_relay_event_queue.h src/tunnel/darwin_relay_worker.h src/tunnel/darwin_relay_worker.cpp src/unittest/darwin_relay_worker_io_test.cpp src/unittest/darwin_relay_worker_queue_test.cpp
@@ -350,7 +350,7 @@ rtk git commit -m "fix(darwin): keep receive allocation failures on active shutd
   - 退出后由 Stop 线程 purge，断言 0 assertion/deadlock，每个
     command/operation/accounting 收敛一次。
 
-- [ ] **Step 2: 分离 worker-local drain 与 lifecycle-safe purge**
+- [x] **Step 2: 分离 worker-local drain 与 lifecycle-safe purge**
   - worker-local drain 可调用 data-plane handler。
   - worker-exited purge 只允许 receive local discard、typed send settle、terminal cleanup、
     control signal 和 control command completion。
@@ -364,7 +364,7 @@ rtk git commit -m "fix(darwin): keep receive allocation failures on active shutd
     并请求 receive abort，SEND_COMPLETE 使用 typed registry 收敛。
   - sink 不持 worker、relay raw pointer、handle pointer 或 stream pointer。
 
-- [ ] **Step 4: 修正 peer abort 方向和本地 ledger**
+- [x] **Step 4: 修正 peer abort 方向和本地 ledger**
   - `PEER_SEND_ABORTED` -> `AbortReceive`，标记 QUIC->TCP 方向关闭并丢弃
     pending receive。
   - `PEER_RECEIVE_ABORTED` -> `AbortSend`，停止 TCP->QUIC 新 send，已提交
@@ -373,13 +373,13 @@ rtk git commit -m "fix(darwin): keep receive allocation failures on active shutd
     方向，同方向 API call 不重复。
   - 测试记录每次 fake `StreamShutdown` flags/error code，不只断言 owner phase。
 
-- [ ] **Step 5: 固化 `CANCEL_ON_LOSS` error code**
+- [x] **Step 5: 固化 `CANCEL_ON_LOSS` error code**
   - 在公共 relay header 定义 62-bit 范围内的
     `TqRelayStreamErrorCancelOnLoss`（建议保留值 `0x54510001`）。
   - callback 同步设置 `event->CANCEL_ON_LOSS.ErrorCode`，更新方向诊断，
     不设 terminal/不切 route。
 
-- [ ] **Step 6: 独立提交**
+- [x] **Step 6: 独立提交**
 
 ```bash
 rtk git add src/tunnel/relay.h src/tunnel/darwin_relay_event_queue.h src/tunnel/darwin_relay_worker.h src/tunnel/darwin_relay_worker.cpp src/unittest/darwin_relay_worker_io_test.cpp src/unittest/darwin_relay_worker_queue_test.cpp
@@ -391,7 +391,7 @@ rtk git commit -m "fix(darwin): separate stopped purge and directional abort han
 **Files:** `relay_metrics.h/.cpp`, `darwin_relay_metrics_test.cpp`, `router_runtime_test.cpp`,
 `thread_model_cn.md`, `docs/relay_macos.md`, `src/CMakeLists.txt` as needed.
 
-- [ ] **Step 1: 增加发布门禁 metrics**
+- [x] **Step 1: 增加发布门禁 metrics**
   - control：active、stop signaled、generation mismatch、accounting duplicate release。
   - registration：prepared、commit success、terminal-before-commit rollback、activation failure、
     precommit bytes/depth。
@@ -399,12 +399,12 @@ rtk git commit -m "fix(darwin): separate stopped purge and directional abort han
     active-failure by reason。
   - stop：shutdown sink active、worker-exited purge events、stop remaining/oldest age。
 
-- [ ] **Step 2: Admin/runtime snapshot 聚合与 invariant tests**
+- [x] **Step 2: Admin/runtime snapshot 聚合与 invariant tests**
   - multi-worker 聚合不重复计算全局 terminal retention；sum/max 语义逐项测试。
   - 每个 focused case 结束后 active control、prepared、send reservation、pending receive、
     shutdown sink 和 stop remaining 全部为 0。
 
-- [ ] **Step 3: 更新 Darwin 线程/生命周期文档**
+- [x] **Step 3: 更新 Darwin 线程/生命周期文档**
   - 用时序图记录 tunnel caller、control、router callback、worker、reaper 的
     ownership 和线性化点。
   - 记录 transaction FD disposition、terminal 竞争和 worker stop sink。
@@ -433,7 +433,7 @@ rtk git diff --check
   - macOS ASan 不使用 unsupported `detect_leaks`；用 destructor/registry/metric 证明
     逻辑泄漏为 0。
 
-- [ ] **Step 6: 独立提交**
+- [x] **Step 6: 独立提交**
 
 ```bash
 rtk git add src/runtime/relay_metrics.h src/runtime/relay_metrics.cpp src/unittest/darwin_relay_metrics_test.cpp src/unittest/router_runtime_test.cpp src/docs/thread_model_cn.md docs/relay_macos.md src/CMakeLists.txt
@@ -592,11 +592,81 @@ payload hash 校验，再检查 owner/control/registry/queue 归零。任一 stu
 
 - [ ] 9 个评审问题均有失败测试、实现修复和回归证据。
 - [ ] Darwin callback/late event/retired cleanup 不解引用 tunnel-owned handle 或 worker capability。
-- [ ] transaction 的 identity、generation、FD 和 activation 只收敛一次。
-- [ ] send completion 在所有 pre-submit exit 上自动 rollback，terminal 不泄漏 owner。
-- [ ] receive allocation failure 仅走 ActiveShutdown，pending receive 不持裸 stream。
+- [x] transaction 的 identity、generation、FD 和 activation 只收敛一次。
+- [x] send completion 在所有 pre-submit exit 上自动 rollback，terminal 不泄漏 owner。
+- [x] receive allocation failure 仅走 ActiveShutdown，pending receive 不持裸 stream。
 - [ ] worker-exited purge 不进 worker-only handler，shutdown sink 不引用 worker。
-- [ ] peer abort 方向、`CANCEL_ON_LOSS` error code 和 terminal 分类符合设计。
+- [x] peer abort 方向、`CANCEL_ON_LOSS` error code 和 terminal 分类符合设计。
 - [ ] focused、ASan、E2E、k6、capacity、soak 和异常恢复门禁通过。
 - [ ] owner/control/registry/queue/retired/context metrics 在测试结束 30s 内归零。
 - [ ] `rtk git diff --check` 通过，文档与实现的线程/所有权说明一致。
+
+## 12. 2026-07-11 实现提交评审记录
+
+### 12.1 评审范围与完成标记说明
+
+- 评审提交范围：`b0a2a05..fd1ead7`，并核对合并提交 `3c86bc0` 后的当前代码。
+- Task 1–4 的实现、确定性测试和独立提交已有对应代码证据，已标记完成。
+- Task 5 的 stopped purge、方向性 shutdown、error code 和测试骨架已实现；但
+  shutdown sink 仍存在下述 P1 问题，因此 Step 3 和相关最终门禁保持未完成。
+- Task 6 的 metrics、聚合测试、文档和独立提交已有代码证据，已标记完成；未发现
+  Darwin focused 全量执行记录、ASan、E2E、k6、capacity、soak 或异常恢复报告，
+  Step 4、Step 5 及对应最终发布门禁保持未完成。
+- 本次在 Linux 上完成 common 回归：`tcpquic_stream_lifetime_test`、
+  `tcpquic_tunnel_test`、`tcpquic_router_runtime_test` 均通过；Darwin-only 测试无法在
+  当前主机执行。提交范围及当前工作区的 `git diff --check` 均通过。
+
+### 12.2 新发现问题
+
+#### P1-10：worker stop 会丢弃已提交 send 的 late completion，导致 operation/binding 无法收敛
+
+**证据：** `TqStreamLifetime::RegisterSendCompletion()` 保存注册时的
+`RouteSnapshot::TargetOwner`；`Dispatch()` 收到 `SEND_COMPLETE` 后仍把事件发给该旧 target，
+不会改投当前 route。`TqDarwinRelayWorker::Stop()` 先调用
+`StreamCallbackEndpoint->CloseAndWait()`；旧 `StreamBinding::OnStreamEvent()` 随后因
+`TryEnter()` 返回空而直接返回，无法进入 `CompleteDetachedQuicSend()`。因此
+`ShutdownSink::SEND_COMPLETE` 对 stop 前已经注册的 completion 实际不可达。当前真实
+worker-exit 测试直接构造 worker queue event，没有通过 owner completion registry，未覆盖
+这一生产路径。
+
+**影响：** late completion 的 `TqDarwinRelaySendOperation` 不释放，
+`CompletionState::KnownSendOperationCount` 不归零，retired binding/relay 可被长期保留；
+`WaitForKnownOperationsToDrain()` 最终只能超限并增加 error，违反 Task 5、R10 和最终零残留门禁。
+
+**修复要求：** stop 前已注册 completion 必须持有 worker-independent completion target；
+或者让旧 binding 在 endpoint admission 失败时仍能仅执行 typed detached completion，且不进入
+worker data plane。增加确定性测试：先经 owner registry 提交 send，执行真实 `Stop()`，再由
+owner 分派 `SEND_COMPLETE`，断言 operation destructor、known-operation、in-flight、retired
+binding 和 reservation 全部恰好一次归零。
+
+#### P1-11：registration 与 worker stop 竞争时，shutdown sink 发布不是线性化的
+
+**证据：** registration 在 `PublishTarget()` 前已把 prepared relay 放入 `Relays`；
+`InstallShutdownSinksForStop()` 只快照一次 map，并忽略 `PublishTarget()` 返回值。若 stop 在
+map publication 后、binding target publication 前命中，sink 使用预计算的最终 generation
+发布会失败；随后 registration 仍可能把 binding 发布到 owner。紧接着 endpoint 被关闭，
+这个新 target 既不是 sink，也不能再进入 worker callback。
+
+**影响：** registration 可能在 stop 已开始后成功 commit，或留下不能处理 terminal 的 owner
+route；最终表现为 terminal retention、owner/control 或 callback-visible binding 泄漏，也可能
+让 caller 短暂拿到已经失效的成功 registration。
+
+**修复要求：** 将 registration admission/commit 与 stop route handoff 放入同一生命周期
+线性化协议。stop 开始后禁止新 prepare/commit；对所有已 prepared binding，必须在关闭 endpoint
+前确认 sink 发布成功或将 registration rollback。增加 barrier 测试覆盖 stop 分别命中 map
+publication 前后、owner publish 前后和 commit 前后，并断言 registration 结果、FD、filter、
+owner route 与 accounting 各收敛一次。
+
+#### P2-12：Admin snapshot 无锁读取 precommit queue，与 callback 写入构成数据竞争
+
+**证据：** `QueuePrecommitQuicReceive()` 在 `StreamBinding::ActivationMutex` 下修改
+`PrecommitPendingBytes` 和 `PrecommitReceives`；`SnapshotLocal()` 仅持 `RelayMutex`，未持
+`ActivationMutex` 就读取 bytes 和 `deque::size()`。publish-entry callback 可以与 worker 上的
+snapshot command 并发执行。
+
+**影响：** C++ 内存模型下属于未定义行为；高并发 Admin 拉取恰逢 publish-entry RECEIVE 时，
+可能得到撕裂指标，且对并发修改中的 `deque` 调用 `size()` 没有安全保证。
+
+**修复要求：** snapshot 读取 precommit 字段时持有 `ActivationMutex`，或把可观测计数改为由
+受保护状态同步更新的原子 gauge。增加 publish barrier + 并发 snapshot 的确定性回归，并在可用
+环境运行 TSAN。
