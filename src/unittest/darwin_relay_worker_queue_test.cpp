@@ -206,6 +206,9 @@ void PendingReceiveStreamOwnerIsIndependentOfRelayMap() {
 }
 
 void ActiveShutdownEventMovePreservesReasonAndOwner() {
+    // Task 4 wires ReceiveAllocationFailed onto QuicActiveShutdown.
+    // ReceiveBudgetExceeded / ReceiveQueueFull enum values are reserved for
+    // Task 5+; current budget/queue-full paths stay non-terminal backpressure.
     TqDarwinRelayEventQueue queue(2);
     auto relayOwner = std::make_shared<int>(99);
 
@@ -227,6 +230,10 @@ void ActiveShutdownEventMovePreservesReasonAndOwner() {
         popped.Value ==
         static_cast<uint64_t>(TqDarwinActiveShutdownReason::ReceiveAllocationFailed));
     CHECK(relayOwner.use_count() == 2);
+    CHECK(
+        static_cast<uint8_t>(TqDarwinActiveShutdownReason::ReceiveBudgetExceeded) == 1);
+    CHECK(
+        static_cast<uint8_t>(TqDarwinActiveShutdownReason::ReceiveQueueFull) == 2);
 }
 
 void DrainWakeProcessesPastBudgetAndShutdown() {

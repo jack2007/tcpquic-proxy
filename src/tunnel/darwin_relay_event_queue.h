@@ -46,6 +46,11 @@ struct TqDarwinPendingQuicReceive {
 };
 
 // Typed active-failure reasons for QuicActiveShutdown (not terminal).
+// Task 4 enqueues QuicActiveShutdown only for ReceiveAllocationFailed.
+// ReceiveBudgetExceeded / ReceiveQueueFull are reserved for Task 5+; current
+// budget-reject and queue-full paths are non-terminal backpressure
+// (immediate ReceiveComplete / PENDING hold) and must not forge
+// QuicShutdownComplete.
 enum class TqDarwinActiveShutdownReason : uint8_t {
     ReceiveAllocationFailed = 0,
     ReceiveBudgetExceeded = 1,

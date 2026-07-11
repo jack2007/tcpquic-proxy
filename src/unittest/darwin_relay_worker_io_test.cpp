@@ -735,6 +735,7 @@ void ControlEventRetriesAfterWakeFailure() {
 }
 
 
+
 inline TqDarwinRelayRegistrationResult RegisterAndPublish(
     TqDarwinRelayWorker& worker,
     TqDarwinRelayRegistration& registration,
@@ -2662,6 +2663,9 @@ void ReceiveCallbackQueueFullReturnsPendingWithoutCompleting() {
     CHECK(worker.EventQueueFullErrorsForTest() == 1);
     CHECK(worker.QuicReceiveEnqueueFailuresForTest() == 0);
     CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
+    // Queue-full holds PENDING views; does not enqueue QuicActiveShutdown (Task 4).
+    CHECK(worker.QuicActiveShutdownEnqueuedForTest() == 0);
+    CHECK(worker.QuicShutdownCompleteEnqueuedForTest() == 0);
     CHECK(g_receiveSetEnabledCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 0);
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
@@ -2703,6 +2707,7 @@ void ReceiveCallbackQueueFullHoldsBudgetUntilFlush() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
     CHECK(worker.PendingEventsForTest() == 2);
@@ -2728,8 +2733,8 @@ void ReceiveCallbackQueueFullHoldsBudgetUntilFlush() {
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.FlushTcpWritableForTest(result.RelayId));
     CHECK(worker.CallbackPendingReceiveBytesForTest(result.RelayId) == 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == payloadBytes);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
 
     worker.SetReceiveSetEnabledForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -2768,6 +2773,7 @@ void ReceiveCallbackQueueFullBackpressureRetriesAfterDrain() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     CHECK(worker.EnqueueForTest(TestMarkerEvent(1)));
     CHECK(worker.EnqueueForTest(TestMarkerEvent(2)));
     CHECK(worker.PendingEventsForTest() == 2);
@@ -2794,8 +2800,8 @@ void ReceiveCallbackQueueFullBackpressureRetriesAfterDrain() {
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.PendingEventsForTest() == 0);
     CHECK(worker.FlushTcpWritableForTest(result.RelayId));
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
 
@@ -2840,6 +2846,7 @@ void ReceiveCallbackBudgetRejectPausesAndCompletes() {
 
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
+
     CHECK(worker.CallbackReceiveBudgetRejectsForTest() == 0);
 
     const char firstPayload[] = "abc";
@@ -2868,6 +2875,9 @@ void ReceiveCallbackBudgetRejectPausesAndCompletes() {
 
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &secondEvent) == QUIC_STATUS_SUCCESS);
     CHECK(worker.CallbackReceiveBudgetRejectsForTest() == 1);
+    // Budget reject is non-terminal backpressure (immediate complete), not QuicActiveShutdown.
+    CHECK(worker.QuicActiveShutdownEnqueuedForTest() == 0);
+    CHECK(worker.QuicShutdownCompleteEnqueuedForTest() == 0);
     CHECK(g_receiveSetEnabledCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 0);
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
@@ -2978,6 +2988,7 @@ void QuicReceiveCallbackDefersPendingBytesUntilWorkerEvent() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "eventized-receive";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -2994,8 +3005,8 @@ void QuicReceiveCallbackDefersPendingBytesUntilWorkerEvent() {
 
     CHECK(worker.DrainOneEventForTest());
     CHECK(worker.FlushTcpWritableForTest(result.RelayId));
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
 
@@ -3011,6 +3022,8 @@ void QuicReceiveCallbackDefersPendingBytesUntilWorkerEvent() {
 }
 
 void QuicReceiveCallbackQueuedEventCompletesOnStop() {
+    // Legacy (no StreamOwner): Stop must discard PENDING views without calling
+    // ReceiveComplete via bare relay->Stream. Lease-only complete is managed-only.
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
     CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     ResetFakeReceiveComplete();
@@ -3050,12 +3063,17 @@ void QuicReceiveCallbackQueuedEventCompletesOnStop() {
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     worker.Stop();
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
+    CHECK(worker.QuicActiveShutdownEnqueuedForTest() == 0);
 
     worker.SetReceiveCompleteForTest(nullptr);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
+
+
+
+
 
 void QuicReceiveCallbackAcceptsOneOversizedReceiveBeforeWorkerEvent() {
     int fds[2]{TqInvalidSocket, TqInvalidSocket};
@@ -3085,6 +3103,7 @@ void QuicReceiveCallbackAcceptsOneOversizedReceiveBeforeWorkerEvent() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "oversized-callback-receive";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3097,8 +3116,8 @@ void QuicReceiveCallbackAcceptsOneOversizedReceiveBeforeWorkerEvent() {
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &receiveEvent) == QUIC_STATUS_PENDING);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     worker.Stop();
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
 
     worker.SetReceiveCompleteForTest(nullptr);
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
@@ -3185,6 +3204,7 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     std::vector<uint8_t> payload(13, static_cast<uint8_t>('A'));
     const std::vector<uint8_t> expected = payload;
     QUIC_BUFFER quicBuffer{};
@@ -3221,8 +3241,8 @@ void QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush() {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == expected.size());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
 
     std::vector<uint8_t> output(expected.size());
     size_t total = 0;
@@ -3269,6 +3289,7 @@ void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "flush-unregister-race";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3306,8 +3327,8 @@ void QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister() {
         CHECK(unregisterCv.wait_for(lock, std::chrono::seconds(2), [&] { return unregisterDone; }));
     }
     unregisterThread.join();
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(handle.Control != nullptr);
     CHECK(handle.Control->Stop.load(std::memory_order_acquire));
 
@@ -3347,6 +3368,7 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "partial-then-error";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3375,8 +3397,8 @@ void QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce() {
 
     SetSendMsgMode(4);
     CHECK(!worker.FlushTcpWritableForTest(result.RelayId));
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
 
@@ -3416,6 +3438,7 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     registration.EnableQuicSends = false;
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
+
 
     const char payload[] = "pause-resume";
     QUIC_BUFFER quicBuffer{};
@@ -3468,8 +3491,8 @@ void QuicReceivePauseAndResumeFollowsTcpWritePressure() {
     CHECK(snapshot.QuicReceiveResumedCount == 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
 
     worker.SetSendMsgForTest(nullptr);
     worker.SetReceiveCompleteForTest(nullptr);
@@ -3539,6 +3562,7 @@ void CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = compressed.data();
     quicBuffer.Length = static_cast<uint32_t>(compressed.size());
@@ -3566,8 +3590,8 @@ void CompressedQuicReceiveDecompressesToTcpAndCompletesCompressedBytes() {
 
     CHECK(total == sizeof(plaintext) - 1);
     CHECK(std::memcmp(output, plaintext, sizeof(plaintext) - 1) == 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == compressed.size());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
 
@@ -3606,6 +3630,7 @@ void QuicReceivePauseFailureRollsBackAndCompletesReceive() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "pause-failure";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3629,8 +3654,8 @@ void QuicReceivePauseFailureRollsBackAndCompletesReceive() {
     CHECK(snapshot.QuicReceivePausedCount == 0);
     CHECK(snapshot.QuicReceiveResumedCount == 0);
     CHECK(snapshot.Errors != 0);
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
 
@@ -3735,6 +3760,7 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
     TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
     CHECK(result.Ok);
 
+
     const char payload[] = "not-zstd-frame";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3750,8 +3776,8 @@ void CompressedQuicReceiveFailsClosedWithoutWritingCorruptData() {
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
-    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == sizeof(payload) - 1);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
     CHECK(worker.PendingTcpWriteBytesForTest(result.RelayId) == 0);
 

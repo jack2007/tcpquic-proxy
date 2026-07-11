@@ -341,8 +341,8 @@ void TqDarwinRelayWorker::Stop() {
                 std::lock_guard<std::mutex> lock(RelayMutex);
                 relays.swap(Relays);
             }
-            // Settle PENDING receive views while relay->Stream is still reachable
-            // via binding weak locks. Do not depend on a bare ReceiveCompleteStream.
+            // Settle PENDING receive views while StreamOwner leases are still
+            // acquirable. CompleteDeferred is lease-only — no bare Stream.
             SettleQueuedReceiveViewsBeforeRetire();
             for (const auto& entry : relays) {
                 RequestRelayShutdown(
@@ -1159,8 +1159,7 @@ void TqDarwinRelayWorker::SettleQueuedReceiveViewsBeforeRetire() {
     uint32_t settled = 0;
     while (EventQueue.TryPop(event)) {
         if (event.Type == TqDarwinRelayEventType::QuicReceiveView) {
-            // Discard releases callback budget and completes via BindingOwner→Relay
-            // while Stream is still live (before RetireRelay clears it).
+            // Discard releases callback budget; MsQuic complete needs StreamOwner lease.
             (void)DiscardDeferredQuicReceive(nullptr, event.ReceiveView);
             ++settled;
             continue;
@@ -1390,6 +1389,19 @@ void TqDarwinRelayWorker::CloseRelayTcpFdOnce(const std::shared_ptr<RelayState>&
 #endif
 }
 
+#if defined(TCPQUIC_TESTING)
+namespace {
+thread_local int g_darwinRelayMutexDepthForTest = 0;
+
+struct TqDarwinRelayMutexDepthGuard {
+    TqDarwinRelayMutexDepthGuard() noexcept { ++g_darwinRelayMutexDepthForTest; }
+    ~TqDarwinRelayMutexDepthGuard() noexcept { --g_darwinRelayMutexDepthForTest; }
+    TqDarwinRelayMutexDepthGuard(const TqDarwinRelayMutexDepthGuard&) = delete;
+    TqDarwinRelayMutexDepthGuard& operator=(const TqDarwinRelayMutexDepthGuard&) = delete;
+};
+} // namespace
+#endif
+
 void TqDarwinRelayWorker::RetireRelay(
     const std::shared_ptr<RelayState>& relay,
     TqDarwinRelayCloseDisposition disposition) {
@@ -1426,6 +1438,9 @@ void TqDarwinRelayWorker::RetireRelay(
     // Lifecycle cleanup may run after worker exit or during unregister fallback; data-plane paths must not enter here for normal forwarding.
     {
         std::unique_lock<std::mutex> relayLock(relay->Mutex);
+#if defined(TCPQUIC_TESTING)
+        TqDarwinRelayMutexDepthGuard mutexDepthGuard;
+#endif
         relay->Closing = true;
         relay->TcpReadClosed = true;
         relay->TcpWriteClosed = true;
@@ -1457,12 +1472,9 @@ void TqDarwinRelayWorker::RetireRelay(
         relay->PendingQuicReceiveBytes = 0;
         relay->PendingTcpWrites.clear();
         relay->PendingTcpWriteBytes = 0;
-        // Complete/discard while Stream is still set on relay. BindingOwner may
-        // already be cleared after ProcessQuicReceiveViewEvent, so pass relay.
-        for (const auto& receive : receivesToDiscard) {
-            (void)DiscardDeferredQuicReceive(relay, receive);
-        }
-        receivesToDiscard.clear();
+        // Snapshot under lock only — Discard/Complete must run outside
+        // relay->Mutex (non-recursive) to avoid reentrancy/deadlock when
+        // ReceiveComplete or lease paths touch relay state.
         if (!terminalDetach && relay->StreamOwner == nullptr && relay->Stream != nullptr) {
             const auto completions = binding != nullptr ? binding->Completions : nullptr;
             const bool hasKnownOperations = completions != nullptr &&
@@ -1489,7 +1501,8 @@ void TqDarwinRelayWorker::RetireRelay(
         legacyStreamForCallbackClear->Context = nullptr;
     }
     for (const auto& receive : receivesToDiscard) {
-        (void)DiscardDeferredQuicReceive(nullptr, receive);
+        // Prefer receive->StreamOwner lease; pass relay only for bookkeeping.
+        (void)DiscardDeferredQuicReceive(relay, receive);
     }
     bool retireBinding = false;
     if (binding != nullptr) {
@@ -3333,9 +3346,9 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     if (receive == nullptr) {
         return false;
     }
-    // Capture stream-bearing relay before budget release clears BindingOwner
-    // (Task 4: no bare ReceiveCompleteStream fallback). ProcessQuicReceiveViewEvent
-    // may already have released BindingOwner — callers must pass relay then.
+    // Capture stream-bearing relay before budget release clears BindingOwner.
+    // CompleteDeferred is lease-only via receive->StreamOwner->TryAcquireApi();
+    // no bare ReceiveCompleteStream / relay->Stream fallback.
     std::shared_ptr<RelayState> completeRelay = relay;
     if (completeRelay == nullptr) {
         if (auto binding = std::static_pointer_cast<StreamBinding>(receive->BindingOwner)) {
@@ -3347,7 +3360,7 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     {
         // Worker-thread bookkeeping touches PendingQuicReceive* under the
         // worker-thread ownership rule. Stop-thread retire/settle uses the
-        // else branch and still completes via completeRelay->Stream.
+        // else branch; MsQuic complete still requires a StreamOwner lease.
         if (relay != nullptr && IsWorkerThread()) {
             AssertWorkerThreadForRelayState();
             bytesToComplete = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
@@ -3612,38 +3625,20 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         }
         receive->PendingCompleteBytes = 0;
         DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
+#if defined(TCPQUIC_TESTING)
+        assert(g_darwinRelayMutexDepthForTest == 0 &&
+               "ReceiveComplete must not run under relay->Mutex");
+#endif
         CompleteMsQuicReceiveFromCallback(lease.Stream(), bytes);
         return;
     }
-    if (bindingTerminal) {
-        if (!receive->TryClaimCompletionDispatch()) {
-            return;
-        }
-        receive->PendingCompleteBytes = 0;
-        DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    MsQuicStream* stream = relay != nullptr ? relay->Stream : nullptr;
-    if (stream == nullptr && bindingOwner != nullptr && !bindingTerminal) {
-        if (auto lockedRelay = bindingOwner->Relay.lock()) {
-            stream = lockedRelay->Stream;
-        }
-    }
-    if (stream == nullptr) {
-        // No owner lease and no live relay stream: discard without bare stream API.
-        if (!receive->TryClaimCompletionDispatch()) {
-            return;
-        }
-        receive->PendingCompleteBytes = 0;
-        DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
+    // No StreamOwner: discard/bookkeeping only. Never call ReceiveComplete via
+    // bare relay->Stream (Task 4 lease-only contract).
     if (!receive->TryClaimCompletionDispatch()) {
         return;
     }
     receive->PendingCompleteBytes = 0;
-    DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
-    CompleteMsQuicReceiveFromCallback(stream, bytes);
+    DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TqDarwinRelayWorker::CompleteMsQuicReceiveFromCallback(
@@ -4738,11 +4733,16 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             return QUIC_STATUS_OUT_OF_MEMORY;
         }
         case TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected:
+            // Non-terminal backpressure: did not take PENDING ownership.
+            // Immediate complete on callback stream param; no QuicActiveShutdown
+            // (ReceiveBudgetExceeded reserved for Task 5+).
             binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
             worker->PauseMsQuicReceiveFromCallback(stream);
             worker->CompleteMsQuicReceiveFromCallback(stream, totalLength);
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::EventQueueFull:
+            // Non-terminal backpressure: PENDING held on binding queue.
+            // ReceiveQueueFull QuicActiveShutdown reserved for Task 5+.
             return QUIC_STATUS_PENDING;
         }
         return QUIC_STATUS_SUCCESS;
