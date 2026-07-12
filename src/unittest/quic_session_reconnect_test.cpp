@@ -864,10 +864,72 @@ static int TestClaimedRetryTracesExecuteWhenSlotStartFails() {
         ? 0 : 2122;
 }
 
+static int TestRetryTraceContainsPublicIdentityWithoutToken() {
+    QuicClientSession session;
+    TqConfig cfg;
+    cfg.QuicPeer = "trace.example:8443";
+    std::function<void()> task;
+    std::vector<std::string> lines;
+    session.MarkReconnectStartedForTest(1, cfg);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [](size_t) { return true; };
+    hooks.RetryTraceLineObserver = [&](const char* line) { lines.emplace_back(line); };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler([&](auto, std::function<void()> scheduledTask) {
+        task = std::move(scheduledTask);
+        return true;
+    });
+    const auto identity = session.SnapshotConnections().at(0);
+    session.ScheduleStartRetryForTest(0);
+    if (!task || lines.size() != 1) return 2123;
+    task();
+    session.Stop();
+    if (lines.size() != 2) return 2124;
+    for (const auto& line : lines) {
+        if (line.find("peer=trace.example:8443") == std::string::npos ||
+            line.find("slot=0") == std::string::npos ||
+            line.find("numeric_connection_id=" + std::to_string(identity.NumericConnectionId)) == std::string::npos ||
+            line.find("generation=" + std::to_string(identity.Generation)) == std::string::npos ||
+            line.find("token=") != std::string::npos) return 2125;
+    }
+    return 0;
+}
+
+static int TestConnectedCallbackClearsOnlyMatchingRetryGeneration() {
+    QuicClientSession session;
+    std::function<void()> staleTask;
+    session.MarkReconnectStartedForTest(1);
+    session.SetDelayedTaskScheduler([&](auto, std::function<void()> task) {
+        staleTask = std::move(task);
+        return true;
+    });
+    const auto oldIdentity = session.SnapshotConnections().at(0);
+    session.ScheduleStartRetryForTest(0);
+    if (!staleTask) return 2126;
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 2127;
+    const auto newIdentity = session.SnapshotConnections().at(0);
+    session.ScheduleStartRetryForTest(0);
+    if (!session.MarkSlotConnectedIdentityForTest(
+            0, oldIdentity.NumericConnectionId, oldIdentity.Generation)) return 2128;
+    if (!session.SnapshotConnections().at(0).RetryScheduled) return 2129;
+    if (!session.MarkSlotConnectedIdentityForTest(
+            0, newIdentity.NumericConnectionId, newIdentity.Generation)) return 2130;
+    const bool cleared = !session.SnapshotConnections().at(0).RetryScheduled;
+    session.Stop();
+    return cleared ? 0 : 2131;
+}
+
 static int TestRetryTokenExhaustionRejectsScheduling() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
-    session.MarkReconnectStartedForTest(1);
+    std::string traceLine;
+    TqConfig cfg;
+    cfg.QuicPeer = "exhausted.example:8443";
+    session.MarkReconnectStartedForTest(1, cfg);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.RetryTraceLineObserver = [&](const char* line) { traceLine = line; };
+    session.SetReconnectTestHooks(std::move(hooks));
     session.SetDelayedTaskScheduler(
         [&](std::chrono::milliseconds delay, std::function<void()>) {
             if (delay != std::chrono::milliseconds(3000)) return false;
@@ -881,7 +943,9 @@ static int TestRetryTokenExhaustionRejectsScheduling() {
     session.Stop();
     return scheduled.load(std::memory_order_relaxed) == 0 &&
             diag.ScheduleFailedTotal == 1 && snapshots.size() == 1 &&
-            snapshots[0].LastError.find("retry token exhausted") != std::string::npos
+            snapshots[0].LastError.find("retry token exhausted") != std::string::npos &&
+            traceLine.find("peer=exhausted.example:8443") != std::string::npos &&
+            traceLine.find("token=") == std::string::npos
         ? 0 : 2010;
 }
 
@@ -1758,6 +1822,8 @@ int main() {
     if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;
     if (int rc = TestRemovedSlotRetryCannotClaimRecreatedSlot()) return rc;
     if (int rc = TestClaimedRetryTracesExecuteWhenSlotStartFails()) return rc;
+    if (int rc = TestRetryTraceContainsPublicIdentityWithoutToken()) return rc;
+    if (int rc = TestConnectedCallbackClearsOnlyMatchingRetryGeneration()) return rc;
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
     if (int rc = TestRetryTokenExhaustionStopsEnsureStartupRetries()) return rc;
     if (int rc = TestStartClaimExhaustionStopsEnsureWithoutWraparound()) return rc;

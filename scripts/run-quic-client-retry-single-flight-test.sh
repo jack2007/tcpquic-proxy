@@ -164,12 +164,62 @@ fi
 
 TMP="$(mktemp -d)"
 PIDS=()
+declare -A OWNED_STARTTIME=()
+declare -A OWNED_EXE=()
+
+proc_starttime() {
+  local pid=$1 stat rest
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  rest=${stat##*) }
+  set -- $rest
+  printf '%s\n' "$20"
+}
+
+register_owned_pid() {
+  local pid=$1 starttime exe previous_exe="" attempt stable=0
+  starttime=$(proc_starttime "$pid") || return 1
+  # The child may still be between fork and exec.  Record only after the
+  # executable identity is stable across two observations.
+  for attempt in $(seq 1 50); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    if [[ -n "$previous_exe" && "$exe" == "$previous_exe" ]]; then
+      stable=1
+      break
+    fi
+    previous_exe=$exe
+    sleep 0.01
+  done
+  (( stable == 1 )) || return 1
+  PIDS+=("$pid")
+  OWNED_STARTTIME["$pid"]=$starttime
+  OWNED_EXE["$pid"]=$exe
+}
+
+pid_is_owned() {
+  local pid=$1 starttime exe
+  [[ -n "${OWNED_STARTTIME[$pid]:-}" && -n "${OWNED_EXE[$pid]:-}" ]] || return 1
+  starttime=$(proc_starttime "$pid") || return 1
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+  # Linux starttime identifies this exact process lifetime.  The executable is
+  # retained for audit; it may legitimately change during the initial exec.
+  [[ "$starttime" == "${OWNED_STARTTIME[$pid]}" ]]
+}
+
+unregister_owned_pid() {
+  local pid=$1 item
+  local remaining=()
+  for item in "${PIDS[@]}"; do
+    [[ "$item" == "$pid" ]] || remaining+=("$item")
+  done
+  PIDS=("${remaining[@]}")
+  unset 'OWNED_STARTTIME[$pid]' 'OWNED_EXE[$pid]'
+}
 
 cleanup() {
-  for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+  for pid in "${PIDS[@]}"; do
+    pid_is_owned "$pid" && kill "$pid" 2>/dev/null || true
   done
-  for pid in "${PIDS[@]:-}"; do
+  for pid in "${PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true
   done
   rm -rf "$TMP"
@@ -221,15 +271,15 @@ cat >"$TMP/client.json" <<JSON
 JSON
 
 python3 -m http.server "$target_http_port" --bind 127.0.0.1 --directory "$TMP/http" \
-  >"$RESULT_ROOT/http.log" 2>&1 & PIDS+=("$!")
+  >"$RESULT_ROOT/http.log" 2>&1 & register_owned_pid "$!"
 "$TEST_BIN" server --listen "127.0.0.1:$healthy_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \
-  >"$RESULT_ROOT/healthy-server.log" 2>&1 & PIDS+=("$!")
+  >"$RESULT_ROOT/healthy-server.log" 2>&1 & register_owned_pid "$!"
 client_start_ms=$(monotonic_ms)
 "$TEST_BIN" client --ca "$ROOT/cert/ca.crt" --config "$TMP/client.json" \
   --admin-listen "127.0.0.1:$admin_port" --admin-token-file "$TMP/admin-token.json" \
   --trace --trace-interval 30 \
-  >"$RESULT_ROOT/client.log" 2>&1 & client_pid=$!; PIDS+=("$client_pid")
+  >"$RESULT_ROOT/client.log" 2>&1 & client_pid=$!; register_owned_pid "$client_pid"
 
 TOKEN=""
 for _ in $(seq 1 600); do
@@ -293,7 +343,10 @@ sample_resources() {
   printf '%s,%s,%s,%s,%s\n' "$elapsed" "$cpu_ticks" "$clock_ticks_per_second" "${rss:-0}" "$bytes" >>"$RESULT_ROOT/resources.csv"
   if command -v pidstat >/dev/null 2>&1; then
     pidstat_file="$RESULT_ROOT/pidstat-$elapsed.txt"
-    pidstat -p "$client_pid" 1 1 >"$pidstat_file" 2>&1 & PIDS+=("$!")
+    pidstat -p "$client_pid" 1 1 >"$pidstat_file" 2>&1 & pidstat_pid=$!
+    register_owned_pid "$pidstat_pid"
+    wait "$pidstat_pid" 2>/dev/null || true
+    unregister_owned_pid "$pidstat_pid"
   fi
 }
 
@@ -333,7 +386,7 @@ analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_attempt_window_ms" 
 
 "$TEST_BIN" server --listen "127.0.0.1:$failed_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \
-  >"$RESULT_ROOT/failed-server.log" 2>&1 & PIDS+=("$!")
+  >"$RESULT_ROOT/failed-server.log" 2>&1 & register_owned_pid "$!"
 deadline=$(( $(monotonic_ms) + RECOVERY_TIMEOUT_MS ))
 recovered=0
 while (( $(monotonic_ms) <= deadline )); do

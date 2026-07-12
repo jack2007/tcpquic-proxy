@@ -15,12 +15,26 @@ def test_harness_is_process_safe_and_uses_dynamic_ports():
     assert 'TMP="$(mktemp -d)"' in text
     assert "PIDS=()" in text
     assert "trap cleanup EXIT INT TERM" in text
-    assert 'for pid in "${PIDS[@]:-}"' in text
+    assert 'register_owned_pid "$!"' in text
+    assert 'pid_is_owned "$pid"' in text
+    assert 'proc_starttime "$pid"' in text
+    assert 'OWNED_STARTTIME["$pid"]' in text
+    assert 'OWNED_EXE["$pid"]' in text
+    assert "unregister_owned_pid()" in text
     assert 'kill "$pid"' in text
     assert "pkill" not in text
     assert "killall" not in text
     assert text.count("alloc_port)") >= 6
-    assert text.count('PIDS+=("$!")') >= 3
+    assert text.count('register_owned_pid "$!"') >= 3
+
+
+def test_pidstat_sampler_is_reaped_and_removed_immediately():
+    text = HARNESS.read_text()
+    assert 'pidstat_pid=$!' in text
+    assert 'register_owned_pid "$pidstat_pid"' in text
+    assert 'wait "$pidstat_pid"' in text
+    assert 'unregister_owned_pid "$pidstat_pid"' in text
+    assert 'pidstat -p "$client_pid" 1 1' in text
 
 
 def test_harness_covers_two_peer_isolation_and_recovery_contract():

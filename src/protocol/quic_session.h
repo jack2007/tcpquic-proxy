@@ -228,6 +228,7 @@ public:
         std::function<void()> BeforeShutdownRetryReservation;
         std::function<void()> RetryTraceObserver;
         std::function<void(const char* event)> RetryTraceEventObserver;
+        std::function<void(const char* line)> RetryTraceLineObserver;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
@@ -235,6 +236,8 @@ public:
     void MarkSlotConnectedForTest(size_t index, MsQuicConnection* connection);
     void MarkSlotConnectedForTest(
         size_t index, std::shared_ptr<MsQuicConnection> connection);
+    bool MarkSlotConnectedIdentityForTest(
+        size_t index, uint64_t numericConnectionId, uint64_t generation);
     void MarkSlotDisconnectedForTest(size_t index);
     void MarkSlotClosingForTest(size_t index);
     void ClearSlotConnectionForTest(size_t index);
@@ -273,6 +276,7 @@ private:
         ClientConnContext* Context{nullptr};
         std::shared_ptr<MsQuicConnection> Connection;
         std::string ConnectionId;
+        std::string PeerAddress;
         uint64_t NumericConnectionId{0};
         uint64_t Generation{0};
         bool Connected{false};
@@ -335,6 +339,7 @@ private:
         uint64_t NumericConnectionId{0};
         uint64_t Generation{0};
         uint64_t Token{0};
+        std::string PeerAddress;
     };
 
     struct RetrySubmission {
@@ -384,7 +389,10 @@ private:
     static uint32_t ConnectedCountLocked(const ClientSharedState& state);
     static void NotifyConnectionStateChanged(ConnectionStateNotification notification);
     void SendClientHello(MsQuicConnection* connection);
-    static ConnectionStateNotification OnSlotConnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
+    static ConnectionStateNotification OnSlotConnected(
+        const std::shared_ptr<ClientSharedState>& state, size_t index,
+        MsQuicConnection* connection, uint64_t numericConnectionId,
+        uint64_t generation);
     static ConnectionStateNotification OnSlotDisconnected(const std::shared_ptr<ClientSharedState>& state, size_t index, MsQuicConnection* connection);
     static void DropOrphanedConnection(const std::shared_ptr<ClientSharedState>& state, MsQuicConnection* connection);
     static void WaitForOrphanedConnectionsDrain(const std::shared_ptr<ClientSharedState>& state, std::chrono::milliseconds timeout);
