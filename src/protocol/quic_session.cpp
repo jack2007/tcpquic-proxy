@@ -1534,10 +1534,10 @@ std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const
         snapshot.NumericConnectionId = slot.NumericConnectionId;
         snapshot.Generation = slot.Generation;
         snapshot.Connected = slot.Connected && slot.Connection && slot.Connection->IsValid();
-        snapshot.RetryScheduled = slot.RetryScheduled;
+        snapshot.RetryScheduled = slot.ActiveRetryToken != 0;
         if (snapshot.Connected) {
             snapshot.State = "connected";
-        } else if (slot.RetryScheduled) {
+        } else if (slot.ActiveRetryToken != 0) {
             snapshot.State = "retry_scheduled";
         } else if (slot.Connection) {
             snapshot.State = "connecting";
@@ -1555,6 +1555,11 @@ std::vector<TqConnectionSnapshot> QuicClientSession::SnapshotConnections() const
         snapshots.push_back(std::move(snapshot));
     }
     return snapshots;
+}
+
+TqClientRetryDiagnostics QuicClientSession::SnapshotRetryDiagnostics() const {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    return State->RetryDiagnostics;
 }
 
 bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string& err) {
@@ -1654,7 +1659,7 @@ bool QuicClientSession::ReconnectSlot(size_t index, std::string& err) {
         auto& slot = State->Slots[index];
         slot.Connected = false;
         slot.Closing = true;
-        slot.RetryScheduled = false;
+        InvalidateRetryLocked(slot);
         ++slot.Generation;
         slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         slot.TerminalShutdownReserved = false;
@@ -1693,7 +1698,7 @@ bool QuicClientSession::AbortConnectionTunnels(const std::string& connectionId, 
 }
 
 MsQuicConnection* QuicClientSession::PickableConnectionLocked(const ConnectionSlot& slot) {
-    if (!slot.Connected || slot.RetryScheduled) {
+    if (!slot.Connected || slot.ActiveRetryToken != 0) {
         return nullptr;
     }
 #if defined(TQ_UNIT_TESTING)
@@ -1829,7 +1834,7 @@ void QuicClientSession::MarkSlotConnectedForTest(size_t index, MsQuicConnection*
     if (slot.NumericConnectionId == 0) {
         slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
     }
-    slot.RetryScheduled = false;
+    InvalidateRetryLocked(slot);
     slot.LastError.clear();
     slot.TestConnectionOverride = connection;
 }
@@ -1890,7 +1895,20 @@ MsQuicConnection* QuicClientSession::PickConnectionForTest() {
 }
 
 void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
-    ScheduleStartRetry(index);
+    uint64_t numericConnectionId = 0;
+    uint64_t generation = 0;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        if (index >= State->Slots.size()) return;
+        numericConnectionId = State->Slots[index].NumericConnectionId;
+        generation = State->Slots[index].Generation;
+    }
+    ScheduleStartRetry(index, numericConnectionId, generation);
+}
+
+void QuicClientSession::SetNextRetryTokenForTest(uint64_t token) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    State->NextRetryToken = token;
 }
 
 void QuicClientSession::RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation) {
@@ -2066,6 +2084,7 @@ bool QuicClientSession::StartSlot(size_t index) {
     std::shared_ptr<MsQuicConnection> oldConnection;
     std::shared_ptr<ClientSharedState> state = State;
     TqClientSlotPath path;
+    uint64_t numericConnectionId = 0;
     uint64_t generation = 0;
     std::shared_ptr<ClientSessionGate> gate;
 
@@ -2131,7 +2150,8 @@ bool QuicClientSession::StartSlot(size_t index) {
         oldConnection = std::move(slot.Connection);
         slot.Context = nullptr;
         slot.Connected = false;
-        slot.RetryScheduled = false;
+        InvalidateRetryLocked(slot);
+        numericConnectionId = slot.NumericConnectionId;
         generation = slot.Generation;
         TqClientDebugLog("slot-reset", index, oldConnection.get());
     }
@@ -2249,7 +2269,7 @@ bool QuicClientSession::StartSlot(size_t index) {
     }
 
     if (scheduleRetry) {
-        ScheduleStartRetry(index);
+        ScheduleStartRetry(index, numericConnectionId, generation);
         return false;
     }
 
@@ -2325,59 +2345,116 @@ bool QuicClientSession::StartSlot(size_t index) {
     delete failedStartContext;
     failedStartConnection.reset();
     if (scheduleRetry) {
-        ScheduleStartRetry(index);
+        ScheduleStartRetry(index, numericConnectionId, generation);
         return false;
     }
 
     return true;
 }
 
-void QuicClientSession::ScheduleStartRetry(size_t index) {
-    DelayedTaskScheduler scheduler;
-    std::weak_ptr<ClientSharedState> weakState;
-    std::shared_ptr<ClientSessionGate> gate;
+void QuicClientSession::InvalidateRetryLocked(ConnectionSlot& slot) noexcept {
+    slot.ActiveRetryToken = 0;
+}
+
+bool QuicClientSession::RetryTicketMatchesLocked(
+    const ClientSharedState& state,
+    const RetryTicket& ticket) noexcept {
+    if (!state.Started || state.Stopping || ticket.SlotIndex >= state.Slots.size()) return false;
+    const auto& slot = state.Slots[ticket.SlotIndex];
+    return ticket.Token != 0 && slot.ActiveRetryToken == ticket.Token &&
+        slot.NumericConnectionId == ticket.NumericConnectionId &&
+        slot.Generation == ticket.Generation;
+}
+
+std::optional<QuicClientSession::RetrySubmission> QuicClientSession::ReserveRetryLocked(
+    const std::shared_ptr<ClientSharedState>& state,
+    size_t index,
+    uint64_t expectedNumericConnectionId,
+    uint64_t expectedGeneration) {
+    if (!state->Started || state->Stopping || index >= state->Slots.size()) return std::nullopt;
+    auto& slot = state->Slots[index];
+    if (slot.NumericConnectionId != expectedNumericConnectionId ||
+        slot.Generation != expectedGeneration || slot.ActiveRetryToken != 0) {
+        return std::nullopt;
+    }
+    if (state->NextRetryToken == 0 || state->NextRetryToken == UINT64_MAX) {
+        slot.LastError = "retry token exhausted";
+        ++state->RetryDiagnostics.ScheduleFailedTotal;
+        char line[224];
+        std::snprintf(line, sizeof(line),
+            "event=quic_retry_schedule_failed slot=%zu numeric_connection_id=%llu generation=%llu reason=token_exhausted",
+            index, static_cast<unsigned long long>(expectedNumericConnectionId),
+            static_cast<unsigned long long>(expectedGeneration));
+        TqTraceLogLine(line);
+        return std::nullopt;
+    }
+    RetrySubmission submission;
+    submission.Ticket = {index, expectedNumericConnectionId, expectedGeneration,
+        state->NextRetryToken++};
+    slot.ActiveRetryToken = submission.Ticket.Token;
+    submission.Scheduler = state->Scheduler;
+    submission.WeakState = state;
+    submission.Gate = state->SessionGate;
+    return submission;
+}
+
+void QuicClientSession::ScheduleStartRetry(
+    size_t index,
+    uint64_t expectedNumericConnectionId,
+    uint64_t expectedGeneration) {
+    std::optional<RetrySubmission> submission;
     {
         std::lock_guard<std::mutex> guard(State->Lock);
-        if (!State->Started || State->Stopping || index >= State->Slots.size()) {
-            return;
-        }
-        if (State->Slots[index].RetryScheduled) {
-            return;
-        }
-        scheduler = State->Scheduler;
-        weakState = State;
-        gate = State->SessionGate;
-        if (scheduler && gate) {
-            State->Slots[index].RetryScheduled = true;
-        }
+        submission = ReserveRetryLocked(
+            State, index, expectedNumericConnectionId, expectedGeneration);
     }
-    if (!scheduler || !gate) {
-        return;
-    }
-    if (!scheduler(TqClientStartRetryDelay, [weakState, gate, index]() {
-        auto state = weakState.lock();
-        if (!state) {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> guard(state->Lock);
-            if (!state->Started || state->Stopping || index >= state->Slots.size() ||
-                !state->Slots[index].RetryScheduled) {
-                return;
-            }
-            state->Slots[index].RetryScheduled = false;
-        }
-        QuicClientSession* session = AcquireLiveSession(gate);
-        if (session == nullptr) {
-            return;
-        }
-        (void)session->StartSlot(index);
-        ReleaseLiveSession(gate);
-    })) {
-        std::lock_guard<std::mutex> guard(State->Lock);
-        if (index < State->Slots.size()) {
-            State->Slots[index].RetryScheduled = false;
-        }
+    if (submission) SubmitRetry(std::move(*submission));
+}
+
+void QuicClientSession::SubmitRetry(RetrySubmission submission) {
+    auto TraceRetry = [](const char* event, const RetryTicket& ticket) {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+            "event=%s slot=%zu numeric_connection_id=%llu generation=%llu token=%llu",
+            event, ticket.SlotIndex,
+            static_cast<unsigned long long>(ticket.NumericConnectionId),
+            static_cast<unsigned long long>(ticket.Generation),
+            static_cast<unsigned long long>(ticket.Token));
+        TqTraceLogLine(line);
+    };
+    const bool accepted = submission.Scheduler && submission.Gate &&
+        submission.Scheduler(TqClientStartRetryDelay,
+            [weakState = submission.WeakState, gate = submission.Gate,
+             ticket = submission.Ticket, TraceRetry]() {
+                auto state = weakState.lock();
+                if (!state) return;
+                {
+                    std::lock_guard<std::mutex> guard(state->Lock);
+                    if (!RetryTicketMatchesLocked(*state, ticket)) {
+                        ++state->RetryDiagnostics.StaleDroppedTotal;
+                        TraceRetry("quic_retry_stale_drop", ticket);
+                        return;
+                    }
+                    InvalidateRetryLocked(state->Slots[ticket.SlotIndex]);
+                    ++state->RetryDiagnostics.ExecutedTotal;
+                    TraceRetry("quic_retry_execute", ticket);
+                }
+                auto* session = AcquireLiveSession(gate);
+                if (!session) return;
+                (void)session->StartSlot(ticket.SlotIndex);
+                ReleaseLiveSession(gate);
+            });
+    auto state = submission.WeakState.lock();
+    if (!state) return;
+    std::lock_guard<std::mutex> guard(state->Lock);
+    if (accepted) {
+        ++state->RetryDiagnostics.ScheduledTotal;
+        TraceRetry("quic_retry_schedule", submission.Ticket);
+    } else if (RetryTicketMatchesLocked(*state, submission.Ticket)) {
+        InvalidateRetryLocked(state->Slots[submission.Ticket.SlotIndex]);
+        state->Slots[submission.Ticket.SlotIndex].LastError = "retry scheduler unavailable";
+        ++state->RetryDiagnostics.ScheduleFailedTotal;
+        TraceRetry("quic_retry_schedule_failed", submission.Ticket);
     }
 }
 
@@ -2385,14 +2462,16 @@ void QuicClientSession::RestartSlotAfterShutdownComplete(
     const std::shared_ptr<ClientSharedState>& state,
     size_t slotIndex,
     uint64_t generation) {
+    uint64_t numericConnectionId = 0;
     {
         std::lock_guard<std::mutex> guard(state->Lock);
         if (!state->Started || state->Stopping || slotIndex >= state->Slots.size() ||
             state->Slots[slotIndex].Generation != generation) {
             return;
         }
+        numericConnectionId = state->Slots[slotIndex].NumericConnectionId;
     }
-    ScheduleStartRetry(slotIndex);
+    ScheduleStartRetry(slotIndex, numericConnectionId, generation);
 }
 
 QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnected(
@@ -2612,7 +2691,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                     state->Slots[slotIndex].Context == slotContext) {
                     auto& slot = state->Slots[slotIndex];
                     slot.Context = nullptr;
-                    slot.RetryScheduled = false;
+                    InvalidateRetryLocked(slot);
                     if (slot.Connection.get() == connection) {
                         completedSlotConnection = std::move(slot.Connection);
                     }

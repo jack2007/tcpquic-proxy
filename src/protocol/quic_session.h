@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -71,6 +72,13 @@ struct TqConnectionSnapshot {
     std::string PathName;
     std::string LocalAddress;
     std::string PeerAddress;
+};
+
+struct TqClientRetryDiagnostics {
+    uint64_t ScheduledTotal{0};
+    uint64_t ExecutedTotal{0};
+    uint64_t StaleDroppedTotal{0};
+    uint64_t ScheduleFailedTotal{0};
 };
 
 struct TqServerConnectionSnapshot {
@@ -188,6 +196,7 @@ public:
     void SetDelayedTaskScheduler(DelayedTaskScheduler scheduler);
     void AbortAllTunnels();
     std::vector<TqConnectionSnapshot> SnapshotConnections() const;
+    TqClientRetryDiagnostics SnapshotRetryDiagnostics() const;
     bool SetDesiredConnectionCount(uint32_t desired, std::string& err);
     bool StopHighestConnection(const std::string& connectionId, std::string& err);
     bool ReconnectConnection(const std::string& connectionId, std::string& err);
@@ -229,6 +238,7 @@ public:
     void SendClientHelloForTest(MsQuicConnection* connection);
     MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
+    void SetNextRetryTokenForTest(uint64_t token);
     void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
 #endif
@@ -254,7 +264,7 @@ private:
         bool Connected{false};
         bool Closing{false};
         bool TerminalShutdownReserved{false};
-        bool RetryScheduled{false};
+        uint64_t ActiveRetryToken{0};
         std::string LastError;
 #if defined(TQ_UNIT_TESTING)
         MsQuicConnection* TestConnectionOverride{nullptr};
@@ -295,16 +305,45 @@ private:
         uint64_t TerminalGenerationMismatch{0};
         uint64_t TerminalDuplicate{0};
         uint64_t TerminalClosingSuppressed{0};
+        uint64_t NextRetryToken{1};
+        TqClientRetryDiagnostics RetryDiagnostics;
 #if defined(TQ_UNIT_TESTING)
         ReconnectTestHooks TestHooks;
         std::vector<uint64_t> ConnectionShutdownCalls;
 #endif
     };
 
+    struct RetryTicket {
+        size_t SlotIndex{0};
+        uint64_t NumericConnectionId{0};
+        uint64_t Generation{0};
+        uint64_t Token{0};
+    };
+
+    struct RetrySubmission {
+        RetryTicket Ticket;
+        DelayedTaskScheduler Scheduler;
+        std::weak_ptr<ClientSharedState> WeakState;
+        std::shared_ptr<ClientSessionGate> Gate;
+    };
+
     void Stop(bool clearHandlers);
     bool StartSlot(size_t index);
     void StartAllSlots();
-    void ScheduleStartRetry(size_t index);
+    static void InvalidateRetryLocked(ConnectionSlot& slot) noexcept;
+    static bool RetryTicketMatchesLocked(
+        const ClientSharedState& state,
+        const RetryTicket& ticket) noexcept;
+    std::optional<RetrySubmission> ReserveRetryLocked(
+        const std::shared_ptr<ClientSharedState>& state,
+        size_t index,
+        uint64_t expectedNumericConnectionId,
+        uint64_t expectedGeneration);
+    void ScheduleStartRetry(
+        size_t index,
+        uint64_t expectedNumericConnectionId,
+        uint64_t expectedGeneration);
+    void SubmitRetry(RetrySubmission submission);
     void RestartSlotAfterShutdownComplete(
         const std::shared_ptr<ClientSharedState>& state,
         size_t slotIndex,

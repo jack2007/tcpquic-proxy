@@ -565,6 +565,60 @@ static int TestRejectedSchedulerAllowsLaterRetry() {
     return 0;
 }
 
+static int TestStaleRetryCannotBorrowReplacementToken() {
+    QuicClientSession session;
+    std::vector<std::function<void()>> tasks;
+    std::atomic<int> starts{0};
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks({[&](size_t index) {
+        if (index != 0) return false;
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }});
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()> task) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
+            tasks.push_back(std::move(task));
+            return true;
+        });
+
+    session.ScheduleStartRetryForTest(0);
+    if (tasks.size() != 1) return 2001;
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 2002;
+    if (starts.load(std::memory_order_relaxed) != 1) return 2003;
+    session.ScheduleStartRetryForTest(0);
+    if (tasks.size() != 2) return 2004;
+
+    tasks[0]();
+    if (starts.load(std::memory_order_relaxed) != 1) return 2005;
+    tasks[1]();
+    if (starts.load(std::memory_order_relaxed) != 2) return 2006;
+    const auto diag = session.SnapshotRetryDiagnostics();
+    session.Stop();
+    return diag.StaleDroppedTotal == 1 && diag.ExecutedTotal == 1 ? 0 : 2007;
+}
+
+static int TestRetryTokenExhaustionRejectsScheduling() {
+    QuicClientSession session;
+    std::atomic<int> scheduled{0};
+    session.MarkReconnectStartedForTest(1);
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds, std::function<void()>) {
+            scheduled.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        });
+    session.SetNextRetryTokenForTest(UINT64_MAX);
+    session.ScheduleStartRetryForTest(0);
+    const auto diag = session.SnapshotRetryDiagnostics();
+    const auto snapshots = session.SnapshotConnections();
+    session.Stop();
+    return scheduled.load(std::memory_order_relaxed) == 0 &&
+            diag.ScheduleFailedTotal == 1 && snapshots.size() == 1 &&
+            snapshots[0].LastError.find("retry token exhausted") != std::string::npos
+        ? 0 : 2010;
+}
+
 static int TestConnectionStartPendingIsAccepted() {
     if (!QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_SUCCESS)) {
         return 50;
@@ -1260,6 +1314,8 @@ int main() {
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
+    if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
+    if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
