@@ -9,15 +9,23 @@ RECOVERY_TIMEOUT_MS="${RECOVERY_TIMEOUT_MS:-3500}"
 HOLD_FOR_K6_SECONDS="${HOLD_FOR_K6_SECONDS:-0}"
 ENV_OUT="${ENV_OUT:-}"
 ANALYZE_FIXTURE="${ANALYZE_FIXTURE:-}"
+EXTRACT_TRACE_SOURCE="${EXTRACT_TRACE_SOURCE:-}"
+TRACE_START_BYTES="${TRACE_START_BYTES:-0}"
 
 [[ "$(uname -s)" == "Linux" ]] || { echo "this system harness is Linux-only" >&2; exit 2; }
 
+extract_trace_evidence() {
+  local source=$1 start_bytes=$2 output=$3
+  tail -c "+$((start_bytes + 1))" "$source" >"$output"
+}
+
 analyze_evidence() {
-  local evidence=$1 failed_port=$2 duration_ms=$3
-  python3 - "$evidence" "$failed_port" "$duration_ms" <<'PY'
+  local evidence=$1 failed_port=$2 attempt_window_ms=$3 soak_ms=${4:-$3}
+  python3 - "$evidence" "$failed_port" "$attempt_window_ms" "$soak_ms" <<'PY'
 import csv, datetime, json, math, pathlib, re, statistics, sys
 
-root=pathlib.Path(sys.argv[1]); failed_port=sys.argv[2]; duration_ms=int(sys.argv[3])
+root=pathlib.Path(sys.argv[1]); failed_port=sys.argv[2]
+duration_ms=int(sys.argv[3]); soak_ms=int(sys.argv[4])
 required_top=(
     'ingress_delayed_task_queue_depth','ingress_delayed_task_queue_depth_max',
     'ingress_reactor_timeout_overshoot_max_us','ingress_reactor_timeout_overshoot_p95_us',
@@ -74,12 +82,29 @@ for before,after,t0,t1,hz in zip(ticks,ticks[1:],elapsed,elapsed[1:],clock_hz[1:
 if not cpu: cpu=[0.0]; cpu_elapsed=[duration_ms]
 
 def rising_three_windows(values, name):
-    # Allocators commonly grow during connection-stack warmup and then retain
-    # arenas.  A leak must still be rising at the end of the soak; an early
-    # rise followed by a plateau is bounded retention, not sustained growth.
-    if len(values) >= 4 and all(a < b for a,b in zip(values[-4:],values[-3:])):
+    if any(a < b < c < d for a,b,c,d in zip(values,values[1:],values[2:],values[3:])):
         raise SystemExit(f'{name} monotonic rise across three sampling windows')
-rising_three_windows(rss,'rss')
+
+def rising_rss_time_windows(times, values):
+    if len(values) < 3 or times[-1] <= times[0]: return
+    # Ignore allocator startup warmup, then aggregate the final 60% of elapsed
+    # time into three non-overlapping windows. Medians reject individual arena
+    # allocation/deallocation noise while still detecting bounded-rate leaks.
+    start=times[0] + (times[-1]-times[0])*0.4
+    width=(times[-1]-start)/3
+    windows=[[],[],[]]
+    for stamp,value in zip(times,values):
+        if stamp < start: continue
+        index=min(2,int((stamp-start)/width)) if width > 0 else 2
+        windows[index].append(value)
+    if any(not window for window in windows): return
+    medians=[statistics.median(window) for window in windows]
+    tolerance=max(256, medians[0]*0.005)
+    if medians[1] > medians[0]+tolerance and medians[2] > medians[1]+tolerance:
+        raise SystemExit(
+            f'rss monotonic rise across three sampling windows: medians={medians}, tolerance={tolerance:.0f}KiB')
+
+rising_rss_time_windows(elapsed,rss)
 rising_three_windows(queue,'delayed queue depth')
 growth=[b-a for a,b in zip(logs,logs[1:])]
 if any(a < b < c for a,b,c in zip(growth,growth[1:],growth[2:])):
@@ -94,7 +119,8 @@ reactor_p99=max(int(r['ingress_reactor_timeout_overshoot_p99_us']) for r in metr
 if reactor_p99>500000: raise SystemExit(f'reactor p99 delay {reactor_p99}us exceeds 500ms handshake budget')
 
 summary=(
- f'PASS\nactual_soak_ms={duration_ms}\nfailed_peer_attempts={len(times)}\nmax_attempts={limit}\n'
+ f'PASS\nactual_soak_ms={soak_ms}\nactual_attempt_window_ms={duration_ms}\n'
+ f'failed_peer_attempts={len(times)}\nmax_attempts={limit}\n'
  f'cpu_baseline_mean={baseline:.3f}\ncpu_final_mean={final:.3f}\nreactor_p99_max_us={reactor_p99}\n'
  'rss_trend=pass\ndelayed_queue_trend=pass\ntrace_log_growth_trend=pass\n')
 (root/'summary.txt').write_text(summary)
@@ -103,6 +129,9 @@ PY
 }
 
 if [[ -n "$ANALYZE_FIXTURE" ]]; then
+  if [[ -n "$EXTRACT_TRACE_SOURCE" ]]; then
+    extract_trace_evidence "$EXTRACT_TRACE_SOURCE" "$TRACE_START_BYTES" "$ANALYZE_FIXTURE/client-trace.log"
+  fi
   analyze_evidence "$ANALYZE_FIXTURE" "${FAILED_QUIC_PORT:?FAILED_QUIC_PORT required}" "$((SOAK_SECONDS * 1000))"
   exit
 fi
@@ -146,6 +175,8 @@ cp "$BIN" "$TMP/raypx2"
 chmod +x "$TMP/raypx2"
 TEST_BIN="$TMP/raypx2"
 TRACE_LOG="$TMP/log/client.log"
+trace_start_bytes=0
+[[ -f "$TRACE_LOG" ]] && trace_start_bytes=$(wc -c <"$TRACE_LOG")
 
 mkdir -p "$TMP/http" "$RESULT_ROOT/admin"
 printf 'ok\n' >"$TMP/http/health.txt"
@@ -241,8 +272,6 @@ sample_resources() {
 }
 
 soak_start_ms=$(monotonic_ms)
-trace_soak_start_bytes=0
-[[ -f "$TRACE_LOG" ]] && trace_soak_start_bytes=$(wc -c <"$TRACE_LOG")
 soak_deadline_ms=$((soak_start_ms + SOAK_SECONDS * 1000))
 next_probe_ms=$soak_start_ms
 next_sample_ms=$soak_start_ms
@@ -265,15 +294,16 @@ while (( $(monotonic_ms) < soak_deadline_ms )); do
 done
 soak_end_ms=$(monotonic_ms)
 actual_soak_ms=$((soak_end_ms - soak_start_ms))
+actual_attempt_window_ms=$((soak_end_ms - client_start_ms))
 sample_resources "$actual_soak_ms"
 
 (( healthy_probe_failures == 0 )) || { echo "healthy probe failures: $healthy_probe_failures" >&2; exit 1; }
 if [[ -f "$TRACE_LOG" ]]; then
-  tail -c "+$((trace_soak_start_bytes + 1))" "$TRACE_LOG" >"$RESULT_ROOT/client-trace.log"
+  extract_trace_evidence "$TRACE_LOG" "$trace_start_bytes" "$RESULT_ROOT/client-trace.log"
 else
   : >"$RESULT_ROOT/client-trace.log"
 fi
-analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_soak_ms"
+analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_attempt_window_ms" "$actual_soak_ms"
 
 "$TEST_BIN" server --listen "127.0.0.1:$failed_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \

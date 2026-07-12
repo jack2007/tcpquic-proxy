@@ -46,8 +46,9 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
     assert "--max-time" in text
     assert "Linux" in text
     assert "TRACE_LOG" in text
-    assert "trace_soak_start_bytes" in text
-    assert '"$actual_soak_ms"' in text
+    assert "extract_trace_evidence" in text
+    assert '"$trace_start_bytes"' in text
+    assert '"$actual_attempt_window_ms"' in text
 
 
 def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, warmup_plateau=False,
@@ -79,10 +80,10 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
         (path / "admin" / f"metrics-{i * 10000}.json").write_text(json.dumps(sample))
     values = [100, 100, 100, 100, 100]
     if rising:
-        values = [100, 110, 120, 130, 140]
+        values = [10000] * 6 + [10000, 10200, 10100, 10500, 10400, 10600, 10900, 10800, 11000]
     if warmup_plateau:
-        values = [100, 110, 120, 130, 130]
-    log_values = [100] * 5
+        values = [10000, 12000, 14000, 16000, 18000, 20000] + [20000, 20100, 19900] * 3
+    log_values = [100] * len(values)
     if log_rising:
         log_values = [100, 101, 103, 106, 110]
     with (path / "resources.csv").open("w", newline="") as out:
@@ -150,6 +151,20 @@ def test_fixture_analysis_accepts_allocator_warmup_that_reaches_plateau(tmp_path
     _write_fixture(tmp_path, warmup_plateau=True)
     result = _analyze(tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+def test_harness_trace_extraction_keeps_startup_burst(tmp_path):
+    _write_fixture(tmp_path, burst_before_ready=True)
+    raw = tmp_path / "raw-client-trace.log"
+    (tmp_path / "client-trace.log").rename(raw)
+    env = os.environ.copy()
+    env.update(
+        ANALYZE_FIXTURE=str(tmp_path), FAILED_QUIC_PORT="12345", SOAK_SECONDS="40",
+        EXTRACT_TRACE_SOURCE=str(raw), TRACE_START_BYTES="0",
+    )
+    result = subprocess.run([str(HARNESS)], env=env, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "below 2900ms" in result.stderr
 
 
 def test_fixture_analysis_rejects_nonmonotonic_connecting_timestamps(tmp_path):
