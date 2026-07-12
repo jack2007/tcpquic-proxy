@@ -4,8 +4,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <thread>
 
 static int TestServerNewConnectionDisable1RttStatusClassification() {
@@ -597,6 +599,90 @@ static int TestStaleRetryCannotBorrowReplacementToken() {
     const auto diag = session.SnapshotRetryDiagnostics();
     session.Stop();
     return diag.StaleDroppedTotal == 1 && diag.ExecutedTotal == 1 ? 0 : 2007;
+}
+
+static int TestManualReconnectSupersedesInFlightRetry() {
+    QuicClientSession session;
+    std::function<void()> retry;
+    std::mutex lock;
+    std::condition_variable cv;
+    bool retryAtClaim = false;
+    bool releaseRetry = false;
+    std::atomic<int> starts{0};
+
+    session.MarkReconnectStartedForTest(1);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+    hooks.BeforeRetryStartClaim = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        retryAtClaim = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return releaseRetry; });
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler([&](auto, std::function<void()> task) {
+        retry = std::move(task);
+        return true;
+    });
+    session.ScheduleStartRetryForTest(0);
+
+    std::thread worker([&] { retry(); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return retryAtClaim; });
+    }
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 2101;
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        releaseRetry = true;
+    }
+    cv.notify_all();
+    worker.join();
+    const auto diag = session.SnapshotRetryDiagnostics();
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 1 &&
+            diag.StaleDroppedTotal == 1
+        ? 0 : 2102;
+}
+
+static int TestRemovedSlotRetryCannotClaimRecreatedSlot() {
+    QuicClientSession session;
+    std::vector<std::function<void()>> tasks;
+    std::atomic<int> starts{0};
+    session.MarkReconnectStartedForTest(2);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [&](size_t index) {
+        if (index != 1) return false;
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler([&](auto, std::function<void()> task) {
+        tasks.push_back(std::move(task));
+        return true;
+    });
+
+    session.ScheduleStartRetryForTest(1);
+    if (tasks.size() != 1) return 2111;
+    std::string err;
+    if (!session.StopHighestConnection("conn-1", err)) return 2112;
+    if (!session.SetDesiredConnectionCount(2, err)) return 2113;
+    if (starts.load(std::memory_order_relaxed) != 1) return 2114;
+    session.ScheduleStartRetryForTest(1);
+    if (tasks.size() != 2) return 2115;
+
+    tasks[0]();
+    if (starts.load(std::memory_order_relaxed) != 1) return 2116;
+    tasks[1]();
+    const auto diag = session.SnapshotRetryDiagnostics();
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 2 &&
+            diag.StaleDroppedTotal == 1 && diag.ExecutedTotal == 1
+        ? 0 : 2117;
 }
 
 static int TestRetryTokenExhaustionRejectsScheduling() {
@@ -1361,6 +1447,8 @@ int main() {
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
+    if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;
+    if (int rc = TestRemovedSlotRetryCannotClaimRecreatedSlot()) return rc;
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
     if (int rc = TestRetryTraceRunsOutsideStateLock()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;

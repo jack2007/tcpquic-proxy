@@ -221,6 +221,7 @@ public:
             QUIC_SEND_FLAGS sendFlags,
             const std::vector<uint8_t>& payload)> SendClientHelloOverride;
         std::function<void()> BeforeTerminalConnectionShutdown;
+        std::function<void()> BeforeRetryStartClaim;
         std::function<void()> RetryTraceObserver;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
@@ -330,7 +331,7 @@ private:
     };
 
     void Stop(bool clearHandlers);
-    bool StartSlot(size_t index);
+    bool StartSlot(size_t index, const RetryTicket* expectedRetry = nullptr);
     void StartAllSlots();
     static void InvalidateRetryLocked(ConnectionSlot& slot) noexcept;
     static bool RetryTicketMatchesLocked(

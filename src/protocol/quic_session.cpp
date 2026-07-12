@@ -2079,7 +2079,7 @@ void QuicClientSession::StartAllSlots() {
     }
 }
 
-bool QuicClientSession::StartSlot(size_t index) {
+bool QuicClientSession::StartSlot(size_t index, const RetryTicket* expectedRetry) {
 #if defined(TQ_UNIT_TESTING)
     std::function<bool(size_t)> startSlotOverride;
     std::function<void(size_t, const TqClientSlotPath&)> startSlotPathObserver;
@@ -2150,13 +2150,22 @@ bool QuicClientSession::StartSlot(size_t index) {
 #endif
 
         auto& slot = state->Slots[index];
+        if (expectedRetry != nullptr) {
+            if (!RetryTicketMatchesLocked(*state, *expectedRetry)) {
+                ++state->RetryDiagnostics.StaleDroppedTotal;
+                return false;
+            }
+            slot.ActiveRetryToken = 0;
+            ++state->RetryDiagnostics.ExecutedTotal;
+        } else {
+            InvalidateRetryLocked(slot);
+        }
         if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
             return true;
         }
         oldConnection = std::move(slot.Connection);
         slot.Context = nullptr;
         slot.Connected = false;
-        InvalidateRetryLocked(slot);
         numericConnectionId = slot.NumericConnectionId;
         generation = slot.Generation;
         TqClientDebugLog("slot-reset", index, oldConnection.get());
@@ -2452,32 +2461,28 @@ void QuicClientSession::SubmitRetry(RetrySubmission submission) {
              ticket = submission.Ticket, TraceRetry]() {
                 auto state = weakState.lock();
                 if (!state) return;
-                bool stale = false;
 #if defined(TQ_UNIT_TESTING)
                 std::function<void()> traceObserver;
+                std::function<void()> beforeRetryStartClaim;
 #endif
                 {
                     std::lock_guard<std::mutex> guard(state->Lock);
-                    if (!RetryTicketMatchesLocked(*state, ticket)) {
-                        ++state->RetryDiagnostics.StaleDroppedTotal;
-                        stale = true;
-                    } else {
-                        InvalidateRetryLocked(state->Slots[ticket.SlotIndex]);
-                        ++state->RetryDiagnostics.ExecutedTotal;
-                    }
 #if defined(TQ_UNIT_TESTING)
                     traceObserver = state->TestHooks.RetryTraceObserver;
+                    beforeRetryStartClaim = state->TestHooks.BeforeRetryStartClaim;
 #endif
                 }
 #if defined(TQ_UNIT_TESTING)
-                if (traceObserver) traceObserver();
+                if (beforeRetryStartClaim) beforeRetryStartClaim();
 #endif
-                TraceRetry(stale ? "quic_retry_stale_drop" : "quic_retry_execute", ticket);
-                if (stale) return;
                 auto* session = AcquireLiveSession(gate);
                 if (!session) return;
-                (void)session->StartSlot(ticket.SlotIndex);
+                const bool started = session->StartSlot(ticket.SlotIndex, &ticket);
                 ReleaseLiveSession(gate);
+#if defined(TQ_UNIT_TESTING)
+                if (traceObserver) traceObserver();
+#endif
+                TraceRetry(started ? "quic_retry_execute" : "quic_retry_stale_drop", ticket);
             });
     auto state = submission.WeakState.lock();
     if (!state) return;
