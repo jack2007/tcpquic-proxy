@@ -1,4 +1,8 @@
+import csv
+import json
+import os
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,7 +33,7 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
     assert "$healthy_socks_port" in text
     assert "SOAK_SECONDS:-600" in text
     assert "RECOVERY_TIMEOUT_MS:-3500" in text
-    assert "201" in text
+    assert "math.ceil(duration / 3) + 1" in text
     assert "2900" in text
     assert "healthy_probe_failures" in text
     assert "event=quic_connecting" in text
@@ -37,6 +41,136 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
     assert '"$BASE_URL/peers"' in text
     assert '"$BASE_URL/metrics"' in text
     assert "pidstat" in text
+    assert "/proc/uptime" in text
+    assert "--connect-timeout" in text
+    assert "--max-time" in text
+    assert "Linux" in text
+    assert "TRACE_LOG" in text
+
+
+def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False,
+                   queue_rising=False, cpu_hot=False, log_rising=False,
+                   reactor_bad=False, close_timestamps=False, nonmonotonic=False):
+    (path / "admin").mkdir()
+    metrics = {
+        "ingress_delayed_task_queue_depth": 1,
+        "ingress_delayed_task_queue_depth_max": 2,
+        "ingress_reactor_timeout_overshoot_max_us": 200,
+        "ingress_reactor_timeout_overshoot_p95_us": 100,
+        "ingress_reactor_timeout_overshoot_p99_us": 150,
+        "ingress_reactor_timeout_overshoot_samples": 5,
+        "peers": [{
+            "peer_id": "failed", "retry_scheduled_total": 3,
+            "retry_executed_total": 2, "retry_stale_dropped_total": 1,
+            "retry_schedule_failed_total": 0,
+        }],
+    }
+    for i in range(4):
+        sample = json.loads(json.dumps(metrics))
+        if queue_rising:
+            sample["ingress_delayed_task_queue_depth"] = i + 1
+        if reactor_bad:
+            sample["ingress_reactor_timeout_overshoot_p99_us"] = 500001
+        if missing:
+            del sample["ingress_delayed_task_queue_depth"]
+        (path / "admin" / f"metrics-{i * 10000}.json").write_text(json.dumps(sample))
+    values = [100, 100, 100, 100, 100]
+    if rising:
+        values = [100, 110, 120, 130, 130]
+    log_values = [100] * 5
+    if log_rising:
+        log_values = [100, 101, 103, 106, 110]
+    with (path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        for i, value in enumerate(values):
+            ticks = i * (100 if cpu_hot else 1)
+            writer.writerow((i * 10000, ticks, 100, value, log_values[i]))
+    timestamp = "not-a-time" if bad_timestamp else "2026-07-12 10:00:00.000"
+    lines = [f"[{timestamp}] [info] event=quic_connecting peer=127.0.0.1:12345\n"]
+    if close_timestamps:
+        lines.append("[2026-07-12 10:00:01.000] [info] event=quic_connecting peer=127.0.0.1:12345\n")
+    if nonmonotonic:
+        lines.append("[2026-07-12 09:59:59.000] [info] event=quic_connecting peer=127.0.0.1:12345\n")
+    (path / "client-trace.log").write_text("".join(lines))
+
+
+def _analyze(path):
+    env = os.environ.copy()
+    env.update(ANALYZE_FIXTURE=str(path), FAILED_QUIC_PORT="12345", SOAK_SECONDS="40")
+    return subprocess.run([str(HARNESS)], env=env, text=True, capture_output=True)
+
+
+def test_fixture_analysis_reads_real_metric_shape(tmp_path):
+    _write_fixture(tmp_path)
+    result = _analyze(tmp_path)
+    assert result.returncode == 0, result.stderr
+    row = list(csv.DictReader((tmp_path / "retry-metrics.csv").open()))[0]
+    assert row["retry_scheduled_total"] == "3"
+    assert row["ingress_delayed_task_queue_depth"] == "1"
+
+
+def test_fixture_analysis_rejects_missing_metrics(tmp_path):
+    _write_fixture(tmp_path, missing=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "missing metric" in result.stderr
+
+
+def test_fixture_analysis_rejects_bad_connecting_timestamp(tmp_path):
+    _write_fixture(tmp_path, bad_timestamp=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "timestamp" in result.stderr
+
+
+def test_fixture_analysis_rejects_three_rising_resource_windows(tmp_path):
+    _write_fixture(tmp_path, rising=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_rejects_nonmonotonic_connecting_timestamps(tmp_path):
+    _write_fixture(tmp_path, nonmonotonic=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "strictly monotonic" in result.stderr
+
+
+def test_fixture_analysis_rejects_early_retry_interval(tmp_path):
+    _write_fixture(tmp_path, close_timestamps=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "below 2900ms" in result.stderr
+
+
+def test_fixture_analysis_rejects_hot_cpu(tmp_path):
+    _write_fixture(tmp_path, cpu_hot=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "CPU mean" in result.stderr
+
+
+def test_fixture_analysis_rejects_queue_growth(tmp_path):
+    _write_fixture(tmp_path, queue_rising=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "delayed queue depth monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_rejects_trace_log_growth(tmp_path):
+    _write_fixture(tmp_path, log_rising=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "trace log growth rate monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_rejects_reactor_delay(tmp_path):
+    _write_fixture(tmp_path, reactor_bad=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "reactor p99 delay" in result.stderr
 
 
 def test_harness_supports_k6_handoff():
