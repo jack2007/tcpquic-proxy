@@ -223,6 +223,7 @@ public:
         std::function<void()> BeforeTerminalConnectionShutdown;
         std::function<void()> BeforeRetryStartClaim;
         std::function<void()> RetryTraceObserver;
+        std::function<void(const char* event)> RetryTraceEventObserver;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
@@ -331,7 +332,10 @@ private:
     };
 
     void Stop(bool clearHandlers);
-    bool StartSlot(size_t index, const RetryTicket* expectedRetry = nullptr);
+    bool StartSlot(
+        size_t index,
+        const RetryTicket* expectedRetry = nullptr,
+        bool* retryClaimed = nullptr);
     void StartAllSlots();
     static void InvalidateRetryLocked(ConnectionSlot& slot) noexcept;
     static bool RetryTicketMatchesLocked(

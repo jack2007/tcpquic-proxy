@@ -666,12 +666,17 @@ static int TestRemovedSlotRetryCannotClaimRecreatedSlot() {
         return true;
     });
 
+    const auto oldSlot = session.SnapshotConnections()[1];
     session.ScheduleStartRetryForTest(1);
     if (tasks.size() != 1) return 2111;
     std::string err;
     if (!session.StopHighestConnection("conn-1", err)) return 2112;
     if (!session.SetDesiredConnectionCount(2, err)) return 2113;
     if (starts.load(std::memory_order_relaxed) != 1) return 2114;
+    const auto newSlot = session.SnapshotConnections()[1];
+    if (oldSlot.NumericConnectionId == newSlot.NumericConnectionId ||
+        oldSlot.Generation != newSlot.Generation) return 2118;
+    session.SetNextRetryTokenForTest(1);
     session.ScheduleStartRetryForTest(1);
     if (tasks.size() != 2) return 2115;
 
@@ -683,6 +688,30 @@ static int TestRemovedSlotRetryCannotClaimRecreatedSlot() {
     return starts.load(std::memory_order_relaxed) == 2 &&
             diag.StaleDroppedTotal == 1 && diag.ExecutedTotal == 1
         ? 0 : 2117;
+}
+
+static int TestClaimedRetryTracesExecuteWhenSlotStartFails() {
+    QuicClientSession session;
+    std::function<void()> task;
+    std::string traceEvent;
+    session.MarkReconnectStartedForTest(1);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [](size_t) { return false; };
+    hooks.RetryTraceEventObserver = [&](const char* event) { traceEvent = event; };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler([&](auto, std::function<void()> scheduledTask) {
+        task = std::move(scheduledTask);
+        return true;
+    });
+
+    session.ScheduleStartRetryForTest(0);
+    if (!task) return 2121;
+    task();
+    const auto diag = session.SnapshotRetryDiagnostics();
+    session.Stop();
+    return traceEvent == "quic_retry_execute" && diag.ExecutedTotal == 1 &&
+            diag.StaleDroppedTotal == 0
+        ? 0 : 2122;
 }
 
 static int TestRetryTokenExhaustionRejectsScheduling() {
@@ -1449,6 +1478,7 @@ int main() {
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
     if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;
     if (int rc = TestRemovedSlotRetryCannotClaimRecreatedSlot()) return rc;
+    if (int rc = TestClaimedRetryTracesExecuteWhenSlotStartFails()) return rc;
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
     if (int rc = TestRetryTraceRunsOutsideStateLock()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
