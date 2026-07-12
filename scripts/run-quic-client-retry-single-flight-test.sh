@@ -111,9 +111,26 @@ def rising_rss_time_windows(times, values):
 
 rising_rss_time_windows(elapsed,rss)
 rising_three_windows(queue,'delayed queue depth')
-growth=[b-a for a,b in zip(logs,logs[1:])]
-if any(a < b < c for a,b,c in zip(growth,growth[1:],growth[2:])):
-    raise SystemExit('trace log growth rate monotonic rise across three sampling windows')
+
+def rising_log_rate_time_windows(times, sizes):
+    start=times[0] + (times[-1]-times[0])*0.4
+    width=(times[-1]-start)/3
+    byte_growth=[0,0,0]; elapsed_growth=[0,0,0]
+    for t0,t1,b0,b1 in zip(times,times[1:],sizes,sizes[1:]):
+        if t1 <= t0 or b1 < b0: raise SystemExit('invalid trace log sample')
+        if t1 < start: continue
+        index=min(2,int((t1-start)/width)) if width > 0 else 2
+        byte_growth[index] += b1-b0
+        elapsed_growth[index] += t1-t0
+    if any(value <= 0 for value in elapsed_growth):
+        raise SystemExit('trace log rate window has no samples')
+    rates=[bytes_*1000/millis for bytes_,millis in zip(byte_growth,elapsed_growth)]
+    tolerance=max(32.0,rates[0]*0.05)
+    if rates[1] > rates[0]+tolerance and rates[2] > rates[1]+tolerance:
+        raise SystemExit(
+            f'trace log growth rate monotonic rise across three sampling windows: rates={rates}, tolerance={tolerance:.1f}B/s')
+
+rising_log_rate_time_windows(elapsed,logs)
 
 baseline_values=[v for t,v in zip(cpu_elapsed,cpu) if t <= 120000] or cpu[:1]
 final_values=[v for t,v in zip(cpu_elapsed,cpu) if t >= max(0,soak_ms-120000)] or cpu[-1:]

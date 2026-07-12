@@ -53,6 +53,7 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
 
 def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, warmup_plateau=False,
                    queue_rising=False, cpu_hot=False, log_rising=False,
+                   log_jitter=False,
                    reactor_bad=False, close_timestamps=False, nonmonotonic=False,
                    late_timestamps=False, burst_before_ready=False, over_limit=False):
     (path / "admin").mkdir()
@@ -83,9 +84,19 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
         values = [10000] * 6 + [10000, 10200, 10100, 10500, 10400, 10600, 10900, 10800, 11000]
     if warmup_plateau:
         values = [10000, 12000, 14000, 16000, 18000, 20000] + [20000, 20100, 19900] * 3
+    if log_rising or log_jitter:
+        values = [10000] * 15
     log_values = [100] * len(values)
     if log_rising:
-        log_values = [100, 101, 103, 106, 110]
+        rates = [500] * 6 + [500, 520, 480, 700, 720, 680, 900, 920]
+        log_values = [100]
+        for rate in rates:
+            log_values.append(log_values[-1] + rate * 10)
+    if log_jitter:
+        rates = [470, 810, 470, 470, 810, 470, 640, 644, 470, 640, 644, 470, 810, 470]
+        log_values = [100]
+        for rate in rates:
+            log_values.append(log_values[-1] + rate * 10)
     with (path / "resources.csv").open("w", newline="") as out:
         writer = csv.writer(out)
         writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
@@ -268,6 +279,12 @@ def test_fixture_analysis_rejects_trace_log_growth(tmp_path):
     result = _analyze(tmp_path)
     assert result.returncode != 0
     assert "trace log growth rate monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_accepts_constant_trace_rate_with_periodic_jitter(tmp_path):
+    _write_fixture(tmp_path, log_jitter=True)
+    result = _analyze(tmp_path, soak_seconds=140)
+    assert result.returncode == 0, result.stderr
 
 
 def test_fixture_analysis_rejects_reactor_delay(tmp_path):
