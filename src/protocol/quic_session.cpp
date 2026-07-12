@@ -1667,6 +1667,7 @@ bool QuicClientSession::ReconnectSlot(size_t index, std::string& err) {
         slot.Connected = false;
         slot.Closing = true;
         InvalidateRetryLocked(slot);
+        slot.RetrySchedulingFailed = false;
         ++slot.Generation;
         slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         slot.TerminalShutdownReserved = false;
@@ -1743,9 +1744,16 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
                 anyConnected = true;
                 continue;
             }
-            if (!slot.Connection && slot.ActiveRetryToken == 0) {
+            if (!slot.Connection && slot.ActiveRetryToken == 0 &&
+                slot.ActiveStartClaim == 0 && !slot.RetrySchedulingFailed) {
+#if defined(TQ_UNIT_TESTING)
+                auto beforeEnsureStartClaim = State->TestHooks.BeforeEnsureStartClaim;
+#endif
                 guard.unlock();
-                StartSlot(i);
+#if defined(TQ_UNIT_TESTING)
+                if (beforeEnsureStartClaim) beforeEnsureStartClaim();
+#endif
+                StartSlot(i, nullptr, nullptr, true);
                 guard.lock();
                 if (ConnectedCountLocked(*State) > 0) {
                     return true;
@@ -2133,7 +2141,8 @@ void QuicClientSession::StartAllSlots() {
 bool QuicClientSession::StartSlot(
     size_t index,
     const RetryTicket* expectedRetry,
-    bool* retryClaimed) {
+    bool* retryClaimed,
+    bool requireIdleClaim) {
     if (retryClaimed != nullptr) {
         *retryClaimed = false;
     }
@@ -2150,6 +2159,21 @@ bool QuicClientSession::StartSlot(
     uint64_t numericConnectionId = 0;
     uint64_t generation = 0;
     std::shared_ptr<ClientSessionGate> gate;
+
+    struct StartClaimGuard {
+        std::shared_ptr<ClientSharedState> State;
+        size_t Index{0};
+        uint64_t Claim{0};
+        ~StartClaimGuard() {
+            if (Claim == 0 || !State) return;
+            std::lock_guard<std::mutex> guard(State->Lock);
+            if (Index < State->Slots.size() &&
+                State->Slots[Index].ActiveStartClaim == Claim) {
+                State->Slots[Index].ActiveStartClaim = 0;
+            }
+            State->StateChanged.notify_all();
+        }
+    } startClaim{state, index, 0};
 
     {
         std::lock_guard<std::mutex> guard(state->Lock);
@@ -2217,9 +2241,17 @@ bool QuicClientSession::StartSlot(
             if (retryClaimed != nullptr) {
                 *retryClaimed = true;
             }
+        } else if (requireIdleClaim) {
+            if (slot.Connection || slot.ActiveRetryToken != 0 ||
+                slot.ActiveStartClaim != 0 || slot.RetrySchedulingFailed) {
+                return false;
+            }
         } else {
             InvalidateRetryLocked(slot);
         }
+        if (state->NextStartClaim == 0) ++state->NextStartClaim;
+        startClaim.Claim = state->NextStartClaim++;
+        slot.ActiveStartClaim = startClaim.Claim;
         if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
             return true;
         }
@@ -2450,7 +2482,8 @@ std::optional<QuicClientSession::RetrySubmission> QuicClientSession::ReserveRetr
     if (!state->Started || state->Stopping || index >= state->Slots.size()) return std::nullopt;
     auto& slot = state->Slots[index];
     if (slot.NumericConnectionId != expectedNumericConnectionId ||
-        slot.Generation != expectedGeneration || slot.ActiveRetryToken != 0) {
+        slot.Generation != expectedGeneration || slot.ActiveRetryToken != 0 ||
+        slot.RetrySchedulingFailed) {
         return std::nullopt;
     }
     if (state->NextRetryToken == 0 || state->NextRetryToken == UINT64_MAX) {
@@ -2568,6 +2601,7 @@ void QuicClientSession::SubmitRetry(RetrySubmission submission) {
         } else if (RetryTicketMatchesLocked(*state, submission.Ticket)) {
             InvalidateRetryLocked(state->Slots[submission.Ticket.SlotIndex]);
             state->Slots[submission.Ticket.SlotIndex].LastError = "retry scheduler unavailable";
+            state->Slots[submission.Ticket.SlotIndex].RetrySchedulingFailed = true;
             ++state->RetryDiagnostics.ScheduleFailedTotal;
             traceEvent = true;
             traceEventName = "quic_retry_schedule_failed";

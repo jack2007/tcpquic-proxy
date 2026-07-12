@@ -223,6 +223,7 @@ public:
             const std::vector<uint8_t>& payload)> SendClientHelloOverride;
         std::function<void()> BeforeTerminalConnectionShutdown;
         std::function<void()> BeforeRetryStartClaim;
+        std::function<void()> BeforeEnsureStartClaim;
         std::function<void()> BeforeShutdownRetryReservation;
         std::function<void()> RetryTraceObserver;
         std::function<void(const char* event)> RetryTraceEventObserver;
@@ -275,7 +276,9 @@ private:
         bool Connected{false};
         bool Closing{false};
         bool TerminalShutdownReserved{false};
+        bool RetrySchedulingFailed{false};
         uint64_t ActiveRetryToken{0};
+        uint64_t ActiveStartClaim{0};
         std::string LastError;
 #if defined(TQ_UNIT_TESTING)
         MsQuicConnection* TestConnectionOverride{nullptr};
@@ -317,6 +320,7 @@ private:
         uint64_t TerminalDuplicate{0};
         uint64_t TerminalClosingSuppressed{0};
         uint64_t NextRetryToken{1};
+        uint64_t NextStartClaim{1};
         TqClientRetryDiagnostics RetryDiagnostics;
 #if defined(TQ_UNIT_TESTING)
         ReconnectTestHooks TestHooks;
@@ -349,7 +353,8 @@ private:
     bool StartSlot(
         size_t index,
         const RetryTicket* expectedRetry = nullptr,
-        bool* retryClaimed = nullptr);
+        bool* retryClaimed = nullptr,
+        bool requireIdleClaim = false);
     void StartAllSlots();
     static void InvalidateRetryLocked(ConnectionSlot& slot) noexcept;
     static bool RetryTicketMatchesLocked(

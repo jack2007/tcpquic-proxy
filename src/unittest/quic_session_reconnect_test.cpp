@@ -568,7 +568,120 @@ static int TestEnsureConnectedDoesNotBypassPendingRetryDelay() {
     return 0;
 }
 
-static int TestRejectedSchedulerAllowsLaterRetry() {
+static int TestEnsureClaimCannotClearRetryReservedAfterObservation() {
+    QuicClientSession session;
+    std::mutex lock;
+    std::condition_variable cv;
+    bool observed = false;
+    bool release = false;
+    std::atomic<int> starts{0};
+    std::atomic<int> scheduled{0};
+
+    session.MarkReconnectStartedForTest(1);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    };
+    hooks.BeforeEnsureStartClaim = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        observed = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()>) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
+            scheduled.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        });
+
+    std::thread waiter([&] { (void)session.EnsureAnyConnected(std::chrono::milliseconds(40)); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        if (!cv.wait_for(guard, std::chrono::seconds(1), [&] { return observed; })) {
+            release = true;
+            cv.notify_all();
+            waiter.join();
+            session.Stop();
+            return 37;
+        }
+    }
+    session.ScheduleStartRetryForTest(0);
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    waiter.join();
+    const auto snapshot = session.SnapshotConnections();
+    session.Stop();
+    if (starts.load(std::memory_order_relaxed) != 0) return 38;
+    if (scheduled.load(std::memory_order_relaxed) != 1) return 39;
+    return snapshot.size() == 1 && snapshot[0].RetryScheduled ? 0 : 42;
+}
+
+static int TestConcurrentEnsureClaimsOnlyOneInitialStart() {
+    QuicClientSession session;
+    std::mutex lock;
+    std::condition_variable cv;
+    int observed = 0;
+    bool release = false;
+    std::atomic<int> starts{0};
+
+    session.MarkReconnectStartedForTest(1);
+    session.SetDelayedTaskScheduler(
+        [](std::chrono::milliseconds, std::function<void()>) { return true; });
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.BeforeEnsureStartClaim = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        ++observed;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    };
+    hooks.StartSlotOverride = [&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        session.ScheduleStartRetryForTest(0);
+        return false;
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+
+    std::thread first([&] { (void)session.EnsureAnyConnected(std::chrono::milliseconds(40)); });
+    std::thread second([&] { (void)session.EnsureAnyConnected(std::chrono::milliseconds(40)); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        if (!cv.wait_for(guard, std::chrono::seconds(1), [&] { return observed == 2; })) {
+            release = true;
+            cv.notify_all();
+            first.join(); second.join(); session.Stop();
+            return 43;
+        }
+        release = true;
+    }
+    cv.notify_all();
+    first.join(); second.join();
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 1 ? 0 : 44;
+}
+
+static int TestSchedulerRejectionStopsEnsureStartupRetries() {
+    QuicClientSession session;
+    std::atomic<int> starts{0};
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks({[&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }});
+    session.SetDelayedTaskScheduler(
+        [](std::chrono::milliseconds, std::function<void()>) { return false; });
+    session.ScheduleStartRetryForTest(0);
+    (void)session.EnsureAnyConnected(std::chrono::milliseconds(220));
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 0 ? 0 : 45;
+}
+
+static int TestRejectedSchedulerRequiresExplicitReconnect() {
     QuicClientSession session;
     std::atomic<int> rejectedCalls{0};
     std::atomic<int> acceptedCalls{0};
@@ -591,9 +704,10 @@ static int TestRejectedSchedulerAllowsLaterRetry() {
             retryTask = std::move(task);
             return true;
         });
-    session.ScheduleStartRetryForTest(0);
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 41;
     if (acceptedCalls.load(std::memory_order_relaxed) != 1 || !retryTask) {
-        return 41;
+        return 46;
     }
     session.Stop();
     return 0;
@@ -795,16 +909,19 @@ static int TestRetryTraceRunsOutsideStateLock() {
         [](std::chrono::milliseconds, std::function<void()>) { return false; });
     session.ScheduleStartRetryForTest(0);
 
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 2022;
+
     session.SetDelayedTaskScheduler(
         [&](std::chrono::milliseconds, std::function<void()> scheduledTask) {
             task = std::move(scheduledTask);
             return true;
         });
     session.ScheduleStartRetryForTest(0);
-    std::string err;
     if (!session.ReconnectConnection("conn-0", err)) return 2022;
     task();
 
+    if (!session.ReconnectConnection("conn-0", err)) return 2022;
     session.SetNextRetryTokenForTest(UINT64_MAX);
     session.ScheduleStartRetryForTest(0);
     session.Stop();
@@ -1544,7 +1661,10 @@ int main() {
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
     if (int rc = TestEnsureConnectedDoesNotBypassPendingRetryDelay()) return rc;
-    if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
+    if (int rc = TestEnsureClaimCannotClearRetryReservedAfterObservation()) return rc;
+    if (int rc = TestConcurrentEnsureClaimsOnlyOneInitialStart()) return rc;
+    if (int rc = TestSchedulerRejectionStopsEnsureStartupRetries()) return rc;
+    if (int rc = TestRejectedSchedulerRequiresExplicitReconnect()) return rc;
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
     if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;
     if (int rc = TestRemovedSlotRetryCannotClaimRecreatedSlot()) return rc;
