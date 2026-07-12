@@ -1917,8 +1917,49 @@ bool QuicClientSession::RetryStateLockAvailableForTest() {
     return true;
 }
 
-void QuicClientSession::RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation) {
-    RestartSlotAfterShutdownComplete(State, index, generation);
+bool QuicClientSession::CompleteSlotShutdownForTest(
+    size_t index,
+    uint64_t expectedNumericConnectionId,
+    uint64_t expectedGeneration,
+    bool useCurrentConnectionIdentity) {
+    std::function<void()> beforeReservation;
+    ClientConnContext* context = nullptr;
+    MsQuicConnection* connection = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        beforeReservation = State->TestHooks.BeforeShutdownRetryReservation;
+        if (index >= State->Slots.size()) return false;
+        auto& slot = State->Slots[index];
+        if (useCurrentConnectionIdentity) {
+            if (slot.Closing && !slot.Context && !slot.Connection) return false;
+            if (!slot.Context) {
+                slot.Context = new ClientConnContext{
+                    State->SessionGate, State, index,
+                    slot.NumericConnectionId, slot.Generation};
+            }
+            if (!slot.Connection) {
+                slot.Connection = std::shared_ptr<MsQuicConnection>(
+                    reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x1)),
+                    [](MsQuicConnection*) {});
+            }
+            context = slot.Context;
+            connection = slot.Connection.get();
+        } else {
+            context = reinterpret_cast<ClientConnContext*>(static_cast<uintptr_t>(0x2));
+            connection = reinterpret_cast<MsQuicConnection*>(static_cast<uintptr_t>(0x3));
+        }
+    }
+    if (beforeReservation) beforeReservation();
+    ShutdownCompleteResult result;
+    {
+        std::lock_guard<std::mutex> guard(State->Lock);
+        result = CompleteSlotShutdownLocked(
+            State, index, context, connection,
+            expectedNumericConnectionId, expectedGeneration);
+    }
+    if (result.Retry) SubmitRetry(std::move(*result.Retry));
+    if (result.WasCurrent) delete context;
+    return result.WasCurrent;
 }
 
 void QuicClientSession::SendClientHelloForTest(MsQuicConnection* connection) {
@@ -2234,7 +2275,8 @@ bool QuicClientSession::StartSlot(
     }
 
     if (!scheduleRetry) {
-        newContext = new (std::nothrow) ClientConnContext{gate, state, index, generation};
+        newContext = new (std::nothrow) ClientConnContext{
+            gate, state, index, numericConnectionId, generation};
     }
     if (!scheduleRetry && newContext == nullptr) {
         SetSlotLastError(index, "connection context allocation failed");
@@ -2531,20 +2573,33 @@ void QuicClientSession::SubmitRetry(RetrySubmission submission) {
     TraceRetry(traceEventName, submission.Ticket);
 }
 
-void QuicClientSession::RestartSlotAfterShutdownComplete(
+QuicClientSession::ShutdownCompleteResult QuicClientSession::CompleteSlotShutdownLocked(
     const std::shared_ptr<ClientSharedState>& state,
     size_t slotIndex,
+    ClientConnContext* context,
+    MsQuicConnection* connection,
+    uint64_t numericConnectionId,
     uint64_t generation) {
-    uint64_t numericConnectionId = 0;
-    {
-        std::lock_guard<std::mutex> guard(state->Lock);
-        if (!state->Started || state->Stopping || slotIndex >= state->Slots.size() ||
-            state->Slots[slotIndex].Generation != generation) {
-            return;
-        }
-        numericConnectionId = state->Slots[slotIndex].NumericConnectionId;
+    ShutdownCompleteResult result;
+    if (slotIndex >= state->Slots.size()) return result;
+    auto& slot = state->Slots[slotIndex];
+    if (slot.Context != context || slot.Connection.get() != connection ||
+        slot.NumericConnectionId != numericConnectionId || slot.Generation != generation) {
+        return result;
     }
-    ScheduleStartRetry(slotIndex, numericConnectionId, generation);
+    result.WasCurrent = true;
+    const bool wasConnected = slot.Connected;
+    slot.Context = nullptr;
+    slot.Connected = false;
+    slot.Closing = true;
+    result.CompletedSlotConnection = std::move(slot.Connection);
+    if (wasConnected) {
+        result.Notification.Handler = state->ConnectionStateChanged;
+        result.Notification.ConnectedCount = ConnectedCountLocked(*state);
+    }
+    result.Retry = ReserveRetryLocked(
+        state, slotIndex, numericConnectionId, generation);
+    return result;
 }
 
 QuicClientSession::ConnectionStateNotification QuicClientSession::OnSlotConnected(
@@ -2735,7 +2790,7 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
     {
         std::shared_ptr<QuicClientSession::ClientSessionGate> gate = slotContext->Gate;
-        std::shared_ptr<MsQuicConnection> completedSlotConnection;
+        QuicClientSession::ShutdownCompleteResult completion;
         TqClientDebugLog("event-shutdown-complete", slotIndex, connection);
         (void)TqAbortConnectionTunnels(connection);
         {
@@ -2757,32 +2812,36 @@ QUIC_STATUS QUIC_API QuicClientSession::ConnectionCallback(
                 "client");
         }
         if (state) {
-            auto notification = QuicClientSession::OnSlotDisconnected(state, slotIndex, connection);
+#if defined(TQ_UNIT_TESTING)
+            std::function<void()> beforeReservation;
             {
                 std::lock_guard<std::mutex> guard(state->Lock);
-                if (slotIndex < state->Slots.size() &&
-                    state->Slots[slotIndex].Context == slotContext) {
-                    auto& slot = state->Slots[slotIndex];
-                    slot.Context = nullptr;
-                    InvalidateRetryLocked(slot);
-                    if (slot.Connection.get() == connection) {
-                        completedSlotConnection = std::move(slot.Connection);
-                    }
-                }
+                beforeReservation = state->TestHooks.BeforeShutdownRetryReservation;
+            }
+#endif
+#if defined(TQ_UNIT_TESTING)
+            if (beforeReservation) beforeReservation();
+#endif
+            {
+                std::lock_guard<std::mutex> guard(state->Lock);
+                completion = QuicClientSession::CompleteSlotShutdownLocked(
+                    state, slotIndex, slotContext, connection,
+                    slotContext->NumericConnectionId, generation);
             }
             state->StateChanged.notify_all();
-            QuicClientSession::NotifyConnectionStateChanged(std::move(notification));
+            QuicClientSession::NotifyConnectionStateChanged(
+                std::move(completion.Notification));
         }
         connection->Close();
-        completedSlotConnection.reset();
+        completion.CompletedSlotConnection.reset();
         if (state) {
             QuicClientSession::DropOrphanedConnection(state, connection);
         }
         delete slotContext;
-        if (gate && state) {
+        if (completion.WasCurrent && completion.Retry && gate && state) {
             QuicClientSession* session = QuicClientSession::AcquireLiveSession(gate);
             if (session != nullptr) {
-                session->RestartSlotAfterShutdownComplete(state, slotIndex, generation);
+                session->SubmitRetry(std::move(*completion.Retry));
                 QuicClientSession::ReleaseLiveSession(gate);
             }
         }

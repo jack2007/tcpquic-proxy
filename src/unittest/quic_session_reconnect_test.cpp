@@ -793,42 +793,78 @@ static int TestConnectionStartPendingIsAccepted() {
     return 0;
 }
 
-static int TestShutdownCompleteSchedulesSlotRestart() {
+static int TestShutdownCompleteDoesNotReserveRetryAfterManualReconnect() {
     QuicClientSession session;
     std::atomic<int> scheduled{0};
-    std::atomic<int> startCalls{0};
-    std::function<void()> retryTask;
+    std::mutex lock;
+    std::condition_variable cv;
+    bool paused = false;
+    bool resume = false;
+    std::atomic<bool> shutdownWasCurrent{true};
 
     session.MarkReconnectStartedForTest(1);
-    session.SetReconnectTestHooks(QuicClientSession::ReconnectTestHooks{
-        [&](size_t index) {
-            if (index != 0) {
-                return false;
-            }
-            startCalls.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        }});
+    const auto before = session.SnapshotConnections().front();
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [](size_t) { return true; };
+    hooks.BeforeShutdownRetryReservation = [&] {
+        std::unique_lock<std::mutex> guard(lock);
+        paused = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return resume; });
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
     session.SetDelayedTaskScheduler(
-        [&](std::chrono::milliseconds delay, std::function<void()> task) {
-            if (delay != std::chrono::milliseconds(3000)) {
-                return false;
-            }
+        [&](std::chrono::milliseconds, std::function<void()>) {
             scheduled.fetch_add(1, std::memory_order_relaxed);
-            retryTask = std::move(task);
             return true;
         });
 
-    session.RestartSlotAfterShutdownCompleteForTest(0, 1);
-    if (scheduled.load(std::memory_order_relaxed) != 1 || !retryTask) {
-        return 75;
+    std::thread shutdown([&] {
+        shutdownWasCurrent.store(session.CompleteSlotShutdownForTest(
+            0, before.NumericConnectionId, before.Generation, true),
+            std::memory_order_release);
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        cv.wait(guard, [&] { return paused; });
     }
-    if (startCalls.load(std::memory_order_relaxed) != 0) {
-        return 76;
+    std::string err;
+    if (!session.ReconnectConnection(before.ConnectionId, err)) return 75;
+    const auto reconnected = session.SnapshotConnections().front();
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        resume = true;
     }
-    retryTask();
-    if (startCalls.load(std::memory_order_relaxed) != 1) {
-        return 77;
-    }
+    cv.notify_all();
+    shutdown.join();
+    const auto after = session.SnapshotConnections().front();
+    if (shutdownWasCurrent.load(std::memory_order_acquire)) return 74;
+    if (scheduled.load(std::memory_order_relaxed) != 0) return 76;
+    if (after.Generation != reconnected.Generation) return 77;
+    session.Stop();
+    return 0;
+}
+
+static int TestShutdownCompleteReservesOnceAndRejectsOrphan() {
+    QuicClientSession session;
+    std::atomic<int> scheduled{0};
+    session.MarkReconnectStartedForTest(1);
+    const auto identity = session.SnapshotConnections().front();
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()>) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
+            scheduled.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        });
+
+    if (!session.CompleteSlotShutdownForTest(
+            0, identity.NumericConnectionId, identity.Generation, true)) return 78;
+    if (scheduled.load(std::memory_order_relaxed) != 1) return 79;
+    if (session.CompleteSlotShutdownForTest(
+            0, identity.NumericConnectionId, identity.Generation, true)) return 780;
+    if (session.CompleteSlotShutdownForTest(
+            0, identity.NumericConnectionId, identity.Generation, false)) return 781;
+    if (scheduled.load(std::memory_order_relaxed) != 1) return 782;
     session.Stop();
     return 0;
 }
@@ -1482,7 +1518,8 @@ int main() {
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
     if (int rc = TestRetryTraceRunsOutsideStateLock()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
-    if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
+    if (int rc = TestShutdownCompleteDoesNotReserveRetryAfterManualReconnect()) return rc;
+    if (int rc = TestShutdownCompleteReservesOnceAndRejectsOrphan()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
     if (int rc = TestPickConnectionWithIdReturnsSlotId()) return rc;
     if (int rc = TestPickConnectionWithIdReturnsEmptyWhenDisconnected()) return rc;

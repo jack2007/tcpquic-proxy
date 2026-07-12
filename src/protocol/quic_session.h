@@ -222,6 +222,7 @@ public:
             const std::vector<uint8_t>& payload)> SendClientHelloOverride;
         std::function<void()> BeforeTerminalConnectionShutdown;
         std::function<void()> BeforeRetryStartClaim;
+        std::function<void()> BeforeShutdownRetryReservation;
         std::function<void()> RetryTraceObserver;
         std::function<void(const char* event)> RetryTraceEventObserver;
     };
@@ -243,7 +244,11 @@ public:
     void ScheduleStartRetryForTest(size_t index);
     void SetNextRetryTokenForTest(uint64_t token);
     bool RetryStateLockAvailableForTest();
-    void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
+    bool CompleteSlotShutdownForTest(
+        size_t index,
+        uint64_t expectedNumericConnectionId,
+        uint64_t expectedGeneration,
+        bool useCurrentConnectionIdentity);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
 #endif
 
@@ -255,6 +260,7 @@ private:
         std::shared_ptr<ClientSessionGate> Gate;
         std::shared_ptr<ClientSharedState> State;
         size_t SlotIndex{0};
+        uint64_t NumericConnectionId{0};
         uint64_t Generation{0};
         ~ClientConnContext();
     };
@@ -331,6 +337,13 @@ private:
         std::shared_ptr<ClientSessionGate> Gate;
     };
 
+    struct ShutdownCompleteResult {
+        std::shared_ptr<MsQuicConnection> CompletedSlotConnection;
+        std::optional<RetrySubmission> Retry;
+        ConnectionStateNotification Notification;
+        bool WasCurrent{false};
+    };
+
     void Stop(bool clearHandlers);
     bool StartSlot(
         size_t index,
@@ -341,7 +354,7 @@ private:
     static bool RetryTicketMatchesLocked(
         const ClientSharedState& state,
         const RetryTicket& ticket) noexcept;
-    std::optional<RetrySubmission> ReserveRetryLocked(
+    static std::optional<RetrySubmission> ReserveRetryLocked(
         const std::shared_ptr<ClientSharedState>& state,
         size_t index,
         uint64_t expectedNumericConnectionId,
@@ -351,9 +364,12 @@ private:
         uint64_t expectedNumericConnectionId,
         uint64_t expectedGeneration);
     void SubmitRetry(RetrySubmission submission);
-    void RestartSlotAfterShutdownComplete(
+    static ShutdownCompleteResult CompleteSlotShutdownLocked(
         const std::shared_ptr<ClientSharedState>& state,
         size_t slotIndex,
+        ClientConnContext* context,
+        MsQuicConnection* connection,
+        uint64_t numericConnectionId,
         uint64_t generation);
     static QuicClientSession* AcquireLiveSession(
         const std::shared_ptr<ClientSessionGate>& gate);
