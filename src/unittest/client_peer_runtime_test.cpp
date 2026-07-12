@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -406,52 +407,82 @@ static int TestManagerStopDoesNotHoldIngressLockAcrossReactorStop() {
     TqClientRuntimeManager manager(TqConfig{});
     if (!manager.StartIngressForTest()) return 2601;
 
-    std::atomic<bool> stopEntered{false};
-    std::atomic<bool> releaseStop{false};
+    std::mutex syncMutex;
+    std::condition_variable syncCv;
+    bool stopEntered{false};
+    bool releaseStop{false};
+    int callsReady{0};
+    bool allowCalls{false};
+    int callsFinished{0};
     manager.SetBeforeIngressStopForTest([&]() {
-        stopEntered.store(true, std::memory_order_release);
-        while (!releaseStop.load(std::memory_order_acquire)) {
-            std::this_thread::yield();
-        }
+        std::unique_lock<std::mutex> lock(syncMutex);
+        stopEntered = true;
+        syncCv.notify_all();
+        syncCv.wait(lock, [&]() { return releaseStop; });
     });
 
     std::thread stopper([&]() { manager.StopAll(); });
-    for (int i = 0; i < 100 && !stopEntered.load(std::memory_order_acquire); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (!stopEntered.load(std::memory_order_acquire)) {
-        releaseStop.store(true, std::memory_order_release);
-        stopper.join();
-        return 2602;
+    {
+        std::unique_lock<std::mutex> lock(syncMutex);
+        if (!syncCv.wait_for(lock, std::chrono::seconds(5), [&]() { return stopEntered; })) {
+            releaseStop = true;
+            lock.unlock();
+            syncCv.notify_all();
+            stopper.join();
+            return 2602;
+        }
     }
 
-    std::atomic<bool> snapshotFinished{false};
+    auto awaitCallGate = [&]() {
+        std::unique_lock<std::mutex> lock(syncMutex);
+        ++callsReady;
+        syncCv.notify_all();
+        syncCv.wait(lock, [&]() { return allowCalls; });
+    };
+    auto markCallFinished = [&]() {
+        std::lock_guard<std::mutex> lock(syncMutex);
+        ++callsFinished;
+        syncCv.notify_all();
+    };
+
     TqClientIngressDiagnostics snapshot;
     std::thread snapshotter([&]() {
+        awaitCallGate();
         snapshot = manager.SnapshotIngressDiagnostics();
-        snapshotFinished.store(true, std::memory_order_release);
+        markCallFinished();
     });
-    std::atomic<bool> startFinished{false};
-    std::atomic<bool> startResult{false};
+    bool startResult{false};
     std::thread starter([&]() {
-        startResult.store(manager.StartIngressForTest(), std::memory_order_release);
-        startFinished.store(true, std::memory_order_release);
+        awaitCallGate();
+        startResult = manager.StartIngressForTest();
+        markCallFinished();
     });
-    for (int i = 0; i < 100 && !snapshotFinished.load(std::memory_order_acquire); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    bool callsCompletedWhileStopBlocked{false};
+    {
+        std::unique_lock<std::mutex> lock(syncMutex);
+        if (!syncCv.wait_for(lock, std::chrono::seconds(5), [&]() { return callsReady == 2; })) {
+            allowCalls = true;
+            releaseStop = true;
+            lock.unlock();
+            syncCv.notify_all();
+            snapshotter.join();
+            starter.join();
+            stopper.join();
+            return 2606;
+        }
+        allowCalls = true;
+        syncCv.notify_all();
+        callsCompletedWhileStopBlocked = syncCv.wait_for(
+            lock, std::chrono::seconds(5), [&]() { return callsFinished == 2; });
+        releaseStop = true;
     }
-    for (int i = 0; i < 100 && !startFinished.load(std::memory_order_acquire); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    const bool snapshotCompletedWhileStopBlocked =
-        snapshotFinished.load(std::memory_order_acquire);
-    const bool startCompletedWhileStopBlocked = startFinished.load(std::memory_order_acquire);
-    releaseStop.store(true, std::memory_order_release);
+    syncCv.notify_all();
     snapshotter.join();
     starter.join();
     stopper.join();
-    if (!snapshotCompletedWhileStopBlocked) return 2603;
-    if (!startCompletedWhileStopBlocked || !startResult.load(std::memory_order_acquire)) return 2605;
+    if (!callsCompletedWhileStopBlocked) return 2603;
+    if (!startResult) return 2605;
     if (snapshot.DelayedTaskQueueDepth != 0 ||
         snapshot.ReactorTimeoutOvershootSamples != 0) return 2604;
     return 0;

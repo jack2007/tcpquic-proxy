@@ -1283,6 +1283,22 @@ int TestIngressDiagnosticsHistogramAndRestartContract() {
         histogram.ReactorTimeoutOvershootP99Micros != 250 ||
         histogram.ReactorTimeoutOvershootMaxMicros != UINT64_MAX) return 2523;
 
+    TqClientIngressReactor upperBoundary;
+    for (int i = 0; i < 95; ++i) upperBoundary.RecordTimeoutOvershootForTest(250);
+    for (int i = 0; i < 5; ++i) upperBoundary.RecordTimeoutOvershootForTest(251);
+    const auto upperHistogram = upperBoundary.SnapshotDiagnostics();
+    if (upperHistogram.ReactorTimeoutOvershootP95Micros != 250 ||
+        upperHistogram.ReactorTimeoutOvershootP99Micros != 500) return 2530;
+
+    TqClientIngressReactor overflow;
+    for (int i = 0; i < 98; ++i) overflow.RecordTimeoutOvershootForTest(250000);
+    overflow.RecordTimeoutOvershootForTest(250001);
+    overflow.RecordTimeoutOvershootForTest(UINT64_MAX);
+    const auto overflowHistogram = overflow.SnapshotDiagnostics();
+    if (overflowHistogram.ReactorTimeoutOvershootP95Micros != 250000 ||
+        overflowHistogram.ReactorTimeoutOvershootP99Micros != UINT64_MAX ||
+        overflowHistogram.ReactorTimeoutOvershootMaxMicros != UINT64_MAX) return 2531;
+
     TqClientIngressReactor restarted;
     restarted.RecordTimeoutOvershootForTest(2500);
     if (!restarted.Start()) return 2524;
