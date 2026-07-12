@@ -111,9 +111,11 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
     (path / "client-trace.log").write_text("".join(lines))
 
 
-def _analyze(path):
+def _analyze(path, *, soak_seconds=40, attempt_window_ms=None):
     env = os.environ.copy()
-    env.update(ANALYZE_FIXTURE=str(path), FAILED_QUIC_PORT="12345", SOAK_SECONDS="40")
+    env.update(ANALYZE_FIXTURE=str(path), FAILED_QUIC_PORT="12345", SOAK_SECONDS=str(soak_seconds))
+    if attempt_window_ms is not None:
+        env["ANALYZE_ATTEMPT_WINDOW_MS"] = str(attempt_window_ms)
     return subprocess.run([str(HARNESS)], env=env, text=True, capture_output=True)
 
 
@@ -151,6 +153,43 @@ def test_fixture_analysis_accepts_allocator_warmup_that_reaches_plateau(tmp_path
     _write_fixture(tmp_path, warmup_plateau=True)
     result = _analyze(tmp_path)
     assert result.returncode == 0, result.stderr
+
+
+def test_fixture_analysis_accepts_rss_growth_just_below_tolerance(tmp_path):
+    _write_fixture(tmp_path)
+    values = [10000] * 6 + [10000] * 3 + [10250] * 3 + [10500] * 3
+    with (tmp_path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        for i, value in enumerate(values):
+            writer.writerow((i * 10000, i, 100, value, 100))
+    result = _analyze(tmp_path, soak_seconds=140)
+    assert result.returncode == 0, result.stderr
+
+
+def test_fixture_analysis_rejects_empty_rss_time_window(tmp_path):
+    _write_fixture(tmp_path)
+    with (tmp_path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        writer.writerows(((0, 0, 100, 10000, 100), (100000, 1, 100, 10000, 100), (110000, 2, 100, 10000, 100)))
+    result = _analyze(tmp_path, soak_seconds=110)
+    assert result.returncode != 0
+    assert "rss time window has no samples" in result.stderr
+
+
+def test_fixture_cpu_final_window_uses_soak_not_attempt_duration(tmp_path):
+    _write_fixture(tmp_path)
+    with (tmp_path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        writer.writerows(((0, 0, 100, 10000, 100), (30000, 0, 100, 10000, 100),
+                          (60000, 1800, 100, 10000, 100), (90000, 1800, 100, 10000, 100),
+                          (120000, 1800, 100, 10000, 100), (150000, 1800, 100, 10000, 100),
+                          (180000, 1800, 100, 10000, 100)))
+    result = _analyze(tmp_path, soak_seconds=180, attempt_window_ms=240000)
+    assert result.returncode != 0
+    assert "final CPU mean" in result.stderr
 
 
 def test_harness_trace_extraction_keeps_startup_burst(tmp_path):

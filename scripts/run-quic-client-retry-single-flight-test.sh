@@ -9,6 +9,7 @@ RECOVERY_TIMEOUT_MS="${RECOVERY_TIMEOUT_MS:-3500}"
 HOLD_FOR_K6_SECONDS="${HOLD_FOR_K6_SECONDS:-0}"
 ENV_OUT="${ENV_OUT:-}"
 ANALYZE_FIXTURE="${ANALYZE_FIXTURE:-}"
+ANALYZE_ATTEMPT_WINDOW_MS="${ANALYZE_ATTEMPT_WINDOW_MS:-}"
 EXTRACT_TRACE_SOURCE="${EXTRACT_TRACE_SOURCE:-}"
 TRACE_START_BYTES="${TRACE_START_BYTES:-0}"
 
@@ -97,7 +98,8 @@ def rising_rss_time_windows(times, values):
         if stamp < start: continue
         index=min(2,int((stamp-start)/width)) if width > 0 else 2
         windows[index].append(value)
-    if any(not window for window in windows): return
+    if any(not window for window in windows):
+        raise SystemExit('rss time window has no samples')
     medians=[statistics.median(window) for window in windows]
     tolerance=max(256, medians[0]*0.005)
     if medians[1] > medians[0]+tolerance and medians[2] > medians[1]+tolerance:
@@ -111,7 +113,7 @@ if any(a < b < c for a,b,c in zip(growth,growth[1:],growth[2:])):
     raise SystemExit('trace log growth rate monotonic rise across three sampling windows')
 
 baseline_values=[v for t,v in zip(cpu_elapsed,cpu) if t <= 120000] or cpu[:1]
-final_values=[v for t,v in zip(cpu_elapsed,cpu) if t >= max(0,duration_ms-120000)] or cpu[-1:]
+final_values=[v for t,v in zip(cpu_elapsed,cpu) if t >= max(0,soak_ms-120000)] or cpu[-1:]
 baseline=statistics.fmean(baseline_values); final=statistics.fmean(final_values)
 if final>5.0: raise SystemExit(f'final CPU mean {final:.3f}% exceeds single-core 5%')
 if final>baseline*1.5 and final>0.1: raise SystemExit(f'final CPU mean {final:.3f}% exceeds baseline {baseline:.3f}% x1.5')
@@ -132,7 +134,8 @@ if [[ -n "$ANALYZE_FIXTURE" ]]; then
   if [[ -n "$EXTRACT_TRACE_SOURCE" ]]; then
     extract_trace_evidence "$EXTRACT_TRACE_SOURCE" "$TRACE_START_BYTES" "$ANALYZE_FIXTURE/client-trace.log"
   fi
-  analyze_evidence "$ANALYZE_FIXTURE" "${FAILED_QUIC_PORT:?FAILED_QUIC_PORT required}" "$((SOAK_SECONDS * 1000))"
+  analyze_evidence "$ANALYZE_FIXTURE" "${FAILED_QUIC_PORT:?FAILED_QUIC_PORT required}" \
+    "${ANALYZE_ATTEMPT_WINDOW_MS:-$((SOAK_SECONDS * 1000))}" "$((SOAK_SECONDS * 1000))"
   exit
 fi
 
