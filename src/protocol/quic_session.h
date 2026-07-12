@@ -209,6 +209,7 @@ public:
         uint64_t generation) noexcept;
 
 #if defined(TQ_UNIT_TESTING)
+    void SetRetryDiagnosticsForTest(const TqClientRetryDiagnostics& diagnostics);
     struct ReconnectTestHooks {
         std::function<bool(size_t index)> StartSlotOverride;
         std::function<void(size_t index, const TqClientSlotPath& path)> StartSlotPathObserver;

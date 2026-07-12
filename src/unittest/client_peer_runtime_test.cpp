@@ -381,6 +381,27 @@ static int TestSnapshotPeerMetricsIncludesStreamTotals() {
     return 0;
 }
 
+static int TestSnapshotPeerMetricsIncludesQuicRetryDiagnostics() {
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.SocksListen = "127.0.0.1:0";
+    cfg.QuicConnections = 1;
+
+    TqClientIngressReactor ingress;
+    auto runtime = std::make_shared<TqClientPeerRuntime>("peer-retry", cfg, &ingress);
+    auto quic = std::make_unique<QuicClientSession>();
+    quic->SetRetryDiagnosticsForTest({11, 7, 3, 1});
+    runtime->SetQuicSessionForTest(std::move(quic));
+
+    const TqPeerMetrics metrics = runtime->SnapshotPeerMetrics();
+    if (metrics.RetryScheduledTotal != 11) return 2201;
+    if (metrics.RetryExecutedTotal != 7) return 2202;
+    if (metrics.RetryStaleDroppedTotal != 3) return 2203;
+    if (metrics.RetryScheduleFailedTotal != 1) return 2204;
+    return 0;
+}
+
 int main() {
     if (int rc = TestPrimaryPeerConfigUsesCliFields()) return rc;
     if (int rc = TestPeerConfigOverlayUsesPeerOverrides()) return rc;
@@ -389,5 +410,6 @@ int main() {
     if (int rc = TestStopAcceptingDoesNotHangBehindPendingListenerApply()) return rc;
     if (int rc = TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen()) return rc;
     if (int rc = TestSnapshotPeerMetricsIncludesStreamTotals()) return rc;
+    if (int rc = TestSnapshotPeerMetricsIncludesQuicRetryDiagnostics()) return rc;
     return 0;
 }

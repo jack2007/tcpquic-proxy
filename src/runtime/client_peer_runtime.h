@@ -88,6 +88,7 @@ public:
     bool ApplyConnectionStateForTest(uint32_t connectedCount, std::string& err, bool requireConnected);
     void SetBeforeOpenIngressForTest(std::function<void()> hook);
     void IncrementTotalStreamsForTest(uint64_t count = 1);
+    void SetQuicSessionForTest(std::unique_ptr<QuicClientSession> quic);
 #endif
 
 private:

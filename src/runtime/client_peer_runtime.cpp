@@ -492,6 +492,11 @@ void TqClientPeerRuntime::SetBeforeOpenIngressForTest(std::function<void()> hook
 void TqClientPeerRuntime::IncrementTotalStreamsForTest(uint64_t count) {
     TotalStreams.fetch_add(count, std::memory_order_relaxed);
 }
+
+void TqClientPeerRuntime::SetQuicSessionForTest(std::unique_ptr<QuicClientSession> quic) {
+    std::lock_guard<std::mutex> guard(TunnelStartMutex);
+    Quic = std::move(quic);
+}
 #endif
 
 void TqClientPeerRuntime::CloseListeners() {

@@ -14,6 +14,7 @@
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -266,6 +267,10 @@ public:
     std::vector<std::string> AbortedConnectionTunnels;
     uint64_t ActiveStreams{0};
     uint64_t TotalStreams{0};
+    uint64_t RetryScheduledTotal{11};
+    uint64_t RetryExecutedTotal{7};
+    uint64_t RetryStaleDroppedTotal{3};
+    uint64_t RetryScheduleFailedTotal{1};
 
     bool StartPeer(const TqPeerConfig& peer, std::string& err) override {
         Started.push_back(peer.PeerId);
@@ -297,10 +302,10 @@ public:
         out.ConnectedConnections = ConnectedConnections;
         out.ActiveStreams = ActiveStreams;
         out.TotalStreams = TotalStreams;
-        out.RetryScheduledTotal = 11;
-        out.RetryExecutedTotal = 7;
-        out.RetryStaleDroppedTotal = 3;
-        out.RetryScheduleFailedTotal = 1;
+        out.RetryScheduledTotal = RetryScheduledTotal;
+        out.RetryExecutedTotal = RetryExecutedTotal;
+        out.RetryStaleDroppedTotal = RetryStaleDroppedTotal;
+        out.RetryScheduleFailedTotal = RetryScheduleFailedTotal;
         out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
         return true;
     }
@@ -387,6 +392,13 @@ static bool ParseJson(const std::string& text, nlohmann::json& out) {
     } catch (const nlohmann::json::exception&) {
         return false;
     }
+}
+
+static bool HasRetryTotals(const nlohmann::json& peer, uint64_t expected) {
+    return peer.at("retry_scheduled_total").get<uint64_t>() == expected &&
+        peer.at("retry_executed_total").get<uint64_t>() == expected &&
+        peer.at("retry_stale_dropped_total").get<uint64_t>() == expected &&
+        peer.at("retry_schedule_failed_total").get<uint64_t>() == expected;
 }
 
 static bool HasPortForward(const nlohmann::json& forwards, const char* listen, const char* target) {
@@ -641,11 +653,18 @@ int main() {
         adapter.ActiveStreams = 2;
         adapter.TotalStreams = 5;
         adapter.ConnectedConnections = 1;
+        adapter.RetryScheduledTotal = std::numeric_limits<uint64_t>::max();
+        adapter.RetryExecutedTotal = std::numeric_limits<uint64_t>::max();
+        adapter.RetryStaleDroppedTotal = std::numeric_limits<uint64_t>::max();
+        adapter.RetryScheduleFailedTotal = std::numeric_limits<uint64_t>::max();
         TqRouterRuntime adapterRuntime(&adapter);
         TqRouterConfig cfg;
         cfg.Peers.push_back(Peer("agent-metrics-peers", "127.0.0.1:11020"));
         std::string err;
         if (!adapterRuntime.ApplyConfig(cfg, err)) return 2301;
+        nlohmann::json metricsJson;
+        if (!ParseJson(JsonBody(adapterRuntime.HandleAdmin(Request("GET", "/metrics", ""))), metricsJson)) return 2401;
+        if (!HasRetryTotals(metricsJson.at("peers").at(0), std::numeric_limits<uint64_t>::max())) return 2402;
         TqHttpRequest list = Request("GET", "/peers", "");
         std::string listResp = adapterRuntime.HandleAdmin(list);
         const std::string listBody = JsonBody(listResp);
@@ -653,10 +672,9 @@ int main() {
         if (listBody.find("\"peer_id\":\"agent-metrics-peers\"") == std::string::npos) return 2308;
         if (listBody.find("\"active_streams\":2") == std::string::npos) return 2303;
         if (listBody.find("\"total_streams\":5") == std::string::npos) return 2304;
-        if (listBody.find("\"retry_scheduled_total\":11") == std::string::npos) return 2401;
-        if (listBody.find("\"retry_executed_total\":7") == std::string::npos) return 2402;
-        if (listBody.find("\"retry_stale_dropped_total\":3") == std::string::npos) return 2403;
-        if (listBody.find("\"retry_schedule_failed_total\":1") == std::string::npos) return 2404;
+        nlohmann::json listJson;
+        if (!ParseJson(listBody, listJson)) return 2403;
+        if (!HasRetryTotals(listJson.at("peers").at(0), std::numeric_limits<uint64_t>::max())) return 2404;
         TqHttpRequest get = Request("GET", "/peers/agent-metrics-peers", "");
         std::string getResp = adapterRuntime.HandleAdmin(get);
         const std::string getBody = JsonBody(getResp);
@@ -664,6 +682,22 @@ int main() {
         if (getBody.find("\"peer_id\":\"agent-metrics-peers\"") == std::string::npos) return 2309;
         if (getBody.find("\"active_streams\":2") == std::string::npos) return 2306;
         if (getBody.find("\"total_streams\":5") == std::string::npos) return 2307;
+        nlohmann::json getJson;
+        if (!ParseJson(getBody, getJson)) return 2405;
+        if (!HasRetryTotals(getJson, std::numeric_limits<uint64_t>::max())) return 2406;
+    }
+    {
+        FakeAdapter adapter;
+        TqRouterRuntime adapterRuntime(&adapter);
+        TqRouterConfig cfg;
+        TqPeerConfig disabled = Peer("agent-metrics-disabled", "127.0.0.1:11021");
+        disabled.Enabled = false;
+        cfg.Peers.push_back(disabled);
+        std::string err;
+        if (!adapterRuntime.ApplyConfig(cfg, err)) return 2407;
+        nlohmann::json metricsJson;
+        if (!ParseJson(adapterRuntime.MetricsJson(), metricsJson)) return 2408;
+        if (!HasRetryTotals(metricsJson.at("peers").at(0), 0)) return 2409;
     }
     {
         FakeAdapter adapter;

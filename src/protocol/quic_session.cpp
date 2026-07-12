@@ -1562,6 +1562,13 @@ TqClientRetryDiagnostics QuicClientSession::SnapshotRetryDiagnostics() const {
     return State->RetryDiagnostics;
 }
 
+#if defined(TQ_UNIT_TESTING)
+void QuicClientSession::SetRetryDiagnosticsForTest(const TqClientRetryDiagnostics& diagnostics) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    State->RetryDiagnostics = diagnostics;
+}
+#endif
+
 bool QuicClientSession::SetDesiredConnectionCount(uint32_t desired, std::string& err) {
     if (desired == 0) {
         err = "desired connection count must be greater than zero";
