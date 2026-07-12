@@ -402,6 +402,61 @@ static int TestSnapshotPeerMetricsIncludesQuicRetryDiagnostics() {
     return 0;
 }
 
+static int TestManagerStopDoesNotHoldIngressLockAcrossReactorStop() {
+    TqClientRuntimeManager manager(TqConfig{});
+    if (!manager.StartIngressForTest()) return 2601;
+
+    std::atomic<bool> stopEntered{false};
+    std::atomic<bool> releaseStop{false};
+    manager.SetBeforeIngressStopForTest([&]() {
+        stopEntered.store(true, std::memory_order_release);
+        while (!releaseStop.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+    });
+
+    std::thread stopper([&]() { manager.StopAll(); });
+    for (int i = 0; i < 100 && !stopEntered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!stopEntered.load(std::memory_order_acquire)) {
+        releaseStop.store(true, std::memory_order_release);
+        stopper.join();
+        return 2602;
+    }
+
+    std::atomic<bool> snapshotFinished{false};
+    TqClientIngressDiagnostics snapshot;
+    std::thread snapshotter([&]() {
+        snapshot = manager.SnapshotIngressDiagnostics();
+        snapshotFinished.store(true, std::memory_order_release);
+    });
+    std::atomic<bool> startFinished{false};
+    std::atomic<bool> startResult{false};
+    std::thread starter([&]() {
+        startResult.store(manager.StartIngressForTest(), std::memory_order_release);
+        startFinished.store(true, std::memory_order_release);
+    });
+    for (int i = 0; i < 100 && !snapshotFinished.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    for (int i = 0; i < 100 && !startFinished.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool snapshotCompletedWhileStopBlocked =
+        snapshotFinished.load(std::memory_order_acquire);
+    const bool startCompletedWhileStopBlocked = startFinished.load(std::memory_order_acquire);
+    releaseStop.store(true, std::memory_order_release);
+    snapshotter.join();
+    starter.join();
+    stopper.join();
+    if (!snapshotCompletedWhileStopBlocked) return 2603;
+    if (!startCompletedWhileStopBlocked || !startResult.load(std::memory_order_acquire)) return 2605;
+    if (snapshot.DelayedTaskQueueDepth != 0 ||
+        snapshot.ReactorTimeoutOvershootSamples != 0) return 2604;
+    return 0;
+}
+
 int main() {
     if (int rc = TestPrimaryPeerConfigUsesCliFields()) return rc;
     if (int rc = TestPeerConfigOverlayUsesPeerOverrides()) return rc;
@@ -411,5 +466,6 @@ int main() {
     if (int rc = TestConcurrentAsyncOpenAndSyncApplyShareInFlightOpen()) return rc;
     if (int rc = TestSnapshotPeerMetricsIncludesStreamTotals()) return rc;
     if (int rc = TestSnapshotPeerMetricsIncludesQuicRetryDiagnostics()) return rc;
+    if (int rc = TestManagerStopDoesNotHoldIngressLockAcrossReactorStop()) return rc;
     return 0;
 }

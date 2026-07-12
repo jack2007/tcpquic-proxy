@@ -154,6 +154,10 @@ public:
         const std::string& peerId,
         std::string& err,
         bool requireConnected);
+#ifdef TQ_UNIT_TESTING
+    bool StartIngressForTest();
+    void SetBeforeIngressStopForTest(std::function<void()> hook);
+#endif
 
 private:
     struct DrainSignal;

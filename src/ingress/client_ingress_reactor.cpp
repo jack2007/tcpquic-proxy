@@ -300,6 +300,16 @@ bool TqClientIngressReactor::Start() {
 }
 
 void TqClientIngressReactor::Stop() {
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> beforeStop;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        beforeStop = BeforeStopForTest;
+    }
+    if (beforeStop) {
+        beforeStop();
+    }
+#endif
     std::shared_ptr<CompletionToken> oldToken;
     {
         std::unique_lock<std::mutex> lifecycleLock(LifecycleMutex);
@@ -533,6 +543,16 @@ void TqClientIngressReactor::SetOpenTimeoutForTest(std::chrono::milliseconds tim
     std::lock_guard<std::mutex> lock(Mutex);
     OpenTimeout = timeout;
 }
+
+void TqClientIngressReactor::RecordTimeoutOvershootForTest(uint64_t overshootMicros) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    RecordTimeoutOvershootLocked(overshootMicros);
+}
+
+void TqClientIngressReactor::SetBeforeStopForTest(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(Mutex);
+    BeforeStopForTest = std::move(hook);
+}
 #endif
 
 void TqClientIngressReactor::Run() {
@@ -559,22 +579,26 @@ void TqClientIngressReactor::Run() {
         const uint64_t overshootMicros = elapsedMicros > static_cast<int64_t>(timeoutMicros)
             ? static_cast<uint64_t>(elapsedMicros) - timeoutMicros
             : 0;
-        constexpr std::array<uint64_t, 12> kOvershootBucketBounds{
-            100, 250, 500, 1000, 2500, 5000,
-            10000, 25000, 50000, 100000, 250000, UINT64_MAX};
         std::lock_guard<std::mutex> lock(Mutex);
-        ++ReactorTimeoutOvershootSamples;
-        ReactorTimeoutOvershootMaxMicros =
-            std::max(ReactorTimeoutOvershootMaxMicros, overshootMicros);
-        const auto bucket = std::lower_bound(
-            kOvershootBucketBounds.begin(), kOvershootBucketBounds.end(), overshootMicros);
-        ++ReactorTimeoutOvershootBuckets[static_cast<size_t>(
-            bucket - kOvershootBucketBounds.begin())];
+        RecordTimeoutOvershootLocked(overshootMicros);
     }
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
         ReactorThreadId = std::thread::id{};
     }
+}
+
+void TqClientIngressReactor::RecordTimeoutOvershootLocked(uint64_t overshootMicros) {
+    constexpr std::array<uint64_t, 12> kOvershootBucketBounds{
+        100, 250, 500, 1000, 2500, 5000,
+        10000, 25000, 50000, 100000, 250000, UINT64_MAX};
+    ++ReactorTimeoutOvershootSamples;
+    ReactorTimeoutOvershootMaxMicros =
+        std::max(ReactorTimeoutOvershootMaxMicros, overshootMicros);
+    const auto bucket = std::lower_bound(
+        kOvershootBucketBounds.begin(), kOvershootBucketBounds.end(), overshootMicros);
+    ++ReactorTimeoutOvershootBuckets[static_cast<size_t>(
+        bucket - kOvershootBucketBounds.begin())];
 }
 
 bool TqClientIngressReactor::IsReactorThread() const {

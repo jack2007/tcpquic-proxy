@@ -1257,6 +1257,52 @@ int TestDelayedTaskDiagnosticsTrackDepthAndDrain() {
     return 0;
 }
 
+int TestIngressDiagnosticsHistogramAndRestartContract() {
+    TqClientIngressReactor empty;
+    const auto initial = empty.SnapshotDiagnostics();
+    if (initial.DelayedTaskQueueDepth != 0 || initial.MaxDelayedTaskQueueDepth != 0 ||
+        initial.ReactorTimeoutOvershootSamples != 0 ||
+        initial.ReactorTimeoutOvershootP95Micros != 0 ||
+        initial.ReactorTimeoutOvershootP99Micros != 0 ||
+        initial.ReactorTimeoutOvershootMaxMicros != 0) return 2521;
+
+    empty.RecordTimeoutOvershootForTest(0);
+    auto earlyWake = empty.SnapshotDiagnostics();
+    if (earlyWake.ReactorTimeoutOvershootSamples != 1 ||
+        earlyWake.ReactorTimeoutOvershootMaxMicros != 0 ||
+        earlyWake.ReactorTimeoutOvershootP95Micros != 100 ||
+        earlyWake.ReactorTimeoutOvershootP99Micros != 100) return 2522;
+
+    TqClientIngressReactor buckets;
+    for (int i = 0; i < 95; ++i) buckets.RecordTimeoutOvershootForTest(100);
+    for (int i = 0; i < 4; ++i) buckets.RecordTimeoutOvershootForTest(101);
+    buckets.RecordTimeoutOvershootForTest(UINT64_MAX);
+    const auto histogram = buckets.SnapshotDiagnostics();
+    if (histogram.ReactorTimeoutOvershootSamples != 100 ||
+        histogram.ReactorTimeoutOvershootP95Micros != 100 ||
+        histogram.ReactorTimeoutOvershootP99Micros != 250 ||
+        histogram.ReactorTimeoutOvershootMaxMicros != UINT64_MAX) return 2523;
+
+    TqClientIngressReactor restarted;
+    restarted.RecordTimeoutOvershootForTest(2500);
+    if (!restarted.Start()) return 2524;
+    if (!restarted.EnqueueDelayed(std::chrono::hours(1), [] {})) return 2525;
+    const auto queued = restarted.SnapshotDiagnostics();
+    restarted.Stop();
+    const auto stopped = restarted.SnapshotDiagnostics();
+    if (!restarted.Start()) return 2526;
+    const auto afterRestart = restarted.SnapshotDiagnostics();
+    restarted.Stop();
+    if (queued.DelayedTaskQueueDepth != 1 || queued.MaxDelayedTaskQueueDepth != 1) return 2527;
+    if (stopped.DelayedTaskQueueDepth != 0 || afterRestart.DelayedTaskQueueDepth != 0 ||
+        stopped.MaxDelayedTaskQueueDepth != 1 || afterRestart.MaxDelayedTaskQueueDepth != 1) return 2528;
+    if (stopped.ReactorTimeoutOvershootSamples < 1 ||
+        afterRestart.ReactorTimeoutOvershootSamples < stopped.ReactorTimeoutOvershootSamples ||
+        stopped.ReactorTimeoutOvershootMaxMicros < 2500 ||
+        afterRestart.ReactorTimeoutOvershootMaxMicros < 2500) return 2529;
+    return 0;
+}
+
 int TestDelayedTaskRejectedAfterStop() {
     TqClientIngressReactor reactor;
     if (!reactor.Start()) {
@@ -1358,6 +1404,8 @@ int main() {
     result = TestDelayedTaskRunsAfterDelay();
     if (result != 0) return result;
     result = TestDelayedTaskDiagnosticsTrackDepthAndDrain();
+    if (result != 0) return result;
+    result = TestIngressDiagnosticsHistogramAndRestartContract();
     if (result != 0) return result;
     result = TestDelayedTaskRejectedAfterStop();
     if (result != 0) return result;

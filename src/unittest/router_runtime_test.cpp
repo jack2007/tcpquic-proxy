@@ -655,6 +655,19 @@ int main() {
         if (metrics.find("\"ingress_delayed_task_queue_depth_max\":41") == std::string::npos) return 2512;
         if (metrics.find("\"ingress_reactor_timeout_overshoot_p95_us\":250") == std::string::npos) return 2513;
         if (metrics.find("\"ingress_reactor_timeout_overshoot_p99_us\":500") == std::string::npos) return 2514;
+        if (metrics.find("\"ingress_reactor_timeout_overshoot_samples\":1000") == std::string::npos) return 2515;
+        if (metrics.find("\"ingress_reactor_timeout_overshoot_max_us\":2500") == std::string::npos) return 2516;
+    }
+    {
+        TqRouterRuntime runtime;
+        nlohmann::json metrics;
+        if (!ParseJson(runtime.MetricsJson(), metrics)) return 2518;
+        if (metrics.at("ingress_delayed_task_queue_depth") != 0 ||
+            metrics.at("ingress_delayed_task_queue_depth_max") != 0 ||
+            metrics.at("ingress_reactor_timeout_overshoot_samples") != 0 ||
+            metrics.at("ingress_reactor_timeout_overshoot_p95_us") != 0 ||
+            metrics.at("ingress_reactor_timeout_overshoot_p99_us") != 0 ||
+            metrics.at("ingress_reactor_timeout_overshoot_max_us") != 0) return 2519;
     }
     {
         FakeAdapter adapter;
@@ -706,6 +719,12 @@ int main() {
         nlohmann::json metricsJson;
         if (!ParseJson(adapterRuntime.MetricsJson(), metricsJson)) return 2408;
         if (!HasRetryTotals(metricsJson.at("peers").at(0), 0)) return 2409;
+        if (metricsJson.at("ingress_delayed_task_queue_depth") != 17 ||
+            metricsJson.at("ingress_delayed_task_queue_depth_max") != 41 ||
+            metricsJson.at("ingress_reactor_timeout_overshoot_samples") != 1000 ||
+            metricsJson.at("ingress_reactor_timeout_overshoot_p95_us") != 250 ||
+            metricsJson.at("ingress_reactor_timeout_overshoot_p99_us") != 500 ||
+            metricsJson.at("ingress_reactor_timeout_overshoot_max_us") != 2500) return 2517;
     }
     {
         FakeAdapter adapter;

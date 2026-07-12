@@ -626,6 +626,7 @@ void TqClientRuntimeManager::StopAccepting(const std::string& peerId) {
 void TqClientRuntimeManager::StopAll() {
     std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> peers;
     std::vector<DrainHandle> draining;
+    std::shared_ptr<TqClientIngressReactor> ingress;
     {
         std::lock_guard<std::mutex> lifecycleGuard(LifecycleMutex);
         {
@@ -652,13 +653,32 @@ void TqClientRuntimeManager::StopAll() {
         }
         {
             std::lock_guard<std::mutex> guard(IngressLock);
-            if (Ingress) {
-                Ingress->Stop();
-                Ingress.reset();
-            }
+            ingress = std::move(Ingress);
         }
     }
+    if (ingress) {
+        ingress->Stop();
+    }
 }
+
+#ifdef TQ_UNIT_TESTING
+bool TqClientRuntimeManager::StartIngressForTest() {
+    std::lock_guard<std::mutex> lifecycleGuard(LifecycleMutex);
+    std::string err;
+    return EnsureIngressStarted(err);
+}
+
+void TqClientRuntimeManager::SetBeforeIngressStopForTest(std::function<void()> hook) {
+    std::shared_ptr<TqClientIngressReactor> ingress;
+    {
+        std::lock_guard<std::mutex> guard(IngressLock);
+        ingress = Ingress;
+    }
+    if (ingress) {
+        ingress->SetBeforeStopForTest(std::move(hook));
+    }
+}
+#endif
 
 void TqClientRuntimeManager::AbortPeerTunnels(const std::string& peerId) {
     std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);

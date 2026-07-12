@@ -85,6 +85,8 @@ public:
     std::string HttpListenAddressForTest(const std::string& peerId) const;
     std::string PortForwardListenAddressForTest(const std::string& peerId, size_t index) const;
     void SetOpenTimeoutForTest(std::chrono::milliseconds timeout);
+    void RecordTimeoutOvershootForTest(uint64_t overshootMicros);
+    void SetBeforeStopForTest(std::function<void()> hook);
 #endif
 
 private:
@@ -166,6 +168,7 @@ private:
     void ProcessPendingTasks();
     void ProcessDueDelayedTasks();
     int NextRunTimeoutMsLocked() const;
+    void RecordTimeoutOvershootLocked(uint64_t overshootMicros);
     void AcceptLoop(TqSocketHandle listenFd);
     void HandleClientEvents(TqSocketHandle clientFd, uint32_t events);
     void HandleClientRead(TqSocketHandle clientFd);
@@ -220,6 +223,9 @@ private:
     std::array<uint64_t, 12> ReactorTimeoutOvershootBuckets{};
     uint64_t ReactorTimeoutOvershootSamples{0};
     uint64_t ReactorTimeoutOvershootMaxMicros{0};
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> BeforeStopForTest;
+#endif
     std::unordered_map<std::string, PeerEntry> Peers;
     std::unordered_map<TqSocketHandle, ListenEntry> Listens;
     std::unordered_map<TqSocketHandle, ClientEntry> Clients;
