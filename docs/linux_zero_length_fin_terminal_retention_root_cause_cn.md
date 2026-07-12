@@ -348,16 +348,26 @@ tcp_valid=true
 
 但 relay runtime 同时显示 `tcp_fd=-1`。这说明 retention handoff facts 没有及时反映 worker 已关闭 TCP fd 的事实，降低了诊断准确性。该问题不导致 retention，但建议独立修正或增加明确的 `tcp_fd_closed`/`data_plane_stopped` 字段。
 
-## 11. 建议修复范围
+## 11. 修复范围
 
-本报告只记录根因，尚未实施以下修复。
+本报告原先只记录根因；当前已实施首要修复。后续门禁与诊断加固仍建议独立评估。
 
 ### 11.1 首要修复
 
-应确保 `CompleteAndDiscardQuicReceive()` 在丢弃非 terminal view 前，同时完成两类义务：
+已确保 `CompleteAndDiscardQuicReceive()` 在丢弃非 terminal view 前，同时完成两类义务：
 
 1. 正长度 receive 的剩余字节 completion；
 2. `ZeroLengthFinCompletionPending` 对应的 `ReceiveComplete(0)`。
+
+当前最小代码改动为：
+
+```cpp
+void TqLinuxRelayWorker::CompleteAndDiscardQuicReceive(
+    TqPendingQuicReceive& view) {
+    (void)CompleteZeroLengthFinReceive(view);
+    ...
+}
+```
 
 更稳妥的设计是把“完成 view 的全部 MsQuic receive ownership”集中到一个 helper，使所有正常 drain、closing、fallback 和 handoff 清理路径都调用同一出口，避免每个分支分别记住零长度 FIN 特例。
 
@@ -382,12 +392,13 @@ tcp_valid=true
 
 ## 12. 必需回归测试
 
-至少应增加以下确定性测试，使用 barrier/latch 或可控 event ordering，不使用 sleep 猜测竞态：
+至少应增加以下确定性测试，使用 barrier/latch 或可控 event ordering，不使用 sleep 猜测竞态。当前已新增第一类最小回归测试；其余仍建议补齐。
 
 1. **零长度 FIN 在 relay Closing 后到达**
    - callback 返回 `QUIC_STATUS_PENDING`；
    - worker 处理 view 时 relay 已为 `Closing`；
    - 断言恰好调用一次 `StreamReceiveComplete(0)`。
+   - 当前覆盖：`tcpquic_linux_relay_worker_io_test` 中构造 relay 不存在的 `QuicReceiveView`，`Fin=true` 且 `ZeroLengthFinCompletionPending=true`，断言 fake MsQuic 收到一次 `StreamReceiveComplete(0)`。
 
 2. **零长度 FIN 位于 PendingQuicReceives，handoff 先执行**
    - handoff 清理 pending queue；
@@ -436,7 +447,203 @@ ShutdownComplete=1
 - 不通过直接 `StreamClose`、伪造 terminal 或重启进程掩盖问题。
 - 正常单向 FIN half-close 行为不变。
 
-## 14. 根因置信度
+## 14. 2026-07-12 服务端 PID 31420 补充现场
+
+### 14.1 现象
+
+同日服务端进程 `31420` 也出现 3 条长期无法关闭的 tunnel：
+
+```text
+PID: 31420
+程序: build/bin/Release/raypx2 server
+Admin: 0.0.0.0:2345
+```
+
+Admin 指标显示：
+
+```text
+active_streams=3
+active_tunnels=3
+terminal_retained_owner_count=3
+terminal_sink_pending=3
+linux_relay_active_relays=3
+linux_relay_closing_relays=3
+terminal_shutdown_submitted=41
+terminal_shutdown_pending=41
+terminal_watchdog_timeout=0
+```
+
+3 条 active tunnel 的目标分别为：
+
+| tunnel | target | 持续时间 |
+|---|---|---:|
+| `tun-61` | `go.microsoft.com:443` | 约 10 小时 |
+| `tun-205` | `optimizationguide-pa.googleapis.com:443` | 约 101 分钟 |
+| `tun-227` | `ep2.adtrafficquality.google:443` | 约 101 分钟 |
+
+relay runtime 已经显示数据面关闭：
+
+```text
+closing=true
+stream_detached=true
+tcp_fd=-1
+tcp_read_closed=true
+tcp_write_closed=true
+quic_send_fin_submitted=true
+quic_send_fin_completed=true
+outstanding_quic_sends=0
+pending_quic_receive_bytes=0
+```
+
+系统 socket 状态也确认进程没有残留这些 tunnel 的目标 TCP fd，只有 QUIC UDP listen 和 admin listen fd。
+
+### 14.2 MsQuic live 状态
+
+通过只读 gdb attach，从日志中的 `MsQuicStream*` wrapper 读取 3 个底层 `HQUIC`：
+
+| relay | wrapper | HQUIC | MsQuic stream ID |
+|---:|---|---|---:|
+| 30 | `0x7fb3d40045d0` | `0x21f0f902410` | 244 |
+| 102 | `0x7fb3d4008800` | `0x21f0f901410` | 832 |
+| 113 | `0x7fb3d402dd00` | `0x21f0f907010` | 920 |
+
+三者 flags 完全一致：
+
+```text
+LocalCloseFin=1
+LocalCloseAcked=1
+FinAcked=1
+HandleSendShutdown=1
+
+ReceiveDataPending=1
+RemoteCloseFin=0
+RemoteCloseAcked=0
+HandleShutdown=0
+HandleClosed=0
+ShutdownComplete=0
+Freed=0
+InStreamTable=1
+```
+
+进一步读取 `QUIC_STREAM::RecvBuffer` 后确认不是 payload 未处理：
+
+| relay | BaseOffset | RecvMaxLength | contiguous unread | ReadPendingLength | RecvPendingLength |
+|---:|---:|---:|---:|---:|---:|
+| 30 | 17820 | 17820 | 0 | 0 | 0 |
+| 102 | 4267 | 4267 | 0 | 0 | 0 |
+| 113 | 3319 | 3319 | 0 | 0 | 0 |
+
+这组状态说明：对端 FIN 已经到达，MsQuic receive buffer 已 drain 到 final offset，没有未读 payload，也没有 outstanding app receive bytes；但应用返回 `QUIC_STATUS_PENDING` 后没有完成 FIN-only receive，导致 `ReceiveDataPending` 位一直保持为 1。
+
+因此本次服务端 PID 31420 的 3 条 retention 与客户端 tunnel 56 属于同一类根因，不是“对端还没有调用 shutdown”，也不是 MsQuic 丢失 `SHUTDOWN_COMPLETE` callback。
+
+### 14.3 代码触发路径
+
+服务端日志显示这 3 条 relay 都经过：
+
+```text
+stream_event=receive_fin
+linux_relay_tcp_read result=eof
+trigger=quic_send_fin_completed
+```
+
+随后进入 `MaybeStopFullyClosedRelay()` 的 normal fully-closed 路径：
+
+```cpp
+(void)BeginTerminalHandoff(relay, trigger, 0, true);
+```
+
+`gracefulComplete=true` 会将 terminal sink 安装到 stream owner，并提交 `QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL`。该路径不会启动 fatal watchdog；terminal sink 只有在收到 `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE` 后才完成 handoff。
+
+由于零长度 FIN receive completion 欠账，MsQuic 无法把 `RemoteCloseAcked` 置位，也就不会发布 `QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE`。因此 handoff 永久等待，最终表现为：
+
+```text
+terminal_phase=shutdown_submitted
+shutdown_intent=graceful_complete
+shutdown_status=pending
+watchdog_state=idle
+```
+
+## 15. 已实施修复与验证
+
+### 15.1 修复
+
+修复位置：
+
+```text
+src/tunnel/linux_relay_worker.cpp
+```
+
+修复方式是在 `CompleteAndDiscardQuicReceive()` 入口先消费 zero-length FIN completion obligation：
+
+```cpp
+(void)CompleteZeroLengthFinReceive(view);
+```
+
+这样当 pending receive view 因 relay 已关闭、handoff、unregister 或 fallback cleanup 进入公共丢弃路径时，仍会对 `ZeroLengthFinCompletionPending=true` 的 view 调用一次 `StreamReceiveComplete(0)`。
+
+该修复保持正长度 receive 原有行为不变；正长度剩余字节仍由 `FlushDeferredReceiveCompletion(view, true)` 处理。
+
+### 15.2 回归测试
+
+新增测试位置：
+
+```text
+src/unittest/linux_relay_worker_io_test.cpp
+```
+
+测试构造：
+
+```text
+TqPendingQuicReceive:
+  Fin=true
+  TotalLength=0
+  ZeroLengthFinCompletionPending=true
+
+TqLinuxRelayEvent:
+  Type=QuicReceiveView
+  RelayId=不存在的 relay
+```
+
+修复前该测试失败：
+
+```text
+zero-length FIN discard must complete MsQuic receive, calls=0 bytes=0 pending=1
+```
+
+修复后断言：
+
+```text
+StreamReceiveComplete 调用次数 = 1
+完成字节数 = 0
+ZeroLengthFinCompletionPending = false
+```
+
+### 15.3 验证命令
+
+已运行：
+
+```bash
+rtk cmake --build build --target tcpquic_linux_relay_worker_io_test -j 4
+rtk build/bin/Release/tcpquic_linux_relay_worker_io_test
+rtk cmake --build build --target tcpquic_linux_terminal_convergence_test -j 4
+rtk build/bin/Release/tcpquic_linux_terminal_convergence_test
+```
+
+结果：
+
+```text
+tcpquic_linux_relay_worker_io_test: exit 0
+tcpquic_linux_terminal_convergence_test: exit 0
+```
+
+`tcpquic_linux_terminal_convergence_test` 输出的 terminal retention warning/critical 是该测试主动构造的预期诊断日志，不代表验证失败。
+
+### 15.4 部署注意
+
+该修复只影响新编译出的 binary。已经运行并卡住的旧进程中，MsQuic stream 仍停在旧状态，源码修改不会自动让这些 stream 收敛。需要替换为修复后的 binary 并重启对应 `raypx2` 进程。
+
+## 16. 根因置信度
 
 根因置信度为高，依据包括：
 

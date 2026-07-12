@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,8 @@ public:
 
 std::mutex g_FakeSendMutex;
 std::vector<void*> g_FakeSendContexts;
+std::atomic<uint64_t> g_FakeReceiveCompleteCalls{0};
+std::atomic<uint64_t> g_FakeReceiveCompleteBytes{0};
 std::shared_ptr<TqStreamLifetime> g_PrecommitOwner;
 std::array<uint8_t, 32> g_PrecommitPayload{};
 QUIC_STATUS g_PrecommitReceiveStatus = QUIC_STATUS_INTERNAL_ERROR;
@@ -84,7 +87,9 @@ QUIC_STATUS QUIC_API FakeStreamSend(
     return QUIC_STATUS_SUCCESS;
 }
 
-void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t) {
+void QUIC_API FakeStreamReceiveComplete(HQUIC, uint64_t bytes) {
+    g_FakeReceiveCompleteCalls.fetch_add(1, std::memory_order_relaxed);
+    g_FakeReceiveCompleteBytes.fetch_add(bytes, std::memory_order_relaxed);
 }
 
 std::mutex g_FakeStreamShutdownMutex;
@@ -120,6 +125,8 @@ QUIC_STATUS QUIC_API FakeStreamReceiveSetEnabled(HQUIC, BOOLEAN) {
 
 void InstallFakeMsQuicForSend(QUIC_API_TABLE& table) {
     std::memset(&table, 0, sizeof(table));
+    g_FakeReceiveCompleteCalls.store(0, std::memory_order_relaxed);
+    g_FakeReceiveCompleteBytes.store(0, std::memory_order_relaxed);
     table.StreamSend = FakeStreamSend;
     table.SetCallbackHandler = FakeSetCallbackHandler;
     table.StreamClose = FakeStreamClose;
@@ -763,6 +770,59 @@ int main() {
 
         worker.Stop();
         ::close(fds[1]);
+    }
+
+    {
+        QUIC_API_TABLE fakeApi{};
+        InstallFakeMsQuicForSend(fakeApi);
+
+        TqLinuxRelayWorkerConfig config{};
+        config.EventBudget = 8;
+        TqLinuxRelayWorker worker(config);
+        if (!worker.StartForTest()) {
+            MsQuic = nullptr;
+            return 380;
+        }
+
+        alignas(MsQuicStream) uint8_t fakeStreamStorage[sizeof(MsQuicStream)]{};
+        std::memset(fakeStreamStorage, 0, sizeof(fakeStreamStorage));
+        MsQuicStream* fakeStream = reinterpret_cast<MsQuicStream*>(fakeStreamStorage);
+        fakeStream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+
+        auto receive = std::make_shared<TqPendingQuicReceive>();
+        receive->Stream = fakeStream;
+        receive->Fin = true;
+        receive->ZeroLengthFinCompletionPending = true;
+
+        TqLinuxRelayEvent event{};
+        event.Type = TqLinuxRelayEventType::QuicReceiveView;
+        event.RelayId = 0x51554943;
+        event.ReceiveView = receive;
+        if (!worker.EnqueueForTest(std::move(event)) ||
+            worker.DrainForTest(config.EventBudget) != 1) {
+            worker.Stop();
+            MsQuic = nullptr;
+            return 381;
+        }
+
+        const auto completeCalls =
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed);
+        const auto completeBytes =
+            g_FakeReceiveCompleteBytes.load(std::memory_order_relaxed);
+        if (completeCalls != 1 || completeBytes != 0 ||
+            receive->ZeroLengthFinCompletionPending) {
+            std::fprintf(stderr,
+                "zero-length FIN discard must complete MsQuic receive, calls=%llu bytes=%llu pending=%d\n",
+                static_cast<unsigned long long>(completeCalls),
+                static_cast<unsigned long long>(completeBytes),
+                receive->ZeroLengthFinCompletionPending ? 1 : 0);
+            worker.Stop();
+            MsQuic = nullptr;
+            return 382;
+        }
+
+        worker.Stop();
+        MsQuic = nullptr;
     }
 
     {

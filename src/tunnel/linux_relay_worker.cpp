@@ -2707,6 +2707,7 @@ bool TqLinuxRelayWorker::HasAbortableStream(RelayState* relay) const {
 }
 
 void TqLinuxRelayWorker::CompleteAndDiscardQuicReceive(TqPendingQuicReceive& view) {
+    (void)CompleteZeroLengthFinReceive(view);
     const uint64_t remaining = view.TotalLength >= view.CompletedLength
         ? view.TotalLength - view.CompletedLength
         : 0;
