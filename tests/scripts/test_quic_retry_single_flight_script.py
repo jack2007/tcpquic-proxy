@@ -53,7 +53,7 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
 
 def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, warmup_plateau=False,
                    queue_rising=False, cpu_hot=False, log_rising=False,
-                   log_jitter=False,
+                   log_jitter=False, log_slow_acceleration=False,
                    reactor_bad=False, close_timestamps=False, nonmonotonic=False,
                    late_timestamps=False, burst_before_ready=False, over_limit=False):
     (path / "admin").mkdir()
@@ -84,7 +84,7 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
         values = [10000] * 6 + [10000, 10200, 10100, 10500, 10400, 10600, 10900, 10800, 11000]
     if warmup_plateau:
         values = [10000, 12000, 14000, 16000, 18000, 20000] + [20000, 20100, 19900] * 3
-    if log_rising or log_jitter:
+    if log_rising or log_jitter or log_slow_acceleration:
         values = [10000] * 15
     log_values = [100] * len(values)
     if log_rising:
@@ -94,6 +94,11 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
             log_values.append(log_values[-1] + rate * 10)
     if log_jitter:
         rates = [470, 810, 470, 470, 810, 470, 640, 644, 470, 640, 644, 470, 810, 470]
+        log_values = [100]
+        for rate in rates:
+            log_values.append(log_values[-1] + rate * 10)
+    if log_slow_acceleration:
+        rates = [500] * 6 + [500, 500, 500, 531, 531, 531, 562, 562]
         log_values = [100]
         for rate in rates:
             log_values.append(log_values[-1] + rate * 10)
@@ -284,6 +289,33 @@ def test_fixture_analysis_rejects_trace_log_growth(tmp_path):
 def test_fixture_analysis_accepts_constant_trace_rate_with_periodic_jitter(tmp_path):
     _write_fixture(tmp_path, log_jitter=True)
     result = _analyze(tmp_path, soak_seconds=140)
+    assert result.returncode == 0, result.stderr
+
+
+def test_fixture_analysis_rejects_two_small_compounding_log_rate_increases(tmp_path):
+    _write_fixture(tmp_path, log_slow_acceleration=True)
+    result = _analyze(tmp_path, soak_seconds=140)
+    assert result.returncode != 0
+    assert "trace log growth rate monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_splits_log_intervals_at_window_boundaries(tmp_path):
+    _write_fixture(tmp_path)
+    with (tmp_path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        # Final 60% is [60000,150000], with boundaries at 90000 and 120000.
+        # Rates around the boundaries are 400, 500, 600, 470 B/s. Assigning
+        # each whole interval by t1 falsely yields 400 -> 500 -> 535 B/s;
+        # proportional splitting yields about 450 -> 567 -> 492 B/s.
+        elapsed_values = (0, 50000, 75000, 100000, 125000, 150000)
+        rates = (400, 400, 500, 600, 470)
+        size = 100
+        writer.writerow((elapsed_values[0], 0, 100, 10000, size))
+        for before, elapsed, rate in zip(elapsed_values, elapsed_values[1:], rates):
+            size += rate * (elapsed - before) // 1000
+            writer.writerow((elapsed, 0, 100, 10000, size))
+    result = _analyze(tmp_path, soak_seconds=150)
     assert result.returncode == 0, result.stderr
 
 

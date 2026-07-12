@@ -115,18 +115,21 @@ rising_three_windows(queue,'delayed queue depth')
 def rising_log_rate_time_windows(times, sizes):
     start=times[0] + (times[-1]-times[0])*0.4
     width=(times[-1]-start)/3
-    byte_growth=[0,0,0]; elapsed_growth=[0,0,0]
+    byte_growth=[0.0,0.0,0.0]; elapsed_growth=[0.0,0.0,0.0]
     for t0,t1,b0,b1 in zip(times,times[1:],sizes,sizes[1:]):
         if t1 <= t0 or b1 < b0: raise SystemExit('invalid trace log sample')
-        if t1 < start: continue
-        index=min(2,int((t1-start)/width)) if width > 0 else 2
-        byte_growth[index] += b1-b0
-        elapsed_growth[index] += t1-t0
+        for index in range(3):
+            window_start=start+index*width
+            window_end=start+(index+1)*width
+            overlap=max(0.0,min(t1,window_end)-max(t0,window_start))
+            if overlap <= 0: continue
+            elapsed_growth[index] += overlap
+            byte_growth[index] += (b1-b0)*overlap/(t1-t0)
     if any(value <= 0 for value in elapsed_growth):
         raise SystemExit('trace log rate window has no samples')
     rates=[bytes_*1000/millis for bytes_,millis in zip(byte_growth,elapsed_growth)]
     tolerance=max(32.0,rates[0]*0.05)
-    if rates[1] > rates[0]+tolerance and rates[2] > rates[1]+tolerance:
+    if rates[1] > rates[0] and rates[2] > rates[1] and rates[2]-rates[0] > tolerance:
         raise SystemExit(
             f'trace log growth rate monotonic rise across three sampling windows: rates={rates}, tolerance={tolerance:.1f}B/s')
 
