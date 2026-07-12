@@ -1854,7 +1854,7 @@ static constexpr char kConsoleJsStorage[] =
 
       if (!tbody || rows.length === 0) return;
 
-      tbody.querySelectorAll('tr').forEach((tr, index) => {
+      tbody.querySelectorAll('tr').forEach((rowElement, index) => {
 
         const peerId = rows[index] && rows[index].peer_id ? rows[index].peer_id : '';
 
@@ -1862,7 +1862,7 @@ static constexpr char kConsoleJsStorage[] =
 
         td.innerHTML = `<button class="btn" data-edit-peer="${escapeHtml(peerId)}">${escapeHtml(tr('action.edit'))}</button> <button class="btn danger" data-delete-peer="${escapeHtml(peerId)}">${escapeHtml(tr('action.delete'))}</button>`;
 
-        tr.appendChild(td);
+        rowElement.appendChild(td);
 
       });
 
@@ -1904,7 +1904,7 @@ static constexpr char kConsoleJsStorage[] =
 
       if (!tbody || rows.length === 0) return;
 
-      tbody.querySelectorAll('tr').forEach((tr, index) => {
+      tbody.querySelectorAll('tr').forEach((rowElement, index) => {
 
         const row = rows[index] || {};
 
@@ -1912,7 +1912,7 @@ static constexpr char kConsoleJsStorage[] =
 
         td.innerHTML = `<button class="btn" data-peer-id="${escapeHtml(row.peer_id)}" data-connection-id="${escapeHtml(row.connection_id)}">${escapeHtml(tr('action.detail'))}</button>`;
 
-        tr.appendChild(td);
+        rowElement.appendChild(td);
 
       });
 

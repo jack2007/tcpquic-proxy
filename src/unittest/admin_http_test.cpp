@@ -390,6 +390,15 @@ int main() {
         if (html.find("id=\"peer-delete\"") != std::string_view::npos) return 380;
         if (js.find("document.getElementById('peer-delete')") != std::string_view::npos) return 381;
         if (js.find("data-delete-peer") == std::string_view::npos) return 382;
+        if (js.find("tbody.querySelectorAll('tr').forEach((tr, index) => {") != std::string_view::npos) return 1388;
+        if (js.find("tbody.querySelectorAll('tr').forEach((rowElement, index) => {") == std::string_view::npos) return 1389;
+        if (js.find("rowElement.appendChild(td);") == std::string_view::npos) return 1390;
+        if (js.find("'action.edit': 'Edit'") == std::string_view::npos) return 1391;
+        if (js.find("'action.delete': 'Delete'") == std::string_view::npos) return 1392;
+        if (js.find("'action.detail': 'Detail'") == std::string_view::npos) return 1393;
+        if (js.find("'action.edit': '编辑'") == std::string_view::npos) return 1394;
+        if (js.find("'action.delete': '删除'") == std::string_view::npos) return 1395;
+        if (js.find("'action.detail': '详情'") == std::string_view::npos) return 1396;
         if (html.find("<section class=\"peer-form-panel hidden\" id=\"peer-form-panel\">") == std::string_view::npos) return 443;
         if (!TqCssRuleHasDeclaration(css, ".hidden", "display:none!important")) return 444;
         if (js.find("function showPeerForm()") == std::string_view::npos) return 445;
