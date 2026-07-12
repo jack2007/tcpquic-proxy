@@ -80,14 +80,17 @@ cpu=[]; cpu_elapsed=[]
 for before,after,t0,t1,hz in zip(ticks,ticks[1:],elapsed,elapsed[1:],clock_hz[1:]):
     if t1<=t0 or after<before or hz<=0: raise SystemExit('invalid monotonic CPU sample')
     cpu.append((after-before)*100000/(hz*(t1-t0))); cpu_elapsed.append(t1)
-if not cpu: cpu=[0.0]; cpu_elapsed=[duration_ms]
+if not cpu: cpu=[0.0]; cpu_elapsed=[soak_ms]
 
 def rising_three_windows(values, name):
     if any(a < b < c < d for a,b,c,d in zip(values,values[1:],values[2:],values[3:])):
         raise SystemExit(f'{name} monotonic rise across three sampling windows')
 
 def rising_rss_time_windows(times, values):
-    if len(values) < 3 or times[-1] <= times[0]: return
+    if len(values) < 3:
+        raise SystemExit('rss requires at least three samples')
+    if times[-1] <= times[0]:
+        raise SystemExit('rss sampling interval is not positive')
     # Ignore allocator startup warmup, then aggregate the final 60% of elapsed
     # time into three non-overlapping windows. Medians reject individual arena
     # allocation/deallocation noise while still detecting bounded-rate leaks.

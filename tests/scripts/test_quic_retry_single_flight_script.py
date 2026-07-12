@@ -192,6 +192,35 @@ def test_fixture_cpu_final_window_uses_soak_not_attempt_duration(tmp_path):
     assert "final CPU mean" in result.stderr
 
 
+def test_fixture_cpu_empty_interval_fallback_uses_soak_end(tmp_path):
+    _write_fixture(tmp_path)
+    with (tmp_path / "resources.csv").open("w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+        writer.writerow((180000, 0, 100, 10000, 100))
+    result = _analyze(tmp_path, soak_seconds=180, attempt_window_ms=240000)
+    assert result.returncode != 0
+    assert "rss requires at least three samples" in result.stderr
+    # The CPU fallback is established before RSS validation and must use the
+    # soak-relative endpoint, never the longer attempt window.
+    assert "cpu_elapsed=[soak_ms]" in HARNESS.read_text()
+
+
+def test_fixture_analysis_rejects_fewer_than_three_rss_samples(tmp_path):
+    for count in (1, 2):
+        case = tmp_path / str(count)
+        case.mkdir()
+        _write_fixture(case)
+        with (case / "resources.csv").open("w", newline="") as out:
+            writer = csv.writer(out)
+            writer.writerow(("elapsed_ms", "cpu_ticks", "clock_ticks_per_second", "rss_kb", "trace_log_bytes"))
+            for i in range(count):
+                writer.writerow((i * 10000, i, 100, 10000, 100))
+        result = _analyze(case)
+        assert result.returncode != 0
+        assert "rss requires at least three samples" in result.stderr
+
+
 def test_harness_trace_extraction_keeps_startup_burst(tmp_path):
     _write_fixture(tmp_path, burst_before_ready=True)
     raw = tmp_path / "raw-client-trace.log"
