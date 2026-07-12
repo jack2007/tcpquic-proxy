@@ -681,7 +681,7 @@ static int TestSchedulerRejectionStopsEnsureStartupRetries() {
     return starts.load(std::memory_order_relaxed) == 0 ? 0 : 45;
 }
 
-static int TestRejectedSchedulerRequiresExplicitReconnect() {
+static int TestRejectedSchedulerRequiresSessionRestart() {
     QuicClientSession session;
     std::atomic<int> rejectedCalls{0};
     std::atomic<int> acceptedCalls{0};
@@ -705,9 +705,13 @@ static int TestRejectedSchedulerRequiresExplicitReconnect() {
             return true;
         });
     std::string err;
-    if (!session.ReconnectConnection("conn-0", err)) return 41;
+    if (session.ReconnectConnection("conn-0", err)) return 41;
+    if (err.find("restart peer session") == std::string::npos) return 46;
+    if (acceptedCalls.load(std::memory_order_relaxed) != 0 || retryTask) return 47;
+    session.MarkReconnectStartedForTest(1);
+    session.ScheduleStartRetryForTest(0);
     if (acceptedCalls.load(std::memory_order_relaxed) != 1 || !retryTask) {
-        return 46;
+        return 48;
     }
     session.Stop();
     return 0;
@@ -881,6 +885,93 @@ static int TestRetryTokenExhaustionRejectsScheduling() {
         ? 0 : 2010;
 }
 
+static int TestRetryTokenExhaustionStopsEnsureStartupRetries() {
+    QuicClientSession session;
+    std::atomic<int> starts{0};
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks({[&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }});
+    session.SetDelayedTaskScheduler(
+        [](std::chrono::milliseconds, std::function<void()>) { return true; });
+    session.SetNextRetryTokenForTest(UINT64_MAX);
+    session.ScheduleStartRetryForTest(0);
+    (void)session.EnsureAnyConnected(std::chrono::milliseconds(220));
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 0 ? 0 : 2011;
+}
+
+static int TestStartClaimExhaustionStopsEnsureWithoutWraparound() {
+    QuicClientSession session;
+    std::atomic<int> starts{0};
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks({[&](size_t) {
+        starts.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }});
+    session.SetNextStartClaimForTest(UINT64_MAX);
+    (void)session.EnsureAnyConnected(std::chrono::milliseconds(220));
+    const auto snapshots = session.SnapshotConnections();
+    session.Stop();
+    return starts.load(std::memory_order_relaxed) == 0 && snapshots.size() == 1 &&
+            snapshots[0].LastError.find("start claim exhausted") != std::string::npos
+        ? 0 : 2012;
+}
+
+static int TestRetryStartClaimBlocksEnsureBeforeConnectionPublish() {
+    QuicClientSession session;
+    TqConfig cfg{};
+    cfg.Mode = TqMode::Client;
+    cfg.QuicPeer = "127.0.0.1:4433";
+    cfg.QuicConnections = 1;
+    cfg.QuicCa = "cert/ca.crt";
+    cfg.QuicDisable1RttEncryption = false;
+    if (!session.Start(cfg)) return 2013;
+
+    std::function<void()> retryTask;
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()> task) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
+            retryTask = std::move(task);
+            return true;
+        });
+    std::mutex lock;
+    std::condition_variable cv;
+    bool beforePublish = false;
+    bool release = false;
+    std::atomic<int> publishCalls{0};
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.BeforePublishSlot = [&](size_t index) {
+        if (index != 0) return;
+        publishCalls.fetch_add(1, std::memory_order_relaxed);
+        std::unique_lock<std::mutex> guard(lock);
+        beforePublish = true;
+        cv.notify_all();
+        cv.wait(guard, [&] { return release; });
+    };
+    hooks.ConnectionStartOverride = [](size_t) { return QUIC_STATUS_ABORTED; };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.ScheduleStartRetryForTest(0);
+    if (!retryTask) { session.Stop(); return 2014; }
+    std::thread retry([&] { retryTask(); });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        if (!cv.wait_for(guard, std::chrono::seconds(1), [&] { return beforePublish; })) {
+            release = true; cv.notify_all(); retry.join(); session.Stop(); return 2015;
+        }
+    }
+    (void)session.EnsureAnyConnected(std::chrono::milliseconds(40));
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+    }
+    cv.notify_all();
+    retry.join();
+    session.Stop();
+    return publishCalls.load(std::memory_order_relaxed) == 1 ? 0 : 2016;
+}
+
 static int TestRetryTraceRunsOutsideStateLock() {
     QuicClientSession session;
     std::function<void()> task;
@@ -909,8 +1000,7 @@ static int TestRetryTraceRunsOutsideStateLock() {
         [](std::chrono::milliseconds, std::function<void()>) { return false; });
     session.ScheduleStartRetryForTest(0);
 
-    std::string err;
-    if (!session.ReconnectConnection("conn-0", err)) return 2022;
+    session.MarkReconnectStartedForTest(1);
 
     session.SetDelayedTaskScheduler(
         [&](std::chrono::milliseconds, std::function<void()> scheduledTask) {
@@ -918,6 +1008,7 @@ static int TestRetryTraceRunsOutsideStateLock() {
             return true;
         });
     session.ScheduleStartRetryForTest(0);
+    std::string err;
     if (!session.ReconnectConnection("conn-0", err)) return 2022;
     task();
 
@@ -1345,6 +1436,9 @@ static int TestStartSlotCleansUnpublishedContextOnLocalBindFailure() {
     cfg.QuicDisable1RttEncryption = false;
     cfg.QuicPaths.push_back(TqQuicPathConfig{"bad-local", "not-an-ip", "127.0.0.1:4433", 1});
 
+    session.SetDelayedTaskScheduler(
+        [](std::chrono::milliseconds, std::function<void()>) { return true; });
+
     if (!session.Start(cfg)) return 1811;
 
     std::atomic<int> deletedContexts{0};
@@ -1664,12 +1758,15 @@ int main() {
     if (int rc = TestEnsureClaimCannotClearRetryReservedAfterObservation()) return rc;
     if (int rc = TestConcurrentEnsureClaimsOnlyOneInitialStart()) return rc;
     if (int rc = TestSchedulerRejectionStopsEnsureStartupRetries()) return rc;
-    if (int rc = TestRejectedSchedulerRequiresExplicitReconnect()) return rc;
+    if (int rc = TestRejectedSchedulerRequiresSessionRestart()) return rc;
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
     if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;
     if (int rc = TestRemovedSlotRetryCannotClaimRecreatedSlot()) return rc;
     if (int rc = TestClaimedRetryTracesExecuteWhenSlotStartFails()) return rc;
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
+    if (int rc = TestRetryTokenExhaustionStopsEnsureStartupRetries()) return rc;
+    if (int rc = TestStartClaimExhaustionStopsEnsureWithoutWraparound()) return rc;
+    if (int rc = TestRetryStartClaimBlocksEnsureBeforeConnectionPublish()) return rc;
     if (int rc = TestRetryTraceRunsOutsideStateLock()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     if (int rc = TestShutdownCompleteDoesNotReserveRetryAfterManualReconnect()) return rc;

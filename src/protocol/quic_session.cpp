@@ -1664,10 +1664,13 @@ bool QuicClientSession::ReconnectSlot(size_t index, std::string& err) {
             return false;
         }
         auto& slot = State->Slots[index];
+        if (slot.RetrySchedulingFailed) {
+            err = "retry scheduling failed; restart peer session";
+            return false;
+        }
         slot.Connected = false;
         slot.Closing = true;
         InvalidateRetryLocked(slot);
-        slot.RetrySchedulingFailed = false;
         ++slot.Generation;
         slot.NumericConnectionId = g_nextNumericConnectionId.fetch_add(1);
         slot.TerminalShutdownReserved = false;
@@ -1924,6 +1927,11 @@ void QuicClientSession::ScheduleStartRetryForTest(size_t index) {
 void QuicClientSession::SetNextRetryTokenForTest(uint64_t token) {
     std::lock_guard<std::mutex> guard(State->Lock);
     State->NextRetryToken = token;
+}
+
+void QuicClientSession::SetNextStartClaimForTest(uint64_t claim) {
+    std::lock_guard<std::mutex> guard(State->Lock);
+    State->NextStartClaim = claim;
 }
 
 bool QuicClientSession::RetryStateLockAvailableForTest() {
@@ -2236,6 +2244,17 @@ bool QuicClientSession::StartSlot(
                 ++state->RetryDiagnostics.StaleDroppedTotal;
                 return false;
             }
+        }
+        if (state->NextStartClaim == 0 || state->NextStartClaim == UINT64_MAX) {
+            if (expectedRetry != nullptr) {
+                InvalidateRetryLocked(slot);
+            }
+            slot.RetrySchedulingFailed = true;
+            slot.LastError = "start claim exhausted";
+            ++state->RetryDiagnostics.ScheduleFailedTotal;
+            return false;
+        }
+        if (expectedRetry != nullptr) {
             slot.ActiveRetryToken = 0;
             ++state->RetryDiagnostics.ExecutedTotal;
             if (retryClaimed != nullptr) {
@@ -2249,7 +2268,6 @@ bool QuicClientSession::StartSlot(
         } else {
             InvalidateRetryLocked(slot);
         }
-        if (state->NextStartClaim == 0) ++state->NextStartClaim;
         startClaim.Claim = state->NextStartClaim++;
         slot.ActiveStartClaim = startClaim.Claim;
         if (slot.Connected && slot.Connection && slot.Connection->IsValid()) {
@@ -2488,6 +2506,7 @@ std::optional<QuicClientSession::RetrySubmission> QuicClientSession::ReserveRetr
     }
     if (state->NextRetryToken == 0 || state->NextRetryToken == UINT64_MAX) {
         slot.LastError = "retry token exhausted";
+        slot.RetrySchedulingFailed = true;
         ++state->RetryDiagnostics.ScheduleFailedTotal;
         return std::nullopt;
     }

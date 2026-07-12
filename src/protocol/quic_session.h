@@ -245,6 +245,7 @@ public:
     MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
     void SetNextRetryTokenForTest(uint64_t token);
+    void SetNextStartClaimForTest(uint64_t claim);
     bool RetryStateLockAvailableForTest();
     bool CompleteSlotShutdownForTest(
         size_t index,
