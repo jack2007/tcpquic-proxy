@@ -368,9 +368,7 @@ private:
         const std::shared_ptr<ClientSharedState>& state,
         size_t slotIndex,
         ClientConnContext* context,
-        MsQuicConnection* connection,
-        uint64_t numericConnectionId,
-        uint64_t generation);
+        MsQuicConnection* connection);
     static QuicClientSession* AcquireLiveSession(
         const std::shared_ptr<ClientSessionGate>& gate);
     static void ReleaseLiveSession(const std::shared_ptr<ClientSessionGate>& gate);

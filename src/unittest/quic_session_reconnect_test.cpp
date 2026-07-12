@@ -719,7 +719,8 @@ static int TestRetryTokenExhaustionRejectsScheduling() {
     std::atomic<int> scheduled{0};
     session.MarkReconnectStartedForTest(1);
     session.SetDelayedTaskScheduler(
-        [&](std::chrono::milliseconds, std::function<void()>) {
+        [&](std::chrono::milliseconds delay, std::function<void()>) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
             scheduled.fetch_add(1, std::memory_order_relaxed);
             return true;
         });
