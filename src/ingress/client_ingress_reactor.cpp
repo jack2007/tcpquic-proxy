@@ -551,7 +551,25 @@ void TqClientIngressReactor::Run() {
             std::lock_guard<std::mutex> lock(Mutex);
             timeoutMs = NextRunTimeoutMsLocked();
         }
+        const auto runStarted = std::chrono::steady_clock::now();
         (void)Reactor.RunOnce(timeoutMs);
+        const auto elapsedMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - runStarted).count();
+        const uint64_t timeoutMicros = static_cast<uint64_t>(timeoutMs) * 1000;
+        const uint64_t overshootMicros = elapsedMicros > static_cast<int64_t>(timeoutMicros)
+            ? static_cast<uint64_t>(elapsedMicros) - timeoutMicros
+            : 0;
+        constexpr std::array<uint64_t, 12> kOvershootBucketBounds{
+            100, 250, 500, 1000, 2500, 5000,
+            10000, 25000, 50000, 100000, 250000, UINT64_MAX};
+        std::lock_guard<std::mutex> lock(Mutex);
+        ++ReactorTimeoutOvershootSamples;
+        ReactorTimeoutOvershootMaxMicros =
+            std::max(ReactorTimeoutOvershootMaxMicros, overshootMicros);
+        const auto bucket = std::lower_bound(
+            kOvershootBucketBounds.begin(), kOvershootBucketBounds.end(), overshootMicros);
+        ++ReactorTimeoutOvershootBuckets[static_cast<size_t>(
+            bucket - kOvershootBucketBounds.begin())];
     }
     {
         std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
@@ -583,9 +601,44 @@ bool TqClientIngressReactor::EnqueueDelayed(
             std::chrono::steady_clock::now() + delay,
             NextDelayedTaskOrder++,
             std::move(task)});
+        MaxDelayedTaskQueueDepth = std::max<uint64_t>(
+            MaxDelayedTaskQueueDepth, static_cast<uint64_t>(DelayedTasks.size()));
     }
     (void)Reactor.Wake();
     return true;
+}
+
+TqClientIngressDiagnostics TqClientIngressReactor::SnapshotDiagnostics() const {
+    std::lock_guard<std::mutex> lifecycleLock(LifecycleMutex);
+    std::lock_guard<std::mutex> lock(Mutex);
+    TqClientIngressDiagnostics snapshot;
+    snapshot.DelayedTaskQueueDepth = static_cast<uint64_t>(DelayedTasks.size());
+    snapshot.MaxDelayedTaskQueueDepth = MaxDelayedTaskQueueDepth;
+    snapshot.ReactorTimeoutOvershootSamples = ReactorTimeoutOvershootSamples;
+    snapshot.ReactorTimeoutOvershootMaxMicros = ReactorTimeoutOvershootMaxMicros;
+    if (ReactorTimeoutOvershootSamples == 0) {
+        return snapshot;
+    }
+    constexpr std::array<uint64_t, 12> kOvershootBucketBounds{
+        100, 250, 500, 1000, 2500, 5000,
+        10000, 25000, 50000, 100000, 250000, UINT64_MAX};
+    const auto percentile = [&](uint64_t numerator) {
+        const uint64_t quotient = ReactorTimeoutOvershootSamples / 100;
+        const uint64_t remainder = ReactorTimeoutOvershootSamples % 100;
+        const uint64_t target = quotient * numerator +
+            (remainder * numerator + 99) / 100;
+        uint64_t cumulative = 0;
+        for (size_t i = 0; i < ReactorTimeoutOvershootBuckets.size(); ++i) {
+            cumulative += ReactorTimeoutOvershootBuckets[i];
+            if (cumulative >= target) {
+                return kOvershootBucketBounds[i];
+            }
+        }
+        return kOvershootBucketBounds.back();
+    };
+    snapshot.ReactorTimeoutOvershootP95Micros = percentile(95);
+    snapshot.ReactorTimeoutOvershootP99Micros = percentile(99);
+    return snapshot;
 }
 
 bool TqClientIngressReactor::EnqueueSync(std::function<bool()> task) {

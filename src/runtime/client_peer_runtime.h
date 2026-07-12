@@ -142,6 +142,7 @@ public:
     void DrainPeer(const std::string& peerId, uint32_t graceSeconds);
     bool SnapshotPeerMetrics(const std::string& peerId, TqPeerMetrics& out) const;
     bool SnapshotClientMetrics(const std::string& peerId, TqClientMetrics& out) const;
+    TqClientIngressDiagnostics SnapshotIngressDiagnostics() const;
     std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) const;
     bool SetDesiredConnectionCount(const std::string& peerId, uint32_t desired, std::string& err);
     bool StopHighestConnection(const std::string& peerId, const std::string& connectionId, std::string& err);
@@ -170,7 +171,7 @@ private:
     mutable std::mutex LifecycleMutex;
     mutable std::mutex Lock;
     mutable std::mutex IngressLock;
-    std::unique_ptr<TqClientIngressReactor> Ingress;
+    std::shared_ptr<TqClientIngressReactor> Ingress;
     std::unordered_map<std::string, std::shared_ptr<TqClientPeerRuntime>> Peers;
     std::vector<DrainHandle> Draining;
 };

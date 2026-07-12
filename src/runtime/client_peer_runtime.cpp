@@ -715,6 +715,15 @@ bool TqClientRuntimeManager::SnapshotClientMetrics(const std::string& peerId, Tq
     return true;
 }
 
+TqClientIngressDiagnostics TqClientRuntimeManager::SnapshotIngressDiagnostics() const {
+    std::shared_ptr<TqClientIngressReactor> ingress;
+    {
+        std::lock_guard<std::mutex> guard(IngressLock);
+        ingress = Ingress;
+    }
+    return ingress ? ingress->SnapshotDiagnostics() : TqClientIngressDiagnostics{};
+}
+
 std::vector<TqConnectionSnapshot> TqClientRuntimeManager::SnapshotConnections(const std::string& peerId) const {
     std::shared_ptr<TqClientPeerRuntime> runtime = Find(peerId);
     return runtime ? runtime->SnapshotConnections() : std::vector<TqConnectionSnapshot>{};
@@ -793,7 +802,7 @@ bool TqClientRuntimeManager::EnsureIngressStarted(std::string& err) {
     if (Ingress) {
         return true;
     }
-    auto reactor = std::make_unique<TqClientIngressReactor>();
+    auto reactor = std::make_shared<TqClientIngressReactor>();
     if (!reactor->Start()) {
         err = "failed to start client ingress reactor";
         return false;

@@ -310,6 +310,10 @@ public:
         return true;
     }
 
+    TqClientIngressDiagnostics SnapshotIngressDiagnostics() override {
+        return TqClientIngressDiagnostics{17, 41, 1000, 250, 500, 2500};
+    }
+
     std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) override {
         (void)peerId;
         return Connections;
@@ -647,6 +651,10 @@ int main() {
         if (metrics.find("\"connection_count\":4") == std::string::npos) return 107;
         if (metrics.find("\"connected_connections\":2") == std::string::npos) return 108;
         if (metrics.find("\"state\":\"healthy\"") == std::string::npos) return 109;
+        if (metrics.find("\"ingress_delayed_task_queue_depth\":17") == std::string::npos) return 2511;
+        if (metrics.find("\"ingress_delayed_task_queue_depth_max\":41") == std::string::npos) return 2512;
+        if (metrics.find("\"ingress_reactor_timeout_overshoot_p95_us\":250") == std::string::npos) return 2513;
+        if (metrics.find("\"ingress_reactor_timeout_overshoot_p99_us\":500") == std::string::npos) return 2514;
     }
     {
         FakeAdapter adapter;

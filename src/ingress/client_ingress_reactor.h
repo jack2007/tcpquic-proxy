@@ -13,6 +13,7 @@
 #include "client_tunnel_open.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +55,15 @@ struct TqClientIngressPeer {
     TqClientIngressTunnelCloseFn CancelTunnel;
 };
 
+struct TqClientIngressDiagnostics {
+    uint64_t DelayedTaskQueueDepth{0};
+    uint64_t MaxDelayedTaskQueueDepth{0};
+    uint64_t ReactorTimeoutOvershootSamples{0};
+    uint64_t ReactorTimeoutOvershootP95Micros{0};
+    uint64_t ReactorTimeoutOvershootP99Micros{0};
+    uint64_t ReactorTimeoutOvershootMaxMicros{0};
+};
+
 class TqClientIngressReactor {
 public:
     TqClientIngressReactor();
@@ -67,6 +77,7 @@ public:
     bool AddPeer(const TqClientIngressPeer& peer);
     bool RemovePeer(const std::string& peerId);
     bool EnqueueDelayed(std::chrono::milliseconds delay, std::function<void()> task);
+    TqClientIngressDiagnostics SnapshotDiagnostics() const;
     size_t PeerCountForTest() const;
 
 #if defined(TQ_UNIT_TESTING)
@@ -205,6 +216,10 @@ private:
     std::vector<DelayedTask> DelayedTasks;
     uint64_t NextDelayedTaskOrder{1};
     size_t ActiveDelayedTasks{0};
+    uint64_t MaxDelayedTaskQueueDepth{0};
+    std::array<uint64_t, 12> ReactorTimeoutOvershootBuckets{};
+    uint64_t ReactorTimeoutOvershootSamples{0};
+    uint64_t ReactorTimeoutOvershootMaxMicros{0};
     std::unordered_map<std::string, PeerEntry> Peers;
     std::unordered_map<TqSocketHandle, ListenEntry> Listens;
     std::unordered_map<TqSocketHandle, ClientEntry> Clients;

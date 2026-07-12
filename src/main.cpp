@@ -52,6 +52,10 @@ public:
         return Manager.SnapshotPeerMetrics(peerId, out);
     }
 
+    TqClientIngressDiagnostics SnapshotIngressDiagnostics() override {
+        return Manager.SnapshotIngressDiagnostics();
+    }
+
     std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) override {
         return Manager.SnapshotConnections(peerId);
     }

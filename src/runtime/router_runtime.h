@@ -1,6 +1,7 @@
 #pragma once
 
 #include "admin_http.h"
+#include "client_ingress_reactor.h"
 #include "config.h"
 #include "quic_session.h"
 
@@ -37,6 +38,7 @@ struct TqRouterMetrics {
     std::string Role{"client"};
     std::string Status{"healthy"};
     uint64_t UptimeSeconds{0};
+    TqClientIngressDiagnostics Ingress;
     std::vector<TqPeerMetrics> Peers;
 };
 
@@ -52,6 +54,7 @@ public:
         (void)out;
         return false;
     }
+    virtual TqClientIngressDiagnostics SnapshotIngressDiagnostics() { return {}; }
     virtual std::vector<TqConnectionSnapshot> SnapshotConnections(const std::string& peerId) {
         (void)peerId;
         return {};

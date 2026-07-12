@@ -1235,6 +1235,28 @@ int TestDelayedTaskRunsAfterDelay() {
     return observed == 1 ? 0 : 923;
 }
 
+int TestDelayedTaskDiagnosticsTrackDepthAndDrain() {
+    TqClientIngressReactor reactor;
+    if (!reactor.Start()) return 2501;
+    std::atomic<int> calls{0};
+    for (int i = 0; i < 32; ++i) {
+        if (!reactor.EnqueueDelayed(std::chrono::milliseconds(100),
+                [&] { calls.fetch_add(1); })) return 2502;
+    }
+    auto queued = reactor.SnapshotDiagnostics();
+    if (queued.DelayedTaskQueueDepth != 32 ||
+        queued.MaxDelayedTaskQueueDepth < 32) return 2503;
+    for (int i = 0; i < 100 && calls.load() != 32; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    auto drained = reactor.SnapshotDiagnostics();
+    reactor.Stop();
+    if (calls.load() != 32 || drained.DelayedTaskQueueDepth != 0) return 2504;
+    if (drained.ReactorTimeoutOvershootP99Micros <
+        drained.ReactorTimeoutOvershootP95Micros) return 2505;
+    return 0;
+}
+
 int TestDelayedTaskRejectedAfterStop() {
     TqClientIngressReactor reactor;
     if (!reactor.Start()) {
@@ -1334,6 +1356,8 @@ int main() {
     result = TestConcurrentStartStopDoesNotCrashOrDeadlock();
     if (result != 0) return result;
     result = TestDelayedTaskRunsAfterDelay();
+    if (result != 0) return result;
+    result = TestDelayedTaskDiagnosticsTrackDepthAndDrain();
     if (result != 0) return result;
     result = TestDelayedTaskRejectedAfterStop();
     if (result != 0) return result;

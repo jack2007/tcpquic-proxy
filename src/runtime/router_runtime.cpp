@@ -1205,16 +1205,28 @@ TqRouterConfig TqRouterRuntime::SnapshotConfig() const {
 }
 
 TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
-    std::lock_guard<std::mutex> lock(Mutex);
     TqRouterMetrics snapshot;
-    snapshot.UptimeSeconds = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - Started).count());
-    snapshot.Peers.reserve(Metrics.size());
-    for (const auto& item : Metrics) {
+    TqPeerRuntimeAdapter* adapter = nullptr;
+    std::unordered_map<std::string, TqPeerMetrics> metrics;
+    std::unordered_map<std::string, TqPeerConfig> runningPeers;
+    {
+        std::lock_guard<std::mutex> lock(Mutex);
+        snapshot.UptimeSeconds = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - Started).count());
+        adapter = Adapter;
+        metrics = Metrics;
+        runningPeers = RunningPeers;
+    }
+    if (adapter != nullptr) {
+        snapshot.Ingress = adapter->SnapshotIngressDiagnostics();
+    }
+    snapshot.Peers.reserve(metrics.size());
+    for (const auto& item : metrics) {
         TqPeerMetrics peer = item.second;
-        if (Adapter != nullptr && RunningPeers.find(item.first) != RunningPeers.end()) {
+        if (adapter != nullptr && runningPeers.find(item.first) != runningPeers.end()) {
             TqPeerMetrics live;
-            if (Adapter->SnapshotPeerMetrics(item.first, live)) {
+            if (adapter->SnapshotPeerMetrics(item.first, live)) {
                 peer.ConnectionCount = live.ConnectionCount;
                 peer.ConnectedConnections = live.ConnectedConnections;
                 peer.ActiveStreams = live.ActiveStreams;
@@ -1533,6 +1545,12 @@ std::string TqRouterRuntime::MetricsJson() const {
         {"role", metrics.Role},
         {"status", metrics.Status},
         {"uptime_seconds", metrics.UptimeSeconds},
+        {"ingress_delayed_task_queue_depth", metrics.Ingress.DelayedTaskQueueDepth},
+        {"ingress_delayed_task_queue_depth_max", metrics.Ingress.MaxDelayedTaskQueueDepth},
+        {"ingress_reactor_timeout_overshoot_samples", metrics.Ingress.ReactorTimeoutOvershootSamples},
+        {"ingress_reactor_timeout_overshoot_p95_us", metrics.Ingress.ReactorTimeoutOvershootP95Micros},
+        {"ingress_reactor_timeout_overshoot_p99_us", metrics.Ingress.ReactorTimeoutOvershootP99Micros},
+        {"ingress_reactor_timeout_overshoot_max_us", metrics.Ingress.ReactorTimeoutOvershootMaxMicros},
         {"peers", nlohmann::json::array()},
     };
     for (const auto& peer : metrics.Peers) {
