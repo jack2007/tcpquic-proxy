@@ -297,6 +297,10 @@ public:
         out.ConnectedConnections = ConnectedConnections;
         out.ActiveStreams = ActiveStreams;
         out.TotalStreams = TotalStreams;
+        out.RetryScheduledTotal = 11;
+        out.RetryExecutedTotal = 7;
+        out.RetryStaleDroppedTotal = 3;
+        out.RetryScheduleFailedTotal = 1;
         out.State = ConnectedConnections > 0 ? "healthy" : "connecting";
         return true;
     }
@@ -649,6 +653,10 @@ int main() {
         if (listBody.find("\"peer_id\":\"agent-metrics-peers\"") == std::string::npos) return 2308;
         if (listBody.find("\"active_streams\":2") == std::string::npos) return 2303;
         if (listBody.find("\"total_streams\":5") == std::string::npos) return 2304;
+        if (listBody.find("\"retry_scheduled_total\":11") == std::string::npos) return 2401;
+        if (listBody.find("\"retry_executed_total\":7") == std::string::npos) return 2402;
+        if (listBody.find("\"retry_stale_dropped_total\":3") == std::string::npos) return 2403;
+        if (listBody.find("\"retry_schedule_failed_total\":1") == std::string::npos) return 2404;
         TqHttpRequest get = Request("GET", "/peers/agent-metrics-peers", "");
         std::string getResp = adapterRuntime.HandleAdmin(get);
         const std::string getBody = JsonBody(getResp);

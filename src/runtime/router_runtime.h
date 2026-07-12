@@ -25,6 +25,10 @@ struct TqPeerMetrics {
     uint64_t ActiveStreams{0};
     uint64_t TotalStreams{0};
     uint64_t Reconnects{0};
+    uint64_t RetryScheduledTotal{0};
+    uint64_t RetryExecutedTotal{0};
+    uint64_t RetryStaleDroppedTotal{0};
+    uint64_t RetryScheduleFailedTotal{0};
     std::string LastError;
     std::string LastConnectedAt;
 };

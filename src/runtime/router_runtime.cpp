@@ -186,6 +186,10 @@ nlohmann::json PeerMetricsJsonValue(const TqPeerMetrics& peer) {
         {"active_streams", peer.ActiveStreams},
         {"total_streams", peer.TotalStreams},
         {"reconnects", peer.Reconnects},
+        {"retry_scheduled_total", peer.RetryScheduledTotal},
+        {"retry_executed_total", peer.RetryExecutedTotal},
+        {"retry_stale_dropped_total", peer.RetryStaleDroppedTotal},
+        {"retry_schedule_failed_total", peer.RetryScheduleFailedTotal},
         {"last_error", peer.LastError},
         {"last_connected_at", peer.LastConnectedAt},
     };
@@ -1216,6 +1220,10 @@ TqRouterMetrics TqRouterRuntime::SnapshotMetrics() const {
                 peer.ActiveStreams = live.ActiveStreams;
                 peer.TotalStreams = live.TotalStreams;
                 peer.Reconnects = live.Reconnects;
+                peer.RetryScheduledTotal = live.RetryScheduledTotal;
+                peer.RetryExecutedTotal = live.RetryExecutedTotal;
+                peer.RetryStaleDroppedTotal = live.RetryStaleDroppedTotal;
+                peer.RetryScheduleFailedTotal = live.RetryScheduleFailedTotal;
                 if (!live.ClientName.empty()) {
                     peer.ClientName = live.ClientName;
                 }

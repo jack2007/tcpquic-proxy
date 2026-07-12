@@ -105,6 +105,11 @@ TqPeerMetrics TqClientPeerRuntime::SnapshotPeerMetrics() const {
     metrics.ConnectedConnections = Quic ? Quic->ConnectedConnectionCount() : 0;
     metrics.State = metrics.ConnectedConnections > 0 ? "healthy" : "connecting";
     if (Quic) {
+        const TqClientRetryDiagnostics retry = Quic->SnapshotRetryDiagnostics();
+        metrics.RetryScheduledTotal = retry.ScheduledTotal;
+        metrics.RetryExecutedTotal = retry.ExecutedTotal;
+        metrics.RetryStaleDroppedTotal = retry.StaleDroppedTotal;
+        metrics.RetryScheduleFailedTotal = retry.ScheduleFailedTotal;
         for (const auto& connection : Quic->SnapshotConnections()) {
             metrics.ActiveStreams += connection.ActiveTunnels;
         }
