@@ -1911,6 +1911,12 @@ void QuicClientSession::SetNextRetryTokenForTest(uint64_t token) {
     State->NextRetryToken = token;
 }
 
+bool QuicClientSession::RetryStateLockAvailableForTest() {
+    if (!State->Lock.try_lock()) return false;
+    State->Lock.unlock();
+    return true;
+}
+
 void QuicClientSession::RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation) {
     RestartSlotAfterShutdownComplete(State, index, generation);
 }
@@ -2380,12 +2386,6 @@ std::optional<QuicClientSession::RetrySubmission> QuicClientSession::ReserveRetr
     if (state->NextRetryToken == 0 || state->NextRetryToken == UINT64_MAX) {
         slot.LastError = "retry token exhausted";
         ++state->RetryDiagnostics.ScheduleFailedTotal;
-        char line[224];
-        std::snprintf(line, sizeof(line),
-            "event=quic_retry_schedule_failed slot=%zu numeric_connection_id=%llu generation=%llu reason=token_exhausted",
-            index, static_cast<unsigned long long>(expectedNumericConnectionId),
-            static_cast<unsigned long long>(expectedGeneration));
-        TqTraceLogLine(line);
         return std::nullopt;
     }
     RetrySubmission submission;
@@ -2403,12 +2403,36 @@ void QuicClientSession::ScheduleStartRetry(
     uint64_t expectedNumericConnectionId,
     uint64_t expectedGeneration) {
     std::optional<RetrySubmission> submission;
+    bool tokenExhausted = false;
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> traceObserver;
+#endif
     {
         std::lock_guard<std::mutex> guard(State->Lock);
+        const uint64_t failuresBefore = State->RetryDiagnostics.ScheduleFailedTotal;
         submission = ReserveRetryLocked(
             State, index, expectedNumericConnectionId, expectedGeneration);
+        tokenExhausted = !submission &&
+            State->RetryDiagnostics.ScheduleFailedTotal != failuresBefore &&
+            index < State->Slots.size() &&
+            State->Slots[index].LastError == "retry token exhausted";
+#if defined(TQ_UNIT_TESTING)
+        if (tokenExhausted) traceObserver = State->TestHooks.RetryTraceObserver;
+#endif
     }
-    if (submission) SubmitRetry(std::move(*submission));
+    if (submission) {
+        SubmitRetry(std::move(*submission));
+    } else if (tokenExhausted) {
+        char line[224];
+        std::snprintf(line, sizeof(line),
+            "event=quic_retry_schedule_failed slot=%zu numeric_connection_id=%llu generation=%llu reason=token_exhausted",
+            index, static_cast<unsigned long long>(expectedNumericConnectionId),
+            static_cast<unsigned long long>(expectedGeneration));
+#if defined(TQ_UNIT_TESTING)
+        if (traceObserver) traceObserver();
+#endif
+        TqTraceLogLine(line);
+    }
 }
 
 void QuicClientSession::SubmitRetry(RetrySubmission submission) {
@@ -2428,17 +2452,28 @@ void QuicClientSession::SubmitRetry(RetrySubmission submission) {
              ticket = submission.Ticket, TraceRetry]() {
                 auto state = weakState.lock();
                 if (!state) return;
+                bool stale = false;
+#if defined(TQ_UNIT_TESTING)
+                std::function<void()> traceObserver;
+#endif
                 {
                     std::lock_guard<std::mutex> guard(state->Lock);
                     if (!RetryTicketMatchesLocked(*state, ticket)) {
                         ++state->RetryDiagnostics.StaleDroppedTotal;
-                        TraceRetry("quic_retry_stale_drop", ticket);
-                        return;
+                        stale = true;
+                    } else {
+                        InvalidateRetryLocked(state->Slots[ticket.SlotIndex]);
+                        ++state->RetryDiagnostics.ExecutedTotal;
                     }
-                    InvalidateRetryLocked(state->Slots[ticket.SlotIndex]);
-                    ++state->RetryDiagnostics.ExecutedTotal;
-                    TraceRetry("quic_retry_execute", ticket);
+#if defined(TQ_UNIT_TESTING)
+                    traceObserver = state->TestHooks.RetryTraceObserver;
+#endif
                 }
+#if defined(TQ_UNIT_TESTING)
+                if (traceObserver) traceObserver();
+#endif
+                TraceRetry(stale ? "quic_retry_stale_drop" : "quic_retry_execute", ticket);
+                if (stale) return;
                 auto* session = AcquireLiveSession(gate);
                 if (!session) return;
                 (void)session->StartSlot(ticket.SlotIndex);
@@ -2446,16 +2481,33 @@ void QuicClientSession::SubmitRetry(RetrySubmission submission) {
             });
     auto state = submission.WeakState.lock();
     if (!state) return;
-    std::lock_guard<std::mutex> guard(state->Lock);
-    if (accepted) {
-        ++state->RetryDiagnostics.ScheduledTotal;
-        TraceRetry("quic_retry_schedule", submission.Ticket);
-    } else if (RetryTicketMatchesLocked(*state, submission.Ticket)) {
-        InvalidateRetryLocked(state->Slots[submission.Ticket.SlotIndex]);
-        state->Slots[submission.Ticket.SlotIndex].LastError = "retry scheduler unavailable";
-        ++state->RetryDiagnostics.ScheduleFailedTotal;
-        TraceRetry("quic_retry_schedule_failed", submission.Ticket);
+    bool traceEvent = false;
+    const char* traceEventName = nullptr;
+#if defined(TQ_UNIT_TESTING)
+    std::function<void()> traceObserver;
+#endif
+    {
+        std::lock_guard<std::mutex> guard(state->Lock);
+        if (accepted) {
+            ++state->RetryDiagnostics.ScheduledTotal;
+            traceEvent = true;
+            traceEventName = "quic_retry_schedule";
+        } else if (RetryTicketMatchesLocked(*state, submission.Ticket)) {
+            InvalidateRetryLocked(state->Slots[submission.Ticket.SlotIndex]);
+            state->Slots[submission.Ticket.SlotIndex].LastError = "retry scheduler unavailable";
+            ++state->RetryDiagnostics.ScheduleFailedTotal;
+            traceEvent = true;
+            traceEventName = "quic_retry_schedule_failed";
+        }
+#if defined(TQ_UNIT_TESTING)
+        if (traceEvent) traceObserver = state->TestHooks.RetryTraceObserver;
+#endif
     }
+    if (!traceEvent) return;
+#if defined(TQ_UNIT_TESTING)
+    if (traceObserver) traceObserver();
+#endif
+    TraceRetry(traceEventName, submission.Ticket);
 }
 
 void QuicClientSession::RestartSlotAfterShutdownComplete(

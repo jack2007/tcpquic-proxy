@@ -221,6 +221,7 @@ public:
             QUIC_SEND_FLAGS sendFlags,
             const std::vector<uint8_t>& payload)> SendClientHelloOverride;
         std::function<void()> BeforeTerminalConnectionShutdown;
+        std::function<void()> RetryTraceObserver;
     };
     void SetReconnectTestHooks(ReconnectTestHooks hooks);
     void MarkReconnectStartedForTest(size_t slots);
@@ -239,6 +240,7 @@ public:
     MsQuicConnection* PickConnectionForTest();
     void ScheduleStartRetryForTest(size_t index);
     void SetNextRetryTokenForTest(uint64_t token);
+    bool RetryStateLockAvailableForTest();
     void RestartSlotAfterShutdownCompleteForTest(size_t index, uint64_t generation);
     static bool ConnectionStartAcceptedForTest(QUIC_STATUS status);
 #endif

@@ -619,6 +619,52 @@ static int TestRetryTokenExhaustionRejectsScheduling() {
         ? 0 : 2010;
 }
 
+static int TestRetryTraceRunsOutsideStateLock() {
+    QuicClientSession session;
+    std::function<void()> task;
+    std::atomic<int> traces{0};
+    std::atomic<int> lockedTraces{0};
+    session.MarkReconnectStartedForTest(1);
+    QuicClientSession::ReconnectTestHooks hooks;
+    hooks.StartSlotOverride = [](size_t) { return true; };
+    hooks.RetryTraceObserver = [&] {
+        traces.fetch_add(1, std::memory_order_relaxed);
+        if (!session.RetryStateLockAvailableForTest()) {
+            lockedTraces.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+    session.SetReconnectTestHooks(std::move(hooks));
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds, std::function<void()> scheduledTask) {
+            task = std::move(scheduledTask);
+            return true;
+        });
+    session.ScheduleStartRetryForTest(0);
+    if (!task) return 2020;
+    task();
+
+    session.SetDelayedTaskScheduler(
+        [](std::chrono::milliseconds, std::function<void()>) { return false; });
+    session.ScheduleStartRetryForTest(0);
+
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds, std::function<void()> scheduledTask) {
+            task = std::move(scheduledTask);
+            return true;
+        });
+    session.ScheduleStartRetryForTest(0);
+    std::string err;
+    if (!session.ReconnectConnection("conn-0", err)) return 2022;
+    task();
+
+    session.SetNextRetryTokenForTest(UINT64_MAX);
+    session.ScheduleStartRetryForTest(0);
+    session.Stop();
+    return traces.load(std::memory_order_relaxed) >= 6 &&
+            lockedTraces.load(std::memory_order_relaxed) == 0
+        ? 0 : 2021;
+}
+
 static int TestConnectionStartPendingIsAccepted() {
     if (!QuicClientSession::ConnectionStartAcceptedForTest(QUIC_STATUS_SUCCESS)) {
         return 50;
@@ -1316,6 +1362,7 @@ int main() {
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
     if (int rc = TestRetryTokenExhaustionRejectsScheduling()) return rc;
+    if (int rc = TestRetryTraceRunsOutsideStateLock()) return rc;
     if (int rc = TestConnectionStartPendingIsAccepted()) return rc;
     if (int rc = TestShutdownCompleteSchedulesSlotRestart()) return rc;
     if (int rc = TestConnectionSnapshotAndSlotControls()) return rc;
