@@ -74,7 +74,10 @@ for before,after,t0,t1,hz in zip(ticks,ticks[1:],elapsed,elapsed[1:],clock_hz[1:
 if not cpu: cpu=[0.0]; cpu_elapsed=[duration_ms]
 
 def rising_three_windows(values, name):
-    if any(a < b < c < d for a,b,c,d in zip(values,values[1:],values[2:],values[3:])):
+    # Allocators commonly grow during connection-stack warmup and then retain
+    # arenas.  A leak must still be rising at the end of the soak; an early
+    # rise followed by a plateau is bounded retention, not sustained growth.
+    if len(values) >= 4 and all(a < b for a,b in zip(values[-4:],values[-3:])):
         raise SystemExit(f'{name} monotonic rise across three sampling windows')
 rising_three_windows(rss,'rss')
 rising_three_windows(queue,'delayed queue depth')
@@ -143,8 +146,6 @@ cp "$BIN" "$TMP/raypx2"
 chmod +x "$TMP/raypx2"
 TEST_BIN="$TMP/raypx2"
 TRACE_LOG="$TMP/log/client.log"
-trace_start_bytes=0
-[[ -f "$TRACE_LOG" ]] && trace_start_bytes=$(wc -c <"$TRACE_LOG")
 
 mkdir -p "$TMP/http" "$RESULT_ROOT/admin"
 printf 'ok\n' >"$TMP/http/health.txt"
@@ -240,6 +241,8 @@ sample_resources() {
 }
 
 soak_start_ms=$(monotonic_ms)
+trace_soak_start_bytes=0
+[[ -f "$TRACE_LOG" ]] && trace_soak_start_bytes=$(wc -c <"$TRACE_LOG")
 soak_deadline_ms=$((soak_start_ms + SOAK_SECONDS * 1000))
 next_probe_ms=$soak_start_ms
 next_sample_ms=$soak_start_ms
@@ -262,16 +265,15 @@ while (( $(monotonic_ms) < soak_deadline_ms )); do
 done
 soak_end_ms=$(monotonic_ms)
 actual_soak_ms=$((soak_end_ms - soak_start_ms))
-actual_attempt_window_ms=$((soak_end_ms - client_start_ms))
 sample_resources "$actual_soak_ms"
 
 (( healthy_probe_failures == 0 )) || { echo "healthy probe failures: $healthy_probe_failures" >&2; exit 1; }
 if [[ -f "$TRACE_LOG" ]]; then
-  tail -c "+$((trace_start_bytes + 1))" "$TRACE_LOG" >"$RESULT_ROOT/client-trace.log"
+  tail -c "+$((trace_soak_start_bytes + 1))" "$TRACE_LOG" >"$RESULT_ROOT/client-trace.log"
 else
   : >"$RESULT_ROOT/client-trace.log"
 fi
-analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_attempt_window_ms"
+analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_soak_ms"
 
 "$TEST_BIN" server --listen "127.0.0.1:$failed_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \

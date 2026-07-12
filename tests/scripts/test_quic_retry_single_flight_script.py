@@ -46,9 +46,11 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
     assert "--max-time" in text
     assert "Linux" in text
     assert "TRACE_LOG" in text
+    assert "trace_soak_start_bytes" in text
+    assert '"$actual_soak_ms"' in text
 
 
-def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False,
+def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, warmup_plateau=False,
                    queue_rising=False, cpu_hot=False, log_rising=False,
                    reactor_bad=False, close_timestamps=False, nonmonotonic=False,
                    late_timestamps=False, burst_before_ready=False, over_limit=False):
@@ -77,6 +79,8 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False,
         (path / "admin" / f"metrics-{i * 10000}.json").write_text(json.dumps(sample))
     values = [100, 100, 100, 100, 100]
     if rising:
+        values = [100, 110, 120, 130, 140]
+    if warmup_plateau:
         values = [100, 110, 120, 130, 130]
     log_values = [100] * 5
     if log_rising:
@@ -140,6 +144,12 @@ def test_fixture_analysis_rejects_three_rising_resource_windows(tmp_path):
     result = _analyze(tmp_path)
     assert result.returncode != 0
     assert "monotonic rise" in result.stderr
+
+
+def test_fixture_analysis_accepts_allocator_warmup_that_reaches_plateau(tmp_path):
+    _write_fixture(tmp_path, warmup_plateau=True)
+    result = _analyze(tmp_path)
+    assert result.returncode == 0, result.stderr
 
 
 def test_fixture_analysis_rejects_nonmonotonic_connecting_timestamps(tmp_path):

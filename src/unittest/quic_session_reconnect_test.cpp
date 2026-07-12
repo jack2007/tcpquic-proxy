@@ -921,13 +921,7 @@ static int TestStartClaimExhaustionStopsEnsureWithoutWraparound() {
 
 static int TestRetryStartClaimBlocksEnsureBeforeConnectionPublish() {
     QuicClientSession session;
-    TqConfig cfg{};
-    cfg.Mode = TqMode::Client;
-    cfg.QuicPeer = "127.0.0.1:4433";
-    cfg.QuicConnections = 1;
-    cfg.QuicCa = "cert/ca.crt";
-    cfg.QuicDisable1RttEncryption = false;
-    if (!session.Start(cfg)) return 2013;
+    session.MarkReconnectStartedForTest(1);
 
     std::function<void()> retryTask;
     session.SetDelayedTaskScheduler(
@@ -942,7 +936,8 @@ static int TestRetryStartClaimBlocksEnsureBeforeConnectionPublish() {
     bool release = false;
     std::atomic<int> publishCalls{0};
     QuicClientSession::ReconnectTestHooks hooks;
-    hooks.BeforePublishSlot = [&](size_t index) {
+    hooks.StartSlotOverride = [](size_t) { return true; };
+    hooks.AfterStartClaim = [&](size_t index) {
         if (index != 0) return;
         publishCalls.fetch_add(1, std::memory_order_relaxed);
         std::unique_lock<std::mutex> guard(lock);

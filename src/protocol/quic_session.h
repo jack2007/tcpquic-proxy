@@ -214,6 +214,7 @@ public:
         std::function<bool(size_t index)> StartSlotOverride;
         std::function<void(size_t index, const TqClientSlotPath& path)> StartSlotPathObserver;
         std::function<void(size_t index)> BeforePublishSlot;
+        std::function<void(size_t index)> AfterStartClaim;
         std::function<QUIC_STATUS(size_t index)> ConnectionStartOverride;
         std::function<void(size_t index, uint64_t generation)> ContextDeleted;
         std::function<bool(

@@ -789,7 +789,7 @@ rtk cmake --build build --target \
   tcpquic_quic_session_reconnect_test \
   tcpquic_client_ingress_reactor_test \
   tcpquic_router_runtime_test \
-  raypx2 -j2
+  tcpquic-proxy -j2
 ```
 
 Expected: exit 0，无新增编译 warning。

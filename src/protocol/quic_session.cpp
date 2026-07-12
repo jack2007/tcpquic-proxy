@@ -2158,6 +2158,7 @@ bool QuicClientSession::StartSlot(
     std::function<bool(size_t)> startSlotOverride;
     std::function<void(size_t, const TqClientSlotPath&)> startSlotPathObserver;
     std::function<void(size_t)> beforePublishSlot;
+    std::function<void(size_t)> afterStartClaim;
     std::function<QUIC_STATUS(size_t)> connectionStartOverride;
 #endif
 
@@ -2235,6 +2236,7 @@ bool QuicClientSession::StartSlot(
         startSlotOverride = state->TestHooks.StartSlotOverride;
         startSlotPathObserver = state->TestHooks.StartSlotPathObserver;
         beforePublishSlot = state->TestHooks.BeforePublishSlot;
+        afterStartClaim = state->TestHooks.AfterStartClaim;
         connectionStartOverride = state->TestHooks.ConnectionStartOverride;
 #endif
 
@@ -2282,6 +2284,9 @@ bool QuicClientSession::StartSlot(
     }
 
 #if defined(TQ_UNIT_TESTING)
+    if (afterStartClaim) {
+        afterStartClaim(index);
+    }
     if (startSlotPathObserver) {
         startSlotPathObserver(index, path);
     }
