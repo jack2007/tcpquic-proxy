@@ -167,6 +167,7 @@ python3 -m http.server "$target_http_port" --bind 127.0.0.1 --directory "$TMP/ht
 "$TEST_BIN" server --listen "127.0.0.1:$healthy_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \
   >"$RESULT_ROOT/healthy-server.log" 2>&1 & PIDS+=("$!")
+client_start_ms=$(monotonic_ms)
 "$TEST_BIN" client --ca "$ROOT/cert/ca.crt" --config "$TMP/client.json" \
   --admin-listen "127.0.0.1:$admin_port" --admin-token-file "$TMP/admin-token.json" \
   --trace --trace-interval 30 \
@@ -176,7 +177,7 @@ TOKEN=""
 for _ in $(seq 1 600); do
   if [[ -s "$TMP/admin-token.json" ]]; then
     TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$TMP/admin-token.json")
-    if curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" \
+    if curl --fail --silent --show-error --connect-timeout 1 --max-time 2 -H "Authorization: Bearer $TOKEN" \
       "$BASE_URL/peers" >"$RESULT_ROOT/admin/initial-peers.json"; then
       break
     fi
@@ -184,8 +185,19 @@ for _ in $(seq 1 600); do
   sleep 0.1
 done
 [[ -n "$TOKEN" ]] || { echo "admin token unavailable" >&2; exit 1; }
-curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$BASE_URL/peers" \
+curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+  -H "Authorization: Bearer $TOKEN" "$BASE_URL/peers" \
   >"$RESULT_ROOT/admin/initial-peers.json"
+curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+  -H "Authorization: Bearer $TOKEN" "$BASE_URL/metrics" \
+  >"$RESULT_ROOT/admin/startup-metrics.json"
+printf 'client_start_ms,captured_ms,cpu_ticks,clock_ticks_per_second,rss_kb,trace_log_bytes\n' \
+  >"$RESULT_ROOT/startup-resources.csv"
+startup_ticks=$(awk '{print $14+$15}' "/proc/$client_pid/stat")
+startup_rss=$(ps -o rss= -p "$client_pid" | tr -d ' ')
+startup_trace_bytes=0; [[ -f "$TRACE_LOG" ]] && startup_trace_bytes=$(wc -c <"$TRACE_LOG")
+printf '%s,%s,%s,%s,%s,%s\n' "$client_start_ms" "$(monotonic_ms)" "$startup_ticks" \
+  "$(getconf CLK_TCK)" "$startup_rss" "$startup_trace_bytes" >>"$RESULT_ROOT/startup-resources.csv"
 
 ready_deadline=$(( $(monotonic_ms) + 60000 ))
 healthy_ready=0
@@ -205,9 +217,9 @@ PY
   sleep 0.1
 done
 (( healthy_ready == 1 )) || { echo "healthy peer readiness barrier timed out" >&2; exit 1; }
+healthy_ready_ms=$(monotonic_ms)
+printf '%s\n' "$healthy_ready_ms" >"$RESULT_ROOT/healthy-ready-ms.txt"
 
-trace_start_bytes=0
-[[ -f "$TRACE_LOG" ]] && trace_start_bytes=$(wc -c <"$TRACE_LOG")
 clock_ticks_per_second=$(getconf CLK_TCK)
 printf 'elapsed_ms,cpu_ticks,clock_ticks_per_second,rss_kb,trace_log_bytes\n' >"$RESULT_ROOT/resources.csv"
 healthy_probe_failures=0
@@ -250,6 +262,7 @@ while (( $(monotonic_ms) < soak_deadline_ms )); do
 done
 soak_end_ms=$(monotonic_ms)
 actual_soak_ms=$((soak_end_ms - soak_start_ms))
+actual_attempt_window_ms=$((soak_end_ms - client_start_ms))
 sample_resources "$actual_soak_ms"
 
 (( healthy_probe_failures == 0 )) || { echo "healthy probe failures: $healthy_probe_failures" >&2; exit 1; }
@@ -258,7 +271,7 @@ if [[ -f "$TRACE_LOG" ]]; then
 else
   : >"$RESULT_ROOT/client-trace.log"
 fi
-analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_soak_ms"
+analyze_evidence "$RESULT_ROOT" "$failed_quic_port" "$actual_attempt_window_ms"
 
 "$TEST_BIN" server --listen "127.0.0.1:$failed_quic_port" \
   --cert "$ROOT/cert/server/server.crt" --key "$ROOT/cert/server/server.key" \
@@ -282,7 +295,8 @@ PY
 done
 (( recovered == 1 )) || { echo "failed peer did not recover within ${RECOVERY_TIMEOUT_MS}ms" >&2; exit 1; }
 
-curl --fail --silent --show-error -H "Authorization: Bearer $TOKEN" "$BASE_URL/metrics" \
+curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
+  -H "Authorization: Bearer $TOKEN" "$BASE_URL/metrics" \
   >"$RESULT_ROOT/admin/final-metrics.json"
 printf 'healthy_probe_failures=%s\nfailed_peer_recovered=1\n' "$healthy_probe_failures" >>"$RESULT_ROOT/summary.txt"
 

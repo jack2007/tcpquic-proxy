@@ -50,7 +50,8 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
 
 def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False,
                    queue_rising=False, cpu_hot=False, log_rising=False,
-                   reactor_bad=False, close_timestamps=False, nonmonotonic=False):
+                   reactor_bad=False, close_timestamps=False, nonmonotonic=False,
+                   late_timestamps=False, burst_before_ready=False, over_limit=False):
     (path / "admin").mkdir()
     metrics = {
         "ingress_delayed_task_queue_depth": 1,
@@ -92,6 +93,16 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False,
         lines.append("[2026-07-12 10:00:01.000] [info] event=quic_connecting peer=127.0.0.1:12345\n")
     if nonmonotonic:
         lines.append("[2026-07-12 09:59:59.000] [info] event=quic_connecting peer=127.0.0.1:12345\n")
+    if late_timestamps:
+        lines.append("[2026-07-12 10:00:04.000] [info] event=quic_connecting peer=127.0.0.1:12345\n")
+    if burst_before_ready:
+        (path / "healthy-ready-ms.txt").write_text("999999\n")
+        lines.append("[2026-07-12 10:00:00.100] [info] event=quic_connecting peer=127.0.0.1:12345\n")
+    if over_limit:
+        lines = [
+            f"[2026-07-12 10:00:{i * 3:02d}.000] [info] event=quic_connecting peer=127.0.0.1:12345\n"
+            for i in range(16)
+        ]
     (path / "client-trace.log").write_text("".join(lines))
 
 
@@ -171,6 +182,27 @@ def test_fixture_analysis_rejects_reactor_delay(tmp_path):
     result = _analyze(tmp_path)
     assert result.returncode != 0
     assert "reactor p99 delay" in result.stderr
+
+
+def test_fixture_analysis_rejects_readiness_preceding_burst(tmp_path):
+    _write_fixture(tmp_path, burst_before_ready=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "below 2900ms" in result.stderr
+
+
+def test_fixture_analysis_rejects_retry_later_than_3500ms(tmp_path):
+    _write_fixture(tmp_path, late_timestamps=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "above 3500ms" in result.stderr
+
+
+def test_fixture_analysis_rejects_attempts_over_dynamic_limit(tmp_path):
+    _write_fixture(tmp_path, over_limit=True)
+    result = _analyze(tmp_path)
+    assert result.returncode != 0
+    assert "exceed 15" in result.stderr
 
 
 def test_harness_supports_k6_handoff():
