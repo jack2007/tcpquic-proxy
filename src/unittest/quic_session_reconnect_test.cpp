@@ -536,6 +536,38 @@ static int TestFixedDelayRetryCoalescesDuplicates() {
     return 0;
 }
 
+static int TestEnsureConnectedDoesNotBypassPendingRetryDelay() {
+    QuicClientSession session;
+    std::atomic<int> scheduled{0};
+    std::atomic<int> startCalls{0};
+    std::function<void()> retryTask;
+
+    session.MarkReconnectStartedForTest(1);
+    session.SetReconnectTestHooks({[&](size_t index) {
+        if (index != 0) return false;
+        startCalls.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }});
+    session.SetDelayedTaskScheduler(
+        [&](std::chrono::milliseconds delay, std::function<void()> task) {
+            if (delay != std::chrono::milliseconds(3000)) return false;
+            scheduled.fetch_add(1, std::memory_order_relaxed);
+            retryTask = std::move(task);
+            return true;
+        });
+
+    session.ScheduleStartRetryForTest(0);
+    if (scheduled.load(std::memory_order_relaxed) != 1 || !retryTask) return 32;
+    if (session.EnsureAnyConnected(std::chrono::milliseconds(20))) return 33;
+    if (startCalls.load(std::memory_order_relaxed) != 0) return 34;
+    if (scheduled.load(std::memory_order_relaxed) != 1) return 35;
+
+    retryTask();
+    if (startCalls.load(std::memory_order_relaxed) != 1) return 36;
+    session.Stop();
+    return 0;
+}
+
 static int TestRejectedSchedulerAllowsLaterRetry() {
     QuicClientSession session;
     std::atomic<int> rejectedCalls{0};
@@ -1511,6 +1543,7 @@ int main() {
     if (int rc = TestFixedDelayRetrySchedulesAndRestartsSlot()) return rc;
     if (int rc = TestDelayedRetryDropsAfterStop()) return rc;
     if (int rc = TestFixedDelayRetryCoalescesDuplicates()) return rc;
+    if (int rc = TestEnsureConnectedDoesNotBypassPendingRetryDelay()) return rc;
     if (int rc = TestRejectedSchedulerAllowsLaterRetry()) return rc;
     if (int rc = TestStaleRetryCannotBorrowReplacementToken()) return rc;
     if (int rc = TestManualReconnectSupersedesInFlightRetry()) return rc;

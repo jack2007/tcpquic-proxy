@@ -1743,7 +1743,7 @@ bool QuicClientSession::EnsureConnected(std::chrono::milliseconds timeout) {
                 anyConnected = true;
                 continue;
             }
-            if (!slot.Connection) {
+            if (!slot.Connection && slot.ActiveRetryToken == 0) {
                 guard.unlock();
                 StartSlot(i);
                 guard.lock();
