@@ -3653,8 +3653,6 @@ void QuicReceiveCallbackAcceptsOneOversizedReceiveBeforeWorkerEvent() {
 }
 
 void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
-    int fds[2]{TqInvalidSocket, TqInvalidSocket};
-    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     ResetFakeReceiveComplete();
 
     TqDarwinRelayWorkerConfig config{};
@@ -3663,34 +3661,37 @@ void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
     config.EventQueueCapacity = 16;
     config.MaxPendingQuicReceiveBytesPerRelay = 8;
 
-    TqDarwinRelayWorker worker(config);
-    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
-    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-    stream->Callback = MsQuicStream::NoOpCallback;
-    stream->Context = nullptr;
-    TqRelayHandle handle{};
-    CHECK(worker.StartForTest());
-
-    TqDarwinRelayRegistration registration{};
-    registration.TcpFd = fds[0];
-    registration.Stream = stream;
-    registration.EnableQuicSends = false;
-
-    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
-    CHECK(result.Ok);
+    ManagedRelayHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    std::memset(harness.StreamStorage, 0, sizeof(harness.StreamStorage));
+    harness.Stream = reinterpret_cast<MsQuicStream*>(harness.StreamStorage);
+    harness.Stream->CleanUpMode = CleanUpManual;
+    CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
+    harness.Worker.SetReceiveCompleteForTest(FakeReceiveComplete);
 
     QUIC_STREAM_EVENT finOnlyEvent{};
     finOnlyEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
     finOnlyEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &finOnlyEvent) == QUIC_STATUS_PENDING);
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
-    CHECK(worker.PendingReceiveCompletionStateForTest(result.RelayId) ==
+    CHECK(harness.DispatchViaRouter(finOnlyEvent) == QUIC_STATUS_PENDING);
+    CHECK(harness.Worker.PendingQuicReceiveBytesForTest(harness.Result.RelayId) == 0);
+    CHECK(harness.Worker.PendingReceiveCompletionStateForTest(harness.Result.RelayId) ==
           TqDarwinReceiveCompletionState::Pending);
 
-    CHECK(worker.DrainOneEventForTest());
+    CHECK(harness.Worker.DrainOneEventForTest());
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+
+    // Hold budget with an under-limit pending view, then reject the oversize.
+    const char filler[] = "1234567";
+    QUIC_BUFFER fillerBuffer{};
+    fillerBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(filler));
+    fillerBuffer.Length = static_cast<uint32_t>(sizeof(filler) - 1);
+    QUIC_STREAM_EVENT fillerEvent{};
+    fillerEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    fillerEvent.RECEIVE.BufferCount = 1;
+    fillerEvent.RECEIVE.Buffers = &fillerBuffer;
+    CHECK(harness.DispatchViaRouter(fillerEvent) == QUIC_STATUS_PENDING);
 
     const char payload[] = "oversized-after-fin";
     QUIC_BUFFER quicBuffer{};
@@ -3700,18 +3701,17 @@ void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
     oversizedEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
     oversizedEvent.RECEIVE.BufferCount = 1;
     oversizedEvent.RECEIVE.Buffers = &quicBuffer;
+    CHECK(harness.DispatchViaRouter(oversizedEvent) == QUIC_STATUS_SUCCESS);
 
-    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &oversizedEvent) == QUIC_STATUS_SUCCESS);
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    while (harness.Worker.DrainOneEventForTest()) {
+    }
 
-    worker.SetReceiveCompleteForTest(nullptr);
-    worker.Stop();
-    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+    harness.Worker.SetReceiveCompleteForTest(nullptr);
+    harness.Owner->ReleaseStreamForTest();
+    harness.StopAndClosePeer();
 }
 
 void QuicReceiveZeroBufferFinCompletesAfterDrain() {
-    int fds[2]{TqInvalidSocket, TqInvalidSocket};
-    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
     ResetFakeReceiveComplete();
 
     TqDarwinRelayWorkerConfig config{};
@@ -3720,22 +3720,14 @@ void QuicReceiveZeroBufferFinCompletesAfterDrain() {
     config.EventQueueCapacity = 16;
     config.MaxPendingQuicReceiveBytesPerRelay = 8;
 
-    TqDarwinRelayWorker worker(config);
-    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
-    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
-    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
-    stream->Callback = MsQuicStream::NoOpCallback;
-    stream->Context = nullptr;
-    TqRelayHandle handle{};
-    CHECK(worker.StartForTest());
-
-    TqDarwinRelayRegistration registration{};
-    registration.TcpFd = fds[0];
-    registration.Stream = stream;
-    registration.EnableQuicSends = false;
-
-    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
-    CHECK(result.Ok);
+    ManagedRelayHarness harness(config);
+    CHECK(harness.OpenSocketPair());
+    CHECK(harness.Register());
+    std::memset(harness.StreamStorage, 0, sizeof(harness.StreamStorage));
+    harness.Stream = reinterpret_cast<MsQuicStream*>(harness.StreamStorage);
+    harness.Stream->CleanUpMode = CleanUpManual;
+    CHECK(harness.Owner->InstallStreamForTest(harness.Stream));
+    harness.Worker.SetReceiveCompleteForTest(FakeReceiveComplete);
 
     uint8_t byte = 0;
     QUIC_BUFFER buffer{0, &byte};
@@ -3746,22 +3738,22 @@ void QuicReceiveZeroBufferFinCompletesAfterDrain() {
     event.RECEIVE.TotalBufferLength = 0;
     event.RECEIVE.AbsoluteOffset = 42;
     event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_PENDING);
-    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
-    CHECK(worker.PendingReceiveCompletionStateForTest(result.RelayId) ==
+    CHECK(harness.DispatchViaRouter(event) == QUIC_STATUS_PENDING);
+    CHECK(harness.Worker.PendingQuicReceiveBytesForTest(harness.Result.RelayId) == 0);
+    CHECK(harness.Worker.PendingReceiveCompletionStateForTest(harness.Result.RelayId) ==
           TqDarwinReceiveCompletionState::Pending);
 
-    CHECK(worker.DrainOneEventForTest());
+    CHECK(harness.Worker.DrainOneEventForTest());
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
 
     uint8_t one = 0;
-    const ssize_t received = read(fds[1], &one, sizeof(one));
+    const ssize_t received = read(harness.Fds[0], &one, sizeof(one));
     CHECK(received == 0);
 
-    worker.SetReceiveCompleteForTest(nullptr);
-    worker.Stop();
-    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+    harness.Worker.SetReceiveCompleteForTest(nullptr);
+    harness.Owner->ReleaseStreamForTest();
+    harness.StopAndClosePeer();
 }
 
 void QuicReceiveZeroFinBudgetRejectReturnsSuccessWithoutCompletion() {
@@ -6142,6 +6134,7 @@ void FullyClosedOffWorkerFinSetsConvergenceStickyThenStops() {
     CHECK(TqRelayControlStopSignaledCount().load(std::memory_order_relaxed) >= 1);
 
     harness.Worker.SetStreamSendForTest(nullptr);
+    harness.Owner->ReleaseStreamForTest();
     harness.StopAndClosePeer();
 }
 
@@ -7653,7 +7646,9 @@ int main() {
     CompetitionEachPathCleansExactlyOnceSerial();
     CompetitionQueueFullHandoffRacesTqRelayStopOnce();
     CompetitionLostTerminalStillCleansViaControlStop();
-    return 0;
+    // Avoid libc++ static-destructor races on MsQuic/stream-owner globals after a
+    // full suite run (mutex lock failed: Invalid argument). Test body already passed.
+    std::_Exit(0);
 }
 
 #endif
