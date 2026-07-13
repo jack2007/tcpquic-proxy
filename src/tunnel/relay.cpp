@@ -391,7 +391,7 @@ void TqRelaySetTraceContext(TqRelayHandle* handle, uint64_t tunnelId, const char
     if (handle->Backend == TqRelayBackendType::WindowsWorker && handle->WindowsRelayId != 0) {
         const auto control = handle->Control;
         const uint64_t controlGeneration =
-            control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+            control != nullptr ? control->Generation : 0;
         TqWindowsRelayRuntime::Instance().SetRelayTraceContext(
             control,
             handle->WindowsWorkerIndex,
@@ -418,7 +418,7 @@ void TqRelayStop(TqRelayHandle* handle) {
         const uint64_t relayId = handle->WindowsRelayId;
         const uint64_t relayGeneration = handle->WindowsRelayGeneration;
         const uint64_t controlGeneration =
-            control != nullptr ? control->Generation.load(std::memory_order_acquire) : 0;
+            control != nullptr ? control->Generation : 0;
         handle->Backend = TqRelayBackendType::None;
         handle->WindowsWorker = nullptr;
         handle->WindowsRelayId = 0;
