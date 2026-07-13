@@ -5895,6 +5895,13 @@ int main() {
             MsQuic = nullptr;
             std::_Exit(6096);
         }
+        if (snapshot.ReceiveCompletionZeroLength < 1 ||
+            snapshot.ReceiveCompletionExactlyOnceViolation != 0) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6097;
+        }
         receiveWorker.Stop();
         TqCloseSocket(pair[1]);
         MsQuic = nullptr;

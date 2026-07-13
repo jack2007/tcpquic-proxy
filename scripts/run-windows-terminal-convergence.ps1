@@ -43,6 +43,17 @@ usage: $($MyInvocation.MyCommand.Name) -SelfTest
 "@
 }
 
+function Get-RelayMetricInt64 {
+    param(
+        $Relay,
+        [string]$Name
+    )
+    if ($null -eq $Relay -or $null -eq $Relay.PSObject.Properties[$Name]) {
+        return [int64]0
+    }
+    return [int64]$Relay.$Name
+}
+
 function Assert-ZeroFinReleaseGate {
     param(
         [Parameter(Mandatory = $true)]
@@ -63,28 +74,12 @@ function Assert-ZeroFinReleaseGate {
         }
     }
 
-    $pending = [int64]$(if ($null -ne $Relay.windows_relay_receive_completion_pending) {
-            $Relay.windows_relay_receive_completion_pending
-        } else { 0 })
-    $violation = [int64]$(if ($null -ne $Relay.windows_relay_receive_completion_exactly_once_violation) {
-            $Relay.windows_relay_receive_completion_exactly_once_violation
-        } else { 0 })
-    $retained = [int64]$(if ($null -ne $Relay.windows_relay_terminal_retained_owner_count) {
-            $Relay.windows_relay_terminal_retained_owner_count
-        } elseif ($null -ne $Relay.terminal_retained_owner_count) {
-            $Relay.terminal_retained_owner_count
-        } else { 0 })
-    $sinkPending = [int64]$(if ($null -ne $Relay.windows_relay_terminal_shutdown_sink_pending_count) {
-            $Relay.windows_relay_terminal_shutdown_sink_pending_count
-        } elseif ($null -ne $Relay.terminal_sink_pending) {
-            $Relay.terminal_sink_pending
-        } else { 0 })
-    $terminalRetained = [int64]$(if ($null -ne $Relay.terminal_retained_owner_count) {
-            $Relay.terminal_retained_owner_count
-        } else { 0 })
-    $terminalSink = [int64]$(if ($null -ne $Relay.terminal_sink_pending) {
-            $Relay.terminal_sink_pending
-        } else { 0 })
+    $pending = Get-RelayMetricInt64 $Relay 'windows_relay_receive_completion_pending'
+    $violation = Get-RelayMetricInt64 $Relay 'windows_relay_receive_completion_exactly_once_violation'
+    $retained = Get-RelayMetricInt64 $Relay 'windows_relay_terminal_retained_owner_count'
+    $sinkPending = Get-RelayMetricInt64 $Relay 'windows_relay_terminal_shutdown_sink_pending_count'
+    $terminalRetained = Get-RelayMetricInt64 $Relay 'terminal_retained_owner_count'
+    $terminalSink = Get-RelayMetricInt64 $Relay 'terminal_sink_pending'
 
     if ($terminalRetained -ne 0 -or
         $terminalSink -ne 0 -or
@@ -102,6 +97,49 @@ function Assert-ZeroFinReleaseGate {
     }
 }
 
+function Assert-FinActivityGate {
+    param(
+        [Parameter(Mandatory = $true)]$ClientBefore,
+        [Parameter(Mandatory = $true)]$ServerBefore,
+        [Parameter(Mandatory = $true)]$ClientAfter,
+        [Parameter(Mandatory = $true)]$ServerAfter,
+        [Parameter(Mandatory = $true)][int]$CurlAttempts,
+        [Parameter(Mandatory = $true)][int]$CurlSuccesses,
+        [double]$MinSuccessRate = 0.5
+    )
+
+    if ($CurlAttempts -le 0) {
+        throw 'Windows FIN activity gate failed: no curl attempts were recorded'
+    }
+    if ($CurlSuccesses -le 0) {
+        throw ("Windows FIN activity gate failed: zero successful curls " +
+            "(successes=$CurlSuccesses attempts=$CurlAttempts)")
+    }
+    $rate = $CurlSuccesses / [double]$CurlAttempts
+    if ($rate -lt $MinSuccessRate) {
+        throw ("Windows FIN activity gate failed: curl success rate {0:N2} < {1} ({2}/{3})" -f
+            $rate, $MinSuccessRate, $CurlSuccesses, $CurlAttempts)
+    }
+
+    $clientRequiredDelta =
+        (Get-RelayMetricInt64 $ClientAfter 'windows_relay_receive_completion_required') -
+        (Get-RelayMetricInt64 $ClientBefore 'windows_relay_receive_completion_required')
+    $serverRequiredDelta =
+        (Get-RelayMetricInt64 $ServerAfter 'windows_relay_receive_completion_required') -
+        (Get-RelayMetricInt64 $ServerBefore 'windows_relay_receive_completion_required')
+    $clientZeroLength = Get-RelayMetricInt64 $ClientAfter 'windows_relay_receive_completion_zero_length'
+    $serverZeroLength = Get-RelayMetricInt64 $ServerAfter 'windows_relay_receive_completion_zero_length'
+
+    if ($clientRequiredDelta -le 0 -and
+        $serverRequiredDelta -le 0 -and
+        $clientZeroLength -le 0 -and
+        $serverZeroLength -le 0) {
+        throw ("Windows FIN activity gate failed: no receive-completion activity " +
+            "(client_required_delta=$clientRequiredDelta server_required_delta=$serverRequiredDelta " +
+            "client_zero_length=$clientZeroLength server_zero_length=$serverZeroLength)")
+    }
+}
+
 function Invoke-SelfTest {
     # Validate gate helper against fixture JSON (ConvertFrom-Json).
     $good = @'
@@ -116,7 +154,8 @@ function Invoke-SelfTest {
   "windows_relay_receive_completion_exactly_once_violation": 0,
   "windows_relay_receive_completion_required": 3,
   "windows_relay_receive_completion_active_completed": 2,
-  "windows_relay_receive_completion_terminal_discarded": 1
+  "windows_relay_receive_completion_terminal_discarded": 1,
+  "windows_relay_receive_completion_zero_length": 1
 }
 '@ | ConvertFrom-Json
     Assert-ZeroFinReleaseGate -Relay $good
@@ -156,6 +195,48 @@ function Invoke-SelfTest {
     if (-not $failed) {
         throw 'self-test accepted non-zero terminal_retained_owner_count'
     }
+
+    $idle = @'
+{
+  "windows_relay_receive_completion_required": 0,
+  "windows_relay_receive_completion_zero_length": 0
+}
+'@ | ConvertFrom-Json
+    $failed = $false
+    try {
+        Assert-FinActivityGate -ClientBefore $idle -ServerBefore $idle `
+            -ClientAfter $idle -ServerAfter $idle -CurlAttempts 4 -CurlSuccesses 4
+    } catch {
+        $failed = $true
+    }
+    if (-not $failed) {
+        throw 'self-test accepted idle metrics with no FIN/receive activity'
+    }
+
+    $failed = $false
+    try {
+        Assert-FinActivityGate -ClientBefore $idle -ServerBefore $idle `
+            -ClientAfter $good -ServerAfter $idle -CurlAttempts 4 -CurlSuccesses 0
+    } catch {
+        $failed = $true
+    }
+    if (-not $failed) {
+        throw 'self-test accepted zero successful curls'
+    }
+
+    $failed = $false
+    try {
+        Assert-FinActivityGate -ClientBefore $idle -ServerBefore $idle `
+            -ClientAfter $good -ServerAfter $idle -CurlAttempts 10 -CurlSuccesses 4
+    } catch {
+        $failed = $true
+    }
+    if (-not $failed) {
+        throw 'self-test accepted curl success rate below 50%'
+    }
+
+    Assert-FinActivityGate -ClientBefore $idle -ServerBefore $idle `
+        -ClientAfter $good -ServerAfter $idle -CurlAttempts 4 -CurlSuccesses 3
 
     # Parse syntax of this script by re-tokenizing.
     $null = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -215,6 +296,23 @@ function Resolve-ProxyBinary {
         }
     }
     return $null
+}
+
+function Invoke-CurlAttempt {
+    param([Parameter(Mandatory = $true)][string[]]$CurlArgs)
+    # Prefer HTTP status over curl exit code: tunnel FIN/RST often yields
+    # curl exit 56 after a successful 200 response body.
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $argsWithStatus = @('-sS', '-o', 'NUL', '-w', '%{http_code}') + $CurlArgs
+        $code = (& curl.exe @argsWithStatus 2>$null | Out-String).Trim()
+        return ($code -eq '200')
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $prev
+    }
 }
 
 function Get-FreeTcpPort {
@@ -514,18 +612,28 @@ Rebuild tcpquic-proxy/raypx2 after fixing any compile blockers, then re-run -Sce
     $workloadSeconds = if ($Scenario -eq 'soak') { [Math]::Max(1, $SoakSeconds) } else { 5 }
     $deadline = (Get-Date).AddSeconds($workloadSeconds)
     $sample = 0
+    $curlAttempts = 0
+    $curlSuccesses = 0
     while ((Get-Date) -lt $deadline) {
-        try {
-            & curl.exe --max-time 10 -fsS -x "http://127.0.0.1:$httpListenPort" `
-                --proxytunnel "http://127.0.0.1:$targetPort/" | Out-Null
-        } catch {
+        $curlAttempts++
+        if (Invoke-CurlAttempt -CurlArgs @(
+                '--max-time', '10',
+                '-x', "http://127.0.0.1:$httpListenPort",
+                '--proxytunnel', "http://127.0.0.1:$targetPort/"
+            )) {
+            $curlSuccesses++
         }
-        try {
-            & curl.exe --max-time 10 -fsS -x "http://127.0.0.1:$httpListenPort" `
-                -X POST --data-binary 'fin-body' `
-                "http://127.0.0.1:$targetPort/fin" | Out-Null
-        } catch {
+
+        $curlAttempts++
+        if (Invoke-CurlAttempt -CurlArgs @(
+                '--max-time', '10',
+                '-x', "http://127.0.0.1:$httpListenPort",
+                '-X', 'POST', '--data-binary', 'fin-body',
+                "http://127.0.0.1:$targetPort/fin"
+            )) {
+            $curlSuccesses++
         }
+
         if (($sample % 6) -eq 0) {
             try {
                 (Get-AdminMetrics -Port $clientAdminPort -Token $token | ConvertTo-Json -Depth 8) |
@@ -539,6 +647,7 @@ Rebuild tcpquic-proxy/raypx2 after fixing any compile blockers, then re-run -Sce
         Start-Sleep -Seconds 1
     }
 
+    Write-Host ("workload curl successes={0}/{1}" -f $curlSuccesses, $curlAttempts)
     Write-Host "draining for $DrainSeconds seconds before release gates..."
     Start-Sleep -Seconds $DrainSeconds
 
@@ -549,6 +658,10 @@ Rebuild tcpquic-proxy/raypx2 after fixing any compile blockers, then re-run -Sce
     ($serverFinal | ConvertTo-Json -Depth 12) |
         Set-Content -LiteralPath (Join-Path $Out 'metrics\server-final-relay.json') -Encoding utf8
 
+    Assert-FinActivityGate `
+        -ClientBefore $clientBaseline -ServerBefore $serverBaseline `
+        -ClientAfter $clientFinal -ServerAfter $serverFinal `
+        -CurlAttempts $curlAttempts -CurlSuccesses $curlSuccesses
     Assert-ZeroFinReleaseGate -Relay $clientFinal -RequireNewCompletionFields
     Assert-ZeroFinReleaseGate -Relay $serverFinal -RequireNewCompletionFields
 
@@ -557,6 +670,8 @@ Rebuild tcpquic-proxy/raypx2 after fixing any compile blockers, then re-run -Sce
         soak_seconds_requested = $SoakSeconds
         workload_seconds = $workloadSeconds
         binary = $binPath
+        curl_attempts = $curlAttempts
+        curl_successes = $curlSuccesses
         note = if ($Scenario -eq 'soak' -and $SoakSeconds -lt 1800) {
             'short soak smoke; full release soak expects -SoakSeconds 1800'
         } else {
@@ -566,6 +681,10 @@ Rebuild tcpquic-proxy/raypx2 after fixing any compile blockers, then re-run -Sce
         server_receive_completion_pending = $serverFinal.windows_relay_receive_completion_pending
         client_exactly_once_violation = $clientFinal.windows_relay_receive_completion_exactly_once_violation
         server_exactly_once_violation = $serverFinal.windows_relay_receive_completion_exactly_once_violation
+        client_receive_completion_required = $clientFinal.windows_relay_receive_completion_required
+        server_receive_completion_required = $serverFinal.windows_relay_receive_completion_required
+        client_receive_completion_zero_length = $clientFinal.windows_relay_receive_completion_zero_length
+        server_receive_completion_zero_length = $serverFinal.windows_relay_receive_completion_zero_length
     }
     ($summary | ConvertTo-Json -Depth 6) |
         Set-Content -LiteralPath (Join-Path $Out 'summary\result.json') -Encoding utf8
