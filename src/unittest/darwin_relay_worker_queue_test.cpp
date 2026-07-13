@@ -239,6 +239,38 @@ void ActiveShutdownEventMovePreservesReasonAndOwner() {
         static_cast<uint8_t>(TqDarwinActiveShutdownReason::ReceiveQueueFull) == 2);
 }
 
+void ZeroFinPendingReceivePreservesCompletionObligationOnQueueMove() {
+    // Queue-full / kqueue fallback parks the view with Pending obligation; the
+    // queue must preserve ZeroLengthFinCompletionPending across push/pop.
+    auto receive = std::make_shared<TqDarwinPendingQuicReceive>();
+    receive->RelayId = 42;
+    receive->Fin = true;
+    receive->TotalLength = 0;
+    receive->ZeroLengthFinCompletionPending = true;
+    receive->CompletionState.store(
+        TqDarwinReceiveCompletionState::Pending,
+        std::memory_order_release);
+
+    TqDarwinRelayEventQueue queue(2);
+    TqDarwinRelayEvent event{};
+    event.Type = TqDarwinRelayEventType::QuicReceiveView;
+    event.RelayId = receive->RelayId;
+    event.Fin = true;
+    event.ReceiveView = receive;
+    CHECK(queue.TryPush(std::move(event)));
+
+    TqDarwinRelayEvent popped{};
+    CHECK(queue.TryPop(popped));
+    CHECK(popped.Type == TqDarwinRelayEventType::QuicReceiveView);
+    CHECK(popped.ReceiveView == receive);
+    CHECK(popped.ReceiveView->ZeroLengthFinCompletionPending);
+    CHECK(
+        popped.ReceiveView->CompletionState.load(std::memory_order_acquire) ==
+        TqDarwinReceiveCompletionState::Pending);
+    CHECK(popped.ReceiveView->TotalLength == 0);
+    CHECK(popped.Fin);
+}
+
 void DrainWakeProcessesPastBudgetAndShutdown() {
     TqDarwinRelayWorkerConfig config{};
     config.EventBudget = 2;
@@ -356,6 +388,7 @@ int main() {
     EventMovePreservesOwnedMembers();
     PendingReceiveStreamOwnerIsIndependentOfRelayMap();
     ActiveShutdownEventMovePreservesReasonAndOwner();
+    ZeroFinPendingReceivePreservesCompletionObligationOnQueueMove();
     DrainWakeProcessesPastBudgetAndShutdown();
     SnapshotReportsNormalizedEventQueueCapacity();
     RealWorkerStopPurgeIgnoresHalfCloseHints();

@@ -1941,6 +1941,22 @@ void TqDarwinRelayWorker::RetireRelay(
         legacyStreamForCallbackClear->Callback = MsQuicStream::NoOpCallback;
         legacyStreamForCallbackClear->Context = nullptr;
     }
+    auto needsCompletionSettlement =
+        [](const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
+            if (receive == nullptr) {
+                return false;
+            }
+            const auto state = receive->CompletionState.load(std::memory_order_acquire);
+            if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
+                state == TqDarwinReceiveCompletionState::TerminalDiscarded ||
+                state == TqDarwinReceiveCompletionState::NotRequired) {
+                return false;
+            }
+            return receive->PendingCompleteBytes > 0 ||
+                receive->ZeroLengthFinCompletionPending ||
+                state == TqDarwinReceiveCompletionState::Pending ||
+                state == TqDarwinReceiveCompletionState::Dispatching;
+        };
     for (const auto& receive : receivesToDiscard) {
         // Prefer receive->StreamOwner lease; pass relay only for bookkeeping.
         (void)DiscardDeferredQuicReceive(relay, receive);
@@ -1957,6 +1973,19 @@ void TqDarwinRelayWorker::RetireRelay(
             (void)DiscardDeferredQuicReceive(nullptr, receive);
         }
         binding->Active.store(false, std::memory_order_release);
+        // Closing + lease-fail may leave Pending obligations outside the queue.
+        // After Active=false, CompleteDeferred takes the inactive TerminalDiscarded
+        // path (or ActiveCompleted if a lease is still available).
+        for (const auto& receive : receivesToDiscard) {
+            if (needsCompletionSettlement(receive)) {
+                CompleteDeferredQuicReceive(relay, receive);
+            }
+        }
+        for (const auto& receive : callbackPendingReceives) {
+            if (needsCompletionSettlement(receive)) {
+                CompleteDeferredQuicReceive(relay, receive);
+            }
+        }
         // Do not reset binding->Relay after publish (P1-4): weak expiry follows
         // RelayState destruction naturally.
         bool bindingExpected = false;
@@ -1970,6 +1999,12 @@ void TqDarwinRelayWorker::RetireRelay(
                 completions->KnownSendOperationCount.load(std::memory_order_acquire) != 0;
             if (!hasKnownOperations) {
                 binding->Worker.store(nullptr, std::memory_order_release);
+            }
+        }
+    } else {
+        for (const auto& receive : receivesToDiscard) {
+            if (needsCompletionSettlement(receive)) {
+                CompleteDeferredQuicReceive(relay, receive);
             }
         }
     }
@@ -3859,7 +3894,12 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
                 }
             } else {
                 // Lease temporarily failed: keep view queued for maintenance retry.
+                // Arm FIN half-close so FlushTcpWrites re-enters the completion
+                // retry path (empty PendingTcpWrites alone does not).
                 relay->TcpWriteArmed = true;
+                if (receive->Fin) {
+                    relay->TcpWriteShutdownQueued = true;
+                }
             }
         } else if (receive->Fin) {
             relay->TcpWriteShutdownQueued = true;
@@ -3878,7 +3918,7 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
         return false;
     }
     // Capture stream-bearing relay before budget release clears BindingOwner.
-    // CompleteDeferred is lease-only via receive->StreamOwner->TryAcquireApi();
+    // CompleteDeferred is lease-only via receive->StreamOwner->TryAcquireReceiveApi();
     // no bare ReceiveCompleteStream / relay->Stream fallback.
     std::shared_ptr<RelayState> completeRelay = relay;
     if (completeRelay == nullptr) {
@@ -3892,6 +3932,9 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
         // Worker-thread bookkeeping touches PendingQuicReceive* under the
         // worker-thread ownership rule. Stop-thread retire/settle uses the
         // else branch; MsQuic complete still requires a StreamOwner lease.
+        // Mirror EnqueueQuicReceiveForTcp: do NOT erase from PendingQuicReceives
+        // until ActiveCompleted/TerminalDiscarded — lease-fail must keep/re-queue
+        // so maintenance can retry the obligation.
         if (relay != nullptr && IsWorkerThread()) {
             AssertWorkerThreadForRelayState();
             bytesToComplete = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
@@ -3905,12 +3948,6 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
             relay->PendingQuicReceiveBytes = relay->PendingQuicReceiveBytes >= bytesToDebit
                 ? relay->PendingQuicReceiveBytes - bytesToDebit
                 : 0;
-            for (auto it = relay->PendingQuicReceives.begin(); it != relay->PendingQuicReceives.end(); ++it) {
-                if (*it == receive) {
-                    relay->PendingQuicReceives.erase(it);
-                    break;
-                }
-            }
         } else {
             bytesToComplete = receive->PendingCompleteBytes == 0 && receive->CompletedLength >= receive->TotalLength
                 ? 0
@@ -3920,6 +3957,39 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
         }
     }
     CompleteDeferredQuicReceive(completeRelay, receive);
+    const auto state = receive->CompletionState.load(std::memory_order_acquire);
+    if (relay != nullptr && IsWorkerThread()) {
+        AssertWorkerThreadForRelayState();
+        if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
+            state == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+            for (auto it = relay->PendingQuicReceives.begin();
+                 it != relay->PendingQuicReceives.end();
+                 ++it) {
+                if (*it == receive) {
+                    relay->PendingQuicReceives.erase(it);
+                    break;
+                }
+            }
+        } else if (
+            state == TqDarwinReceiveCompletionState::Pending &&
+            !relay->Closing &&
+            (receive->PendingCompleteBytes > 0 || receive->ZeroLengthFinCompletionPending)) {
+            // Swapped-out error paths may have removed the view already;
+            // re-queue so FlushTcpWrites / maintenance can settle the obligation.
+            // Never re-queue onto Closing/retiring relays — Stop settles via
+            // SettleQueuedReceiveViewsBeforeRetire + Discard with a live lease.
+            bool found = false;
+            for (const auto& pending : relay->PendingQuicReceives) {
+                if (pending == receive) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                relay->PendingQuicReceives.push_back(receive);
+            }
+        }
+    }
     return true;
 }
 
@@ -3984,18 +4054,29 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
             }
         } else if (relay->TcpWriteShutdownQueued) {
             bool pendingReceiveCompletion = false;
-            for (const auto& pending : relay->PendingQuicReceives) {
+            for (auto it = relay->PendingQuicReceives.begin();
+                 it != relay->PendingQuicReceives.end();) {
+                auto pending = *it;
                 if (pending == nullptr) {
+                    it = relay->PendingQuicReceives.erase(it);
                     continue;
                 }
                 if (pending->PendingCompleteBytes > 0 ||
                     pending->ZeroLengthFinCompletionPending) {
                     CompleteDeferredQuicReceive(relay, pending);
+                    const auto state =
+                        pending->CompletionState.load(std::memory_order_acquire);
+                    if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
+                        state == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+                        it = relay->PendingQuicReceives.erase(it);
+                        continue;
+                    }
                     if (pending->PendingCompleteBytes > 0 ||
                         pending->ZeroLengthFinCompletionPending) {
                         pendingReceiveCompletion = true;
                     }
                 }
+                ++it;
             }
             if (pendingReceiveCompletion) {
                 relay->TcpWriteArmed = true;
@@ -4156,7 +4237,7 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             return;
         }
 
-        auto lease = receive->StreamOwner->TryAcquireApi();
+        auto lease = receive->StreamOwner->TryAcquireReceiveApi();
         if (!lease) {
             if (bindingOwner != nullptr &&
                 !bindingOwner->Active.load(std::memory_order_acquire) &&
@@ -4174,7 +4255,7 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             if (!zeroFinPending &&
                 receive->CompletedLength >= receive->TotalLength &&
                 receive->PendingCompleteBytes > 0) {
-                // Bookkeeping-only complete when TryAcquireApi fails without an
+                // Bookkeeping-only complete when TryAcquireReceiveApi fails without an
                 // installed stream wrapper (precommit discard); not a MsQuic call.
                 // Zero-FIN still needs a real ReceiveComplete(0) — roll back.
                 receive->PendingCompleteBytes = 0;
