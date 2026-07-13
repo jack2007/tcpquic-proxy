@@ -394,6 +394,7 @@ public:
     bool CorruptOneInFlightSendMagicForTest(uint64_t relayId);
     uint64_t PendingQuicReceiveBytesForTest(uint64_t relayId);
     uint64_t CallbackPendingReceiveBytesForTest(uint64_t relayId);
+    uint64_t CallbackPendingReceiveEventsForTest(uint64_t relayId);
     void SetCallbackPendingReceiveForTest(uint64_t relayId, uint64_t bytes);
     void DrainCallbackPendingReceiveForTest(uint64_t relayId);
     uint64_t PendingTcpWriteBytesForTest(uint64_t relayId);
@@ -744,6 +745,11 @@ private:
     mutable std::atomic<uint64_t> QuicShutdownCompleteEnqueued{0};
     mutable std::atomic<uint8_t> LastActiveShutdownReason{0};
     mutable TqDarwinBindingPublishIdentitySnapshot LastPublishIdentity{};
+    // Survives queue/map purge so tests can assert ActiveCompleted/TerminalDiscarded
+    // after the view has been removed from live pending queues.
+    mutable std::mutex LastReceiveCompletionStateMutex;
+    mutable std::unordered_map<uint64_t, TqDarwinReceiveCompletionState>
+        LastReceiveCompletionStateByRelay;
 #endif
     std::atomic<uint64_t> EventsProcessed{0};
     mutable std::atomic<uint64_t> Wakeups{0};

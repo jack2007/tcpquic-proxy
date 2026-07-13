@@ -1002,6 +1002,14 @@ uint64_t TqDarwinRelayWorker::CallbackPendingReceiveBytesForTest(uint64_t relayI
     return relay->Binding->CallbackPendingReceiveBytes.load(std::memory_order_acquire);
 }
 
+uint64_t TqDarwinRelayWorker::CallbackPendingReceiveEventsForTest(uint64_t relayId) {
+    auto relay = FindRelay(relayId);
+    if (relay == nullptr || relay->Binding == nullptr) {
+        return 0;
+    }
+    return relay->Binding->CallbackPendingReceiveEvents.load(std::memory_order_acquire);
+}
+
 void TqDarwinRelayWorker::SetCallbackPendingReceiveForTest(uint64_t relayId, uint64_t bytes) {
     AssertWorkerThreadForRelayState();
     auto relay = FindRelayLocal(relayId);
@@ -1129,41 +1137,56 @@ TqDarwinRelayWorker::PendingReceiveCompletionStateForTest(uint64_t relayId) cons
         if (it != Relays.end()) {
             relay = it->second;
         }
-    }
-    if (relay == nullptr) {
-        return TqDarwinReceiveCompletionState::NotRequired;
-    }
-
-    if (relay->Binding != nullptr) {
-        {
-            std::lock_guard<std::mutex> guard(relay->Binding->CallbackPendingQuicReceivesMutex);
-            for (const auto& receive : relay->Binding->CallbackPendingQuicReceives) {
-                if (receive != nullptr && receive->RelayId == relayId) {
-                    return receive->CompletionState.load(std::memory_order_acquire);
-                }
-            }
-        }
-        {
-            std::lock_guard<std::mutex> guard(relay->Binding->ActivationMutex);
-            for (const auto& receive : relay->Binding->PrecommitReceives) {
-                if (receive != nullptr && receive->RelayId == relayId) {
-                    return receive->CompletionState.load(std::memory_order_acquire);
+        if (relay == nullptr) {
+            for (const auto& retired : RetiredRelays) {
+                if (retired != nullptr && retired->Id == relayId) {
+                    relay = retired;
+                    break;
                 }
             }
         }
     }
+    if (relay != nullptr) {
+        if (relay->Binding != nullptr) {
+            {
+                std::lock_guard<std::mutex> guard(relay->Binding->CallbackPendingQuicReceivesMutex);
+                for (const auto& receive : relay->Binding->CallbackPendingQuicReceives) {
+                    if (receive != nullptr && receive->RelayId == relayId) {
+                        return receive->CompletionState.load(std::memory_order_acquire);
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> guard(relay->Binding->ActivationMutex);
+                for (const auto& receive : relay->Binding->PrecommitReceives) {
+                    if (receive != nullptr && receive->RelayId == relayId) {
+                        return receive->CompletionState.load(std::memory_order_acquire);
+                    }
+                }
+            }
+        }
 
-    std::lock_guard<std::mutex> relayLock(relay->Mutex);
-    for (const auto& receive : relay->PendingQuicReceives) {
-        if (receive != nullptr && receive->RelayId == relayId) {
-            return receive->CompletionState.load(std::memory_order_acquire);
+        std::lock_guard<std::mutex> relayLock(relay->Mutex);
+        for (const auto& receive : relay->PendingQuicReceives) {
+            if (receive != nullptr && receive->RelayId == relayId) {
+                return receive->CompletionState.load(std::memory_order_acquire);
+            }
+        }
+        for (const auto& write : relay->PendingTcpWrites) {
+            if (write != nullptr &&
+                write->Receive != nullptr &&
+                write->Receive->RelayId == relayId) {
+                return write->Receive->CompletionState.load(std::memory_order_acquire);
+            }
         }
     }
-    for (const auto& write : relay->PendingTcpWrites) {
-        if (write != nullptr &&
-            write->Receive != nullptr &&
-            write->Receive->RelayId == relayId) {
-            return write->Receive->CompletionState.load(std::memory_order_acquire);
+
+    // Settled views are removed from live queues; retain terminal disposition.
+    {
+        std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+        const auto it = LastReceiveCompletionStateByRelay.find(relayId);
+        if (it != LastReceiveCompletionStateByRelay.end()) {
+            return it->second;
         }
     }
     return TqDarwinReceiveCompletionState::NotRequired;
@@ -4234,6 +4257,13 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                 TqDarwinReceiveCompletionState::TerminalDiscarded,
                 std::memory_order_release);
             DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
+            #if defined(TCPQUIC_TESTING)
+            if (receive->RelayId != 0) {
+                std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+                LastReceiveCompletionStateByRelay[receive->RelayId] =
+                    TqDarwinReceiveCompletionState::TerminalDiscarded;
+            }
+            #endif
             return;
         }
 
@@ -4248,6 +4278,13 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                     TqDarwinReceiveCompletionState::TerminalDiscarded,
                     std::memory_order_release);
                 DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
+                #if defined(TCPQUIC_TESTING)
+                if (receive->RelayId != 0) {
+                    std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+                    LastReceiveCompletionStateByRelay[receive->RelayId] =
+                        TqDarwinReceiveCompletionState::TerminalDiscarded;
+                }
+                #endif
                 (void)receive->StreamOwner->RequestShutdown(
                     TqStreamLifetime::ShutdownIntent::AbortReceive);
                 return;
@@ -4263,6 +4300,13 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                     TqDarwinReceiveCompletionState::ActiveCompleted,
                     std::memory_order_release);
                 DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
+                #if defined(TCPQUIC_TESTING)
+                if (receive->RelayId != 0) {
+                    std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+                    LastReceiveCompletionStateByRelay[receive->RelayId] =
+                        TqDarwinReceiveCompletionState::ActiveCompleted;
+                }
+                #endif
                 return;
             }
             // Lease failed while owner is still active: roll back for retry.
@@ -4283,6 +4327,13 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         receive->CompletionState.store(
             TqDarwinReceiveCompletionState::ActiveCompleted,
             std::memory_order_release);
+        #if defined(TCPQUIC_TESTING)
+        if (receive->RelayId != 0) {
+            std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+            LastReceiveCompletionStateByRelay[receive->RelayId] =
+                TqDarwinReceiveCompletionState::ActiveCompleted;
+        }
+        #endif
         return;
     }
     // No StreamOwner: discard/bookkeeping only. Never call ReceiveComplete via
@@ -4296,6 +4347,13 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         TqDarwinReceiveCompletionState::TerminalDiscarded,
         std::memory_order_release);
     DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
+    #if defined(TCPQUIC_TESTING)
+    if (receive->RelayId != 0) {
+        std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
+        LastReceiveCompletionStateByRelay[receive->RelayId] =
+            TqDarwinReceiveCompletionState::TerminalDiscarded;
+    }
+    #endif
 }
 
 void TqDarwinRelayWorker::CompleteMsQuicReceiveFromCallback(

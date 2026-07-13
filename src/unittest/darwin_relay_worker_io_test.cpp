@@ -3855,6 +3855,8 @@ void ReceiveCallbackQueueFullZeroFinCompletesAfterDrain() {
     CHECK(harness.DispatchViaRouter(finOnlyEvent) == QUIC_STATUS_PENDING);
     CHECK(harness.Worker.EventQueueFullErrorsForTest() == 1);
     CHECK(harness.Worker.QuicReceiveViewBackpressureQueuedForTest() == 1);
+    // Zero-FIN holds callback budget via events (bytes stay 0).
+    CHECK(harness.Worker.CallbackPendingReceiveEventsForTest(harness.Result.RelayId) > 0);
     CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) == 0);
     CHECK(harness.Worker.PendingReceiveCompletionStateForTest(harness.Result.RelayId) ==
           TqDarwinReceiveCompletionState::Pending);
@@ -3866,6 +3868,7 @@ void ReceiveCallbackQueueFullZeroFinCompletesAfterDrain() {
     CHECK(harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId));
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
     CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+    CHECK(harness.Worker.CallbackPendingReceiveEventsForTest(harness.Result.RelayId) == 0);
     CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) == 0);
 
     harness.Worker.SetReceiveSetEnabledForTest(nullptr);
@@ -3999,6 +4002,10 @@ void PrecommitZeroFinTerminalFirstDiscardsWithoutComplete() {
     CHECK(!result.Ok);
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
     CHECK(g_PrecommitOwner->GetPhase() == TqStreamLifetime::Phase::TerminalPublished);
+    const uint64_t publishedRelayId = worker.LastPublishIdentityForTest().RelayId;
+    CHECK(publishedRelayId != 0);
+    CHECK(worker.PendingReceiveCompletionStateForTest(publishedRelayId) ==
+          TqDarwinReceiveCompletionState::TerminalDiscarded);
     CHECK(worker.Snapshot().DeferredReceiveDiscards >= 1);
     CHECK(worker.Snapshot().DeferredReceiveCompletes == 0);
 
@@ -4105,6 +4112,8 @@ void ZeroFinLeaseFailTerminalWinsWithoutComplete() {
     }
     (void)harness.Worker.FlushTcpWritableForTest(harness.Result.RelayId);
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(harness.Worker.PendingReceiveCompletionStateForTest(harness.Result.RelayId) ==
+          TqDarwinReceiveCompletionState::TerminalDiscarded);
     CHECK(harness.Worker.Snapshot().DeferredReceiveDiscards >= 1);
 
     harness.Worker.SetReceiveCompleteForTest(nullptr);
@@ -4142,15 +4151,15 @@ void WorkerStopSettlesCallbackPendingZeroFin() {
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
 
     // Leave the zero-FIN in CallbackPendingQuicReceives; Stop must settle it.
+    CHECK(harness.Worker.CallbackPendingReceiveEventsForTest(harness.Result.RelayId) > 0);
     harness.Worker.Stop();
     const auto state =
         harness.Worker.PendingReceiveCompletionStateForTest(harness.Result.RelayId);
-    CHECK(state == TqDarwinReceiveCompletionState::ActiveCompleted ||
-          state == TqDarwinReceiveCompletionState::TerminalDiscarded ||
-          state == TqDarwinReceiveCompletionState::NotRequired);
-    CHECK(
-        g_receiveCompleteCalls.load(std::memory_order_acquire) == 1 ||
-        harness.Worker.Snapshot().DeferredReceiveDiscards >= 1);
+    // No real terminal was published — require exactly-once active completion.
+    CHECK(state == TqDarwinReceiveCompletionState::ActiveCompleted);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+    CHECK(harness.Worker.CallbackPendingReceiveEventsForTest(harness.Result.RelayId) == 0);
     CHECK(harness.Worker.CallbackPendingReceiveBytesForTest(harness.Result.RelayId) == 0);
     CHECK(harness.Worker.PendingEventsForTest() == 0);
 
