@@ -372,6 +372,9 @@ void RealWorkerStopPurgeIgnoresHalfCloseHints() {
     CHECK(state.Fired.load(std::memory_order_acquire));
     CHECK(worker.PendingEventsForTest() == 0);
     CHECK(worker.Snapshot().Errors == 0);
+    // Drop the owner before ~worker so RelayState::~RelayState does not touch
+    // DestructorCounterOwner on an already-destroyed stack worker (ASan UAF).
+    state.RelayOwner.reset();
     g_RealStopPurgeHalfCloseHook = nullptr;
     ::close(fds[0]);
 }
