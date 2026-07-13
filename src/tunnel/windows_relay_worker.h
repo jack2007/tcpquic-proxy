@@ -38,6 +38,15 @@ struct QUIC_STREAM_EVENT;
 struct TqWindowsPendingQuicReceive;
 struct TqWindowsQuicSendOperation;
 
+// Receive-view completion obligation across MsQuic callback → IOCP → worker.
+enum class TqWindowsReceiveCompletionState : uint8_t {
+    NotRequired,
+    Pending,
+    Dispatching,
+    ActiveCompleted,
+    TerminalDiscarded,
+};
+
 // TCP close mode (GracefulDrain/AbortReset) is separate from QUIC stream disposition.
 enum class TqWindowsStreamCloseDisposition : uint8_t {
     ActiveShutdown,
@@ -227,6 +236,16 @@ struct TqWindowsTerminalOperationSnapshotForTest {
     bool HasBindingOwner{false};
     bool HasRelayOwner{false};
 };
+
+struct TqWindowsReceiveCompletionSnapshotForTest {
+    bool HasView{false};
+    TqWindowsReceiveCompletionState CompletionState{
+        TqWindowsReceiveCompletionState::NotRequired};
+    bool ZeroLengthFinCompletionPending{false};
+    uint64_t TotalLength{0};
+    uint64_t CompletedLength{0};
+    bool Fin{false};
+};
 #endif
 
 struct TqWindowsRelayRegistrationResult {
@@ -356,6 +375,8 @@ public:
     void TestDrainMaintenanceForTest();
     bool TestGetTerminalOperationSnapshotForTest(
         TqWindowsTerminalOperationSnapshotForTest* out) const;
+    bool TestGetLastReceiveCompletionSnapshotForTest(
+        TqWindowsReceiveCompletionSnapshotForTest* out) const;
     bool TestGetBindingTerminalSealForTest(
         uint64_t relayId,
         bool* closing,
@@ -781,6 +802,8 @@ private:
     std::atomic<uint64_t> PostTcpRecvFromSendCompleteCallbackCount_{0};
     mutable std::mutex PendingTerminalCleanupLock_;
     std::shared_ptr<TerminalCleanupRecord> PendingTerminalCleanupForTest_;
+    mutable std::mutex LastReceiveCompletionLock_;
+    std::weak_ptr<TqWindowsPendingQuicReceive> LastReceiveViewForTest_;
     std::atomic<DWORD> LastCallbackPostWin32Error_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};

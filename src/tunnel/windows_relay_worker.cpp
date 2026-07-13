@@ -76,9 +76,6 @@ void PublishStopToControl(
 bool ActiveReceiveCompleteViaOwner(
     const std::shared_ptr<TqStreamLifetime>& owner,
     uint64_t completeBytes) {
-    if (completeBytes == 0) {
-        return true;
-    }
     if (!owner) {
         return false;
     }
@@ -250,13 +247,39 @@ struct TqWindowsPendingQuicReceive {
     bool Drained{false};
     bool TcpSendPending{false};
     bool AccountingReleased{false};
-    std::atomic<bool> OwnershipSettled{false};
+    bool ZeroLengthFinCompletionPending{false};
+    std::atomic<TqWindowsReceiveCompletionState> CompletionState{
+        TqWindowsReceiveCompletionState::NotRequired};
 };
 
-bool TrySettleReceiveViewOwnership(TqWindowsPendingQuicReceive& view) {
-    bool expected = false;
-    return view.OwnershipSettled.compare_exchange_strong(
-        expected, true, std::memory_order_acq_rel);
+bool TryBeginActiveCompletion(TqWindowsPendingQuicReceive& view) {
+    auto expected = TqWindowsReceiveCompletionState::Pending;
+    return view.CompletionState.compare_exchange_strong(
+        expected,
+        TqWindowsReceiveCompletionState::Dispatching,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
+
+void FinishActiveCompletion(TqWindowsPendingQuicReceive& view) {
+    view.CompletionState.store(
+        TqWindowsReceiveCompletionState::ActiveCompleted,
+        std::memory_order_release);
+}
+
+bool TryTerminalDiscard(TqWindowsPendingQuicReceive& view) {
+    auto expected = TqWindowsReceiveCompletionState::Pending;
+    return view.CompletionState.compare_exchange_strong(
+        expected,
+        TqWindowsReceiveCompletionState::TerminalDiscarded,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
+
+bool IsReceiveCompletionSettled(const TqWindowsPendingQuicReceive& view) {
+    const auto state = view.CompletionState.load(std::memory_order_acquire);
+    return state == TqWindowsReceiveCompletionState::ActiveCompleted ||
+        state == TqWindowsReceiveCompletionState::TerminalDiscarded;
 }
 
 struct TqWindowsQuicSendOperation {
@@ -962,12 +985,10 @@ void TqWindowsRelayWorker::FlushPendingQuicReceivesOnClose(
         }
         if (discard) {
             DiscardRemainingReceiveOwnership(relay, *view);
-            (void)TrySettleReceiveViewOwnership(*view);
             continue;
         }
         ActiveFlushDeferredReceiveCompletion(*view, true);
         ActiveCompleteRemainingReceiveOwnership(relay, *view);
-        (void)TrySettleReceiveViewOwnership(*view);
     }
     if (discard) {
         relay->DeferredReceiveCompleteBatchPending.store(0, std::memory_order_release);
@@ -2711,6 +2732,9 @@ bool TqWindowsRelayWorker::QueuePrecommitQuicReceive(
         return false;
     }
     binding->PrecommitPendingBytes += pending;
+    view->CompletionState.store(
+        TqWindowsReceiveCompletionState::Pending,
+        std::memory_order_release);
     binding->PrecommitReceives.push_back(std::move(view));
     return true;
 }
@@ -3022,6 +3046,27 @@ bool TqWindowsRelayWorker::TestGetTerminalOperationSnapshotForTest(
     return true;
 }
 
+bool TqWindowsRelayWorker::TestGetLastReceiveCompletionSnapshotForTest(
+    TqWindowsReceiveCompletionSnapshotForTest* out) const {
+    if (out == nullptr) {
+        return false;
+    }
+    *out = {};
+    std::lock_guard<std::mutex> guard(LastReceiveCompletionLock_);
+    auto view = LastReceiveViewForTest_.lock();
+    if (!view) {
+        return true;
+    }
+    out->HasView = true;
+    out->CompletionState =
+        view->CompletionState.load(std::memory_order_acquire);
+    out->ZeroLengthFinCompletionPending = view->ZeroLengthFinCompletionPending;
+    out->TotalLength = view->TotalLength;
+    out->CompletedLength = view->CompletedLength;
+    out->Fin = view->Fin;
+    return true;
+}
+
 bool TqWindowsRelayWorker::TestGetBindingTerminalSealForTest(
     uint64_t relayId,
     bool* closing,
@@ -3195,6 +3240,9 @@ bool TqWindowsRelayWorker::TestEnqueueReceiveViewForTest(uint64_t relayId, uint6
     view->Drained = false;
     view->Fin = false;
     view->StreamOwner = relay->StreamOwner;
+    view->CompletionState.store(
+        TqWindowsReceiveCompletionState::Pending,
+        std::memory_order_release);
     relay->PendingQuicReceiveBytes.fetch_add(byteCount, std::memory_order_acq_rel);
     relay->PendingQuicReceiveQueueDepth.fetch_add(1, std::memory_order_acq_rel);
     relay->PendingReceives.push_back(view);
@@ -5132,6 +5180,13 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
     CallbackReceiveCopyNanos_.fetch_add(
         NowSteadyNanos() - copyStartNanos,
         std::memory_order_relaxed);
+    view->ZeroLengthFinCompletionPending = fin && view->TotalLength == 0;
+#if defined(TQ_UNIT_TESTING)
+    {
+        std::lock_guard<std::mutex> guard(LastReceiveCompletionLock_);
+        LastReceiveViewForTest_ = view;
+    }
+#endif
     return view;
 }
 
@@ -5151,6 +5206,12 @@ bool TqWindowsRelayWorker::EnqueueDeferredQuicReceiveView(
     }
 
     view->CompleteBatchBytes = relay->Tuning.WindowsRelayQuicReceiveCompleteBatchBytes;
+    if (view->CompletionState.load(std::memory_order_acquire) ==
+        TqWindowsReceiveCompletionState::NotRequired) {
+        view->CompletionState.store(
+            TqWindowsReceiveCompletionState::Pending,
+            std::memory_order_release);
+    }
     relay->PendingReceives.push_back(view);
 
     const uint64_t maxPendingBytes = relay->Tuning.WindowsRelayMaxPendingQuicReceiveBytesPerRelay;
@@ -5448,19 +5509,34 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
         DiscardRemainingReceiveOwnership(relay, view);
         return;
     }
+    // CompletedLength >= TotalLength alone must not imply a zero-FIN API
+    // down-call. Task 3 owns ReceiveComplete(0); keep Pending for zero-FIN so
+    // Task 3 can CAS Pending→Dispatching. Positive-length fully-flushed views
+    // settle without an extra 0-byte API call.
     if (view.CompletedLength >= view.TotalLength) {
-        if (TrySettleReceiveViewOwnership(view)) {
+        if (view.ZeroLengthFinCompletionPending) {
             view.Drained = true;
             view.CompletedLength = view.TotalLength;
             view.PendingCompleteBytes = 0;
+            return;
         }
+        if (!TryBeginActiveCompletion(view)) {
+            return;
+        }
+        view.Drained = true;
+        view.CompletedLength = view.TotalLength;
+        view.PendingCompleteBytes = 0;
+        FinishActiveCompletion(view);
+        return;
+    }
+    if (!TryBeginActiveCompletion(view)) {
         return;
     }
     const uint64_t remaining = view.TotalLength - view.CompletedLength;
     if (!ActiveReceiveCompleteViaOwner(view.StreamOwner, remaining)) {
-        return;
-    }
-    if (!TrySettleReceiveViewOwnership(view)) {
+        view.CompletionState.store(
+            TqWindowsReceiveCompletionState::Pending,
+            std::memory_order_release);
         return;
     }
     DeferredReceiveCompleteBytes_.fetch_add(remaining, std::memory_order_relaxed);
@@ -5469,6 +5545,8 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
     view.Drained = true;
     view.CompletedLength = view.TotalLength;
     view.PendingCompleteBytes = 0;
+    view.ZeroLengthFinCompletionPending = false;
+    FinishActiveCompletion(view);
 }
 
 void TqWindowsRelayWorker::ReleasePendingReceiveAccounting(
@@ -5491,9 +5569,10 @@ void TqWindowsRelayWorker::ReleasePendingReceiveAccounting(
 void TqWindowsRelayWorker::DiscardRemainingReceiveOwnership(
     const std::shared_ptr<RelayContext>& relay,
     TqWindowsPendingQuicReceive& view) {
-    if (!TrySettleReceiveViewOwnership(view)) {
+    if (!TryTerminalDiscard(view)) {
         return;
     }
+    view.ZeroLengthFinCompletionPending = false;
     view.PendingCompleteBytes = 0;
     ReleasePendingReceiveAccounting(relay, view);
 }
@@ -5609,7 +5688,7 @@ bool TqWindowsRelayWorker::CompletePendingQuicReceive(
     ActiveFlushDeferredReceiveCompletion(*view, true);
     ActiveCompleteRemainingReceiveOwnership(relay, *view);
     TraceReceiveViewEvent(relay, view, "complete_pending_after");
-    if (!view->OwnershipSettled.load(std::memory_order_acquire)) {
+    if (!IsReceiveCompletionSettled(*view)) {
         return false;
     }
     return FinishReceiveView(relay, view);
@@ -6126,6 +6205,9 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
         if (!view) {
             return QUIC_STATUS_SUCCESS;
         }
+        view->CompletionState.store(
+            TqWindowsReceiveCompletionState::Pending,
+            std::memory_order_release);
         if (PostCallbackOperationById(
                 TqWindowsIocpOperationType::RelayReceiveReady,
                 *binding,
@@ -6141,7 +6223,11 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
                 "relay_receive_ready_post_failed",
                 view->TotalLength);
         }
-        ActiveCompleteRemainingReceiveOwnership(relay, *view);
+        // Operation never published: roll back reservation; no completion obligation.
+        view->CompletionState.store(
+            TqWindowsReceiveCompletionState::NotRequired,
+            std::memory_order_release);
+        view->ZeroLengthFinCompletionPending = false;
         return QUIC_STATUS_SUCCESS;
     }
 
