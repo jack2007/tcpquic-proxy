@@ -135,6 +135,14 @@ struct TqRelayMetricsSnapshot {
     uint64_t RelayWorkerExitedPurgeEvents{0};
     uint64_t RelayStopRemaining{0};
     uint64_t RelayStopOldestAgeMs{0};
+    // Darwin zero-length FIN / deferred receive completion obligation metrics.
+    uint64_t DarwinRelayReceiveCompletionRequired{0};
+    uint64_t DarwinRelayReceiveCompletionActiveCompleted{0};
+    uint64_t DarwinRelayReceiveCompletionTerminalDiscarded{0};
+    uint64_t DarwinRelayReceiveCompletionZeroLength{0};
+    uint64_t DarwinRelayReceiveCompletionLeaseRetry{0};
+    uint64_t DarwinRelayReceiveCompletionPending{0};
+    uint64_t DarwinRelayReceiveCompletionExactlyOnceViolation{0};
     uint64_t CompressedTcpBytes{0};
     uint64_t DecompressedTcpBytes{0};
     uint64_t ZstdDecompressInputBytes{0};

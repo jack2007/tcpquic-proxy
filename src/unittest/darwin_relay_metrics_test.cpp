@@ -275,6 +275,13 @@ void MultiWorkerAggregationUsesMaxForGlobalGauges() {
     a.SendReservationOldestAgeMs = 15;
     a.ShutdownSinkActive = 1;
     a.StopOldestAgeMs = 20;
+    a.ReceiveCompletionRequired = 4;
+    a.ReceiveCompletionActiveCompleted = 2;
+    a.ReceiveCompletionTerminalDiscarded = 1;
+    a.ReceiveCompletionZeroLength = 3;
+    a.ReceiveCompletionLeaseRetry = 1;
+    a.ReceiveCompletionPending = 1;
+    a.ReceiveCompletionExactlyOnceViolation = 0;
 
     TqDarwinRelayWorkerSnapshot b{};
     b.ActiveRelays = 3;
@@ -296,6 +303,13 @@ void MultiWorkerAggregationUsesMaxForGlobalGauges() {
     b.SendReservationOldestAgeMs = 12;
     b.ShutdownSinkActive = 1;
     b.StopOldestAgeMs = 8;
+    b.ReceiveCompletionRequired = 5;
+    b.ReceiveCompletionActiveCompleted = 3;
+    b.ReceiveCompletionTerminalDiscarded = 2;
+    b.ReceiveCompletionZeroLength = 1;
+    b.ReceiveCompletionLeaseRetry = 2;
+    b.ReceiveCompletionPending = 2;
+    b.ReceiveCompletionExactlyOnceViolation = 1;
 
     TqDarwinRelayWorkerSnapshot total{};
     TqAccumulateDarwinRelayWorkerSnapshot(total, a);
@@ -320,6 +334,15 @@ void MultiWorkerAggregationUsesMaxForGlobalGauges() {
     Check(total.SendReservationOldestAgeMs == 15, "max SendReservationOldestAgeMs");
     Check(total.ShutdownSinkActive == 1, "max ShutdownSinkActive");
     Check(total.StopOldestAgeMs == 20, "max StopOldestAgeMs");
+    Check(total.ReceiveCompletionRequired == 9, "sum ReceiveCompletionRequired");
+    Check(total.ReceiveCompletionActiveCompleted == 5, "sum ReceiveCompletionActiveCompleted");
+    Check(total.ReceiveCompletionTerminalDiscarded == 3, "sum ReceiveCompletionTerminalDiscarded");
+    Check(total.ReceiveCompletionZeroLength == 4, "sum ReceiveCompletionZeroLength");
+    Check(total.ReceiveCompletionLeaseRetry == 3, "sum ReceiveCompletionLeaseRetry");
+    Check(total.ReceiveCompletionPending == 3, "sum ReceiveCompletionPending");
+    Check(
+        total.ReceiveCompletionExactlyOnceViolation == 1,
+        "sum ReceiveCompletionExactlyOnceViolation");
 }
 
 void ControlMetricsAndReleaseGateJson() {
@@ -374,6 +397,13 @@ void ControlMetricsAndReleaseGateJson() {
     metrics.RelayWorkerExitedPurgeEvents = 15;
     metrics.RelayStopRemaining = 0;
     metrics.RelayStopOldestAgeMs = 16;
+    metrics.DarwinRelayReceiveCompletionRequired = 7;
+    metrics.DarwinRelayReceiveCompletionActiveCompleted = 4;
+    metrics.DarwinRelayReceiveCompletionTerminalDiscarded = 2;
+    metrics.DarwinRelayReceiveCompletionZeroLength = 3;
+    metrics.DarwinRelayReceiveCompletionLeaseRetry = 1;
+    metrics.DarwinRelayReceiveCompletionPending = 0;
+    metrics.DarwinRelayReceiveCompletionExactlyOnceViolation = 0;
     metrics.LinuxRelayTerminalRetainedOwnerCount = 3;
     metrics.LinuxRelayTerminalRetainedOldestAgeMs = 42;
     metrics.LinuxRelayStopRemaining = 5;
@@ -404,6 +434,13 @@ void ControlMetricsAndReleaseGateJson() {
     CheckContains(json, "\"relay_worker_exited_purge_events\":15");
     CheckContains(json, "\"relay_stop_remaining\":0");
     CheckContains(json, "\"relay_stop_oldest_age_ms\":16");
+    CheckContains(json, "\"darwin_relay_receive_completion_required\":7");
+    CheckContains(json, "\"darwin_relay_receive_completion_active_completed\":4");
+    CheckContains(json, "\"darwin_relay_receive_completion_terminal_discarded\":2");
+    CheckContains(json, "\"darwin_relay_receive_completion_zero_length\":3");
+    CheckContains(json, "\"darwin_relay_receive_completion_lease_retry\":1");
+    CheckContains(json, "\"darwin_relay_receive_completion_pending\":0");
+    CheckContains(json, "\"darwin_relay_receive_completion_exactly_once_violation\":0");
     CheckContains(json, "\"linux_relay_terminal_retained_owner_count\":3");
     CheckContains(json, "\"linux_relay_stop_remaining\":5");
 }

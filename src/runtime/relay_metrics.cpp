@@ -562,6 +562,19 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.RelayWorkerExitedPurgeEvents = snapshot.WorkerExitedPurgeEvents;
     metrics.RelayStopRemaining = snapshot.StopRemaining;
     metrics.RelayStopOldestAgeMs = snapshot.StopOldestAgeMs;
+    metrics.DarwinRelayReceiveCompletionRequired = snapshot.ReceiveCompletionRequired;
+    metrics.DarwinRelayReceiveCompletionActiveCompleted =
+        snapshot.ReceiveCompletionActiveCompleted;
+    metrics.DarwinRelayReceiveCompletionTerminalDiscarded =
+        snapshot.ReceiveCompletionTerminalDiscarded;
+    metrics.DarwinRelayReceiveCompletionZeroLength =
+        snapshot.ReceiveCompletionZeroLength;
+    metrics.DarwinRelayReceiveCompletionLeaseRetry =
+        snapshot.ReceiveCompletionLeaseRetry;
+    metrics.DarwinRelayReceiveCompletionPending =
+        snapshot.ReceiveCompletionPending;
+    metrics.DarwinRelayReceiveCompletionExactlyOnceViolation =
+        snapshot.ReceiveCompletionExactlyOnceViolation;
     {
         const auto supportStats = darwinRuntime.SnapshotSupportStats();
         metrics.RelayRuntimeSnapshotInFlight = supportStats.InFlight;
@@ -901,6 +914,20 @@ static void TqAppendNeutralRelayMetricsJson(std::ostringstream& out, const TqRel
     out << ",\"relay_worker_exited_purge_events\":" << metrics.RelayWorkerExitedPurgeEvents;
     out << ",\"relay_stop_remaining\":" << metrics.RelayStopRemaining;
     out << ",\"relay_stop_oldest_age_ms\":" << metrics.RelayStopOldestAgeMs;
+    out << ",\"darwin_relay_receive_completion_required\":"
+        << metrics.DarwinRelayReceiveCompletionRequired;
+    out << ",\"darwin_relay_receive_completion_active_completed\":"
+        << metrics.DarwinRelayReceiveCompletionActiveCompleted;
+    out << ",\"darwin_relay_receive_completion_terminal_discarded\":"
+        << metrics.DarwinRelayReceiveCompletionTerminalDiscarded;
+    out << ",\"darwin_relay_receive_completion_zero_length\":"
+        << metrics.DarwinRelayReceiveCompletionZeroLength;
+    out << ",\"darwin_relay_receive_completion_lease_retry\":"
+        << metrics.DarwinRelayReceiveCompletionLeaseRetry;
+    out << ",\"darwin_relay_receive_completion_pending\":"
+        << metrics.DarwinRelayReceiveCompletionPending;
+    out << ",\"darwin_relay_receive_completion_exactly_once_violation\":"
+        << metrics.DarwinRelayReceiveCompletionExactlyOnceViolation;
     out << ",\"relay_runtime_snapshot_inflight\":" << metrics.RelayRuntimeSnapshotInFlight;
     out << ",\"relay_runtime_snapshot_inflight_max\":"
         << metrics.RelayRuntimeSnapshotInFlightMax;

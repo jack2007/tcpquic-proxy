@@ -328,6 +328,14 @@ struct TqDarwinRelayWorkerSnapshot {
     uint64_t ShutdownSinkActive{0};
     uint64_t WorkerExitedPurgeEvents{0};
     uint64_t StopOldestAgeMs{0};
+    // Zero-length FIN / deferred receive completion obligation metrics.
+    uint64_t ReceiveCompletionRequired{0};
+    uint64_t ReceiveCompletionActiveCompleted{0};
+    uint64_t ReceiveCompletionTerminalDiscarded{0};
+    uint64_t ReceiveCompletionZeroLength{0};
+    uint64_t ReceiveCompletionLeaseRetry{0};
+    uint64_t ReceiveCompletionPending{0};
+    uint64_t ReceiveCompletionExactlyOnceViolation{0};
 };
 
 // Merge one worker snapshot into an aggregate. Global owner/registry gauges use
@@ -780,6 +788,20 @@ private:
     std::atomic<uint64_t> ActiveFailureBudgetExceeded{0};
     std::atomic<uint64_t> ActiveFailureQueueFull{0};
     std::atomic<uint64_t> WorkerExitedPurgeEvents{0};
+    std::atomic<uint64_t> ReceiveCompletionRequired{0};
+    std::atomic<uint64_t> ReceiveCompletionActiveCompleted{0};
+    std::atomic<uint64_t> ReceiveCompletionTerminalDiscarded{0};
+    std::atomic<uint64_t> ReceiveCompletionZeroLength{0};
+    std::atomic<uint64_t> ReceiveCompletionLeaseRetry{0};
+    std::atomic<uint64_t> ReceiveCompletionPending{0};
+    std::atomic<uint64_t> ReceiveCompletionExactlyOnceViolation{0};
+
+    void NoteReceiveCompletionRequired(
+        const std::shared_ptr<TqDarwinPendingQuicReceive>& receive);
+    void NoteReceiveCompletionSettled(TqDarwinReceiveCompletionState settled);
+    void NoteReceiveCompletionLeaseRetry();
+    void NoteReceiveCompletionObligationDropped();
+    void NoteReceiveCompletionExactlyOnceViolation();
 };
 
 class TqDarwinRelayRuntime final {

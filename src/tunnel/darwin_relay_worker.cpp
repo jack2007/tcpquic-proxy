@@ -3573,10 +3573,12 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
     receive->CompletionState.store(
         TqDarwinReceiveCompletionState::Pending,
         std::memory_order_release);
-    auto rollbackObligation = [&receive]() {
+    NoteReceiveCompletionRequired(receive);
+    auto rollbackObligation = [&]() {
         receive->CompletionState.store(
             TqDarwinReceiveCompletionState::NotRequired,
             std::memory_order_release);
+        NoteReceiveCompletionObligationDropped();
     };
     std::lock_guard<std::mutex> guard(binding->ActivationMutex);
     const auto activation = binding->ActivationState.load(std::memory_order_acquire);
@@ -4221,6 +4223,37 @@ bool TqDarwinRelayWorker::FlushTcpWrites(const std::shared_ptr<RelayState>& rela
     }
 }
 
+void TqDarwinRelayWorker::NoteReceiveCompletionRequired(
+    const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
+    ReceiveCompletionRequired.fetch_add(1, std::memory_order_relaxed);
+    ReceiveCompletionPending.fetch_add(1, std::memory_order_relaxed);
+    if (receive != nullptr && receive->ZeroLengthFinCompletionPending) {
+        ReceiveCompletionZeroLength.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void TqDarwinRelayWorker::NoteReceiveCompletionSettled(
+    TqDarwinReceiveCompletionState settled) {
+    ReceiveCompletionPending.fetch_sub(1, std::memory_order_relaxed);
+    if (settled == TqDarwinReceiveCompletionState::ActiveCompleted) {
+        ReceiveCompletionActiveCompleted.fetch_add(1, std::memory_order_relaxed);
+    } else if (settled == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+        ReceiveCompletionTerminalDiscarded.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void TqDarwinRelayWorker::NoteReceiveCompletionLeaseRetry() {
+    ReceiveCompletionLeaseRetry.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TqDarwinRelayWorker::NoteReceiveCompletionObligationDropped() {
+    ReceiveCompletionPending.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void TqDarwinRelayWorker::NoteReceiveCompletionExactlyOnceViolation() {
+    ReceiveCompletionExactlyOnceViolation.fetch_add(1, std::memory_order_relaxed);
+}
+
 void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
     const std::shared_ptr<RelayState>& relay,
     const std::shared_ptr<TqDarwinPendingQuicReceive>& receive) {
@@ -4247,6 +4280,11 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
 
         // Claim Dispatching before lease so concurrent settlers race on CAS.
         if (!receive->TryClaimCompletionDispatch()) {
+            const auto state = receive->CompletionState.load(std::memory_order_acquire);
+            if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
+                state == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+                NoteReceiveCompletionExactlyOnceViolation();
+            }
             return;
         }
 
@@ -4256,6 +4294,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             receive->CompletionState.store(
                 TqDarwinReceiveCompletionState::TerminalDiscarded,
                 std::memory_order_release);
+            NoteReceiveCompletionSettled(
+                TqDarwinReceiveCompletionState::TerminalDiscarded);
             DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
             #if defined(TCPQUIC_TESTING)
             if (receive->RelayId != 0) {
@@ -4277,6 +4317,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                 receive->CompletionState.store(
                     TqDarwinReceiveCompletionState::TerminalDiscarded,
                     std::memory_order_release);
+                NoteReceiveCompletionSettled(
+                    TqDarwinReceiveCompletionState::TerminalDiscarded);
                 DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
                 #if defined(TCPQUIC_TESTING)
                 if (receive->RelayId != 0) {
@@ -4299,6 +4341,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                 receive->CompletionState.store(
                     TqDarwinReceiveCompletionState::ActiveCompleted,
                     std::memory_order_release);
+                NoteReceiveCompletionSettled(
+                    TqDarwinReceiveCompletionState::ActiveCompleted);
                 DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
                 #if defined(TCPQUIC_TESTING)
                 if (receive->RelayId != 0) {
@@ -4313,6 +4357,7 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
             receive->CompletionState.store(
                 TqDarwinReceiveCompletionState::Pending,
                 std::memory_order_release);
+            NoteReceiveCompletionLeaseRetry();
             return;
         }
 
@@ -4327,6 +4372,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         receive->CompletionState.store(
             TqDarwinReceiveCompletionState::ActiveCompleted,
             std::memory_order_release);
+        NoteReceiveCompletionSettled(
+            TqDarwinReceiveCompletionState::ActiveCompleted);
         #if defined(TCPQUIC_TESTING)
         if (receive->RelayId != 0) {
             std::lock_guard<std::mutex> lock(LastReceiveCompletionStateMutex);
@@ -4339,6 +4386,11 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
     // No StreamOwner: discard/bookkeeping only. Never call ReceiveComplete via
     // bare relay->Stream (Task 4 lease-only contract).
     if (!receive->TryClaimCompletionDispatch()) {
+        const auto state = receive->CompletionState.load(std::memory_order_acquire);
+        if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
+            state == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+            NoteReceiveCompletionExactlyOnceViolation();
+        }
         return;
     }
     receive->ZeroLengthFinCompletionPending = false;
@@ -4346,6 +4398,8 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
     receive->CompletionState.store(
         TqDarwinReceiveCompletionState::TerminalDiscarded,
         std::memory_order_release);
+    NoteReceiveCompletionSettled(
+        TqDarwinReceiveCompletionState::TerminalDiscarded);
     DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
     #if defined(TCPQUIC_TESTING)
     if (receive->RelayId != 0) {
@@ -5264,6 +5318,20 @@ TqDarwinRelayWorkerSnapshot TqDarwinRelayWorker::SnapshotLocal() const {
     snapshot.ActiveFailureQueueFull = ActiveFailureQueueFull.load(std::memory_order_relaxed);
     snapshot.ShutdownSinkActive = g_DarwinShutdownSinkActive.load(std::memory_order_relaxed);
     snapshot.WorkerExitedPurgeEvents = WorkerExitedPurgeEvents.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionRequired =
+        ReceiveCompletionRequired.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionActiveCompleted =
+        ReceiveCompletionActiveCompleted.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionTerminalDiscarded =
+        ReceiveCompletionTerminalDiscarded.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionZeroLength =
+        ReceiveCompletionZeroLength.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionLeaseRetry =
+        ReceiveCompletionLeaseRetry.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionPending =
+        ReceiveCompletionPending.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionExactlyOnceViolation =
+        ReceiveCompletionExactlyOnceViolation.load(std::memory_order_relaxed);
     return snapshot;
 }
 
@@ -5631,12 +5699,14 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             receive->CompletionState.store(
                 TqDarwinReceiveCompletionState::Pending,
                 std::memory_order_release);
+            worker->NoteReceiveCompletionRequired(receive);
             enqueueResult = worker->QueueDeferredQuicReceive(bindingOwner, receive, stream);
             if (enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok &&
                 enqueueResult != TqDarwinQuicReceiveEnqueueResult::EventQueueFull) {
                 receive->CompletionState.store(
                     TqDarwinReceiveCompletionState::NotRequired,
                     std::memory_order_release);
+                worker->NoteReceiveCompletionObligationDropped();
             }
         }
         switch (enqueueResult) {
@@ -5772,6 +5842,14 @@ void TqAccumulateDarwinRelayWorkerSnapshot(
     total.ActiveFailureQueueFull += part.ActiveFailureQueueFull;
     total.WorkerExitedPurgeEvents += part.WorkerExitedPurgeEvents;
     total.StopOldestAgeMs = std::max(total.StopOldestAgeMs, part.StopOldestAgeMs);
+    total.ReceiveCompletionRequired += part.ReceiveCompletionRequired;
+    total.ReceiveCompletionActiveCompleted += part.ReceiveCompletionActiveCompleted;
+    total.ReceiveCompletionTerminalDiscarded += part.ReceiveCompletionTerminalDiscarded;
+    total.ReceiveCompletionZeroLength += part.ReceiveCompletionZeroLength;
+    total.ReceiveCompletionLeaseRetry += part.ReceiveCompletionLeaseRetry;
+    total.ReceiveCompletionPending += part.ReceiveCompletionPending;
+    total.ReceiveCompletionExactlyOnceViolation +=
+        part.ReceiveCompletionExactlyOnceViolation;
     total.EventQueueCapacity = std::max(total.EventQueueCapacity, part.EventQueueCapacity);
     total.SnapshotComplete = total.SnapshotComplete && part.SnapshotComplete;
 }
