@@ -1879,11 +1879,9 @@ void TqWindowsRelayWorker::Run() {
             if (!relay || relay->Generation != op->Generation) {
                 PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
                 relay.reset();
-            } else if (relay->Closing.load(std::memory_order_acquire) &&
-                       op->Event == TqWindowsIocpOperationType::RelayReceiveReady) {
-                PostedCallbackStaleDropCount_.fetch_add(1, std::memory_order_relaxed);
-                relay.reset();
             }
+            // Closing alone is not terminal discard: keep the relay so
+            // RelayReceiveReady can enqueue and settle via CompletePendingQuicReceive.
             if (!relay && op->ReceiveView) {
                 DiscardRemainingReceiveOwnership(nullptr, *op->ReceiveView);
             }
@@ -5266,9 +5264,7 @@ bool TqWindowsRelayWorker::PostTcpSendFromReceiveView(
     }
     if (view->SliceIndex >= view->Slices.size()) {
         TraceReceiveViewEvent(relay, view, "post_tcp_send_no_slices");
-        TraceReceiveViewEvent(relay, view, "flush_receive_complete", view->PendingCompleteBytes);
-        ActiveFlushDeferredReceiveCompletion(*view, true);
-        return FinishReceiveView(relay, view);
+        return CompletePendingQuicReceive(relay, view);
     }
 
     const auto& slice = view->Slices[view->SliceIndex];
@@ -5410,16 +5406,12 @@ bool TqWindowsRelayWorker::PostTcpSendFromCompressedReceiveView(
 
         if (view->SliceIndex >= view->Slices.size() && result.NeedsMoreInput) {
             TraceReceiveViewEvent(relay, view, "post_tcp_send_compressed_needs_more_input_finish");
-            TraceReceiveViewEvent(relay, view, "flush_receive_complete", view->PendingCompleteBytes);
-            ActiveFlushDeferredReceiveCompletion(*view, true);
-            return FinishReceiveView(relay, view);
+            return CompletePendingQuicReceive(relay, view);
         }
         if (result.InputConsumed == 0) {
             if (!hasInput && result.NeedsMoreInput) {
                 TraceReceiveViewEvent(relay, view, "post_tcp_send_compressed_empty_finish");
-                TraceReceiveViewEvent(relay, view, "flush_receive_complete", view->PendingCompleteBytes);
-                ActiveFlushDeferredReceiveCompletion(*view, true);
-                return FinishReceiveView(relay, view);
+                return CompletePendingQuicReceive(relay, view);
             }
             ZstdDecompressFailures_.fetch_add(1, std::memory_order_relaxed);
             Errors_.fetch_add(1, std::memory_order_relaxed);
@@ -5513,43 +5505,30 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
         DiscardRemainingReceiveOwnership(relay, view);
         return;
     }
-    // CompletedLength >= TotalLength alone must not imply a zero-FIN API
-    // down-call. Task 3 owns ReceiveComplete(0); keep Pending for zero-FIN so
-    // Task 3 can CAS Pending→Dispatching. Positive-length fully-flushed views
-    // settle without an extra 0-byte API call.
-    if (view.CompletedLength >= view.TotalLength) {
-        if (view.ZeroLengthFinCompletionPending) {
-            view.Drained = true;
-            view.CompletedLength = view.TotalLength;
-            view.PendingCompleteBytes = 0;
-            return;
-        }
-        if (!TryBeginActiveCompletion(view)) {
-            return;
-        }
-        view.Drained = true;
-        view.CompletedLength = view.TotalLength;
-        view.PendingCompleteBytes = 0;
-        FinishActiveCompletion(view);
-        return;
-    }
     if (!TryBeginActiveCompletion(view)) {
         return;
     }
-    const uint64_t remaining = view.TotalLength - view.CompletedLength;
-    if (!ActiveReceiveCompleteViaOwner(view.StreamOwner, remaining)) {
+
+    const uint64_t remaining = view.TotalLength -
+        std::min(view.CompletedLength, view.TotalLength);
+    const bool zeroFin = view.ZeroLengthFinCompletionPending;
+    // remaining==0 && !zeroFin: publish ActiveCompleted without a 0-byte API call.
+    if ((remaining != 0 || zeroFin) &&
+        !ActiveReceiveCompleteViaOwner(view.StreamOwner, remaining)) {
         view.CompletionState.store(
             TqWindowsReceiveCompletionState::Pending,
             std::memory_order_release);
         return;
     }
-    DeferredReceiveCompleteBytes_.fetch_add(remaining, std::memory_order_relaxed);
-    DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
-    DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
+    if (remaining != 0 || zeroFin) {
+        DeferredReceiveCompleteBytes_.fetch_add(remaining, std::memory_order_relaxed);
+        DeferredReceiveCompletes_.fetch_add(1, std::memory_order_relaxed);
+        DeferredReceiveCompletionFlushes_.fetch_add(1, std::memory_order_relaxed);
+    }
+    view.ZeroLengthFinCompletionPending = false;
     view.Drained = true;
     view.CompletedLength = view.TotalLength;
     view.PendingCompleteBytes = 0;
-    view.ZeroLengthFinCompletionPending = false;
     FinishActiveCompletion(view);
 }
 

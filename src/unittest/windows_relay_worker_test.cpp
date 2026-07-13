@@ -5490,8 +5490,8 @@ int main() {
         TqWindowsReceiveCompletionSnapshotForTest completion{};
         if (!receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) ||
             !completion.HasView ||
-            completion.CompletionState != TqWindowsReceiveCompletionState::Pending ||
-            !completion.ZeroLengthFinCompletionPending ||
+            completion.CompletionState != TqWindowsReceiveCompletionState::ActiveCompleted ||
+            completion.ZeroLengthFinCompletionPending ||
             !completion.Fin ||
             completion.TotalLength != 0) {
             receiveWorker.Stop();
@@ -5506,6 +5506,105 @@ int main() {
             MsQuic = nullptr;
             std::_Exit(6096);
         }
+        receiveWorker.Stop();
+        TqCloseSocket(pair[1]);
+        MsQuic = nullptr;
+    }
+    {
+        // Closing-before-IOCP-drain: StopRelay while RelayReceiveReady is blocked.
+        QUIC_API_TABLE fakeApi{};
+        fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
+        fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
+        MsQuic = reinterpret_cast<const MsQuicApi*>(&fakeApi);
+        g_StreamReceiveCompleteBytes = 0;
+        g_StreamReceiveCompleteCalls = 0;
+
+        TqSocketHandle pair[2]{TqInvalidSocket, TqInvalidSocket};
+        if (!TqSocketPair(pair)) {
+            MsQuic = nullptr;
+            return 6105;
+        }
+        if (!TqSetNonBlocking(pair[1])) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6106;
+        }
+
+        TqWindowsRelayWorker receiveWorker;
+        if (!receiveWorker.Start()) {
+            TqCloseSocket(pair[0]);
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6107;
+        }
+        alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+        auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+        stream->Callback = MsQuicStream::NoOpCallback;
+        stream->Context = nullptr;
+        stream->Handle = reinterpret_cast<HQUIC>(static_cast<uintptr_t>(1));
+        TqRelayHandle handle{};
+        TqTuningConfig tuning{};
+        tuning.RelayIoSize = 64 * 1024;
+        if (!receiveWorker.RegisterRelay(
+                pair[0], stream, nullptr, nullptr, &handle, tuning, TqCompressAlgo::None)) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6108;
+        }
+
+        TqWindowsRelayWorkerQueueBlockForTest block{};
+        if (!receiveWorker.TestPostWorkerQueueBlockForTest(&block) ||
+            !receiveWorker.TestWaitWorkerQueueBlockEnteredForTest(block, 2000)) {
+            receiveWorker.TestReleaseWorkerQueueBlockForTest(block);
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6109;
+        }
+
+        QUIC_STREAM_EVENT event{};
+        event.Type = QUIC_STREAM_EVENT_RECEIVE;
+        event.RECEIVE.BufferCount = 0;
+        event.RECEIVE.Buffers = nullptr;
+        event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
+            QUIC_STATUS_PENDING) {
+            receiveWorker.TestReleaseWorkerQueueBlockForTest(block);
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6110;
+        }
+
+        receiveWorker.StopRelay(handle.WindowsRelayId);
+        receiveWorker.TestReleaseWorkerQueueBlockForTest(block);
+
+        TqWindowsReceiveCompletionSnapshotForTest completion{};
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+        bool settled = false;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
+                completion.HasView &&
+                completion.CompletionState ==
+                    TqWindowsReceiveCompletionState::ActiveCompleted) {
+                settled = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!settled ||
+            g_StreamReceiveCompleteCalls != 1 ||
+            g_StreamReceiveCompleteBytes != 0 ||
+            completion.CompletionState != TqWindowsReceiveCompletionState::ActiveCompleted) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            std::_Exit(6111);
+        }
+
         receiveWorker.Stop();
         TqCloseSocket(pair[1]);
         MsQuic = nullptr;
