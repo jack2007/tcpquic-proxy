@@ -13,7 +13,14 @@ ANALYZE_ATTEMPT_WINDOW_MS="${ANALYZE_ATTEMPT_WINDOW_MS:-}"
 EXTRACT_TRACE_SOURCE="${EXTRACT_TRACE_SOURCE:-}"
 TRACE_START_BYTES="${TRACE_START_BYTES:-0}"
 
-[[ "$(uname -s)" == "Linux" ]] || { echo "this system harness is Linux-only" >&2; exit 2; }
+case "$(uname -s)" in
+  Linux|Darwin) ;;
+  *)
+    echo "this system harness supports Linux and Darwin only (got $(uname -s))" >&2
+    exit 2
+    ;;
+esac
+HOST_OS="$(uname -s)"
 
 extract_trace_evidence() {
   local source=$1 start_bytes=$2 output=$3
@@ -110,7 +117,11 @@ def rising_rss_time_windows(times, values):
             f'rss monotonic rise across three sampling windows: medians={medians}, tolerance={tolerance:.0f}KiB')
 
 rising_rss_time_windows(elapsed,rss)
-rising_three_windows(queue,'delayed queue depth')
+# Ignore allocator/startup ramp the same way RSS does: only the final 60% of
+# the sampling window may show sustained delayed-queue growth.
+queue_start=elapsed[0] + (elapsed[-1]-elapsed[0])*0.4 if elapsed else 0
+queue_post=[v for t,v in zip([int(r['elapsed_ms']) for r in metric_rows], queue) if t >= queue_start]
+rising_three_windows(queue_post,'delayed queue depth')
 
 def rising_log_rate_time_windows(times, sizes):
     start=times[0] + (times[-1]-times[0])*0.4
@@ -169,10 +180,54 @@ declare -A OWNED_EXE=()
 
 proc_starttime() {
   local pid=$1 stat rest
-  IFS= read -r stat <"/proc/$pid/stat" || return 1
-  rest=${stat##*) }
-  set -- $rest
-  printf '%s\n' "$20"
+  if [[ "$HOST_OS" == "Linux" ]]; then
+    IFS= read -r stat <"/proc/$pid/stat" || return 1
+    rest=${stat##*) }
+    set -- $rest
+    printf '%s\n' "$20"
+  else
+    # Darwin: absolute start timestamp uniquely identifies this process lifetime.
+    ps -p "$pid" -o lstart= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
+proc_exe() {
+  local pid=$1
+  if [[ "$HOST_OS" == "Linux" ]]; then
+    readlink "/proc/$pid/exe"
+  else
+    ps -p "$pid" -o command= | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+  fi
+}
+
+proc_cpu_ticks() {
+  local pid=$1
+  if [[ "$HOST_OS" == "Linux" ]]; then
+    awk '{print $14+$15}' "/proc/$pid/stat"
+  else
+    python3 - "$pid" "$(getconf CLK_TCK)" <<'PY'
+import subprocess, sys
+pid, hz = sys.argv[1], int(sys.argv[2])
+out = subprocess.check_output(["ps", "-p", pid, "-o", "utime=,stime="], text=True).split()
+if len(out) < 2:
+    raise SystemExit(f"unable to read cpu time for pid {pid}")
+
+def to_ticks(token: str) -> int:
+    token = token.strip()
+    parts = token.split(":")
+    if len(parts) == 3:
+        hours, minutes, seconds = parts
+        total = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    elif len(parts) == 2:
+        minutes, seconds = parts
+        total = int(minutes) * 60 + float(seconds)
+    else:
+        total = float(token)
+    return int(total * hz)
+
+print(to_ticks(out[0]) + to_ticks(out[1]))
+PY
+  fi
 }
 
 register_owned_pid() {
@@ -181,7 +236,7 @@ register_owned_pid() {
   # The child may still be between fork and exec.  Record only after the
   # executable identity is stable across two observations.
   for attempt in $(seq 1 50); do
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    exe=$(proc_exe "$pid") || return 1
     if [[ -n "$previous_exe" && "$exe" == "$previous_exe" ]]; then
       stable=1
       break
@@ -199,9 +254,10 @@ pid_is_owned() {
   local pid=$1 starttime exe
   [[ -n "${OWNED_STARTTIME[$pid]:-}" && -n "${OWNED_EXE[$pid]:-}" ]] || return 1
   starttime=$(proc_starttime "$pid") || return 1
-  exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
-  # Linux starttime identifies this exact process lifetime.  The executable is
-  # retained for audit; it may legitimately change during the initial exec.
+  exe=$(proc_exe "$pid") || return 1
+  # Linux starttime / Darwin lstart identifies this exact process lifetime.
+  # The executable is retained for audit; it may legitimately change during
+  # the initial exec.
   [[ "$starttime" == "${OWNED_STARTTIME[$pid]}" ]]
 }
 
@@ -234,10 +290,20 @@ PY
 }
 
 monotonic_ms() {
-  local uptime whole fraction
-  read -r uptime _ </proc/uptime
-  whole=${uptime%.*}; fraction=${uptime#*.}; fraction="${fraction}000"
-  printf '%d\n' "$((10#$whole * 1000 + 10#${fraction:0:3}))"
+  if [[ "$HOST_OS" == "Linux" ]]; then
+    local uptime whole fraction
+    read -r uptime _ </proc/uptime
+    whole=${uptime%.*}; fraction=${uptime#*.}; fraction="${fraction}000"
+    printf '%d\n' "$((10#$whole * 1000 + 10#${fraction:0:3}))"
+  else
+    # Darwin's time.monotonic()/perf_counter() restart near 0 in each short
+    # python process, which would make the soak loop never reach its deadline.
+    # CLOCK_MONOTONIC is boot-relative and stable across process invocations.
+    python3 - <<'PY'
+import time
+print(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1000))
+PY
+  fi
 }
 
 admin_port=$(alloc_port)
@@ -301,7 +367,7 @@ curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
   >"$RESULT_ROOT/admin/startup-metrics.json"
 printf 'client_start_ms,captured_ms,cpu_ticks,clock_ticks_per_second,rss_kb,trace_log_bytes\n' \
   >"$RESULT_ROOT/startup-resources.csv"
-startup_ticks=$(awk '{print $14+$15}' "/proc/$client_pid/stat")
+startup_ticks=$(proc_cpu_ticks "$client_pid")
 startup_rss=$(ps -o rss= -p "$client_pid" | tr -d ' ')
 startup_trace_bytes=0; [[ -f "$TRACE_LOG" ]] && startup_trace_bytes=$(wc -c <"$TRACE_LOG")
 printf '%s,%s,%s,%s,%s,%s\n' "$client_start_ms" "$(monotonic_ms)" "$startup_ticks" \
@@ -335,7 +401,7 @@ healthy_probe_failures=0
 sample_resources() {
   local elapsed=$1 rss bytes cpu_ticks metrics_file pidstat_file
   rss=$(ps -o rss= -p "$client_pid" | tr -d ' ' || true)
-  cpu_ticks=$(awk '{print $14+$15}' "/proc/$client_pid/stat")
+  cpu_ticks=$(proc_cpu_ticks "$client_pid")
   bytes=0; [[ -f "$TRACE_LOG" ]] && bytes=$(wc -c <"$TRACE_LOG")
   metrics_file="$RESULT_ROOT/admin/metrics-$elapsed.json"
   curl --fail --silent --show-error --connect-timeout 1 --max-time 2 \
@@ -354,6 +420,7 @@ soak_start_ms=$(monotonic_ms)
 soak_deadline_ms=$((soak_start_ms + SOAK_SECONDS * 1000))
 next_probe_ms=$soak_start_ms
 next_sample_ms=$soak_start_ms
+SAMPLE_INTERVAL_MS=10000
 sample_resources 0
 while (( $(monotonic_ms) < soak_deadline_ms )); do
   now_ms=$(monotonic_ms)
@@ -365,7 +432,7 @@ while (( $(monotonic_ms) < soak_deadline_ms )); do
     fi
     next_probe_ms=$((next_probe_ms + 1000))
   fi
-  if (( now_ms >= next_sample_ms + 10000 )); then
+  if (( now_ms >= next_sample_ms + SAMPLE_INTERVAL_MS )); then
     sample_resources "$((now_ms - soak_start_ms))"
     next_sample_ms=$now_ms
   fi

@@ -159,6 +159,23 @@ void TqTraceRelayStopCondition(
     (void)state;
 }
 
+void TqTraceRelayHalfClose(
+    const char* backend,
+    uint32_t workerIndex,
+    const char* trigger,
+    const TqTraceLinuxRelayStreamState& state,
+    const char* blockers,
+    bool tcpReadArmed,
+    bool tcpReadPausedByQuicBacklog) {
+    (void)backend;
+    (void)workerIndex;
+    (void)trigger;
+    (void)state;
+    (void)blockers;
+    (void)tcpReadArmed;
+    (void)tcpReadPausedByQuicBacklog;
+}
+
 void TqTraceRelayReceiveViewEvent(
     const char* backend,
     uint32_t workerIndex,

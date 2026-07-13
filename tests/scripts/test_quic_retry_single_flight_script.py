@@ -59,6 +59,10 @@ def test_harness_covers_two_peer_isolation_and_recovery_contract():
     assert "--connect-timeout" in text
     assert "--max-time" in text
     assert "Linux" in text
+    assert "Darwin" in text
+    assert "proc_cpu_ticks" in text
+    assert "CLOCK_MONOTONIC" in text
+    assert "SAMPLE_INTERVAL_MS" in text
     assert "TRACE_LOG" in text
     assert "extract_trace_evidence" in text
     assert '"$trace_start_bytes"' in text
@@ -84,16 +88,17 @@ def _write_fixture(path, *, missing=False, bad_timestamp=False, rising=False, wa
             "retry_schedule_failed_total": 0,
         }],
     }
-    for i in range(4):
+    for i in range(8 if queue_rising else 4):
         sample = json.loads(json.dumps(metrics))
         if queue_rising:
-            sample["ingress_delayed_task_queue_depth"] = i + 1
+            # Rise only after the shared 40% warmup cut so the gate still trips.
+            sample["ingress_delayed_task_queue_depth"] = 1 if i < 3 else (i - 1)
         if reactor_bad:
             sample["ingress_reactor_timeout_overshoot_p99_us"] = 500001
         if missing:
             del sample["ingress_delayed_task_queue_depth"]
         (path / "admin" / f"metrics-{i * 10000}.json").write_text(json.dumps(sample))
-    values = [100, 100, 100, 100, 100]
+    values = [10000] * 9 if queue_rising else [100, 100, 100, 100, 100]
     if rising:
         values = [10000] * 6 + [10000, 10200, 10100, 10500, 10400, 10600, 10900, 10800, 11000]
     if warmup_plateau:
