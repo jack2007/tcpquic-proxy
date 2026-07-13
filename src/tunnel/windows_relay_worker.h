@@ -365,6 +365,7 @@ public:
     bool TestArmRelayClosingForLateDiscard(uint64_t relayId);
     bool TestArmRelayClosingOnRelayOnlyForTest(uint64_t relayId);
     bool TestBumpCallbackBindingGenerationForTest(uint64_t relayId, uint64_t delta);
+    bool TestBumpRelayGenerationForTest(uint64_t relayId, uint64_t delta);
     bool TestCloseRelayAfterTcpHalfCloseDrain(uint64_t relayId);
     bool MaybePostTcpRecvForTest(uint64_t relayId);
     bool TestGetTcpReadPausedByQuicBacklog(uint64_t relayId) const;

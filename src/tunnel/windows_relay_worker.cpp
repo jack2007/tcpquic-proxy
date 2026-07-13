@@ -1882,8 +1882,10 @@ void TqWindowsRelayWorker::Run() {
             }
             // Closing alone is not terminal discard: keep the relay so
             // RelayReceiveReady can enqueue and settle via CompletePendingQuicReceive.
+            // Orphan / generation-mismatch views must still active-complete when the
+            // stream owner is live; terminal owners discard without an API call.
             if (!relay && op->ReceiveView) {
-                DiscardRemainingReceiveOwnership(nullptr, *op->ReceiveView);
+                ActiveCompleteRemainingReceiveOwnership(nullptr, *op->ReceiveView);
             }
         }
         if (!relay &&
@@ -3450,7 +3452,7 @@ bool TqWindowsRelayWorker::TestDrainSingleReceiveReadyForTest() {
         relay = ResolveRelayForCallback(op->RelayId, op->Generation);
         if (!relay) {
             if (op->ReceiveView) {
-                DiscardRemainingReceiveOwnership(nullptr, *op->ReceiveView);
+                ActiveCompleteRemainingReceiveOwnership(nullptr, *op->ReceiveView);
             }
             return false;
         }
@@ -3506,7 +3508,7 @@ bool TqWindowsRelayWorker::TestDrainPostedCallbackOperationsForTest(size_t expec
             relay = ResolveRelayForCallback(op->RelayId, op->Generation);
             resolvedCallbackById = static_cast<bool>(relay);
             if (!relay && op->ReceiveView) {
-                DiscardRemainingReceiveOwnership(nullptr, *op->ReceiveView);
+                ActiveCompleteRemainingReceiveOwnership(nullptr, *op->ReceiveView);
             }
         }
         if (!relay) {
@@ -3892,6 +3894,24 @@ bool TqWindowsRelayWorker::TestBumpCallbackBindingGenerationForTest(
         return false;
     }
     relay->StreamBinding->Generation += delta;
+    return true;
+}
+
+bool TqWindowsRelayWorker::TestBumpRelayGenerationForTest(
+    uint64_t relayId,
+    uint64_t delta) {
+    std::shared_ptr<RelayContext> relay;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        const auto it = Relays_.find(relayId);
+        if (it != Relays_.end()) {
+            relay = it->second;
+        }
+    }
+    if (!relay || delta == 0) {
+        return false;
+    }
+    relay->Generation += delta;
     return true;
 }
 
