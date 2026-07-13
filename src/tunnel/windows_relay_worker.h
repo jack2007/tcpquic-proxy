@@ -803,7 +803,8 @@ private:
     mutable std::mutex PendingTerminalCleanupLock_;
     std::shared_ptr<TerminalCleanupRecord> PendingTerminalCleanupForTest_;
     mutable std::mutex LastReceiveCompletionLock_;
-    std::weak_ptr<TqWindowsPendingQuicReceive> LastReceiveViewForTest_;
+    // Strong ref so drain can finish while tests still snapshot CompletionState.
+    std::shared_ptr<TqWindowsPendingQuicReceive> LastReceiveViewForTest_;
     std::atomic<DWORD> LastCallbackPostWin32Error_{0};
     mutable std::mutex LastPostedCallbackLock_;
     TqWindowsIocpOperationType LastPostedCallbackType_{TqWindowsIocpOperationType::TcpRecv};

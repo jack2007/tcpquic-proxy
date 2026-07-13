@@ -5487,6 +5487,18 @@ int main() {
             MsQuic = nullptr;
             return 49;
         }
+        TqWindowsReceiveCompletionSnapshotForTest completion{};
+        if (!receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) ||
+            !completion.HasView ||
+            completion.CompletionState != TqWindowsReceiveCompletionState::Pending ||
+            !completion.ZeroLengthFinCompletionPending ||
+            !completion.Fin ||
+            completion.TotalLength != 0) {
+            receiveWorker.Stop();
+            TqCloseSocket(pair[1]);
+            MsQuic = nullptr;
+            return 6095;
+        }
         if (g_StreamReceiveCompleteCalls != 1 ||
             g_StreamReceiveCompleteBytes != 0) {
             receiveWorker.Stop();
@@ -6173,6 +6185,15 @@ int main() {
             receiveWorker.Stop();
             MsQuic = nullptr;
             std::_Exit(6103);
+        }
+        TqWindowsReceiveCompletionSnapshotForTest completion{};
+        if (!receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) ||
+            !completion.HasView ||
+            completion.CompletionState != TqWindowsReceiveCompletionState::NotRequired ||
+            completion.ZeroLengthFinCompletionPending) {
+            receiveWorker.Stop();
+            MsQuic = nullptr;
+            std::_Exit(6104);
         }
 
         receiveWorker.Stop();

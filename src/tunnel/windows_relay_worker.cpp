@@ -2442,6 +2442,10 @@ void TqWindowsRelayWorker::FailManagedBinding(
             view->Drained = true;
             view->CompletedLength = view->TotalLength;
             view->PendingCompleteBytes = 0;
+            view->ZeroLengthFinCompletionPending = false;
+            view->CompletionState.store(
+                TqWindowsReceiveCompletionState::TerminalDiscarded,
+                std::memory_order_release);
         }
         pending.pop_front();
     }
@@ -3053,17 +3057,17 @@ bool TqWindowsRelayWorker::TestGetLastReceiveCompletionSnapshotForTest(
     }
     *out = {};
     std::lock_guard<std::mutex> guard(LastReceiveCompletionLock_);
-    auto view = LastReceiveViewForTest_.lock();
-    if (!view) {
+    if (!LastReceiveViewForTest_) {
         return true;
     }
     out->HasView = true;
     out->CompletionState =
-        view->CompletionState.load(std::memory_order_acquire);
-    out->ZeroLengthFinCompletionPending = view->ZeroLengthFinCompletionPending;
-    out->TotalLength = view->TotalLength;
-    out->CompletedLength = view->CompletedLength;
-    out->Fin = view->Fin;
+        LastReceiveViewForTest_->CompletionState.load(std::memory_order_acquire);
+    out->ZeroLengthFinCompletionPending =
+        LastReceiveViewForTest_->ZeroLengthFinCompletionPending;
+    out->TotalLength = LastReceiveViewForTest_->TotalLength;
+    out->CompletedLength = LastReceiveViewForTest_->CompletedLength;
+    out->Fin = LastReceiveViewForTest_->Fin;
     return true;
 }
 
