@@ -281,6 +281,13 @@ struct TqRelayMetricsSnapshot {
     uint64_t WindowsRelayReceiveViewFinishLinearSearchCount{0};
     uint64_t WindowsRelayReceiveViewFinishLinearSearchNanos{0};
     uint64_t WindowsRelayReceiveViewFinishNotFrontCount{0};
+    uint64_t WindowsRelayReceiveCompletionRequired{0};
+    uint64_t WindowsRelayReceiveCompletionActiveCompleted{0};
+    uint64_t WindowsRelayReceiveCompletionTerminalDiscarded{0};
+    uint64_t WindowsRelayReceiveCompletionZeroLength{0};
+    uint64_t WindowsRelayReceiveCompletionLeaseRetry{0};
+    uint64_t WindowsRelayReceiveCompletionPending{0};
+    uint64_t WindowsRelayReceiveCompletionExactlyOnceViolation{0};
     int64_t LastQuicSendStatus{0};
 };
 

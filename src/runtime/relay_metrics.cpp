@@ -719,6 +719,16 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.WindowsRelayReceiveViewFinishLinearSearchCount = snapshot.ReceiveViewFinishLinearSearchCount;
     metrics.WindowsRelayReceiveViewFinishLinearSearchNanos = snapshot.ReceiveViewFinishLinearSearchNanos;
     metrics.WindowsRelayReceiveViewFinishNotFrontCount = snapshot.ReceiveViewFinishNotFrontCount;
+    metrics.WindowsRelayReceiveCompletionRequired = snapshot.ReceiveCompletionRequired;
+    metrics.WindowsRelayReceiveCompletionActiveCompleted =
+        snapshot.ReceiveCompletionActiveCompleted;
+    metrics.WindowsRelayReceiveCompletionTerminalDiscarded =
+        snapshot.ReceiveCompletionTerminalDiscarded;
+    metrics.WindowsRelayReceiveCompletionZeroLength = snapshot.ReceiveCompletionZeroLength;
+    metrics.WindowsRelayReceiveCompletionLeaseRetry = snapshot.ReceiveCompletionLeaseRetry;
+    metrics.WindowsRelayReceiveCompletionPending = snapshot.ReceiveCompletionPending;
+    metrics.WindowsRelayReceiveCompletionExactlyOnceViolation =
+        snapshot.ReceiveCompletionExactlyOnceViolation;
 #endif
     metrics.RelayActiveControls = TqGetActiveRelayCount();
     metrics.RelayControlStopSignaled =
@@ -1277,6 +1287,20 @@ static void TqAppendRelayMetricsJson(std::ostringstream& out, const TqRelayMetri
         << metrics.WindowsRelayReceiveViewFinishLinearSearchNanos;
     out << ",\"windows_relay_receive_view_finish_not_front_count\":"
         << metrics.WindowsRelayReceiveViewFinishNotFrontCount;
+    out << ",\"windows_relay_receive_completion_required\":"
+        << metrics.WindowsRelayReceiveCompletionRequired;
+    out << ",\"windows_relay_receive_completion_active_completed\":"
+        << metrics.WindowsRelayReceiveCompletionActiveCompleted;
+    out << ",\"windows_relay_receive_completion_terminal_discarded\":"
+        << metrics.WindowsRelayReceiveCompletionTerminalDiscarded;
+    out << ",\"windows_relay_receive_completion_zero_length\":"
+        << metrics.WindowsRelayReceiveCompletionZeroLength;
+    out << ",\"windows_relay_receive_completion_lease_retry\":"
+        << metrics.WindowsRelayReceiveCompletionLeaseRetry;
+    out << ",\"windows_relay_receive_completion_pending\":"
+        << metrics.WindowsRelayReceiveCompletionPending;
+    out << ",\"windows_relay_receive_completion_exactly_once_violation\":"
+        << metrics.WindowsRelayReceiveCompletionExactlyOnceViolation;
     out << ",\"linux_relay_last_quic_send_status\":" << metrics.LastQuicSendStatus;
 }
 

@@ -921,6 +921,28 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayWorker::BuildSnapshotLocal() const {
         ReceiveViewFinishLinearSearchNanos_.load(std::memory_order_relaxed);
     snapshot.ReceiveViewFinishNotFrontCount =
         ReceiveViewFinishNotFrontCount_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionRequired =
+        ReceiveCompletionRequired_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionActiveCompleted =
+        ReceiveCompletionActiveCompleted_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionTerminalDiscarded =
+        ReceiveCompletionTerminalDiscarded_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionZeroLength =
+        ReceiveCompletionZeroLength_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionLeaseRetry =
+        ReceiveCompletionLeaseRetry_.load(std::memory_order_relaxed);
+    snapshot.ReceiveCompletionExactlyOnceViolation =
+        ReceiveCompletionExactlyOnceViolation_.load(std::memory_order_relaxed);
+    {
+        const uint64_t settled =
+            snapshot.ReceiveCompletionActiveCompleted +
+            snapshot.ReceiveCompletionTerminalDiscarded +
+            ReceiveCompletionNotRequiredRollback_.load(std::memory_order_relaxed);
+        snapshot.ReceiveCompletionPending =
+            snapshot.ReceiveCompletionRequired > settled
+                ? snapshot.ReceiveCompletionRequired - settled
+                : 0;
+    }
     snapshot.PendingBytes =
         snapshot.PendingQuicReceiveBytes + snapshot.RelayBufferBytesInUse;
     snapshot.SnapshotComplete = true;
@@ -2446,6 +2468,7 @@ void TqWindowsRelayWorker::FailManagedBinding(
             view->CompletionState.store(
                 TqWindowsReceiveCompletionState::TerminalDiscarded,
                 std::memory_order_release);
+            ReceiveCompletionTerminalDiscarded_.fetch_add(1, std::memory_order_relaxed);
         }
         pending.pop_front();
     }
@@ -2739,6 +2762,7 @@ bool TqWindowsRelayWorker::QueuePrecommitQuicReceive(
     view->CompletionState.store(
         TqWindowsReceiveCompletionState::Pending,
         std::memory_order_release);
+    ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
     binding->PrecommitReceives.push_back(std::move(view));
     return true;
 }
@@ -3247,6 +3271,7 @@ bool TqWindowsRelayWorker::TestEnqueueReceiveViewForTest(uint64_t relayId, uint6
     view->CompletionState.store(
         TqWindowsReceiveCompletionState::Pending,
         std::memory_order_release);
+    ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
     relay->PendingQuicReceiveBytes.fetch_add(byteCount, std::memory_order_acq_rel);
     relay->PendingQuicReceiveQueueDepth.fetch_add(1, std::memory_order_acq_rel);
     relay->PendingReceives.push_back(view);
@@ -5203,6 +5228,9 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
         NowSteadyNanos() - copyStartNanos,
         std::memory_order_relaxed);
     view->ZeroLengthFinCompletionPending = fin && view->TotalLength == 0;
+    if (view->ZeroLengthFinCompletionPending) {
+        ReceiveCompletionZeroLength_.fetch_add(1, std::memory_order_relaxed);
+    }
 #if defined(TQ_UNIT_TESTING)
     {
         std::lock_guard<std::mutex> guard(LastReceiveCompletionLock_);
@@ -5233,6 +5261,7 @@ bool TqWindowsRelayWorker::EnqueueDeferredQuicReceiveView(
         view->CompletionState.store(
             TqWindowsReceiveCompletionState::Pending,
             std::memory_order_release);
+        ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
     }
     relay->PendingReceives.push_back(view);
 
@@ -5526,6 +5555,12 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
         return;
     }
     if (!TryBeginActiveCompletion(view)) {
+        const auto state = view.CompletionState.load(std::memory_order_acquire);
+        if (view.ZeroLengthFinCompletionPending &&
+            (state == TqWindowsReceiveCompletionState::ActiveCompleted ||
+             state == TqWindowsReceiveCompletionState::TerminalDiscarded)) {
+            ReceiveCompletionExactlyOnceViolation_.fetch_add(1, std::memory_order_relaxed);
+        }
         return;
     }
 
@@ -5538,6 +5573,7 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
         view.CompletionState.store(
             TqWindowsReceiveCompletionState::Pending,
             std::memory_order_release);
+        ReceiveCompletionLeaseRetry_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (remaining != 0 || zeroFin) {
@@ -5550,6 +5586,7 @@ void TqWindowsRelayWorker::ActiveCompleteRemainingReceiveOwnership(
     view.CompletedLength = view.TotalLength;
     view.PendingCompleteBytes = 0;
     FinishActiveCompletion(view);
+    ReceiveCompletionActiveCompleted_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void TqWindowsRelayWorker::ReleasePendingReceiveAccounting(
@@ -5573,8 +5610,15 @@ void TqWindowsRelayWorker::DiscardRemainingReceiveOwnership(
     const std::shared_ptr<RelayContext>& relay,
     TqWindowsPendingQuicReceive& view) {
     if (!TryTerminalDiscard(view)) {
+        const auto state = view.CompletionState.load(std::memory_order_acquire);
+        if (view.ZeroLengthFinCompletionPending &&
+            (state == TqWindowsReceiveCompletionState::ActiveCompleted ||
+             state == TqWindowsReceiveCompletionState::TerminalDiscarded)) {
+            ReceiveCompletionExactlyOnceViolation_.fetch_add(1, std::memory_order_relaxed);
+        }
         return;
     }
+    ReceiveCompletionTerminalDiscarded_.fetch_add(1, std::memory_order_relaxed);
     view.ZeroLengthFinCompletionPending = false;
     view.PendingCompleteBytes = 0;
     ReleasePendingReceiveAccounting(relay, view);
@@ -6211,6 +6255,7 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
         view->CompletionState.store(
             TqWindowsReceiveCompletionState::Pending,
             std::memory_order_release);
+        ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
         if (PostCallbackOperationById(
                 TqWindowsIocpOperationType::RelayReceiveReady,
                 *binding,
@@ -6231,6 +6276,7 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
             TqWindowsReceiveCompletionState::NotRequired,
             std::memory_order_release);
         view->ZeroLengthFinCompletionPending = false;
+        ReceiveCompletionNotRequiredRollback_.fetch_add(1, std::memory_order_relaxed);
         return QUIC_STATUS_SUCCESS;
     }
 
@@ -6582,6 +6628,14 @@ TqWindowsRelayWorkerSnapshot TqWindowsRelayRuntime::Snapshot(
         total.ReceiveViewFinishLinearSearchCount += snapshot.ReceiveViewFinishLinearSearchCount;
         total.ReceiveViewFinishLinearSearchNanos += snapshot.ReceiveViewFinishLinearSearchNanos;
         total.ReceiveViewFinishNotFrontCount += snapshot.ReceiveViewFinishNotFrontCount;
+        total.ReceiveCompletionRequired += snapshot.ReceiveCompletionRequired;
+        total.ReceiveCompletionActiveCompleted += snapshot.ReceiveCompletionActiveCompleted;
+        total.ReceiveCompletionTerminalDiscarded += snapshot.ReceiveCompletionTerminalDiscarded;
+        total.ReceiveCompletionZeroLength += snapshot.ReceiveCompletionZeroLength;
+        total.ReceiveCompletionLeaseRetry += snapshot.ReceiveCompletionLeaseRetry;
+        total.ReceiveCompletionPending += snapshot.ReceiveCompletionPending;
+        total.ReceiveCompletionExactlyOnceViolation +=
+            snapshot.ReceiveCompletionExactlyOnceViolation;
         total.EventsProcessed += snapshot.EventsProcessed;
         total.TcpReadResumeByBacklogEvents += snapshot.TcpReadResumeByBacklogEvents;
         total.LateTeardownDowngradedCount += snapshot.LateTeardownDowngradedCount;

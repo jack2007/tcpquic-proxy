@@ -187,6 +187,13 @@ struct TqWindowsRelayWorkerSnapshot {
     uint64_t ReceiveViewFinishLinearSearchCount{0};
     uint64_t ReceiveViewFinishLinearSearchNanos{0};
     uint64_t ReceiveViewFinishNotFrontCount{0};
+    uint64_t ReceiveCompletionRequired{0};
+    uint64_t ReceiveCompletionActiveCompleted{0};
+    uint64_t ReceiveCompletionTerminalDiscarded{0};
+    uint64_t ReceiveCompletionZeroLength{0};
+    uint64_t ReceiveCompletionLeaseRetry{0};
+    uint64_t ReceiveCompletionPending{0};
+    uint64_t ReceiveCompletionExactlyOnceViolation{0};
     uint64_t EventsProcessed{0};
     uint64_t TcpReadResumeByBacklogEvents{0};
     uint64_t LateTeardownDowngradedCount{0};
@@ -792,6 +799,13 @@ private:
     std::atomic<uint64_t> ReceiveViewFinishLinearSearchCount_{0};
     std::atomic<uint64_t> ReceiveViewFinishLinearSearchNanos_{0};
     std::atomic<uint64_t> ReceiveViewFinishNotFrontCount_{0};
+    std::atomic<uint64_t> ReceiveCompletionRequired_{0};
+    std::atomic<uint64_t> ReceiveCompletionActiveCompleted_{0};
+    std::atomic<uint64_t> ReceiveCompletionTerminalDiscarded_{0};
+    std::atomic<uint64_t> ReceiveCompletionZeroLength_{0};
+    std::atomic<uint64_t> ReceiveCompletionLeaseRetry_{0};
+    std::atomic<uint64_t> ReceiveCompletionNotRequiredRollback_{0};
+    std::atomic<uint64_t> ReceiveCompletionExactlyOnceViolation_{0};
 #if defined(TQ_UNIT_TESTING)
     std::atomic<bool> ForceTraceContextPostFailureForTest_{false};
     std::atomic<bool> ForceTerminalIocpPostFailureForTest_{false};
