@@ -3685,6 +3685,8 @@ void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
     finOnlyEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &finOnlyEvent) == QUIC_STATUS_PENDING);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(worker.PendingReceiveCompletionStateForTest(result.RelayId) ==
+          TqDarwinReceiveCompletionState::Pending);
 
     CHECK(worker.DrainOneEventForTest());
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
@@ -3746,6 +3748,8 @@ void QuicReceiveZeroBufferFinCompletesAfterDrain() {
     event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_PENDING);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+    CHECK(worker.PendingReceiveCompletionStateForTest(result.RelayId) ==
+          TqDarwinReceiveCompletionState::Pending);
 
     CHECK(worker.DrainOneEventForTest());
     CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);

@@ -17,6 +17,17 @@ struct TqDarwinQuicReceiveSlice {
     uint32_t Length{0};
 };
 
+// Receive-completion obligation for a deferred MsQuic view.
+// PendingCompleteBytes==0 does NOT mean ownership is done when
+// ZeroLengthFinCompletionPending is set (PENDING zero-FIN).
+enum class TqDarwinReceiveCompletionState : uint8_t {
+    NotRequired = 0,
+    Pending,
+    Dispatching,
+    ActiveCompleted,
+    TerminalDiscarded,
+};
+
 struct TqDarwinPendingQuicReceive {
     // Strong owner captured from StreamBinding::StreamOwner (weak) at build
     // time — never derived from the active relay map entry.
@@ -32,14 +43,19 @@ struct TqDarwinPendingQuicReceive {
     uint64_t TotalLength{0};
     uint64_t CompletedLength{0};
     uint64_t PendingCompleteBytes{0};
-    std::atomic<bool> CompletionDispatched{false};
+    std::atomic<TqDarwinReceiveCompletionState> CompletionState{
+        TqDarwinReceiveCompletionState::NotRequired};
     bool Fin{false};
+    bool ZeroLengthFinCompletionPending{false};
 
+    // Claim the completion obligation for a single settlement attempt.
+    // Succeeds only for Pending -> Dispatching; callers that fail lease while
+    // the owner is still active must roll back to Pending for retry.
     bool TryClaimCompletionDispatch() noexcept {
-        bool expected = false;
-        return CompletionDispatched.compare_exchange_strong(
+        auto expected = TqDarwinReceiveCompletionState::Pending;
+        return CompletionState.compare_exchange_strong(
             expected,
-            true,
+            TqDarwinReceiveCompletionState::Dispatching,
             std::memory_order_acq_rel,
             std::memory_order_acquire);
     }
@@ -183,6 +199,22 @@ public:
 
     static constexpr size_t NormalizeCapacityForTest(size_t capacity) {
         return NormalizeCapacity(capacity);
+    }
+
+    // Single-threaded test scan of occupied slots (no pop). Callers must not
+    // race a live worker drain against this visit.
+    template <typename Fn>
+    void VisitOccupiedForTest(Fn&& fn) const {
+        const size_t dequeued = DequeuePos.load(std::memory_order_acquire);
+        const size_t enqueued = EnqueuePos.load(std::memory_order_acquire);
+        for (size_t pos = dequeued; pos != enqueued; ++pos) {
+            const Cell& cell = Slots[pos & Mask];
+            const size_t sequence = cell.Sequence.load(std::memory_order_acquire);
+            if (sequence != pos + 1) {
+                continue;
+            }
+            fn(cell.Event);
+        }
     }
 #endif
 

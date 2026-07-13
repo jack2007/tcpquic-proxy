@@ -411,6 +411,7 @@ public:
     TqDarwinBindingPublishIdentitySnapshot BindingPublishIdentityForTest(uint64_t relayId) const;
     TqDarwinBindingPublishIdentitySnapshot LastPublishIdentityForTest() const;
     size_t PrecommitQueueDepthForTest(uint64_t relayId) const;
+    TqDarwinReceiveCompletionState PendingReceiveCompletionStateForTest(uint64_t relayId) const;
     uint64_t TcpFilterInstallCountForTest() const;
     uint64_t TcpFilterDeleteCountForTest() const;
     uint64_t TcpFdCloseCountForTest() const;
@@ -594,10 +595,8 @@ private:
         bool& handled);
     TqDarwinQuicReceiveEnqueueResult QueueDeferredQuicReceive(
         const std::shared_ptr<StreamBinding>& binding,
-        MsQuicStream* stream,
-        const QUIC_BUFFER* buffers,
-        uint32_t bufferCount,
-        bool fin);
+        const std::shared_ptr<TqDarwinPendingQuicReceive>& receive,
+        MsQuicStream* callbackStream);
     uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
     uint64_t LowPendingQuicReceiveBytesPerRelay() const;
     bool ReserveCallbackReceiveBudget(StreamBinding* binding, uint64_t bytes);

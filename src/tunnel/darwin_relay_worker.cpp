@@ -20,6 +20,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -1097,6 +1098,75 @@ TqDarwinBindingPublishIdentitySnapshot TqDarwinRelayWorker::LastPublishIdentityF
 
 size_t TqDarwinRelayWorker::PrecommitQueueDepthForTest(uint64_t relayId) const {
     return BindingPublishIdentityForTest(relayId).PrecommitDepth;
+}
+
+TqDarwinReceiveCompletionState
+TqDarwinRelayWorker::PendingReceiveCompletionStateForTest(uint64_t relayId) const {
+    // Event queue first: PENDING callback before drain parks the view here.
+    {
+        std::optional<TqDarwinReceiveCompletionState> found;
+        EventQueue.VisitOccupiedForTest(
+            [relayId, &found](const TqDarwinRelayEvent& event) {
+                if (found.has_value()) {
+                    return;
+                }
+                if (event.Type != TqDarwinRelayEventType::QuicReceiveView ||
+                    event.RelayId != relayId ||
+                    event.ReceiveView == nullptr) {
+                    return;
+                }
+                found = event.ReceiveView->CompletionState.load(std::memory_order_acquire);
+            });
+        if (found.has_value()) {
+            return *found;
+        }
+    }
+
+    std::shared_ptr<RelayState> relay;
+    {
+        std::lock_guard<std::mutex> lock(RelayMutex);
+        const auto it = Relays.find(relayId);
+        if (it != Relays.end()) {
+            relay = it->second;
+        }
+    }
+    if (relay == nullptr) {
+        return TqDarwinReceiveCompletionState::NotRequired;
+    }
+
+    if (relay->Binding != nullptr) {
+        {
+            std::lock_guard<std::mutex> guard(relay->Binding->CallbackPendingQuicReceivesMutex);
+            for (const auto& receive : relay->Binding->CallbackPendingQuicReceives) {
+                if (receive != nullptr && receive->RelayId == relayId) {
+                    return receive->CompletionState.load(std::memory_order_acquire);
+                }
+            }
+        }
+        {
+            std::lock_guard<std::mutex> guard(relay->Binding->ActivationMutex);
+            for (const auto& receive : relay->Binding->PrecommitReceives) {
+                if (receive != nullptr && receive->RelayId == relayId) {
+                    return receive->CompletionState.load(std::memory_order_acquire);
+                }
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> relayLock(relay->Mutex);
+    for (const auto& receive : relay->PendingQuicReceives) {
+        if (receive != nullptr && receive->RelayId == relayId) {
+            return receive->CompletionState.load(std::memory_order_acquire);
+        }
+    }
+    for (const auto& write : relay->PendingTcpWrites) {
+        if (write != nullptr &&
+            write->Receive != nullptr &&
+            write->Receive->RelayId == relayId) {
+            return write->Receive->CompletionState.load(std::memory_order_acquire);
+        }
+    }
+    return TqDarwinReceiveCompletionState::NotRequired;
 }
 
 uint64_t TqDarwinRelayWorker::TcpFilterInstallCountForTest() const {
@@ -3410,6 +3480,7 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
         Errors.fetch_add(1, std::memory_order_relaxed);
         return {};
     }
+    receive->ZeroLengthFinCompletionPending = fin && receive->TotalLength == 0;
     return receive;
 }
 
@@ -3440,9 +3511,19 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
     if (!receive) {
         return false;
     }
+    // Obligation before publish so a concurrent drain cannot observe NotRequired.
+    receive->CompletionState.store(
+        TqDarwinReceiveCompletionState::Pending,
+        std::memory_order_release);
+    auto rollbackObligation = [&receive]() {
+        receive->CompletionState.store(
+            TqDarwinReceiveCompletionState::NotRequired,
+            std::memory_order_release);
+    };
     std::lock_guard<std::mutex> guard(binding->ActivationMutex);
     const auto activation = binding->ActivationState.load(std::memory_order_acquire);
     if (activation == StreamBinding::Activation::Active) {
+        rollbackObligation();
         handled = false;
         return true;
     }
@@ -3450,11 +3531,13 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
         activation == StreamBinding::Activation::Failed ||
         activation == StreamBinding::Activation::Terminal ||
         binding->Closing.load(std::memory_order_acquire)) {
+        rollbackObligation();
         return false;
     }
     const uint64_t pending = receive->TotalLength - receive->CompletedLength;
     if (pending > binding->PrecommitMaxPendingBytes -
             std::min(binding->PrecommitPendingBytes, binding->PrecommitMaxPendingBytes)) {
+        rollbackObligation();
         return false;
     }
     binding->PrecommitPendingBytes += pending;
@@ -3464,10 +3547,8 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
 
 TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
     const std::shared_ptr<StreamBinding>& binding,
-    MsQuicStream* stream,
-    const QUIC_BUFFER* buffers,
-    uint32_t bufferCount,
-    bool fin) {
+    const std::shared_ptr<TqDarwinPendingQuicReceive>& receive,
+    MsQuicStream* callbackStream) {
     auto recordFailure = [this](TqDarwinQuicReceiveEnqueueResult result) -> TqDarwinQuicReceiveEnqueueResult {
         QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
         if (result == TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected) {
@@ -3476,36 +3557,8 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
         return result;
     };
 
-    if (binding == nullptr) {
+    if (binding == nullptr || receive == nullptr) {
         return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
-    }
-    auto receive = BuildPendingQuicReceive(
-        binding->Relay.lock().get(),
-        binding,
-        stream,
-        buffers,
-        bufferCount,
-        fin);
-    if (!receive) {
-        if (bufferCount != 0 && buffers == nullptr) {
-            return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
-        }
-        if (!fin && (buffers == nullptr || bufferCount == 0)) {
-            return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
-        }
-        for (uint32_t i = 0; i < bufferCount; ++i) {
-            if (buffers[i].Length != 0 && buffers[i].Buffer == nullptr) {
-                return recordFailure(TqDarwinQuicReceiveEnqueueResult::NullBuffer);
-            }
-        }
-        uint64_t totalLength = 0;
-        for (uint32_t i = 0; i < bufferCount; ++i) {
-            totalLength += buffers[i].Length;
-        }
-        if (totalLength == 0 && !fin) {
-            return recordFailure(TqDarwinQuicReceiveEnqueueResult::EmptyNonFin);
-        }
-        return recordFailure(TqDarwinQuicReceiveEnqueueResult::AllocationFailed);
     }
     if (!ReserveCallbackReceiveBudget(binding.get(), receive->TotalLength)) {
         Errors.fetch_add(1, std::memory_order_relaxed);
@@ -3519,7 +3572,7 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
     event.Type = TqDarwinRelayEventType::QuicReceiveView;
     event.RelayId = receive->RelayId;
     event.TotalLength = receive->TotalLength;
-    event.Fin = fin;
+    event.Fin = receive->Fin;
     event.ReceiveView = receive;
     if (!EnqueueEvent(std::move(event))) {
         QuicReceiveViewBackpressureQueued.fetch_add(1, std::memory_order_relaxed);
@@ -3529,7 +3582,7 @@ TqDarwinQuicReceiveEnqueueResult TqDarwinRelayWorker::QueueDeferredQuicReceive(
         }
         binding->CallbackQuicReceivePaused.store(true, std::memory_order_release);
         // Pause with the callback stream parameter only — never a saved bare pointer.
-        PauseMsQuicReceiveFromCallback(stream);
+        PauseMsQuicReceiveFromCallback(callbackStream);
         (void)Wake();
         return TqDarwinQuicReceiveEnqueueResult::EventQueueFull;
     }
@@ -4061,6 +4114,9 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                 return;
             }
             receive->PendingCompleteBytes = 0;
+            receive->CompletionState.store(
+                TqDarwinReceiveCompletionState::TerminalDiscarded,
+                std::memory_order_release);
             DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -4073,6 +4129,9 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                     return;
                 }
                 receive->PendingCompleteBytes = 0;
+                receive->CompletionState.store(
+                    TqDarwinReceiveCompletionState::TerminalDiscarded,
+                    std::memory_order_release);
                 DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
                 (void)receive->StreamOwner->RequestShutdown(
                     TqStreamLifetime::ShutdownIntent::AbortReceive);
@@ -4086,6 +4145,9 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                     return;
                 }
                 receive->PendingCompleteBytes = 0;
+                receive->CompletionState.store(
+                    TqDarwinReceiveCompletionState::ActiveCompleted,
+                    std::memory_order_release);
                 DeferredReceiveCompletes.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
@@ -4101,6 +4163,9 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
                "ReceiveComplete must not run under relay->Mutex");
 #endif
         CompleteMsQuicReceiveFromCallback(lease.Stream(), bytes);
+        receive->CompletionState.store(
+            TqDarwinReceiveCompletionState::ActiveCompleted,
+            std::memory_order_release);
         return;
     }
     // No StreamOwner: discard/bookkeeping only. Never call ReceiveComplete via
@@ -4109,6 +4174,9 @@ void TqDarwinRelayWorker::CompleteDeferredQuicReceive(
         return;
     }
     receive->PendingCompleteBytes = 0;
+    receive->CompletionState.store(
+        TqDarwinReceiveCompletionState::TerminalDiscarded,
+        std::memory_order_release);
     DeferredReceiveDiscards.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -5341,12 +5409,60 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             }
             return QUIC_STATUS_PENDING;
         }
-        const TqDarwinQuicReceiveEnqueueResult enqueueResult = worker->QueueDeferredQuicReceive(
+        auto classifyBuildFailure =
+            [worker, buffers = event->RECEIVE.Buffers, bufferCount = event->RECEIVE.BufferCount, fin]() {
+                auto recordFailure =
+                    [worker](TqDarwinQuicReceiveEnqueueResult result) -> TqDarwinQuicReceiveEnqueueResult {
+                    worker->QuicReceiveEnqueueFailures.fetch_add(1, std::memory_order_relaxed);
+                    if (result == TqDarwinQuicReceiveEnqueueResult::CallbackBudgetRejected) {
+                        worker->CallbackReceiveBudgetRejects.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    return result;
+                };
+                if (bufferCount != 0 && buffers == nullptr) {
+                    return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
+                }
+                if (!fin && (buffers == nullptr || bufferCount == 0)) {
+                    return recordFailure(TqDarwinQuicReceiveEnqueueResult::InvalidArgs);
+                }
+                for (uint32_t i = 0; i < bufferCount; ++i) {
+                    if (buffers[i].Length != 0 && buffers[i].Buffer == nullptr) {
+                        return recordFailure(TqDarwinQuicReceiveEnqueueResult::NullBuffer);
+                    }
+                }
+                uint64_t builtLength = 0;
+                for (uint32_t i = 0; i < bufferCount; ++i) {
+                    builtLength += buffers[i].Length;
+                }
+                if (builtLength == 0 && !fin) {
+                    return recordFailure(TqDarwinQuicReceiveEnqueueResult::EmptyNonFin);
+                }
+                return recordFailure(TqDarwinQuicReceiveEnqueueResult::AllocationFailed);
+            };
+        auto receive = worker->BuildPendingQuicReceive(
+            relay.get(),
             bindingOwner,
             stream,
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
             fin);
+        TqDarwinQuicReceiveEnqueueResult enqueueResult =
+            TqDarwinQuicReceiveEnqueueResult::AllocationFailed;
+        if (!receive) {
+            enqueueResult = classifyBuildFailure();
+        } else {
+            // Obligation before publish so worker drain cannot observe NotRequired.
+            receive->CompletionState.store(
+                TqDarwinReceiveCompletionState::Pending,
+                std::memory_order_release);
+            enqueueResult = worker->QueueDeferredQuicReceive(bindingOwner, receive, stream);
+            if (enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok &&
+                enqueueResult != TqDarwinQuicReceiveEnqueueResult::EventQueueFull) {
+                receive->CompletionState.store(
+                    TqDarwinReceiveCompletionState::NotRequired,
+                    std::memory_order_release);
+            }
+        }
         switch (enqueueResult) {
         case TqDarwinQuicReceiveEnqueueResult::Ok:
             return QUIC_STATUS_PENDING;
