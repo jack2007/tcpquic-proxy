@@ -3686,6 +3686,10 @@ void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
     CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &finOnlyEvent) == QUIC_STATUS_PENDING);
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
 
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+
     const char payload[] = "oversized-after-fin";
     QUIC_BUFFER quicBuffer{};
     quicBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(payload));
@@ -3699,6 +3703,128 @@ void QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent() {
     CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
 
     worker.SetReceiveCompleteForTest(nullptr);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void QuicReceiveZeroBufferFinCompletesAfterDrain() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    ResetFakeReceiveComplete();
+
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.EventQueueCapacity = 16;
+    config.MaxPendingQuicReceiveBytesPerRelay = 8;
+
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(result.Ok);
+
+    uint8_t byte = 0;
+    QUIC_BUFFER buffer{0, &byte};
+    QUIC_STREAM_EVENT event{};
+    event.Type = QUIC_STREAM_EVENT_RECEIVE;
+    event.RECEIVE.Buffers = &buffer;
+    event.RECEIVE.BufferCount = 1;
+    event.RECEIVE.TotalBufferLength = 0;
+    event.RECEIVE.AbsoluteOffset = 42;
+    event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &event) == QUIC_STATUS_PENDING);
+    CHECK(worker.PendingQuicReceiveBytesForTest(result.RelayId) == 0);
+
+    CHECK(worker.DrainOneEventForTest());
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+
+    uint8_t one = 0;
+    const ssize_t received = read(fds[1], &one, sizeof(one));
+    CHECK(received == 0);
+
+    worker.SetReceiveCompleteForTest(nullptr);
+    worker.Stop();
+    CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
+}
+
+void QuicReceiveZeroFinBudgetRejectReturnsSuccessWithoutCompletion() {
+    int fds[2]{TqInvalidSocket, TqInvalidSocket};
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    ResetFakeReceiveComplete();
+    ResetFakeReceiveSetEnabled(QUIC_STATUS_SUCCESS);
+
+    TqDarwinRelayWorkerConfig config{};
+    config.ReadChunkSize = 4096;
+    config.ReadBatchBytes = 4096;
+    config.MaxPendingQuicReceiveBytesPerRelay = 4;
+
+    TqDarwinRelayWorker worker(config);
+    worker.SetReceiveCompleteForTest(FakeReceiveComplete);
+    worker.SetReceiveSetEnabledForTest(FakeReceiveSetEnabled);
+    alignas(MsQuicStream) unsigned char streamStorage[sizeof(MsQuicStream)]{};
+    auto* stream = reinterpret_cast<MsQuicStream*>(streamStorage);
+    stream->Callback = MsQuicStream::NoOpCallback;
+    stream->Context = nullptr;
+    TqRelayHandle handle{};
+    CHECK(worker.StartForTest());
+
+    TqDarwinRelayRegistration registration{};
+    registration.TcpFd = fds[0];
+    registration.Stream = stream;
+    registration.EnableQuicSends = false;
+
+    TqDarwinRelayRegistrationResult result = RegisterAndPublish(worker, registration, handle);
+    CHECK(result.Ok);
+
+    CHECK(worker.CallbackReceiveBudgetRejectsForTest() == 0);
+
+    const char firstPayload[] = "12345678";
+    QUIC_BUFFER firstBuffer{};
+    firstBuffer.Buffer = reinterpret_cast<uint8_t*>(const_cast<char*>(firstPayload));
+    firstBuffer.Length = static_cast<uint32_t>(sizeof(firstPayload) - 1);
+
+    QUIC_STREAM_EVENT firstEvent{};
+    firstEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    firstEvent.RECEIVE.BufferCount = 1;
+    firstEvent.RECEIVE.Buffers = &firstBuffer;
+
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &firstEvent) == QUIC_STATUS_PENDING);
+    CHECK(worker.CallbackReceiveBudgetRejectsForTest() == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+
+    uint8_t byte = 0;
+    QUIC_BUFFER buffer{0, &byte};
+    QUIC_STREAM_EVENT finEvent{};
+    finEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+    finEvent.RECEIVE.Buffers = &buffer;
+    finEvent.RECEIVE.BufferCount = 1;
+    finEvent.RECEIVE.TotalBufferLength = 0;
+    finEvent.RECEIVE.AbsoluteOffset = 42;
+    finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
+
+    CHECK(TqDarwinRelayWorker::StreamCallback(stream, stream->Context, &finEvent) == QUIC_STATUS_SUCCESS);
+    CHECK(worker.CallbackReceiveBudgetRejectsForTest() == 1);
+    CHECK(g_receiveSetEnabledCalls.load(std::memory_order_acquire) == 1);
+    CHECK(g_lastReceiveSetEnabled.load(std::memory_order_acquire) == 0);
+    CHECK(g_receiveCompleteCalls.load(std::memory_order_acquire) == 0);
+    CHECK(g_receiveCompleteBytes.load(std::memory_order_acquire) == 0);
+
+    worker.SetReceiveSetEnabledForTest(nullptr);
+    worker.SetReceiveCompleteForTest(nullptr);
+    worker.UnregisterRelay(result.RelayId);
     worker.Stop();
     CloseSocketPairAfterRelayOwned(registration.TcpFd, fds);
 }
@@ -7434,6 +7560,8 @@ int main() {
     QuicReceiveCallbackQueuedEventCompletesOnStop();
     QuicReceiveCallbackAcceptsOneOversizedReceiveBeforeWorkerEvent();
     QuicReceiveCallbackRejectsOversizedReceiveAfterPendingFinOnlyEvent();
+    QuicReceiveZeroBufferFinCompletesAfterDrain();
+    QuicReceiveZeroFinBudgetRejectReturnsSuccessWithoutCompletion();
     QuicReceivePartialTcpWriteCompletesOnceAfterFullFlush();
     QuicReceiveFlushHoldsBuffersAcrossConcurrentUnregister();
     QuicReceivePartialWriteThenErrorCompletesFullReceiveOnce();
