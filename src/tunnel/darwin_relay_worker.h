@@ -592,7 +592,8 @@ private:
         MsQuicStream* stream,
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
-        bool fin);
+        bool fin,
+        bool zeroLengthFinCompletionPending);
     bool QueuePrecommitQuicReceive(
         RelayState* relay,
         StreamBinding* binding,
@@ -601,6 +602,7 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin,
+        bool zeroLengthFinCompletionPending,
         bool& handled);
     TqDarwinQuicReceiveEnqueueResult QueueDeferredQuicReceive(
         const std::shared_ptr<StreamBinding>& binding,

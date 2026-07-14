@@ -19,7 +19,9 @@ struct TqDarwinQuicReceiveSlice {
 
 // Receive-completion obligation for a deferred MsQuic view.
 // PendingCompleteBytes==0 does NOT mean ownership is done when
-// ZeroLengthFinCompletionPending is set (PENDING zero-FIN).
+// ZeroLengthFinCompletionPending is set (callback returned PENDING for
+// zero-FIN). FIN-only that returns SUCCESS leaves this false and keeps
+// CompletionState NotRequired — MsQuic consumes FIN on callback return.
 enum class TqDarwinReceiveCompletionState : uint8_t {
     NotRequired = 0,
     Pending,

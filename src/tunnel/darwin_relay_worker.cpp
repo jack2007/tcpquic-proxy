@@ -3476,7 +3476,8 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
-    bool fin) {
+    bool fin,
+    bool zeroLengthFinCompletionPending) {
     if (binding == nullptr) {
         return {};
     }
@@ -3538,7 +3539,8 @@ std::shared_ptr<TqDarwinPendingQuicReceive> TqDarwinRelayWorker::BuildPendingQui
         Errors.fetch_add(1, std::memory_order_relaxed);
         return {};
     }
-    receive->ZeroLengthFinCompletionPending = fin && receive->TotalLength == 0;
+    receive->ZeroLengthFinCompletionPending =
+        zeroLengthFinCompletionPending && fin && receive->TotalLength == 0;
     return receive;
 }
 
@@ -3550,6 +3552,7 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin,
+    bool zeroLengthFinCompletionPending,
     bool& handled) {
     handled = false;
     if (binding == nullptr ||
@@ -3565,16 +3568,31 @@ bool TqDarwinRelayWorker::QueuePrecommitQuicReceive(
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
     }
-    auto receive = BuildPendingQuicReceive(relay, bindingOwner, stream, buffers, bufferCount, fin);
+    auto receive = BuildPendingQuicReceive(
+        relay,
+        bindingOwner,
+        stream,
+        buffers,
+        bufferCount,
+        fin,
+        zeroLengthFinCompletionPending);
     if (!receive) {
         return false;
     }
     // Obligation before publish so a concurrent drain cannot observe NotRequired.
-    receive->CompletionState.store(
-        TqDarwinReceiveCompletionState::Pending,
-        std::memory_order_release);
-    NoteReceiveCompletionRequired(receive);
+    // FIN-only SUCCESS leaves NotRequired — no StreamReceiveComplete(0) owed.
+    const bool needsCompletion =
+        receive->TotalLength > 0 || receive->ZeroLengthFinCompletionPending;
+    if (needsCompletion) {
+        receive->CompletionState.store(
+            TqDarwinReceiveCompletionState::Pending,
+            std::memory_order_release);
+        NoteReceiveCompletionRequired(receive);
+    }
     auto rollbackObligation = [&]() {
+        if (!needsCompletion) {
+            return;
+        }
         receive->CompletionState.store(
             TqDarwinReceiveCompletionState::NotRequired,
             std::memory_order_release);
@@ -3926,8 +3944,19 @@ bool TqDarwinRelayWorker::EnqueueQuicReceiveForTcp(
                     relay->TcpWriteShutdownQueued = true;
                 }
             }
-        } else if (receive->Fin) {
-            relay->TcpWriteShutdownQueued = true;
+        } else {
+            // No MsQuic completion obligation (FIN-only SUCCESS path).
+            for (auto it = relay->PendingQuicReceives.begin();
+                 it != relay->PendingQuicReceives.end();
+                 ++it) {
+                if (*it == receive) {
+                    relay->PendingQuicReceives.erase(it);
+                    break;
+                }
+            }
+            if (receive->Fin) {
+                relay->TcpWriteShutdownQueued = true;
+            }
         }
     } else if (receive->Fin) {
         relay->TcpWriteShutdownQueued = true;
@@ -3986,7 +4015,8 @@ bool TqDarwinRelayWorker::DiscardDeferredQuicReceive(
     if (relay != nullptr && IsWorkerThread()) {
         AssertWorkerThreadForRelayState();
         if (state == TqDarwinReceiveCompletionState::ActiveCompleted ||
-            state == TqDarwinReceiveCompletionState::TerminalDiscarded) {
+            state == TqDarwinReceiveCompletionState::TerminalDiscarded ||
+            state == TqDarwinReceiveCompletionState::NotRequired) {
             for (auto it = relay->PendingQuicReceives.begin();
                  it != relay->PendingQuicReceives.end();
                  ++it) {
@@ -5630,6 +5660,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
                 totalLength += event->RECEIVE.Buffers[i].Length;
             }
         }
+        const bool finOnly = fin && totalLength == 0;
         std::shared_ptr<RelayState> relay = binding->Relay.lock();
         bool precommitHandled = false;
         const bool precommitQueued = worker->QueuePrecommitQuicReceive(
@@ -5640,6 +5671,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
             fin,
+            !finOnly,
             precommitHandled);
         if (precommitHandled) {
             if (!precommitQueued) {
@@ -5651,7 +5683,8 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
                 }
                 return QUIC_STATUS_OUT_OF_MEMORY;
             }
-            return QUIC_STATUS_PENDING;
+            // FIN-only: MsQuic consumes FIN on SUCCESS; no ReceiveComplete(0).
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         }
         auto classifyBuildFailure =
             [worker, buffers = event->RECEIVE.Buffers, bufferCount = event->RECEIVE.BufferCount, fin]() {
@@ -5689,19 +5722,26 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             stream,
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
-            fin);
+            fin,
+            !finOnly);
         TqDarwinQuicReceiveEnqueueResult enqueueResult =
             TqDarwinQuicReceiveEnqueueResult::AllocationFailed;
         if (!receive) {
             enqueueResult = classifyBuildFailure();
         } else {
             // Obligation before publish so worker drain cannot observe NotRequired.
-            receive->CompletionState.store(
-                TqDarwinReceiveCompletionState::Pending,
-                std::memory_order_release);
-            worker->NoteReceiveCompletionRequired(receive);
+            // FIN-only SUCCESS leaves NotRequired — avoids callback-active +0 race.
+            const bool needsCompletion =
+                receive->TotalLength > 0 || receive->ZeroLengthFinCompletionPending;
+            if (needsCompletion) {
+                receive->CompletionState.store(
+                    TqDarwinReceiveCompletionState::Pending,
+                    std::memory_order_release);
+                worker->NoteReceiveCompletionRequired(receive);
+            }
             enqueueResult = worker->QueueDeferredQuicReceive(bindingOwner, receive, stream);
-            if (enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok &&
+            if (needsCompletion &&
+                enqueueResult != TqDarwinQuicReceiveEnqueueResult::Ok &&
                 enqueueResult != TqDarwinQuicReceiveEnqueueResult::EventQueueFull) {
                 receive->CompletionState.store(
                     TqDarwinReceiveCompletionState::NotRequired,
@@ -5711,7 +5751,7 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
         }
         switch (enqueueResult) {
         case TqDarwinQuicReceiveEnqueueResult::Ok:
-            return QUIC_STATUS_PENDING;
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         case TqDarwinQuicReceiveEnqueueResult::InvalidArgs:
         case TqDarwinQuicReceiveEnqueueResult::EmptyNonFin:
         case TqDarwinQuicReceiveEnqueueResult::NullBuffer:
@@ -5746,9 +5786,10 @@ QUIC_STATUS TqDarwinRelayWorker::OnStreamEventWithBinding(
             }
             return QUIC_STATUS_SUCCESS;
         case TqDarwinQuicReceiveEnqueueResult::EventQueueFull:
-            // Non-terminal backpressure: PENDING held on binding queue.
-            // ReceiveQueueFull QuicActiveShutdown reserved for Task 5+.
-            return QUIC_STATUS_PENDING;
+            // Non-terminal backpressure: payload stays PENDING on binding queue.
+            // FIN-only has no buffer ownership — SUCCESS lets MsQuic consume FIN;
+            // the queued control view still drives TCP SHUT_WR after drain.
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         }
         return QUIC_STATUS_SUCCESS;
     }
