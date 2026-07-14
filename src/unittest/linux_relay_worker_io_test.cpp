@@ -1287,6 +1287,7 @@ int main() {
 
         QUIC_STREAM_EVENT receiveEvent{};
         receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.TotalBufferLength = quicBuffer.Length;
         receiveEvent.RECEIVE.BufferCount = 1;
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
         receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
@@ -1602,7 +1603,14 @@ int main() {
         finEvent.RECEIVE.BufferCount = 0;
         finEvent.RECEIVE.Buffers = nullptr;
         finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
+        const uint64_t receiveCompleteCallsBefore =
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed);
+        const QUIC_STATUS finStatus =
+            worker.DispatchStreamEventForTest(fakeStream, &finEvent);
+        if (finStatus != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr,
+                "expected terminal FIN-only receive callback SUCCESS, got %d\n",
+                finStatus);
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;
@@ -1621,15 +1629,22 @@ int main() {
         }
 
         const TqLinuxRelayWorkerSnapshot snapshot = worker.Snapshot();
-        if (!handle.Stop.load(std::memory_order_acquire)) {
+        if (!handle.Stop.load(std::memory_order_acquire) ||
+            snapshot.DeferredReceiveCompletes != 0 ||
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed) !=
+                receiveCompleteCallsBefore) {
             std::fprintf(stderr,
-                "expected relay stop after both TCP read and QUIC receive FIN, active=%llu read_closed=%llu write_shutdown=%llu closing=%llu sends=%llu pending=%llu\n",
+                "expected relay stop after both TCP read and QUIC receive FIN without zero-byte completion, active=%llu read_closed=%llu write_shutdown=%llu closing=%llu sends=%llu pending=%llu completes=%llu calls=%llu/%llu\n",
                 static_cast<unsigned long long>(snapshot.ActiveRelays),
                 static_cast<unsigned long long>(snapshot.TcpReadClosedRelays),
                 static_cast<unsigned long long>(snapshot.TcpWriteShutdownQueuedRelays),
                 static_cast<unsigned long long>(snapshot.ClosingRelays),
                 static_cast<unsigned long long>(snapshot.OutstandingQuicSends),
-                static_cast<unsigned long long>(snapshot.PendingBytes));
+                static_cast<unsigned long long>(snapshot.PendingBytes),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompletes),
+                static_cast<unsigned long long>(
+                    g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(receiveCompleteCallsBefore));
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;
@@ -2098,6 +2113,7 @@ int main() {
 
         QUIC_STREAM_EVENT receiveEvent{};
         receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.TotalBufferLength = quicBuffer.Length;
         receiveEvent.RECEIVE.BufferCount = 1;
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
         receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
@@ -2281,8 +2297,11 @@ int main() {
         finEvent.RECEIVE.Buffers = nullptr;
         finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
         const uint64_t completionsBefore = worker.Snapshot().DeferredReceiveCompletes;
+        const uint64_t receiveCompleteCallsBefore =
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed);
 
-        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
+        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr, "expected FIN-only receive callback to return SUCCESS\n");
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -2305,18 +2324,27 @@ int main() {
         if (handle.Stop.load(std::memory_order_acquire) ||
             snapshot.Errors != 0 ||
             snapshot.QuicReceiveViewEmptyFailures != 0 ||
-            snapshot.DeferredReceiveCompletes != completionsBefore + 1) {
+            snapshot.DeferredReceiveCompletes != completionsBefore ||
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed) !=
+                receiveCompleteCallsBefore) {
             std::fprintf(stderr,
-                "FIN-only receive should be graceful, stop=%d errors=%llu empty=%llu\n",
+                "FIN-only receive should be graceful without receive completion, stop=%d errors=%llu empty=%llu completes=%llu/%llu calls=%llu/%llu\n",
                 handle.Stop.load(std::memory_order_acquire) ? 1 : 0,
                 static_cast<unsigned long long>(snapshot.Errors),
-                static_cast<unsigned long long>(snapshot.QuicReceiveViewEmptyFailures));
+                static_cast<unsigned long long>(snapshot.QuicReceiveViewEmptyFailures),
+                static_cast<unsigned long long>(snapshot.DeferredReceiveCompletes),
+                static_cast<unsigned long long>(completionsBefore),
+                static_cast<unsigned long long>(
+                    g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(receiveCompleteCallsBefore));
             worker.Stop();
             ::close(fds[1]);
             return 1;
         }
         (void)worker.DrainForTest(config.EventBudget);
-        if (worker.Snapshot().DeferredReceiveCompletes != completionsBefore + 1) {
+        if (worker.Snapshot().DeferredReceiveCompletes != completionsBefore ||
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed) !=
+                receiveCompleteCallsBefore) {
             worker.Stop();
             ::close(fds[1]);
             return 1;
@@ -2774,6 +2802,7 @@ int main() {
 
         QUIC_STREAM_EVENT receiveEvent{};
         receiveEvent.Type = QUIC_STREAM_EVENT_RECEIVE;
+        receiveEvent.RECEIVE.TotalBufferLength = quicBuffer.Length;
         receiveEvent.RECEIVE.BufferCount = 1;
         receiveEvent.RECEIVE.Buffers = &quicBuffer;
         receiveEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
@@ -3966,7 +3995,14 @@ int main() {
         finEvent.RECEIVE.BufferCount = 0;
         finEvent.RECEIVE.Buffers = nullptr;
         finEvent.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (worker.DispatchStreamEventForTest(fakeStream, &finEvent) != QUIC_STATUS_PENDING) {
+        const uint64_t receiveCompleteCallsBefore =
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed);
+        const QUIC_STATUS finStatus =
+            worker.DispatchStreamEventForTest(fakeStream, &finEvent);
+        if (finStatus != QUIC_STATUS_SUCCESS) {
+            std::fprintf(stderr,
+                "expected FIN-only receive before late TCP error to return SUCCESS, got %d\n",
+                finStatus);
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;
@@ -3979,13 +4015,20 @@ int main() {
         if (!FindActiveRelayState(afterFin, registered.RelayId, &relayState) ||
             !relayState.TcpWriteClosed ||
             relayState.Closing ||
-            relayState.StreamDetached) {
+            relayState.StreamDetached ||
+            afterFin.DeferredReceiveCompletes != 0 ||
+            g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed) !=
+                receiveCompleteCallsBefore) {
             std::fprintf(stderr,
-                "expected active relay with tcp write closed before late error, found=%d tcp_write_closed=%d closing=%d detached=%d\n",
+                "expected active relay with tcp write closed and no zero-byte completion before late error, found=%d tcp_write_closed=%d closing=%d detached=%d completes=%llu calls=%llu/%llu\n",
                 FindActiveRelayState(afterFin, registered.RelayId, nullptr) ? 1 : 0,
                 relayState.TcpWriteClosed ? 1 : 0,
                 relayState.Closing ? 1 : 0,
-                relayState.StreamDetached ? 1 : 0);
+                relayState.StreamDetached ? 1 : 0,
+                static_cast<unsigned long long>(afterFin.DeferredReceiveCompletes),
+                static_cast<unsigned long long>(
+                    g_FakeReceiveCompleteCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(receiveCompleteCallsBefore));
             worker.Stop();
             ::close(fds[1]);
             MsQuic = nullptr;

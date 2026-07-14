@@ -1,5 +1,10 @@
 # Linux 零长度 FIN 导致 terminal retention 无法收敛根因分析
 
+> 后续事件：2026-07-14，包含本修复的服务端 PID 28214 再次出现零长度 FIN
+> retention。现场表明 `ReceiveComplete(0)` 即使已经调用，也可能在 MsQuic
+> RECEIVE callback 尚未返回时因零字节并发完成不可见而丢失。详见
+> [Linux 零长度 FIN callback-active completion 竞态根因分析](linux_zero_length_fin_callback_active_race_root_cause_cn.md)。
+
 ## 1. 结论摘要
 
 2026-07-12，客户端进程 `636345` 中出现一条长期无法关闭的 tunnel。该对象为客户端 tunnel 56，对应服务端 tunnel 128，目标为 `api.hcaptcha.com:443`。

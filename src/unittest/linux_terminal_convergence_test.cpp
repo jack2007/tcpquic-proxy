@@ -877,7 +877,7 @@ bool TestGracefulHalfCloseReverseFlow() {
     receive.RECEIVE.BufferCount = 0;
     receive.RECEIVE.Buffers = nullptr;
     receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-    CHECK(worker.DispatchStreamEventForTest(stream, &receive) == QUIC_STATUS_PENDING);
+    CHECK(worker.DispatchStreamEventForTest(stream, &receive) == QUIC_STATUS_SUCCESS);
     (void)worker.DrainForTest(128);
     char byte{};
     CHECK(::read(tcp.Peer, &byte, 1) == 0);

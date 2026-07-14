@@ -620,14 +620,16 @@ private:
         MsQuicStream* stream,
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
-        bool fin);
+        bool fin,
+        bool zeroLengthFinCompletionPending);
     std::shared_ptr<TqPendingQuicReceive> BuildPendingQuicReceive(
         RelayState* relay,
         MsQuicStream* stream,
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         uint64_t completedPrefix,
-        bool fin);
+        bool fin,
+        bool zeroLengthFinCompletionPending);
     bool QueuePrecommitQuicReceive(
         RelayState* relay,
         StreamRelayBinding* binding,
@@ -635,6 +637,7 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin,
+        bool zeroLengthFinCompletionPending,
         bool& handled);
     void ActivateManagedBinding(RelayState* relay, StreamRelayBinding* binding);
     void FailManagedBinding(RelayState* relay, StreamRelayBinding* binding);
@@ -651,7 +654,8 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         uint64_t completedPrefix,
-        bool fin);
+        bool fin,
+        bool zeroLengthFinCompletionPending);
     uint64_t MaxPendingQuicReceiveBytesPerRelay() const;
     uint64_t LowPendingQuicReceiveBytesPerRelay() const;
     void MaybePauseQuicReceive(RelayState* relay);

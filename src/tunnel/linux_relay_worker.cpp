@@ -3278,8 +3278,16 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceive(
     MsQuicStream* stream,
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
-    bool fin) {
-    return QueueDeferredQuicReceiveFromOffset(relay, stream, buffers, bufferCount, 0, fin);
+    bool fin,
+    bool zeroLengthFinCompletionPending) {
+    return QueueDeferredQuicReceiveFromOffset(
+        relay,
+        stream,
+        buffers,
+        bufferCount,
+        0,
+        fin,
+        zeroLengthFinCompletionPending);
 }
 
 bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
@@ -3288,9 +3296,16 @@ bool TqLinuxRelayWorker::QueueDeferredQuicReceiveFromOffset(
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     uint64_t completedPrefix,
-    bool fin) {
+    bool fin,
+    bool zeroLengthFinCompletionPending) {
     auto view = BuildPendingQuicReceive(
-        relay, stream, buffers, bufferCount, completedPrefix, fin);
+        relay,
+        stream,
+        buffers,
+        bufferCount,
+        completedPrefix,
+        fin,
+        zeroLengthFinCompletionPending);
     if (!view) {
         return false;
     }
@@ -3323,7 +3338,8 @@ std::shared_ptr<TqPendingQuicReceive> TqLinuxRelayWorker::BuildPendingQuicReceiv
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     uint64_t completedPrefix,
-    bool fin) {
+    bool fin,
+    bool zeroLengthFinCompletionPending) {
     if (relay == nullptr || relay->Closing ||
         (bufferCount != 0 && buffers == nullptr)) {
         return {};
@@ -3371,7 +3387,8 @@ std::shared_ptr<TqPendingQuicReceive> TqLinuxRelayWorker::BuildPendingQuicReceiv
         QuicReceiveViewEmptyFailures.fetch_add(1);
         return {};
     }
-    view->ZeroLengthFinCompletionPending = fin && view->TotalLength == 0;
+    view->ZeroLengthFinCompletionPending =
+        zeroLengthFinCompletionPending && fin && view->TotalLength == 0;
     RecordQuicReceiveView(view->TotalLength, view->Slices.size());
     return view;
 }
@@ -3383,6 +3400,7 @@ bool TqLinuxRelayWorker::QueuePrecommitQuicReceive(
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin,
+    bool zeroLengthFinCompletionPending,
     bool& handled) {
     handled = false;
     if (binding == nullptr ||
@@ -3396,7 +3414,14 @@ bool TqLinuxRelayWorker::QueuePrecommitQuicReceive(
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
     }
-    auto view = BuildPendingQuicReceive(relay, stream, buffers, bufferCount, 0, fin);
+    auto view = BuildPendingQuicReceive(
+        relay,
+        stream,
+        buffers,
+        bufferCount,
+        0,
+        fin,
+        zeroLengthFinCompletionPending);
     if (!view) {
         return false;
     }
@@ -4998,6 +5023,7 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
         if (relay->Closing) {
             return QUIC_STATUS_SUCCESS;
         }
+        const bool finOnly = fin && event->RECEIVE.TotalBufferLength == 0;
         if (fin) {
             TraceRelayStreamEvent(
                 relay,
@@ -5018,23 +5044,26 @@ QUIC_STATUS TqLinuxRelayWorker::OnStreamEventWithBinding(
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
             fin,
+            !finOnly,
             precommitHandled);
         if (precommitHandled) {
             if (!precommitQueued) {
                 AbortRelayFromCallback(relayId, binding, stream);
                 return QUIC_STATUS_OUT_OF_MEMORY;
             }
-            return QUIC_STATUS_PENDING;
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         }
         if (!QueueDeferredQuicReceive(
                 relay,
                 stream,
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
-                fin)) {
+                fin,
+                !finOnly)) {
             AbortRelayFromCallback(relayId, binding, stream);
+            return QUIC_STATUS_OUT_OF_MEMORY;
         }
-        return QUIC_STATUS_PENDING;
+        return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
     }
     if (event->Type == QUIC_STREAM_EVENT_PEER_SEND_ABORTED) {
         binding->Closing.store(true, std::memory_order_release);
