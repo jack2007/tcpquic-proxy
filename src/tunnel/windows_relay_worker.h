@@ -499,6 +499,7 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin,
+        bool zeroLengthFinCompletionPending,
         bool& handled);
     void RequestRelayShutdown(
         const std::shared_ptr<RelayContext>& relay,
@@ -564,7 +565,8 @@ private:
         const QUIC_BUFFER* buffers,
         uint32_t bufferCount,
         bool fin,
-        uint64_t completeBatchBytes);
+        uint64_t completeBatchBytes,
+        bool zeroLengthFinCompletionPending = true);
     static bool ComputeReceiveEventBytes(
         const QUIC_STREAM_EVENT& event,
         uint64_t* outBytes);

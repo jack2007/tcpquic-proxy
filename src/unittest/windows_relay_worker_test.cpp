@@ -3849,7 +3849,7 @@ bool TestWindowsRelayZeroFinTerminalWinsForTest() {
     receive.RECEIVE.Buffers = nullptr;
     receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
-        QUIC_STATUS_PENDING) {
+        QUIC_STATUS_SUCCESS) {
         worker.Stop();
         MsQuic = nullptr;
         return false;
@@ -3859,7 +3859,7 @@ bool TestWindowsRelayZeroFinTerminalWinsForTest() {
     terminal.Type = QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE;
     (void)owner->DispatchForTest(&terminal);
     // Drain ReceiveReady even if ResolveRelayForCallback rejects Closing:
-    // orphan/terminal path still settles the view.
+    // FIN-only SUCCESS control view still finishes without ReceiveComplete(0).
     (void)worker.TestDrainSingleReceiveReadyForTest();
 
     TqWindowsReceiveCompletionSnapshotForTest completion{};
@@ -3870,7 +3870,8 @@ bool TestWindowsRelayZeroFinTerminalWinsForTest() {
         snapshot.PendingQuicReceiveBytes == 0 &&
         worker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
         completion.HasView &&
-        completion.CompletionState == TqWindowsReceiveCompletionState::TerminalDiscarded &&
+        (completion.CompletionState == TqWindowsReceiveCompletionState::NotRequired ||
+         completion.CompletionState == TqWindowsReceiveCompletionState::TerminalDiscarded) &&
         !completion.ZeroLengthFinCompletionPending &&
         completion.Fin &&
         completion.TotalLength == 0;
@@ -3891,6 +3892,8 @@ bool TestWindowsRelayZeroFinTerminalWinsForTest() {
 }
 
 bool TestWindowsRelayZeroFinLeaseRetryForTest() {
+    // FIN-only SUCCESS path has no ReceiveComplete(0) obligation, so lease deny
+    // must not block TCP half-close / view drain.
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
     fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
@@ -3929,7 +3932,7 @@ bool TestWindowsRelayZeroFinLeaseRetryForTest() {
     receive.RECEIVE.Buffers = nullptr;
     receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
-        QUIC_STATUS_PENDING) {
+        QUIC_STATUS_SUCCESS) {
         worker.Stop();
         MsQuic = nullptr;
         return false;
@@ -3941,42 +3944,18 @@ bool TestWindowsRelayZeroFinLeaseRetryForTest() {
         return false;
     }
 
-    TqWindowsReceiveCompletionSnapshotForTest afterFail{};
-    const TqWindowsRelayWorkerSnapshot afterLeaseFail = worker.Snapshot();
-    if (g_StreamReceiveCompleteCalls != 0 ||
-        afterLeaseFail.PendingQuicReceiveQueueDepth == 0 ||
-        !worker.TestGetLastReceiveCompletionSnapshotForTest(&afterFail) ||
-        !afterFail.HasView ||
-        afterFail.CompletionState != TqWindowsReceiveCompletionState::Pending ||
-        !afterFail.ZeroLengthFinCompletionPending) {
-        worker.Stop();
-        MsQuic = nullptr;
-        return false;
-    }
-
-    owner->DenyReceiveApiLeasesForTest(0);
-    const auto retryDeadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-    TqWindowsReceiveCompletionSnapshotForTest afterRetry{};
-    while (std::chrono::steady_clock::now() < retryDeadline) {
-        (void)worker.TestDrainPendingReceivesForTest(handle.WindowsRelayId);
-        if (worker.TestGetLastReceiveCompletionSnapshotForTest(&afterRetry) &&
-            afterRetry.HasView &&
-            afterRetry.CompletionState ==
-                TqWindowsReceiveCompletionState::ActiveCompleted) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-
+    TqWindowsReceiveCompletionSnapshotForTest afterDrain{};
     const TqWindowsRelayWorkerSnapshot afterSettled = worker.Snapshot();
     const bool ok =
-        g_StreamReceiveCompleteCalls == 1 &&
-        g_StreamReceiveCompleteBytes == 0 &&
+        g_StreamReceiveCompleteCalls == 0 &&
         afterSettled.PendingQuicReceiveQueueDepth == 0 &&
-        afterRetry.HasView &&
-        afterRetry.CompletionState == TqWindowsReceiveCompletionState::ActiveCompleted &&
-        !afterRetry.ZeroLengthFinCompletionPending;
+        afterSettled.PendingQuicReceiveBytes == 0 &&
+        worker.TestGetLastReceiveCompletionSnapshotForTest(&afterDrain) &&
+        afterDrain.HasView &&
+        afterDrain.CompletionState == TqWindowsReceiveCompletionState::NotRequired &&
+        !afterDrain.ZeroLengthFinCompletionPending &&
+        afterDrain.Fin &&
+        afterDrain.TotalLength == 0;
 
     worker.StopRelay(handle.WindowsRelayId);
     FinalizeTestStreamOwnerForGateTeardownForTest(worker, owner);
@@ -4026,7 +4005,7 @@ bool TestWindowsRelayZeroFinOrphanGenerationMismatchForTest() {
     receive.RECEIVE.Buffers = nullptr;
     receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
-        QUIC_STATUS_PENDING) {
+        QUIC_STATUS_SUCCESS) {
         worker.Stop();
         MsQuic = nullptr;
         return false;
@@ -4038,19 +4017,18 @@ bool TestWindowsRelayZeroFinOrphanGenerationMismatchForTest() {
         return false;
     }
 
-    // Generation mismatch: drain settles the orphan view without touching relay queue.
+    // Generation mismatch: FIN-only SUCCESS control view has no ReceiveComplete obligation.
     (void)worker.TestDrainSingleReceiveReadyForTest();
 
     TqWindowsReceiveCompletionSnapshotForTest completion{};
     const TqWindowsRelayWorkerSnapshot afterOrphan = worker.Snapshot();
     if (!worker.TestGetLastReceiveCompletionSnapshotForTest(&completion) ||
         !completion.HasView ||
-        completion.CompletionState != TqWindowsReceiveCompletionState::ActiveCompleted ||
+        completion.CompletionState != TqWindowsReceiveCompletionState::NotRequired ||
         completion.ZeroLengthFinCompletionPending ||
-        g_StreamReceiveCompleteCalls != 1 ||
-        g_StreamReceiveCompleteBytes != 0 ||
+        g_StreamReceiveCompleteCalls != 0 ||
         afterOrphan.PendingQuicReceiveQueueDepth != 0 ||
-        afterOrphan.DeferredReceiveCompletes != beforePost.DeferredReceiveCompletes + 1) {
+        afterOrphan.DeferredReceiveCompletes != beforePost.DeferredReceiveCompletes) {
         worker.Stop();
         MsQuic = nullptr;
         return false;
@@ -4086,8 +4064,8 @@ bool TestWindowsRelayZeroFinOrphanGenerationMismatchForTest() {
 }
 
 bool TestWindowsRelayZeroFinStopDrainSettlesForTest() {
-    // Socket-backed retain-then-StopRelay: Closing != terminal, so zero-FIN must
-    // still StreamReceiveComplete(0) exactly once after the barrier releases.
+    // Socket-backed retain-then-StopRelay: FIN-only SUCCESS control view must
+    // still half-close TCP and clear the queue without ReceiveComplete(0).
     QUIC_API_TABLE fakeApi{};
     fakeApi.StreamReceiveComplete = FakeStreamReceiveComplete;
     fakeApi.StreamReceiveSetEnabled = FakeStreamReceiveSetEnabled;
@@ -4146,7 +4124,7 @@ bool TestWindowsRelayZeroFinStopDrainSettlesForTest() {
     receive.RECEIVE.Buffers = nullptr;
     receive.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
     if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &receive) !=
-        QUIC_STATUS_PENDING) {
+        QUIC_STATUS_SUCCESS) {
         worker.TestReleaseWorkerQueueBlockForTest(block);
         worker.Stop();
         TqCloseSocket(pair[1]);
@@ -4160,26 +4138,23 @@ bool TestWindowsRelayZeroFinStopDrainSettlesForTest() {
     TqWindowsReceiveCompletionSnapshotForTest completion{};
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-    bool settled = false;
+    bool drained = false;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (worker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
+        const TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
+        if (snapshot.PendingQuicReceiveQueueDepth == 0 &&
+            snapshot.PendingQuicReceiveBytes == 0 &&
+            worker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
             completion.HasView &&
             completion.CompletionState ==
-                TqWindowsReceiveCompletionState::ActiveCompleted &&
+                TqWindowsReceiveCompletionState::NotRequired &&
             !completion.ZeroLengthFinCompletionPending) {
-            settled = true;
+            drained = true;
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    const TqWindowsRelayWorkerSnapshot snapshot = worker.Snapshot();
-    const bool ok =
-        settled &&
-        g_StreamReceiveCompleteCalls == 1 &&
-        g_StreamReceiveCompleteBytes == 0 &&
-        snapshot.PendingQuicReceiveQueueDepth == 0 &&
-        snapshot.PendingQuicReceiveBytes == 0;
+    const bool ok = drained && g_StreamReceiveCompleteCalls == 0;
 
     worker.Stop();
     TqCloseSocket(pair[1]);
@@ -5851,7 +5826,7 @@ int main() {
         event.RECEIVE.BufferCount = 0;
         event.RECEIVE.Buffers = nullptr;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_SUCCESS) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -5879,7 +5854,7 @@ int main() {
         TqWindowsReceiveCompletionSnapshotForTest completion{};
         if (!receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) ||
             !completion.HasView ||
-            completion.CompletionState != TqWindowsReceiveCompletionState::ActiveCompleted ||
+            completion.CompletionState != TqWindowsReceiveCompletionState::NotRequired ||
             completion.ZeroLengthFinCompletionPending ||
             !completion.Fin ||
             completion.TotalLength != 0) {
@@ -5888,15 +5863,13 @@ int main() {
             MsQuic = nullptr;
             return 6095;
         }
-        if (g_StreamReceiveCompleteCalls != 1 ||
-            g_StreamReceiveCompleteBytes != 0) {
+        if (g_StreamReceiveCompleteCalls != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
             std::_Exit(6096);
         }
-        if (snapshot.ReceiveCompletionZeroLength < 1 ||
-            snapshot.ReceiveCompletionExactlyOnceViolation != 0) {
+        if (snapshot.ReceiveCompletionExactlyOnceViolation != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -5966,7 +5939,7 @@ int main() {
         event.RECEIVE.Buffers = nullptr;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
         if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) !=
-            QUIC_STATUS_PENDING) {
+            QUIC_STATUS_SUCCESS) {
             receiveWorker.TestReleaseWorkerQueueBlockForTest(block);
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
@@ -5980,22 +5953,22 @@ int main() {
         TqWindowsReceiveCompletionSnapshotForTest completion{};
         const auto deadline =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
-        bool settled = false;
+        bool drained = false;
         while (std::chrono::steady_clock::now() < deadline) {
-            if (receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
+            const TqWindowsRelayWorkerSnapshot closingSnapshot = receiveWorker.Snapshot();
+            if (closingSnapshot.PendingQuicReceiveQueueDepth == 0 &&
+                closingSnapshot.PendingQuicReceiveBytes == 0 &&
+                receiveWorker.TestGetLastReceiveCompletionSnapshotForTest(&completion) &&
                 completion.HasView &&
                 completion.CompletionState ==
-                    TqWindowsReceiveCompletionState::ActiveCompleted) {
-                settled = true;
+                    TqWindowsReceiveCompletionState::NotRequired &&
+                !completion.ZeroLengthFinCompletionPending) {
+                drained = true;
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        if (!settled ||
-            g_StreamReceiveCompleteCalls != 1 ||
-            g_StreamReceiveCompleteBytes != 0 ||
-            completion.CompletionState != TqWindowsReceiveCompletionState::ActiveCompleted ||
-            completion.ZeroLengthFinCompletionPending) {
+        if (!drained || g_StreamReceiveCompleteCalls != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -6608,7 +6581,7 @@ int main() {
         event.RECEIVE.BufferCount = 1;
         event.RECEIVE.Buffers = &buffer;
         event.RECEIVE.Flags = QUIC_RECEIVE_FLAG_FIN;
-        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_PENDING) {
+        if (TqWindowsRelayDispatchTestStreamEvent(stream, stream->Context, &event) != QUIC_STATUS_SUCCESS) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;
@@ -6630,8 +6603,7 @@ int main() {
             MsQuic = nullptr;
             return 191;
         }
-        if (g_StreamReceiveCompleteCalls != 1 ||
-            g_StreamReceiveCompleteBytes != 0) {
+        if (g_StreamReceiveCompleteCalls != 0) {
             receiveWorker.Stop();
             TqCloseSocket(pair[1]);
             MsQuic = nullptr;

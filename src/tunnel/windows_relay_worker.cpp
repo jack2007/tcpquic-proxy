@@ -278,8 +278,10 @@ bool TryTerminalDiscard(TqWindowsPendingQuicReceive& view) {
 
 bool IsReceiveCompletionSettled(const TqWindowsPendingQuicReceive& view) {
     const auto state = view.CompletionState.load(std::memory_order_acquire);
+    // NotRequired: FIN-only SUCCESS control views never took MsQuic receive ownership.
     return state == TqWindowsReceiveCompletionState::ActiveCompleted ||
-        state == TqWindowsReceiveCompletionState::TerminalDiscarded;
+        state == TqWindowsReceiveCompletionState::TerminalDiscarded ||
+        state == TqWindowsReceiveCompletionState::NotRequired;
 }
 
 struct TqWindowsQuicSendOperation {
@@ -2723,6 +2725,7 @@ bool TqWindowsRelayWorker::QueuePrecommitQuicReceive(
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin,
+    bool zeroLengthFinCompletionPending,
     bool& handled) {
     (void)relay;
     handled = false;
@@ -2739,7 +2742,14 @@ bool TqWindowsRelayWorker::QueuePrecommitQuicReceive(
         binding->Closing.load(std::memory_order_acquire)) {
         return false;
     }
-    auto view = BuildDeferredQuicReceiveView(*binding, stream, buffers, bufferCount, fin, 0);
+    auto view = BuildDeferredQuicReceiveView(
+        *binding,
+        stream,
+        buffers,
+        bufferCount,
+        fin,
+        0,
+        zeroLengthFinCompletionPending);
     if (!view) {
         return false;
     }
@@ -2759,10 +2769,17 @@ bool TqWindowsRelayWorker::QueuePrecommitQuicReceive(
         return false;
     }
     binding->PrecommitPendingBytes += pending;
-    view->CompletionState.store(
-        TqWindowsReceiveCompletionState::Pending,
-        std::memory_order_release);
-    ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+    if (view->ZeroLengthFinCompletionPending || view->TotalLength > 0) {
+        view->CompletionState.store(
+            TqWindowsReceiveCompletionState::Pending,
+            std::memory_order_release);
+        ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        // FIN-only SUCCESS control view: no MsQuic receive completion obligation.
+        view->CompletionState.store(
+            TqWindowsReceiveCompletionState::NotRequired,
+            std::memory_order_release);
+    }
     binding->PrecommitReceives.push_back(std::move(view));
     return true;
 }
@@ -5155,7 +5172,8 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
     const QUIC_BUFFER* buffers,
     uint32_t bufferCount,
     bool fin,
-    uint64_t completeBatchBytes) {
+    uint64_t completeBatchBytes,
+    bool zeroLengthFinCompletionPending) {
     if (stream == nullptr || (bufferCount != 0 && buffers == nullptr)) {
         Errors_.fetch_add(1, std::memory_order_relaxed);
         return nullptr;
@@ -5227,7 +5245,8 @@ std::shared_ptr<TqWindowsPendingQuicReceive> TqWindowsRelayWorker::BuildDeferred
     CallbackReceiveCopyNanos_.fetch_add(
         NowSteadyNanos() - copyStartNanos,
         std::memory_order_relaxed);
-    view->ZeroLengthFinCompletionPending = fin && view->TotalLength == 0;
+    view->ZeroLengthFinCompletionPending =
+        zeroLengthFinCompletionPending && fin && view->TotalLength == 0;
     if (view->ZeroLengthFinCompletionPending) {
         ReceiveCompletionZeroLength_.fetch_add(1, std::memory_order_relaxed);
     }
@@ -5256,12 +5275,19 @@ bool TqWindowsRelayWorker::EnqueueDeferredQuicReceiveView(
     }
 
     view->CompleteBatchBytes = relay->Tuning.WindowsRelayQuicReceiveCompleteBatchBytes;
-    if (view->CompletionState.load(std::memory_order_acquire) ==
-        TqWindowsReceiveCompletionState::NotRequired) {
-        view->CompletionState.store(
-            TqWindowsReceiveCompletionState::Pending,
-            std::memory_order_release);
-        ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+    const auto completionState =
+        view->CompletionState.load(std::memory_order_acquire);
+    if (completionState == TqWindowsReceiveCompletionState::NotRequired) {
+        // FIN-only SUCCESS control views stay NotRequired. Payload / PENDING
+        // obligations must already be Pending before enqueue.
+        const bool finOnlyControl =
+            view->Fin && view->TotalLength == 0 && !view->ZeroLengthFinCompletionPending;
+        if (!finOnlyControl) {
+            view->CompletionState.store(
+                TqWindowsReceiveCompletionState::Pending,
+                std::memory_order_release);
+            ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
     relay->PendingReceives.push_back(view);
 
@@ -6225,6 +6251,7 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
             Errors_.fetch_add(1, std::memory_order_relaxed);
             return QUIC_STATUS_SUCCESS;
         }
+        const bool finOnly = fin && receiveBytes == 0;
         auto relay = ResolveRelayForCallback(binding->RelayId, binding->Generation);
         bool precommitHandled = false;
         if (relay &&
@@ -6235,9 +6262,11 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
                 event->RECEIVE.Buffers,
                 event->RECEIVE.BufferCount,
                 fin,
+                !finOnly,
                 precommitHandled) &&
             precommitHandled) {
-            return QUIC_STATUS_PENDING;
+            // FIN-only: MsQuic consumes FIN synchronously on SUCCESS; no ReceiveComplete(0).
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         }
         if (ShouldRejectReceiveInCallback(*binding, stream, *event, receiveBytes)) {
             return QUIC_STATUS_SUCCESS;
@@ -6248,21 +6277,29 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
             event->RECEIVE.Buffers,
             event->RECEIVE.BufferCount,
             fin,
-            0);
+            0,
+            !finOnly);
         if (!view) {
-            return QUIC_STATUS_SUCCESS;
+            return finOnly ? QUIC_STATUS_OUT_OF_MEMORY : QUIC_STATUS_SUCCESS;
         }
-        view->CompletionState.store(
-            TqWindowsReceiveCompletionState::Pending,
-            std::memory_order_release);
-        ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+        if (finOnly) {
+            // Ordered FIN control event only — no MsQuic receive completion obligation.
+            view->CompletionState.store(
+                TqWindowsReceiveCompletionState::NotRequired,
+                std::memory_order_release);
+        } else {
+            view->CompletionState.store(
+                TqWindowsReceiveCompletionState::Pending,
+                std::memory_order_release);
+            ReceiveCompletionRequired_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (PostCallbackOperationById(
                 TqWindowsIocpOperationType::RelayReceiveReady,
                 *binding,
                 0,
                 0,
                 view)) {
-            return QUIC_STATUS_PENDING;
+            return finOnly ? QUIC_STATUS_SUCCESS : QUIC_STATUS_PENDING;
         }
         if (relay) {
             TraceReceiveFlowDiag(
@@ -6276,7 +6313,9 @@ QUIC_STATUS TqWindowsRelayWorker::OnStreamEventWithBinding(
             TqWindowsReceiveCompletionState::NotRequired,
             std::memory_order_release);
         view->ZeroLengthFinCompletionPending = false;
-        ReceiveCompletionNotRequiredRollback_.fetch_add(1, std::memory_order_relaxed);
+        if (!finOnly) {
+            ReceiveCompletionNotRequiredRollback_.fetch_add(1, std::memory_order_relaxed);
+        }
         return QUIC_STATUS_SUCCESS;
     }
 
