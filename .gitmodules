@@ -22,3 +22,6 @@
 [submodule "third_party/crashpad"]
 	path = third_party/crashpad
 	url = git@github.com:jack2007/crashpad.git
+[submodule "third_party/libuv"]
+	path = third_party/libuv
+	url = https://github.com/libuv/libuv

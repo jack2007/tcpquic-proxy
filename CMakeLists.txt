@@ -28,6 +28,11 @@ if(NOT EXISTS "${TCPQUIC_CPP_HTTPLIB_SOURCE_DIR}/httplib.h")
     message(FATAL_ERROR "cpp-httplib submodule missing. Run: git submodule update --init --recursive third_party/cpp-httplib")
 endif()
 
+set(TCPQUIC_LIBUV_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libuv" CACHE PATH "libuv source tree")
+if(NOT EXISTS "${TCPQUIC_LIBUV_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "libuv submodule missing. Run: git submodule update --init --recursive third_party/libuv")
+endif()
+
 set(QUIC_BUILD_TOOLS OFF CACHE BOOL "Build msquic tools" FORCE)
 set(QUIC_ENABLE_LOGGING ON CACHE BOOL "" FORCE)
 
@@ -376,6 +381,14 @@ add_subdirectory("${TCPQUIC_SPDLOG_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/spdlog")
 
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/third_party/json" "${CMAKE_BINARY_DIR}/json")
+
+set(LIBUV_BUILD_SHARED OFF CACHE BOOL "Build libuv shared library" FORCE)
+set(LIBUV_BUILD_TESTS OFF CACHE BOOL "Build libuv tests" FORCE)
+set(LIBUV_BUILD_BENCH OFF CACHE BOOL "Build libuv benchmarks" FORCE)
+add_subdirectory("${TCPQUIC_LIBUV_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/libuv" EXCLUDE_FROM_ALL)
+if(NOT TARGET uv_a)
+    message(FATAL_ERROR "Vendored libuv did not define the required static target uv_a")
+endif()
 
 # Align tool/test binaries with msquic convention: build/bin/Release/
 set(TCPQUIC_OUTPUT_DIR "${CMAKE_BINARY_DIR}/bin/$<IF:$<CONFIG:Debug>,Debug,Release>")

@@ -210,7 +210,13 @@ endif()
 
 tcpquic_target_include_dirs(tcpquic-proxy)
 tcpquic_link_quic_address_deps(tcpquic-proxy)
-target_link_libraries(tcpquic-proxy PRIVATE libzstd spdlog::spdlog ${TCPQUIC_CARES_TARGET} cpp_httplib nlohmann_json::nlohmann_json)
+target_link_libraries(tcpquic-proxy PRIVATE
+    libzstd
+    spdlog::spdlog
+    ${TCPQUIC_CARES_TARGET}
+    cpp_httplib
+    nlohmann_json::nlohmann_json
+    uv_a)
 if(TCPQUIC_HAS_CRASHPAD)
     target_link_libraries(tcpquic-proxy PRIVATE tcpquic_crashpad_client)
     target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_CRASHPAD=1)
