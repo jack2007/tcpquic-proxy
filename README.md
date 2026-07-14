@@ -2,7 +2,7 @@
 
 独立仓库实现的 **TCP-over-QUIC 隧道代理**。在 A、B 两节点各运行一个进程，预先建立 QUIC 长连接；本地应用通过 **SOCKS5** 或 **HTTP CONNECT** 接入代理，每个 TCP 连接映射为一条 QUIC 双向 Stream，由 B 侧按动态目标发起 TCP 拨号。
 
-底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，压缩库来自 [zstd](https://github.com/facebook/zstd)，异步 DNS 解析来自 [c-ares](https://github.com/c-ares/c-ares)，TLS 来自 msquic 内嵌的 [quictls](https://github.com/quictls/openssl)，JSON 解析来自 [nlohmann/json](https://github.com/nlohmann/json)；均以 Git 子模块形式 vendored（详见下方 [依赖](#依赖)）。
+底层 QUIC 栈来自 [msquic](https://github.com/microsoft/msquic)，压缩库来自 [zstd](https://github.com/facebook/zstd)，异步 DNS 解析来自 [c-ares](https://github.com/c-ares/c-ares)，跨平台异步 I/O 库来自 [libuv](https://github.com/libuv/libuv)，TLS 来自 msquic 内嵌的 [quictls](https://github.com/quictls/openssl)，JSON 解析来自 [nlohmann/json](https://github.com/nlohmann/json)；均以 Git 子模块形式 vendored（详见下方 [依赖](#依赖)）。
 
 **典型场景：**
 
@@ -41,14 +41,15 @@
 | [quictls](https://github.com/quictls/openssl) | `third_party/msquic/submodules/quictls` | TLS（msquic 子模块，**首次构建从源码编译**） |
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 |
+| [libuv](https://github.com/libuv/libuv) | `third_party/libuv` | 跨平台异步 I/O 库（静态链接） |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） |
 | [nlohmann/json](https://github.com/nlohmann/json) | `third_party/json` | JSON 配置、Admin API、测试工具 |
 | [mimalloc](https://github.com/microsoft/mimalloc) | `third_party/mimalloc` | relay buffer 显式 allocator（默认静态启用） |
 | [Crashpad](https://github.com/jack2007/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；依赖源码随项目 fork vendored，缺少产物时由 CMake 调用本机已有 GN/Ninja 本地构建 |
 
-当前子模块状态：msquic `13c87cdb`、quictls `ff36838b`、zstd `5233c58e`、c-ares `c93e50f3`、spdlog `8671ca4d`、cpp-httplib `9d159bb4`、nlohmann/json `c363dc3e`、mimalloc `30b2d9d8`、crashpad `df2c143e`。
+当前子模块状态：msquic `13c87cdb`、quictls `ff36838b`、zstd `5233c58e`、c-ares `c93e50f3`、libuv `1cfa32ff`（v1.52.1）、spdlog `8671ca4d`、cpp-httplib `9d159bb4`、nlohmann/json `c363dc3e`、mimalloc `30b2d9d8`、crashpad `df2c143e`。
 
-**不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 也会由 CMake 一并构建。Crashpad 使用 `jack2007/crashpad` fork 中已提交的 `third_party/*` DEPS 源码，主仓库不会在配置阶段联网执行 `gclient sync` 或拉取 `depot_tools`。
+**不需要** 安装 `libzstd-dev`、`libssl-dev`、`libc-ares-dev`、`libuv1-dev` 等系统库；`git submodule update --init --recursive` 会拉齐子模块源码，c-ares 和 libuv 也会由 CMake 一并构建。Crashpad 使用 `jack2007/crashpad` fork 中已提交的 `third_party/*` DEPS 源码，主仓库不会在配置阶段联网执行 `gclient sync` 或拉取 `depot_tools`。
 
 ### 构建工具
 
@@ -71,7 +72,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 
 ### 运行时
 
-主程序实际输出名为 `raypx2`，CMake 构建目标名仍为 `tcpquic-proxy`。运行时**不依赖**系统安装的 libzstd / libssl / libmsquic / libc-ares；默认将 msquic（含 quictls）、zstd、c-ares、spdlog、nlohmann/json、mimalloc 静态或 header-only 集成到主程序。未启用 Crashpad 时部署只需拷贝单个 `raypx2` 可执行文件；启用 Crashpad 时需同目录携带 `crashpad_handler`。
+主程序实际输出名为 `raypx2`，CMake 构建目标名仍为 `tcpquic-proxy`。运行时**不依赖**系统安装的 libzstd / libssl / libmsquic / libc-ares / libuv；默认将 msquic（含 quictls）、zstd、c-ares、libuv、spdlog、nlohmann/json、mimalloc 静态或 header-only 集成到主程序，不产生 `libuv.so` 依赖。未启用 Crashpad 时部署只需拷贝单个 `raypx2` 可执行文件；启用 Crashpad 时需同目录携带 `crashpad_handler`。
 
 ### 测试与脚本（不链接进二进制）
 
@@ -94,6 +95,7 @@ GCC 10 工具链，例如 `/usr/bin/gcc10-gcc` 与 `/usr/bin/gcc10-g++`。
 | `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | 可选 Crashpad：`AUTO` / `ON` / `OFF`；`ON` 要求 fork 子模块包含 vendored DEPS，并可检测或可由本机已有 GN/Ninja 构建 |
 | `TCPQUIC_CRASHPAD_AUTO_BUILD` | `ON` | 缺少 Crashpad 产物时自动用 vendored 源码本地构建；不会执行 `gclient sync` 或下载 `depot_tools` |
 | `TCPQUIC_PREFER_STATIC_OPENSSL_HELPER` | `ON` | 构建并复制 vendored `openssl` 辅助程序时优先尝试静态链接 |
+| `LIBUV_BUILD_SHARED` / `LIBUV_BUILD_TESTS` / `LIBUV_BUILD_BENCH` | `OFF`（强制） | 只构建并链接 vendored libuv 静态库，不构建共享库、测试或 benchmark |
 
 本项目所有平台统一使用 msquic 的 `quictls` TLS 后端；不支持 Windows Schannel 构建。
 

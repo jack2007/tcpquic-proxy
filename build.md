@@ -56,6 +56,7 @@ sudo apt install git cmake build-essential perl
 | [zstd](https://github.com/facebook/zstd) | `third_party/zstd` | 流式压缩 | `5233c58e` |
 | [spdlog](https://github.com/gabime/spdlog) | `third_party/spdlog` | 日志 | `8671ca4d` |
 | [c-ares](https://github.com/c-ares/c-ares) | `third_party/c-ares` | 异步 DNS 解析 | `c93e50f3` |
+| [libuv](https://github.com/libuv/libuv) | `third_party/libuv` | 跨平台异步 I/O 库（静态链接进 `raypx2`） | `1cfa32ff`（v1.52.1） |
 | [cpp-httplib](https://github.com/yhirose/cpp-httplib) | `third_party/cpp-httplib` | Admin HTTP/1.1 server（header-only） | `9d159bb4` |
 | [nlohmann/json](https://github.com/nlohmann/json) | `third_party/json` | JSON 配置、Admin API、测试工具 | `c363dc3e` |
 | [Crashpad](https://github.com/jack2007/crashpad) | `third_party/crashpad` | 可选 crash dump 支持；项目 fork 已 vendored `lss`、`mini_chromium`、`zlib`、`googletest` 等 DEPS 源码 | `df2c143e` |
@@ -69,7 +70,7 @@ sudo apt install git cmake build-essential perl
 - 关闭：`-DTCPQUIC_USE_MIMALLOC=OFF` → 项目 allocator 回退 glibc `malloc`，MsQuic `AUTO` 也随之关闭。
 - 部署：无需附带 `libmimalloc.so`
 
-**不需要** 的系统包：`libzstd-dev`、`libssl-dev`、`libmsquic-dev` 等。Crashpad 的 `third_party/lss/lss`、`third_party/mini_chromium/mini_chromium`、`third_party/zlib/zlib`、`third_party/googletest/googletest` 来自 `jack2007/crashpad` fork 的普通源码提交；主仓库 CMake 不执行 `gclient sync`，也不下载 `depot_tools`。
+**不需要** 的系统包：`libzstd-dev`、`libssl-dev`、`libmsquic-dev`、`libuv1-dev` 等。Crashpad 的 `third_party/lss/lss`、`third_party/mini_chromium/mini_chromium`、`third_party/zlib/zlib`、`third_party/googletest/googletest` 来自 `jack2007/crashpad` fork 的普通源码提交；主仓库 CMake 不执行 `gclient sync`，也不下载 `depot_tools`。
 
 ### 2.3 运行时依赖
 
@@ -77,7 +78,7 @@ sudo apt install git cmake build-essential perl
 
 - `libnuma`、`libstdc++`、`libgcc_s`、`libc`、`libm`（系统 glibc 环境）
 
-msquic（含 quictls）、zstd、c-ares、spdlog、nlohmann/json、mimalloc 均已静态或 header-only 集成到 `raypx2`。**默认部署只需拷贝主程序**，无需 `libmsquic.so`；启用 Crashpad 时还需同目录拷贝 `crashpad_handler`。
+msquic（含 quictls）、zstd、c-ares、libuv、spdlog、nlohmann/json、mimalloc 均已静态或 header-only 集成到 `raypx2`。**默认部署只需拷贝主程序**，无需 `libmsquic.so` 或 `libuv.so`；启用 Crashpad 时还需同目录拷贝 `crashpad_handler`。
 
 若使用 `-DTCPQUIC_MSQUIC_SHARED=ON` 构建，则需同时部署 `libmsquic.so*`（或通过 RPATH 指向 `build/msquic/bin/Release/`）。
 
@@ -110,7 +111,7 @@ cd tcpquic-proxy
 git submodule update --init --recursive
 ```
 
-此步骤会拉取 msquic、zstd、spdlog、c-ares、cpp-httplib、nlohmann/json、mimalloc、Crashpad 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
+此步骤会拉取 msquic、zstd、spdlog、c-ares、libuv、cpp-httplib、nlohmann/json、mimalloc、Crashpad 及 msquic 内部的 quictls 等嵌套子模块。**首次构建 quictls 耗时较长**（OpenSSL 源码编译）。
 
 验证子模块：
 
@@ -118,7 +119,7 @@ git submodule update --init --recursive
 git submodule status
 ```
 
-应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc`、`third_party/crashpad` 等均为已检出 commit，而非 `-` 前缀的空目录。
+应看到 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/c-ares`、`third_party/libuv`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc`、`third_party/crashpad` 等均为已检出 commit，而非 `-` 前缀的空目录。
 
 ### Step 3：选择构建目录
 
@@ -151,15 +152,19 @@ cmake -S . -B build \
 
 配置阶段 CMake 会依次：
 
-1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc` 是否存在；
+1. 检查 `third_party/msquic`、`third_party/zstd`、`third_party/spdlog`、`third_party/libuv`、`third_party/cpp-httplib`、`third_party/json`、`third_party/mimalloc` 是否存在；
 2. 设置 `QUIC_TLS_LIB=quictls`，`QUIC_BUILD_SHARED=OFF`（可通过 `TCPQUIC_MSQUIC_SHARED=ON` 改回动态库）；
 3. `add_subdirectory(third_party/msquic)` → 构建单体 `libmsquic.a`（含 quictls）；
 4. `add_subdirectory(third_party/zstd/build/cmake)` → 构建 libzstd；
 5. `add_subdirectory(third_party/spdlog)` → 构建 spdlog 静态库；
 6. 定义 `cpp_httplib` header-only INTERFACE target；
 7. `add_subdirectory(third_party/json)` → 定义 `nlohmann_json::nlohmann_json`；
-8. 可选检查 Crashpad client/util/base/handler；若缺失且 `TCPQUIC_CRASHPAD_AUTO_BUILD=ON`，使用 fork vendored DEPS 和本机已有 `gn`/`ninja` 本地构建；
-9. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 构建目标、输出 `raypx2`，并定义单元测试目标。
+8. `add_subdirectory(third_party/libuv)` → 只构建静态目标 `uv_a`（输出 `libuv.a`）；
+9. 可选检查 Crashpad client/util/base/handler；若缺失且 `TCPQUIC_CRASHPAD_AUTO_BUILD=ON`，使用 fork vendored DEPS 和本机已有 `gn`/`ninja` 本地构建；
+10. `add_subdirectory(src)` → 定义 `tcpquic-proxy` 构建目标、输出 `raypx2`，并定义单元测试目标。
+
+libuv 集成使用上游官方跨平台 CMake。本次仅完成 Linux 实机验证，macOS 与 Windows
+留待对应平台机器验证。
 
 ### Step 5：编译主程序
 
@@ -216,6 +221,7 @@ CMakeLists.txt (根)
 ├── third_party/spdlog/          → spdlog (static)
 ├── third_party/cpp-httplib/     → cpp_httplib (header-only INTERFACE)
 ├── third_party/json/            → nlohmann_json::nlohmann_json (header-only)
+├── third_party/libuv/           → uv_a / libuv.a（静态链接进 raypx2）
 ├── third_party/crashpad/        → 可选 Crashpad client/util/base/handler（fork vendored DEPS + 本地 GN/Ninja）
 ├── third_party/mimalloc/        → mimalloc-static（默认启用）
 └── src/CMakeLists.txt
@@ -244,6 +250,9 @@ CMakeLists.txt (根)
 | `ZSTD_BUILD_PROGRAMS` | `OFF` | 不构建 zstd 命令行工具 |
 | `ZSTD_BUILD_TESTS` | `OFF` | 不构建 zstd 测试 |
 | `SPDLOG_BUILD_SHARED` | `OFF` | spdlog 静态库 |
+| `LIBUV_BUILD_SHARED` | `OFF`（强制） | 不构建 libuv 共享库 |
+| `LIBUV_BUILD_TESTS` | `OFF`（强制） | 不构建 libuv 测试 |
+| `LIBUV_BUILD_BENCH` | `OFF`（强制） | 不构建 libuv benchmark |
 | `TCPQUIC_USE_MIMALLOC` | `ON` | 静态链接 vendored mimalloc；ASAN 构建会自动关闭 |
 | `TCPQUIC_MSQUIC_USE_MIMALLOC` | `AUTO` | 控制 vendored MsQuic 平台层 allocator patch |
 | `TCPQUIC_ENABLE_CRASHPAD` | `AUTO` | Crashpad crash dump：`AUTO` / `ON` / `OFF` |
@@ -259,6 +268,7 @@ CMakeLists.txt (根)
 | `QUIC_BUILD_PERF` | 视环境 | `ON` 时额外构建 `secnetperf` |
 | `MSQUIC_SOURCE_DIR` | `third_party/msquic` | 自定义 msquic 源码路径 |
 | `TCPQUIC_ZSTD_SOURCE_DIR` | `third_party/zstd` | 自定义 zstd 源码路径 |
+| `TCPQUIC_LIBUV_SOURCE_DIR` | `third_party/libuv` | 自定义 libuv 源码路径 |
 
 **恢复动态库构建（兼容旧部署脚本）：**
 
