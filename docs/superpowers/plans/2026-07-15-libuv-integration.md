@@ -100,7 +100,7 @@ target_link_libraries(tcpquic-proxy PRIVATE
 ```bash
 cmake -S . -B /tmp/tcpquic-proxy-libuv-build -DCMAKE_BUILD_TYPE=Release -DTCPQUIC_ENABLE_CRASHPAD=OFF
 cmake --build /tmp/tcpquic-proxy-libuv-build --target uv_a -j2
-find /tmp/tcpquic-proxy-libuv-build/libuv -type f -name 'libuv_a.a' -print
+find /tmp/tcpquic-proxy-libuv-build/libuv -type f -name 'libuv.a' -print
 ```
 
 预期：命令均退出 0，并输出静态归档路径。
@@ -188,8 +188,8 @@ cmake --build /tmp/tcpquic-proxy-libuv-build --target tcpquic-proxy -j2
 - [ ] **Step 2: 验证静态归档参与主程序链接**
 
 ```bash
-find /tmp/tcpquic-proxy-libuv-build/libuv -type f -name 'libuv_a.a' -print
-rg -n 'libuv_a\.a' /tmp/tcpquic-proxy-libuv-build/src/CMakeFiles/tcpquic-proxy.dir/link.txt
+find /tmp/tcpquic-proxy-libuv-build/libuv -type f -name 'libuv.a' -print
+rg -n 'libuv\.a' /tmp/tcpquic-proxy-libuv-build/src/CMakeFiles/tcpquic-proxy.dir/link.txt
 ```
 
 预期：找到静态归档，并在主程序链接命令中找到它。
