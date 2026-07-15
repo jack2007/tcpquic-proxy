@@ -64,7 +64,7 @@ relay 运行时。本设计新增一套与 native 源码隔离的跨平台 libuv
 | D-21 | 构建选择与回退 | 已确认 | CMake 构建期选择；单产物单 backend；失败不自动回退 |
 | D-22 | metrics 与诊断 | 已确认 | libuv 独立指标；只统一性能对比指标，不统一长期 snapshot 类型 |
 | D-23 | 功能与竞态测试 | 已确认 | native 基线保持不变；libuv 独立测试，先 Linux、后 macOS/Windows |
-| D-24 | 性能与容量验收 | 待确认 | native 对照；吞吐、CPU、p99、内存、扩展效率和 breaking point |
+| D-24 | Linux 性能验收 | 待确认 | 测试范围已确认采用 DGX netem 矩阵；native/libuv 直接淘汰阈值待确认 |
 | D-25 | 评测与退出标准 | 已确认 | 独立构建评测；达标删除 native，不达标删除 libuv |
 
 ## 4. 已确认的基础设计
@@ -714,33 +714,97 @@ worker。第一轮只对 Linux 作集成验证；不得把 Linux 结果表述为
 terminal，再完成性能评测，最后实现完整 runtime stop、强制 abort、反复启停和 stop 专项
 竞态/长稳测试。
 
-### 6.18 D-24 性能与容量验收（待确认）
+### 6.18 D-24 Linux 性能验收（测试范围已确认，淘汰阈值待确认）
 
-数据面以现有 iperf/throughput/netem 脚本为主，k6用于可通过 HTTP/admin 驱动的并发和控制面基线，不用 k6伪装 QUIC/TCP 数据面负载。
+本轮性能验收仅在 Linux 执行，直接参照
+[`docs/test/dgx-netem-delay-loss-matrix_cn.md`](test/dgx-netem-delay-loss-matrix_cn.md)。macOS
+和 Windows 不属于本轮 D-24 范围，不得从 Linux 结果推断其他平台性能。
 
 native 与 libuv 使用同一 commit 的两个独立构建目录。除
 `TCPQUIC_RELAY_BACKEND=native|libuv` 导致的 relay source set 差异外，编译器、优化级别、
-依赖版本、链接方式、tuning 和运行环境必须一致。
+依赖版本、链接方式、tuning 和运行环境必须一致。两端必须部署同一种 compiled backend，
+禁止 native/libuv 混搭形成不可解释结果。
 
-建议场景：
+#### 6.18.1 固定 DGX 矩阵
 
-- baseline：无压缩、低 RTT、单连接；
-- peak：目标并发和目标吞吐；
-- stress：逐步增加连接、带宽、worker；
-- spike：短时连接与流量突增；
-- soak：至少数小时持续双向流量；
-- netem：延迟、丢包、重排、连接重置；
-- breaking point：记录首次持续 backlog、错误率或 loop lag 失控点。
+- 使用两台 DGX 的 200Gbps 直连数据网；SSH 继续走 `172.16.*` 管理网；
+- netem 只允许配置在数据网卡，禁止作用于管理网口；
+- 单 QUIC connection、单 HTTP CONNECT stream；
+- `--compress off --tuning wan --connections 1`；
+- download 和 upload 均执行；
+- 14 个 `delay × loss` 组合：delay 为 `10/20/50/80/100/150/200ms`，loss 为 `5%/10%`；
+- 每个方向、每个组合至少重复 3 轮；
+- 每套 backend 矩阵开始前只启动一次两端 `raypx2`，正常 case 之间不得重启或替换二进制；
+- 若需要修改、替换或重启 `raypx2`，当前 backend 的整套矩阵作废，必须从前置清理重新执行；
+- download 在对端发送网卡配置 netem，upload 在本机发送网卡配置 netem；
+- 默认不启用 trace 文件，保留 `--diag-stats --diag-stats-interval 1`。
 
-对比指标：吞吐、p50/p95/p99、CPU、context switch、RSS、buffer pool、每 worker公平性、terminal收敛时间。具体门槛待确认。
+native 和 libuv 必须各自完成一套独立、完整的矩阵。为识别环境漂移，记录 backend 执行
+顺序，并在每套矩阵前后重复 `10ms + 5%` 的 download/upload anchor case。若资源允许，使用
+`native -> libuv -> native anchor` 的交叉顺序校验基线稳定性。
+
+#### 6.18.2 证据与结果目录
+
+沿用参考文档中的 qdisc、iperf JSON、proxy 日志、admin allocator dump、route/interface 和
+异常现场证据。结果根目录增加 backend 层级或等价 metadata：
+
+```text
+docs/dgx-netem-delay-loss-matrix-<timestamp>/
+  native/
+    build-metadata.txt
+    proxy/
+    cases/
+    summary.csv
+    summary.md
+  libuv/
+    build-metadata.txt
+    proxy/
+    cases/
+    summary.csv
+    summary.md
+  comparison.csv
+  comparison.md
+```
+
+`build-metadata.txt` 至少保存 commit、submodule commit、compiled relay backend、完整 CMake
+cache/命令、编译器、优化级别、二进制 hash、tuning 和两端部署路径。
+
+#### 6.18.3 对比口径
+
+先按参考文档独立判定每套 backend 的 hard/soft anomaly。`baseline_delta_pct > 20%` 继续
+作为单套矩阵的异常停止与现场保留规则，不自动等同于 backend 淘汰线。
+
+对每个相同的 `direction/delay/loss` 组合，使用至少 3 轮的中位数比较：
+
+```text
+native_median_mbps
+libuv_median_mbps
+libuv_delta_pct =
+  (libuv_median_mbps - native_median_mbps) / native_median_mbps * 100
+```
+
+`comparison.csv` 至少包含吞吐中位数/最小值/最大值、失败次数、retransmits、qdisc drop/backlog、
+srtt、BBR bandwidth、bytes in flight、CPU、RSS、context switch、pending bytes、queue-full/send
+错误和 compiled backend。最终报告必须分别汇总 download/upload、5%/10% loss 和全部 14 个
+组合，不能只报告整体平均值掩盖局部退化。
+
+#### 6.18.4 本轮不覆盖的容量目标
+
+参考矩阵固定单 connection、单 stream，因此本轮 D-24 不声称验证多连接容量、worker 扩展
+效率、spike、breaking point 或多小时 soak。这些项目只有在 Linux DGX 对比显示 libuv 值得
+继续评估后，才另立后续性能测试；macOS/Windows 性能也暂不纳入本轮。
+
+待确认问题：参考文档中的 20% 仅继续用于单 backend 异常判定，还是同时作为任一匹配组合
+中 libuv 相对 native 的最大允许吞吐退化；若不是，需要给出独立的 libuv 淘汰阈值。
 
 ### 6.19 D-25 评测与退出标准（已确认）
 
 评测阶段：
 
 1. native build 运行现有测试并建立功能、稳定性和性能基线；
-2. libuv build 依次完成 Linux 正常功能、异常矩阵、性能、容量和长稳验证；
-3. 在对应机器完成 macOS/Windows libuv 构建、功能和性能验证；
+2. libuv build 依次完成 Linux 正常功能、异常矩阵和本轮 DGX netem 性能验证；容量和长稳
+   性能只在本轮结果值得继续评估后另立测试；
+3. 本轮性能取舍只使用 Linux DGX 结果；macOS/Windows 的验证不属于 D-24，后续另行安排；
 4. 使用同一 commit、编译器/优化级别、依赖版本、tuning、CPU affinity、worker 数、负载、
    网络条件和数据集进行对照；
 5. 两套产物的唯一预期差异是 relay source set，并记录完整构建证据；
@@ -862,7 +926,8 @@ client ingress
 | 2026-07-15 | D-22 | libuv 使用独立 snapshot，只统一评测指标 |
 | 2026-07-15 | D-23 | native 测试保持不变，libuv 独立测试；先 Linux 后 macOS/Windows |
 | 2026-07-15 | D-25 | 评测后只保留胜出实现并删除 source-set 选择和落选实现 |
+| 2026-07-15 | D-24 范围 | Linux 参照 DGX netem 14 组合矩阵对比 native/libuv；其他平台暂不考虑 |
 
 ## 11. 下一项确认
 
-下一项待确认为 **D-24：性能与容量验收门槛**。
+下一项待确认为 **D-24：Linux DGX native/libuv 吞吐淘汰门槛**。
