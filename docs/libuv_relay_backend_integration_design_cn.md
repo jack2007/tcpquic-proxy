@@ -66,6 +66,8 @@ relay 运行时。本设计新增一套与 native 源码隔离的跨平台 libuv
 | D-23 | 功能与竞态测试 | 已确认 | native 基线保持不变；libuv 独立测试，先 Linux、后 macOS/Windows |
 | D-24 | Linux 性能评测 | 已确认 | 采用 DGX netem 矩阵，不设自动淘汰线，由负责人依据完整数据判断 |
 | D-25 | 评测与退出标准 | 已确认 | 独立构建评测；达标删除 native，不达标删除 libuv |
+| D-26 | libuv allocator 适配 | 已确认 | 正常构建在首个 libuv API 前进程级注册 mimalloc；sanitizer 构建允许使用 system allocator |
+| D-27 | libuv backend 平台接口边界 | 已确认 | backend 只经 libuv、C++ 标准库、现有 third_party 和项目公共接口访问能力，禁止直接调用 OS 强相关接口 |
 
 ## 4. 已确认的基础设计
 
@@ -830,6 +832,93 @@ libuv 不达标：
 
 评测期间的回切通过重新部署 native build 和进程重启完成；不在活跃 relay 上热切实现。
 
+### 6.20 D-26 libuv allocator 显式适配 mimalloc（已确认）
+
+libuv backend 不依赖链接顺序、符号抢占或 mimalloc 全局 override，而是在 libuv runtime
+bootstrap 阶段调用 `uv_replace_allocator()`，显式注册四个进程级 allocator：
+
+```text
+uv_replace_allocator(
+    LibuvMiMalloc,
+    LibuvMiRealloc,
+    LibuvMiCalloc,
+    LibuvMiFree)
+```
+
+`LibuvMi*` 适配函数分别调用 `mi_malloc`、`mi_realloc`、`mi_calloc` 和 `mi_free`。保留专用适配
+层而不直接散布 mimalloc 调用，便于 exactly-once 初始化、统计、故障注入和单元测试。该设计
+不改变项目当前 `MI_OVERRIDE=OFF`、`MI_OSX_INTERPOSE=OFF` 和 `MI_OSX_ZONE=OFF` 的全局隔离
+策略，也不改变 native backend 的内存分配行为。
+
+初始化必须遵守以下顺序和失败语义：
+
+1. allocator bootstrap 必须发生在进程内第一次 libuv API 调用之前；包括
+   `uv_loop_init()`、`uv_thread_create()`、`uv_mutex_init()`、`uv_async_init()` 以及任何其他
+   runtime/worker/handle 初始化；
+2. 注册是进程全局、线程安全且 exactly-once 的操作，不按 runtime、loop 或 worker 重复执行；
+3. 正常 libuv 构建强制要求 `TCPQUIC_USE_MIMALLOC=ON`，不满足时 CMake 配置直接失败，禁止
+   静默回退 system allocator；
+4. 项目识别出的 ASan 等 sanitizer 构建允许沿用现有规则关闭 mimalloc，此时明确不调用
+   mimalloc allocator replacement，libuv 使用 system allocator；
+5. 正常构建中 `uv_replace_allocator()` 失败时，libuv runtime 启动失败，不得创建 loop、worker
+   或 handle，也不得自动回退到 native backend；
+6. runtime stop 后不恢复 system allocator。`Start -> Stop -> Start` 复用已经注册的相同
+   allocator，避免在仍可能存在旧分配对象时切换 allocator；
+7. allocator 必须满足 libuv 的跨线程分配/释放要求；不得用 worker-local heap 或
+   thread-affine wrapper 改变 mimalloc 的线程安全语义。
+
+新增诊断至少报告：compiled allocator（`mimalloc|system`）、replacement 是否适用及是否成功、
+失败的 libuv status。D-24 的 `build-metadata.txt` 和对比结果必须记录
+`TCPQUIC_USE_MIMALLOC`、sanitizer 状态和 libuv allocator 状态，避免 allocator 配置差异污染
+native/libuv 性能结论。
+
+测试至少覆盖：首个 libuv API 前完成注册、多 worker 并发启动只注册一次、反复启停不重复
+注册、注册失败时零 libuv 资源创建、四类分配确实经过适配函数，以及 sanitizer 构建使用
+system allocator 并保持 sanitizer clean。allocator failure injection 只允许在 bootstrap 前
+安装；测试不得在已有 libuv allocation 存活时替换 allocator。
+
+### 6.21 D-27 libuv backend 平台接口边界（已确认）
+
+libuv backend 的目标是以同一套源码跨 Linux、macOS 和 Windows 评测。其生产实现及专用支持
+模块只能使用：
+
+- libuv 提供的公共接口；
+- C++ 标准库接口；
+- 本设计确认时仓库已有 third_party 的公共接口，例如 MsQuic、mimalloc、zstd 和 spdlog；
+- 项目已有的跨平台公共接口和数据类型，例如 `TqStreamLifetime`、compressor/decompressor、
+  relay tuning、buffer pool、metrics 和 trace 接口。
+
+“允许调用项目公共接口”不允许绕过本条约束：若该调用只是为了从 libuv backend 代调用某个
+OS syscall 或平台专用 helper，同样视为违规。新增 third_party 依赖也不自动进入白名单，必须
+单独设计和确认。
+
+libuv backend 禁止直接调用或依赖操作系统强相关能力，包括但不限于：
+
+- Linux `epoll`、macOS `kqueue`、Windows IOCP 以及 `poll/select` 等原生事件接口；
+- `socket/accept/connect/close/shutdown/read/write/readv/writev`、`fcntl/ioctl/setsockopt` 等
+  socket、fd 或 handle 系统接口；
+- pthread、futex、Windows Event/Critical Section 或其他平台线程和同步接口；
+- 在 backend 源文件中直接包含 `sys/socket.h`、`unistd.h`、`windows.h` 等平台系统头；
+- 使用 `__linux__`、`__APPLE__`、`_WIN32` 等条件分支形成平台专用数据面、ownership、错误
+  恢复或性能 fast path。
+
+平台类型若由 libuv 或其他获准 third_party 公共头传递，可以作为不透明 API 参数使用；不得
+据此提取 native handle 后调用 OS API。编译器属性、warning 控制等不改变运行语义的构建适配
+不属于平台数据面实现，但应限制在构建层或独立 portability header，不能演变为 backend
+行为分叉。
+
+socket 生命周期边界固定为：现有 client ingress 或 server dial reactor 负责创建、连接以及
+handoff 前必须完成的 socket option；libuv backend 接收已建立的 socket，只通过
+`uv_tcp_open()` 纳入 handle ownership，通过 `uv_read_start()`、`uv_write()`、
+`uv_shutdown()` 和 `uv_close()` 推进后续生命周期。进入 `UvHandleOwned` 后禁止裸
+`close()`。如果某项需求无法由 libuv、C++ 标准库、现有 third_party 或既有跨平台公共接口
+表达，必须停止实现并回到设计层确认，不得增加 Linux/macOS/Windows fallback。
+
+准入检查包括：代码评审逐项检查 include/API/平台宏；为 libuv 专用 source set 增加静态扫描
+门禁；验证 libuv target 不链接 native worker 对象；Linux 首轮通过后在 macOS/Windows 使用
+相同 backend 源文件编译和验证。测试 harness、netem 脚本和外部故障注入工具可以使用所在
+平台能力，但这些调用不得编译进 libuv backend，也不能成为生产正确性的必要条件。
+
 ## 7. 系统级验证框架
 
 ### 7.1 端到端功能图
@@ -879,6 +968,8 @@ client ingress
 - 同一二进制运行时选择、混合或热切 native/libuv；
 - 抽取长期 `IRelayBackend` 或统一 native/libuv snapshot 类型；
 - 修改 Linux/Windows/macOS native worker 内部实现；
+- 在 libuv backend 中直接调用 OS syscall、平台事件/同步接口或增加平台专用 fast path；
+- 通过全局 allocator override 使 libuv 间接使用 mimalloc；
 - 为压缩新增独立计算线程池；
 - 立即删除 Linux/Windows/macOS native backend；
 - 在评测结论前长期承诺保留任一实现；
@@ -899,6 +990,10 @@ client ingress
 10. CMake source set 选择错误可能把两套同名 `TqRelay*` 实现同时链接，必须在配置阶段拒绝。
 11. 两个构建目录的编译参数或依赖漂移会污染性能结论，评测证据必须保存完整 build metadata。
 12. common header/调用点的 libuv 条件分支可能意外改变 native build，native 现有测试是强制回归门禁。
+13. `uv_replace_allocator()` 调用过晚或重复切换 allocator 会造成跨 allocator 释放；bootstrap
+    顺序和进程级 exactly-once 必须成为测试门禁。
+14. 为补足 libuv API 差异而引入 OS fallback 会使三平台产生不同 ownership 和 terminal
+    语义；缺失能力必须回到设计层解决。
 
 ## 10. 决策日志
 
@@ -930,9 +1025,13 @@ client ingress
 | 2026-07-15 | D-25 | 评测后只保留胜出实现并删除 source-set 选择和落选实现 |
 | 2026-07-15 | D-24 范围 | Linux 参照 DGX netem 14 组合矩阵对比 native/libuv；其他平台暂不考虑 |
 | 2026-07-15 | D-24 判定 | 不设置自动淘汰线，最终由项目负责人依据完整测试数据判断 |
+| 2026-07-15 | D-26 | 正常 libuv 构建在首个 libuv API 前进程级注册 mimalloc；sanitizer 构建允许 system allocator |
+| 2026-07-15 | D-27 | libuv backend 禁止直接调用 OS 强相关接口，只使用 libuv、标准库、现有 third_party 和项目公共接口 |
 
 ## 11. 设计确认结果
 
-D-01～D-25 已全部确认。后续开发计划必须完整继承本文约束，尤其是 native 零改动、构建期
+D-01～D-27 已全部确认。后续开发计划必须完整继承本文约束，尤其是 native 零改动、构建期
 互斥 source set、Linux-first 验证、D-09～D-18 ownership/terminal 规则，以及 D-19 在正常
-功能和性能验证之后实施。D-24 只生成完整对比证据，不自动决定保留哪套实现。
+功能和性能验证之后实施。D-24 只生成完整对比证据，不自动决定保留哪套实现。D-26 要求
+libuv 对 mimalloc 显式、进程级且先于所有 libuv API 完成适配；D-27 禁止 libuv backend
+直接调用 OS 强相关接口或形成平台专用实现分支。
