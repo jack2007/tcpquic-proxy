@@ -1006,12 +1006,16 @@ rtk git commit -m "feat: add bounded libuv relay runtime shutdown"
 - Consumes: Tasks 1～12 全部 commit 和测试证据。
 - Produces: D-01～D-27 requirement-to-test traceability、Linux 验证状态和最终集成 commit。
 
-- [ ] **Step 1: 建立 D-01～D-27 追踪表**
+> 2026-07-16 范围更新：负责人确认本次只闭环 libuv backend。下述 native regression 与
+> native 零改动审计取消，不再作为 Task 13 完成门禁。后续如需从当前状态派生只保留 libuv
+> 代码的分支，作为独立目标另行设计和执行；本任务不删除 native 实现。
+
+- [x] **Step 1: 建立 D-01～D-27 追踪表**
 
 每个编号记录实现文件、测试 target、验证平台和证据目录。D-24 标注“负责人判断，无自动淘汰线”；
 D-19 标注最后完成；macOS/Windows 标注“未在本轮验证”，不能写成 PASS。
 
-- [ ] **Step 2: 执行完整 libuv build/test**
+- [x] **Step 2: 执行完整 libuv build/test**
 
 Run: `rtk cmake -S . -B build/libuv-final -DTCPQUIC_RELAY_BACKEND=libuv -DTCPQUIC_USE_MIMALLOC=ON -DCMAKE_BUILD_TYPE=Release`
 Expected: configure PASS，compiled backend=libuv，allocator=mimalloc。
@@ -1020,12 +1024,16 @@ Run: `rtk cmake --build build/libuv-final -j2`
 Expected: PASS。
 
 Run: `rtk ctest --test-dir build/libuv-final --output-on-failure`
-Expected: 100% tests passed。
+Actual: exit 0，但项目未注册 CTest，输出 `No tests were found`，不计为测试通过证据；Task 13
+改为逐个执行 `build/libuv-final/bin/Release/tcpquic_*test`，53/53 路径通过。
 
 Run: `rtk python3 scripts/check-libuv-backend-api.py src/tunnel/libuv_allocator.cpp src/tunnel/libuv_relay.cpp src/tunnel/libuv_relay_worker.cpp src/tunnel/libuv_relay_quic_to_tcp.cpp src/tunnel/libuv_relay_tcp_to_quic.cpp src/tunnel/libuv_relay_terminal.cpp`
 Expected: exit 0。
 
-- [ ] **Step 3: 执行完整 native regression**
+- [x] **Step 3: 执行完整 native regression（已取消）**
+
+负责人于 2026-07-16 取消本步骤；本次目标只要求完成 libuv 相关工作。此前已产生的 native
+构建/测试输出仅作为附加信息，不属于完成条件。
 
 Run: `rtk cmake -S . -B build/native-final -DTCPQUIC_RELAY_BACKEND=native -DCMAKE_BUILD_TYPE=Release`
 Expected: configure PASS，compiled backend=native。
@@ -1036,7 +1044,10 @@ Expected: PASS。
 Run: `rtk ctest --test-dir build/native-final --output-on-failure`
 Expected: 100% tests passed。
 
-- [ ] **Step 4: 审计 native 零改动和 source-set 互斥**
+- [x] **Step 4: 审计 native 零改动和 source-set 互斥（已取消）**
+
+负责人于 2026-07-16 明确取消 native 代码零改动审计。source-set 的 libuv 选择、非法 backend
+拒绝和 libuv 生产源码 API 门禁仍保留在本次 libuv 验证范围内。
 
 Run: `rtk git diff master...HEAD -- src/tunnel/relay.cpp src/tunnel/linux_relay_worker.cpp src/tunnel/linux_relay_worker.h src/tunnel/darwin_relay_worker.cpp src/tunnel/darwin_relay_worker.h src/tunnel/windows_relay_worker.cpp src/tunnel/windows_relay_worker.h`
 Expected: 无输出。
@@ -1044,14 +1055,14 @@ Expected: 无输出。
 Run: `rtk git diff --check master...HEAD`
 Expected: exit 0。
 
-- [ ] **Step 5: 提交追踪文档**
+- [x] **Step 5: 提交追踪文档**
 
 ```bash
 rtk git add docs/libuv_relay_backend_integration_design_cn.md docs/test/libuv-relay-linux-functional_cn.md
 rtk git commit -m "docs: record libuv relay verification traceability"
 ```
 
-- [ ] **Step 6: 合入 master 前最终评审**
+- [x] **Step 6: 合入 master 前最终评审**
 
 使用 `requesting-code-review` 对 source-set、allocator 顺序、registration ownership、两个数据方向、
 terminal、D-19 和平台 API 门禁逐项审查。评审和全部 fresh verification 通过后，将集成分支以

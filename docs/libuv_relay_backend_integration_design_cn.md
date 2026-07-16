@@ -1,6 +1,6 @@
 # libuv Relay Backend 集成设计确认稿
 
-> 状态：设计已确认，待开发计划  
+> 状态：设计已确认，已进入实现与验证追踪
 > 创建日期：2026-07-15  
 > 适用范围：`tcpquic-proxy` relay 数据面  
 > 说明：本文是持续更新的设计确认清单。每项经确认后，必须把最终结论、约束和确认日期写回本文；全部确认前不进入实施计划。
@@ -919,9 +919,97 @@ handoff 前必须完成的 socket option；libuv backend 接收已建立的 sock
 相同 backend 源文件编译和验证。测试 harness、netem 脚本和外部故障注入工具可以使用所在
 平台能力，但这些调用不得编译进 libuv backend，也不能成为生产正确性的必要条件。
 
-## 7. 系统级验证框架
+## 7. 实现、测试、平台与证据追踪
 
-### 7.1 端到端功能图
+本节记录当前实现落点和验证入口，不以“存在源码或测试”代替 fresh 执行结果。表中的
+验证结果以 2026-07-16 Task 13 fresh 执行为准。macOS 与 Windows **未在本轮验证**，不得从
+Linux 构建、单测、功能或性能结果推断为 PASS。负责人已确认本次只闭环 libuv backend；
+native regression 和 native 零改动审计取消。后续派生只保留 libuv 代码的分支属于独立目标，
+本次不删除 native 实现。
+
+### 7.1 证据索引
+
+| 代号 | 证据位置 | 当前用途与状态 |
+|---|---|---|
+| E-LUV | `build/libuv-final/` 及 Task 13 报告 | libuv Release configure/build 通过；53 个 `tcpquic_*test` 可执行测试全部通过；CTest 未注册测试，输出 `No tests were found` |
+| E-NAT | — | **负责人取消** native regression，不属于本次完成门禁 |
+| E-API | `scripts/check-libuv-backend-api.py` 及 `tests/scripts/test_check_libuv_backend_api.py` | 生产源码扫描 exit 0；Python 契约测试 32 项通过、1 项因 lane worktree 不存在跳过 |
+| E-FUNC | `docs/test/libuv-relay-linux-functional-<timestamp>/` | Linux 功能/故障 formal evidence；**本轮尚无正式结果目录** |
+| E-DGX | 本次会话中已展示并由负责人确认 OK 的 Linux DGX 数据 | D-24 性能结果已由负责人接受；无自动淘汰线；当前工作区未保存正式对照目录，因此不把历史单 backend 目录冒充本轮原始证据 |
+| E-NATIVE-AUDIT | — | **负责人取消** native 代码零改动审计 |
+| E-ASAN | `build-terminal-asan/` 及 Task 13 报告 | system allocator 的 ASan/LeakSanitizer 聚焦验证：worker queue、runtime stop、terminal convergence 全部通过 |
+| E-SRC | 本表列出的实现文件、CMake fragment、单元测试和脚本契约 | 静态追踪依据；只证明落点存在，不证明运行通过 |
+
+仓库已有的
+`docs/dgx-netem-delay-loss-matrix-20260706-083620/` 和
+`docs/dgx-netem-delay-loss-matrix-20260712-071932/` 是早期单 backend 历史结果索引。前者含
+1 个失败 case，后者在 39/84 case 后因数据有效性门禁停止；二者都不含本设计要求的同 commit
+`native/`、`libuv/` 和 `comparison.*` 对照结构，因此只能用于环境和流程参考，不能替代负责
+人已经审阅的本轮会话数据，也不能单独作为 D-25 删除实现的依据。
+
+### 7.2 D-01～D-27 追踪表
+
+表中测试 target 是最直接的主证据入口；同一决策也可能被其他 lane 或 Linux formal runner
+交叉覆盖。该表的“fresh 待补”文字是实施映射建立时的原始状态，当前执行结论统一由 7.3
+覆盖：E-LUV、E-API、E-ASAN 已完成，D-24 数据已由负责人接受，E-NAT/E-NATIVE-AUDIT 已取消；
+macOS/Windows 本轮未验证。
+
+| 编号 | 实现文件 | 主要测试 target / 门禁 | 验证平台 | 证据目录/状态 |
+|---|---|---|---|---|
+| D-01 | `CMakeLists.txt`、`src/CMakeLists.txt`；`src/tunnel/libuv_relay*.{h,cpp}` | backend/API 契约测试；`tcpquic_production_linkage_guard_test` | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-API |
+| D-02 | `libuv_relay_worker.{h,cpp}`、`libuv_relay_event_queue.h` | `tcpquic_libuv_relay_worker_queue_test`、`tcpquic_libuv_relay_metrics_test` | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-ASAN |
+| D-03 | `libuv_relay_quic_to_tcp.cpp`、`libuv_relay_tcp_to_quic.cpp`、`protocol/compress.cpp` | 两个 libuv 数据方向 test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-04 | `libuv_relay.cpp`、`libuv_relay_worker.cpp`；DNS 仍由既有 server dial/c-ares 路径承担 | E-API；E-FUNC 的 HTTP CONNECT、SOCKS5、port-forward case | Linux：API 边界已验证；macOS/Windows：未在本轮验证 | E-API；E-FUNC 复跑规程 |
+| D-05 | `libuv_relay.cpp`、`libuv_relay_worker.{h,cpp}` | registration、worker queue test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-06 | `libuv_relay_event_queue.h`、`libuv_relay_worker.{h,cpp}` | worker queue test、E-API | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-API |
+| D-07 | `libuv_relay_worker.{h,cpp}` 的注册状态机 | worker queue、registration test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-08 | `libuv_relay_worker.{h,cpp}` 的 runtime worker 集合和 round-robin | worker queue、metrics test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-09 | `libuv_relay.cpp`、`libuv_relay_worker.cpp`、`libuv_relay_internal.h` | registration test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-10 | `libuv_relay_worker.cpp` 的 publish → open → read start → Active 顺序 | registration test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-11 | internal、worker、QUIC→TCP 实现 | registration、QUIC→TCP test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV |
+| D-12 | `libuv_relay_quic_to_tcp.cpp` | QUIC→TCP test；E-FUNC download/fault case | Linux：单测已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-13 | QUIC→TCP、compress 实现 | QUIC→TCP test；E-FUNC zstd download | Linux：单测已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-14 | `libuv_relay_tcp_to_quic.cpp` | TCP→QUIC test；E-FUNC upload/half-close | Linux：单测已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-15 | TCP→QUIC、compress 实现 | TCP→QUIC test；E-FUNC zstd upload | Linux：单测已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-16 | internal、两个方向实现、tuning | 两方向、metrics、queue pressure test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程 |
+| D-17 | terminal、两个方向、公共 lifetime/convergence | terminal、两方向 test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-ASAN；E-FUNC 复跑规程 |
+| D-18 | terminal、worker、公共 lifetime/convergence | terminal、registration、queue test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-ASAN；E-FUNC 复跑规程 |
+| D-19 | worker、terminal | runtime stop、registration test | Linux：已验证且按计划最后完成；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-ASAN；E-FUNC 复跑规程 |
+| D-20 | 根/`src/CMakeLists.txt`、libuv CMake fragments、`relay.h` | API/backend 契约、ready contract、linkage guard | Linux：已验证；macOS/Windows：未在本轮验证 | E-LUV、E-API |
+| D-21 | CMake、main、metrics/memory stats | backend selection、metrics、libuv configure/build | Linux：已验证；macOS/Windows：未在本轮验证 | E-LUV、E-API |
+| D-22 | worker、relay metrics、memory stats | metrics、system allocator metrics test | Linux：已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV；E-FUNC 复跑规程、E-DGX |
+| D-23 | libuv tests/CMake fragments、functional runner | 全部 libuv targets、functional runner 契约 | Linux：Release/ASan 已验证；macOS/Windows：**未在本轮验证** | E-LUV、E-ASAN；E-FUNC 复跑规程 |
+| D-24 | DGX runner、evidence 工具 | backend matrix test；会话测试数据 | 仅 Linux DGX：负责人已接受；macOS/Windows：不在本轮范围 | E-DGX；**由负责人判断，无自动淘汰线** |
+| D-25 | 本文 D-24/D-25 规则；构建 source-set 暂时并存 | 负责人已确认 libuv 性能满足需求 | Linux：性能已接受；macOS/Windows：未在本轮验证 | 仅保留 libuv 的分支属于后续独立目标；本次不执行 |
+| D-26 | allocator、CMake、memory stats | allocator、metrics、system allocator metrics test | Linux：Release 与 ASan 已验证；macOS/Windows：未在本轮验证 | E-SRC、E-LUV、E-ASAN |
+| D-27 | API scanner、CMake API target | E-API；Python 契约测试 | Linux：已验证；macOS/Windows：未在本轮验证 | E-API |
+
+### 7.3 Task 13 fresh 验证登记
+
+2026-07-16 fresh 验证结果如下。CTest 当前没有注册项目，因此其 exit 0 不能表述为测试通过；
+实际回归以逐个运行构建目录中的测试二进制为准。
+
+| 门禁 | 命令/范围 | 当前状态 | 实际证据待填项 |
+|---|---|---|---|
+| libuv configure | `cmake -S . -B build/libuv-final ...` | 通过 | Release、backend=`libuv`、mimalloc=ON，exit 0 |
+| libuv build | `cmake --build build/libuv-final -j2` | 通过 | `raypx2` 和全部 libuv 专项目标构建成功，exit 0 |
+| libuv tests | CTest + 逐二进制运行 | 通过（有基础设施备注） | CTest：0 tests；逐个运行 53 个 `tcpquic_*test`：53/53 通过 |
+| 平台 API | Task 13 列出的生产 `.cpp` + Python 契约测试 | 通过 | 生产扫描 exit 0；unittest 32 passed、1 skipped |
+| libuv ASan | system allocator 聚焦构建 | 通过 | worker queue、runtime stop、terminal convergence 3/3 通过，无 sanitizer 报告 |
+| native configure/build/tests | — | 已取消 | 负责人决定本次只闭环 libuv；不作为完成门禁 |
+| native 零改动/source-set | — | 已取消 | native 代码零改动审计取消；libuv source-set/非法值/API 门禁仍通过 |
+| Linux functional | 见 `docs/test/libuv-relay-linux-functional_cn.md` | 历史功能验证已完成；本轮未重跑 formal runner | 当前工作区无新的 formal 结果目录，不虚构目录证据 |
+| DGX 对照 | 会话中已展示的 Linux 数据 | 负责人已确认 OK | 满足需求；无自动淘汰线；本轮不重跑 |
+| macOS | 相同 libuv backend 源码构建/验证 | 未在本轮验证 | 后续独立机器证据 |
+| Windows | 相同 libuv backend 源码构建/验证 | 未在本轮验证 | 后续独立机器证据 |
+
+D-24 的 `baseline_delta_pct > 20%` 是数据有效性异常停止线，不是 backend 自动淘汰线。负责人
+已确认当前 libuv 性能满足需求。删除 native、派生仅保留 libuv 代码的分支属于后续独立目标，
+本任务不执行。
+
+## 8. 系统级验证框架
+
+### 8.1 端到端功能图
 
 ```text
 client ingress
@@ -937,7 +1025,7 @@ client ingress
 
 每个边界都需要成功、失败、超时、取消、并发和停止场景，并断言日志、指标、资源和用户可见结果。
 
-### 7.2 性能基线框架
+### 8.2 性能基线框架
 
 - 环境：固定 CPU、内存、NIC、MsQuic/libuv版本和 tuning。
 - 对照：同一 commit 和配置，仅切换构建期 relay source set。
@@ -946,7 +1034,7 @@ client ingress
   完整报告后决定。
 - 证据：脚本参数、版本、原始日志、metrics snapshot、结果汇总。
 
-### 7.3 异常与恢复框架
+### 8.3 异常与恢复框架
 
 至少覆盖：
 
@@ -958,7 +1046,7 @@ client ingress
 - late SEND_COMPLETE/RECEIVE/SHUTDOWN_COMPLETE；
 - 检测信号、用户影响、自动缓解、恢复步骤和验收条件。
 
-## 8. 明确非目标
+## 9. 明确非目标
 
 第一阶段不做：
 
@@ -976,7 +1064,7 @@ client ingress
 - 同时重写 compressor/decompressor API；
 - 未经实机测试宣称三个平台均已验证。
 
-## 9. 主要风险
+## 10. 主要风险
 
 1. MsQuic callback 同步等待注册会增加协议线程停顿；本设计先保持 native 语义，必须通过 register wait metrics 验证。
 2. `uv_async_send()` 允许合并，命令队列不能把 wake 次数当作命令数。
@@ -995,7 +1083,7 @@ client ingress
 14. 为补足 libuv API 差异而引入 OS fallback 会使三平台产生不同 ownership 和 terminal
     语义；缺失能力必须回到设计层解决。
 
-## 10. 决策日志
+## 11. 决策日志
 
 | 日期 | 编号 | 结论 |
 |---|---|---|
@@ -1028,10 +1116,11 @@ client ingress
 | 2026-07-15 | D-26 | 正常 libuv 构建在首个 libuv API 前进程级注册 mimalloc；sanitizer 构建允许 system allocator |
 | 2026-07-15 | D-27 | libuv backend 禁止直接调用 OS 强相关接口，只使用 libuv、标准库、现有 third_party 和项目公共接口 |
 
-## 11. 设计确认结果
+## 12. 设计确认结果
 
-D-01～D-27 已全部确认。后续开发计划必须完整继承本文约束，尤其是 native 零改动、构建期
-互斥 source set、Linux-first 验证、D-09～D-18 ownership/terminal 规则，以及 D-19 在正常
+D-01～D-27 已全部确认。后续开发计划必须完整继承本文约束，尤其是构建期互斥 source set、
+Linux-first 验证、D-09～D-18 ownership/terminal 规则，以及 D-19 在正常
 功能和性能验证之后实施。D-24 只生成完整对比证据，不自动决定保留哪套实现。D-26 要求
 libuv 对 mimalloc 显式、进程级且先于所有 libuv API 完成适配；D-27 禁止 libuv backend
-直接调用 OS 强相关接口或形成平台专用实现分支。
+直接调用 OS 强相关接口或形成平台专用实现分支。native 零改动仍是原始设计边界，但负责人已
+取消其作为本次 Task 13 的审计门禁；后续仅保留 libuv 的分支属于独立目标。
