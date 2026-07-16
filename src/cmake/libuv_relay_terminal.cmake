@@ -49,3 +49,17 @@ target_compile_definitions(tcpquic_libuv_relay_ready_contract_test PRIVATE
     TCPQUIC_HAS_ZSTD=1
     TCPQUIC_LIBUV_QUIC_TO_TCP_READY=1
     TCPQUIC_LIBUV_TCP_TO_QUIC_READY=1)
+
+tcpquic_add_libuv_relay_test(tcpquic_libuv_relay_runtime_stop_test
+    unittest/libuv_relay_runtime_stop_test.cpp
+    unittest/trace_proxy_stub.cpp
+    tunnel/libuv_allocator.cpp
+    tunnel/libuv_relay_worker.cpp
+    tunnel/libuv_relay_terminal.cpp
+    tunnel/libuv_relay_quic_to_tcp.cpp
+    tunnel/libuv_relay_tcp_to_quic.cpp
+    tunnel/stream_lifetime.cpp
+    tunnel/terminal_convergence.cpp
+    tunnel/relay_buffer.cpp
+    tunnel/relay_alloc.cpp
+    config/tuning.cpp)

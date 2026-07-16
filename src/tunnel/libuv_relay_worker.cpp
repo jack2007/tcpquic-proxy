@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <limits>
 #include <new>
 #include <utility>
 
@@ -67,6 +68,19 @@ namespace {
 
 constexpr std::uint64_t TqUvSafetyTimerIntervalMs = 25;
 constexpr std::uint32_t TqUvAsyncSendAttemptLimit = 4;
+constexpr std::uint64_t TqUvRuntimeStopNoDeadlineNs =
+    std::numeric_limits<std::uint64_t>::max();
+
+std::uint64_t TqUvRuntimeStopDeadlineNs(
+    std::chrono::steady_clock::time_point deadline) noexcept {
+    if (deadline == std::chrono::steady_clock::time_point::max()) {
+        return TqUvRuntimeStopNoDeadlineNs;
+    }
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            deadline.time_since_epoch())
+            .count());
+}
 
 #if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
 const TqUvCallAdapter gProductionCalls{
@@ -874,10 +888,14 @@ QUIC_STATUS TqUvStreamBinding::OnStreamEvent(
 
 #if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
 bool TqUvRelayWorker::StopForTest() {
+    return StopForTest(std::chrono::steady_clock::time_point::max());
+}
+
+bool TqUvRelayWorker::StopForTest(std::chrono::steady_clock::time_point deadline) {
     if (IsLoopThread()) {
         return false;
     }
-    StopAndJoin();
+    StopAndJoin(deadline);
     return true;
 }
 
@@ -974,6 +992,13 @@ void TqUvRelayWorker::AsyncClosed(uv_handle_t*) {}
 
 void TqUvRelayWorker::ThreadMain() {
     LoopThreadId_ = std::this_thread::get_id();
+    RuntimeStopRequested_.store(false, std::memory_order_release);
+    CloseRequested_.store(false, std::memory_order_release);
+    StopRequested_.store(false, std::memory_order_release);
+    AsyncSendAllowed_.store(true, std::memory_order_release);
+    RuntimeStopDeadlineNs_.store(
+        std::numeric_limits<std::uint64_t>::max(),
+        std::memory_order_release);
 #if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
     if (Config_.LoopInitCallsForTest != nullptr) {
         Config_.LoopInitCallsForTest->fetch_add(1, std::memory_order_relaxed);
@@ -1053,11 +1078,27 @@ void TqUvRelayWorker::ThreadMain() {
 
 void TqUvRelayWorker::HandleWake() noexcept {
     bool shouldClose = false;
+    TqUvTerminalTrigger closeTrigger = TqUvTerminalTrigger::RuntimeStop;
     std::size_t commandCount = 0;
     try {
         {
             std::lock_guard<std::mutex> guard(AdmissionMutex_);
-            shouldClose = StopRequested_.load(std::memory_order_acquire);
+            if (RuntimeStopRequested_.load(std::memory_order_acquire)) {
+                shouldClose = true;
+                const auto deadline = RuntimeStopDeadlineNs_.load(
+                    std::memory_order_acquire);
+                if (deadline != TqUvRuntimeStopNoDeadlineNs) {
+                    const auto now = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                            .count());
+                    if (now >= deadline) {
+                        closeTrigger = TqUvTerminalTrigger::QuicAbort;
+                    }
+                }
+            } else {
+                shouldClose = StopRequested_.load(std::memory_order_acquire);
+            }
             commandCount = Queue_.Size();
         }
         for (std::size_t index = 0; index < commandCount; ++index) {
@@ -1093,7 +1134,7 @@ void TqUvRelayWorker::HandleWake() noexcept {
     }
     ProcessSignaledStops();
     if (shouldClose) {
-        BeginCloseHandles();
+        BeginCloseHandles(closeTrigger);
     }
 }
 
@@ -1161,7 +1202,8 @@ void TqUvRelayWorker::ProcessSignaledStops() noexcept {
     }
 }
 
-void TqUvRelayWorker::BeginCloseHandles() noexcept {
+void TqUvRelayWorker::BeginCloseHandles(
+    TqUvTerminalTrigger trigger) noexcept {
     if (CloseRequested_.load(std::memory_order_acquire)) {
         return;
     }
@@ -1177,7 +1219,7 @@ void TqUvRelayWorker::BeginCloseHandles() noexcept {
             // callback synchronously and erase the current relay.
             auto relay = current->second;
             ++current;
-            TqUvRequestTerminal(*relay, TqUvTerminalTrigger::RuntimeStop);
+            TqUvRequestTerminal(*relay, trigger);
             TqUvProcessTerminalFactsLocal(*this, *relay);
             RecordRegistrationSnapshotForTest(*relay);
             ++processed;
@@ -1301,6 +1343,9 @@ bool TqUvRelayWorker::Enqueue(Command command) {
 }
 
 bool TqUvRelayWorker::WakeLoopUntilAccepted() {
+    if (!AsyncSendAllowed_.load(std::memory_order_acquire)) {
+        return false;
+    }
     for (std::uint32_t attempt = 0;
          attempt < TqUvAsyncSendAttemptLimit &&
          Running_.load(std::memory_order_acquire);
@@ -1676,7 +1721,8 @@ std::shared_ptr<TqUvRelayState> TqUvRelayWorker::RelayForTest(
 }
 #endif
 
-void TqUvRelayWorker::StopAndJoin() {
+void TqUvRelayWorker::StopAndJoin(
+    std::chrono::steady_clock::time_point deadline) {
     if (!ThreadCreated_) {
         if (LifecycleSyncInitialized_) {
             uv_cond_destroy(&LifecycleCondition_);
@@ -1690,8 +1736,13 @@ void TqUvRelayWorker::StopAndJoin() {
         {
             std::lock_guard<std::mutex> guard(AdmissionMutex_);
             Accepting_.store(false, std::memory_order_release);
-            CancelQueuedRegistrations();
+            RuntimeStopRequested_.store(true, std::memory_order_release);
             StopRequested_.store(true, std::memory_order_release);
+            AsyncSendAllowed_.store(false, std::memory_order_release);
+            RuntimeStopDeadlineNs_.store(
+                TqUvRuntimeStopDeadlineNs(deadline),
+                std::memory_order_release);
+            CancelQueuedRegistrations();
         }
         (void)WakeLoopUntilAccepted();
     }
@@ -1702,6 +1753,10 @@ void TqUvRelayWorker::StopAndJoin() {
         uv_mutex_destroy(&LifecycleMutex_);
         LifecycleSyncInitialized_ = false;
     }
+}
+
+void TqUvRelayWorker::StopAndJoin() {
+    StopAndJoin(std::chrono::steady_clock::time_point::max());
 }
 
 void TqUvRelayWorker::ReportReady(int status) {
@@ -1733,7 +1788,8 @@ bool TqUvRelayRuntime::Start(const TqTuningConfig& tuning) {
     if (State_ == TqUvRelayRuntimeState::Running) {
         return true;
     }
-    if (State_ != TqUvRelayRuntimeState::Stopped) {
+    if (State_ != TqUvRelayRuntimeState::Stopped &&
+        State_ != TqUvRelayRuntimeState::Closed) {
         return false;
     }
 
@@ -1795,6 +1851,37 @@ bool TqUvRelayRuntime::Start(const TqTuningConfig& tuning) {
     return true;
 }
 
+#if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
+bool TqUvRelayRuntime::Stop(
+    std::chrono::steady_clock::time_point deadline) {
+    std::vector<std::unique_ptr<TqUvRelayWorker>> workers;
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        if (State_ == TqUvRelayRuntimeState::Stopped ||
+            State_ == TqUvRelayRuntimeState::Closed) {
+            return true;
+        }
+        if (State_ == TqUvRelayRuntimeState::Draining) {
+            return false;
+        }
+        if (State_ != TqUvRelayRuntimeState::Running) {
+            return false;
+        }
+        State_ = TqUvRelayRuntimeState::Draining;
+        workers.swap(Workers_);
+        NextWorker_ = 0;
+    }
+    for (auto& worker : workers) {
+        worker->StopAndJoin(deadline);
+    }
+    {
+        std::lock_guard<std::mutex> guard(Lock_);
+        State_ = TqUvRelayRuntimeState::Closed;
+    }
+    return true;
+}
+#endif
+
 TqUvRelayWorker* TqUvRelayRuntime::PickWorker() {
     std::lock_guard<std::mutex> guard(Lock_);
     if (State_ != TqUvRelayRuntimeState::Running || Workers_.empty()) {
@@ -1839,16 +1926,7 @@ std::vector<TqUvRelayWorkerSnapshot> TqUvRelayRuntime::SnapshotWorkers() const {
 
 #if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
 void TqUvRelayRuntime::StopForTest() {
-    std::vector<std::unique_ptr<TqUvRelayWorker>> workers;
-    {
-        std::lock_guard<std::mutex> guard(Lock_);
-        workers.swap(Workers_);
-        State_ = TqUvRelayRuntimeState::Stopped;
-        NextWorker_ = 0;
-    }
-    for (auto& worker : workers) {
-        worker->StopForStartupRollback();
-    }
+    (void)Stop();
 }
 
 std::size_t TqUvRelayRuntime::WorkerCountForTest() const {

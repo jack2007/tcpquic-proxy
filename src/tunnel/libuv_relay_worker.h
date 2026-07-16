@@ -7,10 +7,12 @@
 #include <uv.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <variant>
@@ -154,6 +156,7 @@ public:
 
 #if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
     bool StopForTest();
+    bool StopForTest(std::chrono::steady_clock::time_point deadline);
     bool StopRequestedForTest() const noexcept;
     bool IsLoopThreadForTest() const noexcept;
     TqUvRegisterCommandState RegistrationStateForTest() const;
@@ -235,7 +238,9 @@ private:
     void DrainSendCompletionFallbacks() noexcept;
     void RetryPendingQuicSends() noexcept;
     void ProcessSignaledStops() noexcept;
-    void BeginCloseHandles() noexcept;
+    void BeginCloseHandles(
+        TqUvTerminalTrigger trigger = TqUvTerminalTrigger::RuntimeStop)
+        noexcept;
     void DispatchCommand(Command& command);
     bool Enqueue(Command command);
     bool WakeLoopUntilAccepted();
@@ -272,6 +277,7 @@ private:
         bool drain);
     void RecordRegistrationSnapshotForTest(const TqUvRelayState& relay);
     void StopAndJoin();
+    void StopAndJoin(std::chrono::steady_clock::time_point deadline);
     void ReportReady(int status);
     bool IsLoopThread() const noexcept;
 
@@ -295,6 +301,10 @@ private:
     std::atomic<bool> Running_{false};
     std::atomic<bool> Accepting_{false};
     std::atomic<bool> StopRequested_{false};
+    std::atomic<bool> RuntimeStopRequested_{false};
+    std::atomic<bool> AsyncSendAllowed_{true};
+    std::atomic<std::uint64_t> RuntimeStopDeadlineNs_{
+        std::numeric_limits<std::uint64_t>::max()};
     std::atomic<bool> CloseRequested_{false};
     bool AsyncCloseStarted_{false};
     bool PrepareCloseStarted_{false};
@@ -351,6 +361,8 @@ enum class TqUvRelayRuntimeState : std::uint8_t {
     Stopped,
     Starting,
     Running,
+    Draining,
+    Closed,
 };
 
 class TqUvRelayRuntime final {
@@ -358,6 +370,11 @@ public:
     static TqUvRelayRuntime& Instance();
 
     bool Start(const TqTuningConfig& tuning);
+#if defined(TQ_UNIT_TESTING) && TQ_UNIT_TESTING
+    bool Stop(
+        std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::time_point::max());
+#endif
     TqUvRelayWorker* PickWorker();
     bool StopRelay(const std::shared_ptr<const TqUvRelayCommittedState>& committed);
     std::vector<TqUvRelayWorkerSnapshot> SnapshotWorkers() const;
