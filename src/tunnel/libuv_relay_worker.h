@@ -244,6 +244,8 @@ private:
     void DispatchCommand(Command& command);
     bool Enqueue(Command command);
     bool WakeLoopUntilAccepted();
+    bool WakeLoopUntilAcceptedLocked();
+    void WakeLoopAndDisable() noexcept;
     void TrackRegistration(const std::shared_ptr<RegisterCommand>& command);
     void UntrackRegistration(const std::shared_ptr<RegisterCommand>& command);
     void CancelQueuedRegistrations();
@@ -344,6 +346,7 @@ private:
     bool FailStopScanOnceForTest_{false};
 #endif
     std::mutex AdmissionMutex_;
+    std::mutex AsyncSendMutex_;
     std::mutex PendingRegistrationMutex_;
     std::vector<std::weak_ptr<RegisterCommand>> PendingRegistrations_;
     std::unordered_map<std::uint64_t, std::shared_ptr<TqUvRelayState>> Relays_;

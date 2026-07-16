@@ -149,6 +149,11 @@ std::mutex gAsyncSendHookMutex;
 std::condition_variable gAsyncSendHookCondition;
 bool gAsyncSendHookEntered = false;
 bool gReleaseAsyncSendHook = false;
+std::mutex gStopWakeHookMutex;
+std::condition_variable gStopWakeHookCondition;
+bool gStopWakeSendEntered = false;
+bool gReleaseStopWakeSend = false;
+bool gAsyncCloseEntered = false;
 std::mutex gPendingOverflowHookMutex;
 std::condition_variable gPendingOverflowHookCondition;
 bool gPendingOverflowHookEntered = false;
@@ -211,6 +216,24 @@ int BlockingSuccessfulAsyncSend(uv_async_t* async) {
     gAsyncSendHookCondition.notify_all();
     gAsyncSendHookCondition.wait(lock, [] { return gReleaseAsyncSendHook; });
     return uv_async_send(async);
+}
+
+int SendThenBlockStopWake(uv_async_t* async) {
+    const int status = uv_async_send(async);
+    std::unique_lock<std::mutex> lock(gStopWakeHookMutex);
+    gStopWakeSendEntered = true;
+    gStopWakeHookCondition.notify_all();
+    gStopWakeHookCondition.wait(lock, [] { return gReleaseStopWakeSend; });
+    return status;
+}
+
+void ObserveAsyncClose(uv_handle_t* handle, uv_close_cb callback) {
+    if (handle->type == UV_ASYNC) {
+        std::lock_guard<std::mutex> guard(gStopWakeHookMutex);
+        gAsyncCloseEntered = true;
+        gStopWakeHookCondition.notify_all();
+    }
+    uv_close(handle, callback);
 }
 
 void BlockingPendingOverflowHook() {
@@ -991,6 +1014,42 @@ void TestStopRetriesOneAsyncSendFailure() {
     Check(!worker.Snapshot().Running);
 }
 
+void TestStopWakeDrainsBeforeAsyncClose() {
+    {
+        std::lock_guard<std::mutex> guard(gStopWakeHookMutex);
+        gStopWakeSendEntered = false;
+        gReleaseStopWakeSend = false;
+        gAsyncCloseEntered = false;
+    }
+    auto calls = TqUvProductionCalls();
+    calls.AsyncSend = &SendThenBlockStopWake;
+    calls.Close = &ObserveAsyncClose;
+    TqUvRelayWorkerConfig config{};
+    config.Calls = &calls;
+    TqUvRelayWorker worker(config);
+    Check(worker.StartAndWaitReady());
+
+    std::thread stopper([&] { Check(worker.StopForTest()); });
+    {
+        std::unique_lock<std::mutex> lock(gStopWakeHookMutex);
+        Check(gStopWakeHookCondition.wait_for(
+            lock,
+            std::chrono::seconds(2),
+            [] { return gStopWakeSendEntered; }));
+        Check(!gStopWakeHookCondition.wait_for(
+            lock,
+            std::chrono::milliseconds(200),
+            [] { return gAsyncCloseEntered; }));
+        gReleaseStopWakeSend = true;
+    }
+    gStopWakeHookCondition.notify_all();
+    stopper.join();
+    {
+        std::lock_guard<std::mutex> guard(gStopWakeHookMutex);
+        Check(gAsyncCloseEntered);
+    }
+}
+
 void TestPersistentAsyncSendFailureUsesBoundedSafetyWake() {
     gAsyncSendCalls.store(0, std::memory_order_relaxed);
     auto calls = TqUvProductionCalls();
@@ -1272,6 +1331,7 @@ int main() {
     TestConcurrentDirectionalAdmissionAndCompletionStayBalanced();
     TestConcurrentPostAndCallbackDrain();
     TestStopRetriesOneAsyncSendFailure();
+    TestStopWakeDrainsBeforeAsyncClose();
     TestPersistentAsyncSendFailureUsesBoundedSafetyWake();
     TestClosePassBadAllocRetriesPartialSynchronousClosesExactlyOnce();
     TestStopAndProducerAdmissionAreLinearized();

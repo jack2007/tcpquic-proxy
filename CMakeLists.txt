@@ -67,6 +67,13 @@ endif()
 
 option(TCPQUIC_USE_MIMALLOC "Statically link vendored mimalloc for relay buffers" ON)
 
+set(TCPQUIC_RELAY_BACKEND native CACHE STRING
+    "Compiled relay backend: native or libuv")
+set_property(CACHE TCPQUIC_RELAY_BACKEND PROPERTY STRINGS native libuv)
+if(NOT TCPQUIC_RELAY_BACKEND MATCHES "^(native|libuv)$")
+    message(FATAL_ERROR "TCPQUIC_RELAY_BACKEND must be native or libuv")
+endif()
+
 set(TCPQUIC_ENABLE_CRASHPAD AUTO CACHE STRING "Enable Crashpad crash dumps: AUTO, ON, or OFF")
 set_property(CACHE TCPQUIC_ENABLE_CRASHPAD PROPERTY STRINGS AUTO ON OFF)
 option(TCPQUIC_CRASHPAD_AUTO_BUILD
@@ -270,6 +277,11 @@ endif()
 if(TCPQUIC_ADDRESS_SANITIZER_ENABLED AND TCPQUIC_USE_MIMALLOC)
     message(STATUS "AddressSanitizer detected; disabling static mimalloc override")
     set(TCPQUIC_USE_MIMALLOC OFF CACHE BOOL "Statically link vendored mimalloc for relay buffers" FORCE)
+endif()
+if(TCPQUIC_RELAY_BACKEND STREQUAL "libuv" AND
+   NOT TCPQUIC_USE_MIMALLOC AND NOT TCPQUIC_ADDRESS_SANITIZER_ENABLED)
+    message(FATAL_ERROR
+        "normal libuv backend builds require TCPQUIC_USE_MIMALLOC=ON")
 endif()
 
 if(DEFINED CACHE{TCPQUIC_MSQUIC_USE_MIMALLOC})

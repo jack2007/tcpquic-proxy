@@ -1233,13 +1233,17 @@ void TqUvRelayWorker::BeginCloseHandles(
         }
 
         if (!AsyncCloseStarted_) {
-            AsyncCloseStarted_ = true;
-            try {
-                CallClose(
-                    reinterpret_cast<uv_handle_t*>(&Async_), &AsyncClosed);
-            } catch (...) {
-                AsyncCloseStarted_ = false;
-                throw;
+            std::lock_guard<std::mutex> asyncGuard(AsyncSendMutex_);
+            AsyncSendAllowed_.store(false, std::memory_order_release);
+            if (!AsyncCloseStarted_) {
+                AsyncCloseStarted_ = true;
+                try {
+                    CallClose(
+                        reinterpret_cast<uv_handle_t*>(&Async_), &AsyncClosed);
+                } catch (...) {
+                    AsyncCloseStarted_ = false;
+                    throw;
+                }
             }
         }
         if (!PrepareCloseStarted_) {
@@ -1343,6 +1347,11 @@ bool TqUvRelayWorker::Enqueue(Command command) {
 }
 
 bool TqUvRelayWorker::WakeLoopUntilAccepted() {
+    std::lock_guard<std::mutex> guard(AsyncSendMutex_);
+    return WakeLoopUntilAcceptedLocked();
+}
+
+bool TqUvRelayWorker::WakeLoopUntilAcceptedLocked() {
     if (!AsyncSendAllowed_.load(std::memory_order_acquire)) {
         return false;
     }
@@ -1358,6 +1367,16 @@ bool TqUvRelayWorker::WakeLoopUntilAccepted() {
         std::this_thread::yield();
     }
     return false;
+}
+
+void TqUvRelayWorker::WakeLoopAndDisable() noexcept {
+    std::lock_guard<std::mutex> guard(AsyncSendMutex_);
+    try {
+        (void)WakeLoopUntilAcceptedLocked();
+    } catch (...) {
+        // StopRequested_ is durable and the safety timer remains a fallback.
+    }
+    AsyncSendAllowed_.store(false, std::memory_order_release);
 }
 
 void TqUvRelayWorker::WakeForDurableFacts() noexcept {
@@ -1738,13 +1757,12 @@ void TqUvRelayWorker::StopAndJoin(
             Accepting_.store(false, std::memory_order_release);
             RuntimeStopRequested_.store(true, std::memory_order_release);
             StopRequested_.store(true, std::memory_order_release);
-            AsyncSendAllowed_.store(false, std::memory_order_release);
             RuntimeStopDeadlineNs_.store(
                 TqUvRuntimeStopDeadlineNs(deadline),
                 std::memory_order_release);
             CancelQueuedRegistrations();
         }
-        (void)WakeLoopUntilAccepted();
+        WakeLoopAndDisable();
     }
     uv_thread_join(&Thread_);
     ThreadCreated_ = false;
