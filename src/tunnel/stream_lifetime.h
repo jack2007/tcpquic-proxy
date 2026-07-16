@@ -203,6 +203,13 @@ public:
         std::shared_ptr<TqTerminalEscalation> escalation,
         TqTerminalShutdownIntent intent =
             TqTerminalShutdownIntent::AbortBothImmediate) noexcept;
+    // A backend that has already committed a graceful terminal handoff may
+    // durably strengthen it after observing a later fatal condition. This is
+    // a separate exactly-once downcall; BeginTerminalShutdown() remains
+    // idempotent for the original submission.
+    TqTerminalShutdownResult UpgradeTerminalShutdownToAbort(
+        uint64_t errorCode,
+        std::shared_ptr<TqTerminalEscalation> escalation = {}) noexcept;
 
     bool PublishTarget(
         uint64_t expectedGeneration,
@@ -270,6 +277,8 @@ private:
         TqTerminalShutdownIntent::AbortBothImmediate};
     uint32_t TerminalShutdownAttempt_{0};
     bool TerminalRetryOwned_{false};
+    bool TerminalAbortUpgradeReserved_{false};
+    bool TerminalAbortUpgradeApplied_{false};
     uint32_t TerminalWatchdogSeconds_{5};
     std::shared_ptr<Target> TerminalSink_;
     std::vector<std::unique_ptr<uint64_t>> SendKeyEnvelopes_;

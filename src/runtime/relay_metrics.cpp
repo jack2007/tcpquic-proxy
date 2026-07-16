@@ -1,13 +1,16 @@
 #include "relay_metrics.h"
 
-#if defined(__linux__)
+#if defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
 #include "linux_relay_worker.h"
 #endif
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TCPQUIC_RELAY_BACKEND_LIBUV
 #include "darwin_relay_worker.h"
 #endif
-#if defined(_WIN32)
+#if defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
 #include "windows_relay_worker.h"
+#endif
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+#include "libuv_relay_worker.h"
 #endif
 
 #include "relay.h"
@@ -22,13 +25,13 @@
 
 namespace {
 
-#if defined(_WIN32) || defined(__linux__)
+#if (defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV) || (defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV)
 constexpr bool kRelayActiveRelayDetailSupported = true;
 #else
 constexpr bool kRelayActiveRelayDetailSupported = false;
 #endif
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
 TqRelayActiveSnapshot ConvertWindowsRelaySnapshot(const TqWindowsRelayActiveSnapshot& relay) {
     TqRelayActiveSnapshot active{};
     active.Backend = "windows";
@@ -100,7 +103,10 @@ static void TqAppendJsonString(std::ostringstream& out, const char* name, const 
 
 namespace {
 
-#if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
+#if TCPQUIC_RELAY_BACKEND_LIBUV || \
+    (defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV) || \
+    (defined(__APPLE__) && !TCPQUIC_RELAY_BACKEND_LIBUV) || \
+    (defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV)
 TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
     const std::vector<TqRelayWorkerSnapshot>& workers,
     const char* backend,
@@ -110,6 +116,10 @@ TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
     aggregate.WorkerIndex = 0;
     aggregate.WorkerId = "aggregate";
     aggregate.SnapshotComplete = snapshotComplete;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    aggregate.ExpectedWorkers = workers.size();
+    aggregate.LoopAlive = !workers.empty();
+#endif
     for (const auto& worker : workers) {
         aggregate.ActiveRelays += worker.ActiveRelays;
         aggregate.PendingBytes += worker.PendingBytes;
@@ -118,12 +128,60 @@ TqRelayWorkerSnapshot MakeAggregateRelayWorkerSnapshot(
         aggregate.Errors += worker.Errors;
         aggregate.EventQueueCapacity = std::max(
             aggregate.EventQueueCapacity, worker.EventQueueCapacity);
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        aggregate.LoopAlive = aggregate.LoopAlive && worker.LoopAlive;
+        aggregate.AliveWorkers += worker.LoopAlive ? 1 : 0;
+        aggregate.QueueDepth += worker.QueueDepth;
+        aggregate.WakeAttempts += worker.WakeAttempts;
+        aggregate.WakeSuccesses += worker.WakeSuccesses;
+        aggregate.WakeFailures += worker.WakeFailures;
+        aggregate.WakeCoalesced += worker.WakeCoalesced;
+        aggregate.AsyncCallbacks += worker.AsyncCallbacks;
+        aggregate.TimerCallbacks += worker.TimerCallbacks;
+        aggregate.LoopIterations += worker.LoopIterations;
+        aggregate.LoopLagMicros = std::max(
+            aggregate.LoopLagMicros, worker.LoopLagMicros);
+        aggregate.QuicToTcpPendingBytes += worker.QuicToTcpPendingBytes;
+        aggregate.TcpToQuicPendingBytes += worker.TcpToQuicPendingBytes;
+#endif
     }
     return aggregate;
 }
 #endif
 
-#if defined(__linux__)
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+TqRelayWorkerSnapshot ConvertUvRelayWorkerSnapshot(
+    const TqUvRelayWorkerSnapshot& snapshot) {
+    TqRelayWorkerSnapshot worker{};
+    worker.Backend = "libuv";
+    worker.WorkerIndex = snapshot.WorkerIndex;
+    worker.WorkerId = "libuv-" + std::to_string(snapshot.WorkerIndex);
+    worker.ActiveRelays = snapshot.ActiveRelays;
+    worker.PendingBytes = snapshot.PendingBytes;
+    worker.TcpReadBytes = snapshot.TcpReadBytes;
+    worker.TcpWriteBytes = snapshot.TcpWriteBytes;
+    worker.Errors = snapshot.AsyncWakeFailures + snapshot.StopScanFailures;
+    worker.EventQueueCapacity = snapshot.EventQueueCapacity;
+    worker.SnapshotComplete = true;
+    worker.LoopAlive = snapshot.Running;
+    worker.AliveWorkers = snapshot.Running ? 1 : 0;
+    worker.ExpectedWorkers = 1;
+    worker.QueueDepth = snapshot.PendingCommands;
+    worker.WakeAttempts = snapshot.AsyncWakeAttempts;
+    worker.WakeSuccesses = snapshot.AsyncWakeSuccesses;
+    worker.WakeFailures = snapshot.AsyncWakeFailures;
+    worker.WakeCoalesced = snapshot.AsyncWakeCoalesced;
+    worker.AsyncCallbacks = snapshot.AsyncCallbacks;
+    worker.TimerCallbacks = snapshot.SafetyTimerCallbacks;
+    worker.LoopIterations = snapshot.LoopIterations;
+    worker.LoopLagMicros = snapshot.LoopLagMicros;
+    worker.QuicToTcpPendingBytes = snapshot.QuicToTcpPendingBytes;
+    worker.TcpToQuicPendingBytes = snapshot.TcpToQuicPendingBytes;
+    return worker;
+}
+#endif
+
+#if defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
 TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSnapshot& snapshot) {
     TqRelayWorkerSnapshot worker{};
     worker.Backend = "linux";
@@ -140,7 +198,7 @@ TqRelayWorkerSnapshot ConvertLinuxRelayWorkerSnapshot(const TqLinuxRelayWorkerSn
 }
 #endif
 
-#if defined(_WIN32)
+#if defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
 TqRelayWorkerSnapshot ConvertWindowsRelayWorkerSnapshot(
     const TqWindowsRelayWorkerSnapshot& snapshot) {
     TqRelayWorkerSnapshot worker{};
@@ -158,7 +216,7 @@ TqRelayWorkerSnapshot ConvertWindowsRelayWorkerSnapshot(
 }
 #endif
 
-#if defined(__linux__)
+#if defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
 TqRelayActiveSnapshot ConvertLinuxRelaySnapshot(const TqLinuxRelayActiveSnapshot& relay) {
     TqRelayActiveSnapshot active{};
     active.Backend = "linux";
@@ -197,7 +255,7 @@ TqRelayActiveSnapshot ConvertLinuxRelaySnapshot(const TqLinuxRelayActiveSnapshot
 }
 #endif
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !TCPQUIC_RELAY_BACKEND_LIBUV
 TqRelayWorkerSnapshot ConvertDarwinRelayWorkerSnapshot(
     const TqDarwinRelayWorkerSnapshot& snapshot) {
     TqRelayWorkerSnapshot worker{};
@@ -275,7 +333,7 @@ nlohmann::json TqActiveRelayJsonValue(const TqRelayActiveSnapshot& relay) {
 }
 
 nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
-    return {
+    nlohmann::json body{
         {"worker_id", worker.WorkerId},
         {"backend", worker.Backend},
         {"worker_index", worker.WorkerIndex},
@@ -287,19 +345,36 @@ nlohmann::json TqRelayWorkerJsonValue(const TqRelayWorkerSnapshot& worker) {
         {"event_queue_capacity", worker.EventQueueCapacity},
         {"snapshot_complete", worker.SnapshotComplete},
     };
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    body["loop_alive"] = worker.LoopAlive;
+    body["alive_workers"] = worker.AliveWorkers;
+    body["expected_workers"] = worker.ExpectedWorkers;
+    body["queue_depth"] = worker.QueueDepth;
+    body["wake_attempts"] = worker.WakeAttempts;
+    body["wake_successes"] = worker.WakeSuccesses;
+    body["wake_failures"] = worker.WakeFailures;
+    body["wake_coalesced"] = worker.WakeCoalesced;
+    body["async_callbacks"] = worker.AsyncCallbacks;
+    body["timer_callbacks"] = worker.TimerCallbacks;
+    body["loop_iterations"] = worker.LoopIterations;
+    body["loop_lag_us"] = worker.LoopLagMicros;
+    body["quic_to_tcp_pending_bytes"] = worker.QuicToTcpPendingBytes;
+    body["tcp_to_quic_pending_bytes"] = worker.TcpToQuicPendingBytes;
+#endif
+    return body;
 }
 
 } // namespace
 
 std::vector<TqRelayActiveSnapshot> TqSnapshotActiveRelays() {
     std::vector<TqRelayActiveSnapshot> active;
-#if defined(__linux__)
+#if defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
     active.reserve(snapshot.ActiveRelayStates.size());
     for (const auto& relay : snapshot.ActiveRelayStates) {
         active.push_back(ConvertLinuxRelaySnapshot(relay));
     }
-#elif defined(_WIN32)
+#elif defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     active.reserve(snapshot.ActiveRelayStates.size());
     for (const auto& relay : snapshot.ActiveRelayStates) {
@@ -334,7 +409,35 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.TerminalSchedulerFailure = terminal.SchedulerFailure;
     metrics.TerminalRetainedOwnerCount = retained.OwnerCount;
     metrics.TerminalRetainedOldestAgeMs = retained.OldestAgeMs;
-#if defined(__linux__)
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    const auto workers = TqUvRelayRuntime::Instance().SnapshotWorkers();
+    metrics.Backend = "libuv";
+    metrics.SnapshotComplete = true;
+    for (const auto& worker : workers) {
+        metrics.Wakeups += worker.AsyncWakeSuccesses;
+        metrics.EventsProcessed += worker.CommandsExecuted;
+        metrics.PendingEvents += worker.PendingCommands;
+        metrics.PendingBytes += worker.PendingBytes;
+        metrics.ActiveRelays += worker.ActiveRelays;
+        metrics.Errors += worker.AsyncWakeFailures + worker.StopScanFailures;
+        metrics.TcpReadBytes += worker.TcpReadBytes;
+        metrics.TcpWriteBytes += worker.TcpWriteBytes;
+        metrics.CompressedTcpBytes += worker.CompressedTcpBytes;
+        metrics.DecompressedTcpBytes += worker.DecompressedTcpBytes;
+        metrics.ZstdDecompressInputBytes += worker.ZstdDecompressInputBytes;
+        metrics.ZstdDecompressOutputBytes += worker.ZstdDecompressOutputBytes;
+        metrics.ZstdDecompressCalls += worker.ZstdDecompressCalls;
+        metrics.ZstdDecompressNeedInput += worker.ZstdDecompressNeedInput;
+        metrics.ZstdDecompressNeedOutput += worker.ZstdDecompressNeedOutput;
+        metrics.ZstdDecompressFailures += worker.ZstdDecompressFailures;
+        metrics.TcpToQuicCompressFailures +=
+            worker.TcpToQuicCompressFailures;
+        metrics.QuicReceiveDecompressFailures +=
+            worker.QuicReceiveDecompressFailures;
+        metrics.RelayEventQueueCapacity = std::max<uint64_t>(
+            metrics.RelayEventQueueCapacity, worker.EventQueueCapacity);
+    }
+#elif defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto snapshot = TqLinuxRelayRuntime::Instance().Snapshot();
     metrics.SnapshotComplete = snapshot.SnapshotComplete;
     metrics.Backend = "epoll";
@@ -501,7 +604,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
     metrics.LastTcpReadErrno = snapshot.LastTcpReadErrno;
     metrics.FatalRelayResets = snapshot.FatalRelayResets;
     metrics.LastQuicSendStatus = snapshot.LastQuicSendStatus;
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !TCPQUIC_RELAY_BACKEND_LIBUV
     auto& darwinRuntime = TqDarwinRelayRuntime::Instance();
     const auto snapshot = darwinRuntime.Snapshot();
     metrics.Backend = "kqueue";
@@ -592,7 +695,7 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
         metrics.RelaySnapshotExecutionDeadlineTimeouts = gateStats.DeadlineTimeouts;
         metrics.RelaySnapshotExecutionDetachedLateCommands = gateStats.DetachedLateCommands;
     }
-#elif defined(_WIN32)
+#elif defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto snapshot = TqWindowsRelayRuntime::Instance().Snapshot();
     uint64_t outstandingQuicSends = 0;
     uint64_t inflightTcpSends = 0;
@@ -742,7 +845,20 @@ TqRelayMetricsSnapshot TqSnapshotRelayMetrics() {
 
 TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers() {
     TqRelayWorkersSnapshotResult result;
-#if defined(__linux__)
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    const auto uvWorkers = TqUvRelayRuntime::Instance().SnapshotWorkers();
+    result.SnapshotComplete = true;
+    result.IdentitiesComplete = true;
+    std::vector<TqRelayWorkerSnapshot> workers;
+    workers.reserve(uvWorkers.size());
+    for (const auto& snapshot : uvWorkers) {
+        workers.push_back(ConvertUvRelayWorkerSnapshot(snapshot));
+    }
+    result.Workers.reserve(workers.size() + 1);
+    result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
+        workers, "libuv", result.SnapshotComplete));
+    result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
+#elif defined(__linux__) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto linuxWorkers = TqLinuxRelayRuntime::Instance().SnapshotWorkers();
     result.SnapshotComplete = linuxWorkers.SnapshotComplete && linuxWorkers.IdentitiesComplete;
     result.IdentitiesComplete = linuxWorkers.IdentitiesComplete;
@@ -755,7 +871,7 @@ TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers() {
     result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
         workers, "epoll", result.SnapshotComplete));
     result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto darwinWorkers = TqDarwinRelayRuntime::Instance().SnapshotWorkers();
     result.SnapshotComplete = darwinWorkers.SnapshotComplete && darwinWorkers.IdentitiesComplete;
     result.IdentitiesComplete = darwinWorkers.IdentitiesComplete;
@@ -768,7 +884,7 @@ TqRelayWorkersSnapshotResult TqSnapshotRelayWorkers() {
     result.Workers.push_back(MakeAggregateRelayWorkerSnapshot(
         workers, "kqueue", result.SnapshotComplete));
     result.Workers.insert(result.Workers.end(), workers.begin(), workers.end());
-#elif defined(_WIN32)
+#elif defined(_WIN32) && !TCPQUIC_RELAY_BACKEND_LIBUV
     const auto windowsWorkers = TqWindowsRelayRuntime::Instance().SnapshotWorkers();
     result.SnapshotComplete =
         windowsWorkers.SnapshotComplete && windowsWorkers.IdentitiesComplete;
@@ -825,6 +941,11 @@ std::string TqRelayWorkersJson() {
         {"snapshot_complete", result.SnapshotComplete},
         {"workers", nlohmann::json::array()},
     };
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    body["compiled_relay_backend"] = "libuv";
+#else
+    body["compiled_relay_backend"] = "native";
+#endif
     for (const auto& worker : result.Workers) {
         body["workers"].push_back(TqRelayWorkerJsonValue(worker));
     }
@@ -1312,5 +1433,10 @@ std::string TqRelayMetricsFieldsJson(const TqRelayMetricsSnapshot& metrics) {
     out << '}';
     auto value = nlohmann::json::parse(out.str());
     value.erase("_");
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    value["compiled_relay_backend"] = "libuv";
+#else
+    value["compiled_relay_backend"] = "native";
+#endif
     return value.dump();
 }

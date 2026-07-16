@@ -53,6 +53,7 @@ int main() {
         return 17;
     }
     if (json["status"] != "dumped") return 18;
+    if (json["compiled_relay_backend"] != "native") return 46;
     if (json["allocator"] != "mimalloc") return 19;
     if (json["enabled"] != true) return 20;
     if (json["available"] != true) return 21;

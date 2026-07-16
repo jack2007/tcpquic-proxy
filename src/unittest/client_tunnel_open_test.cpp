@@ -518,6 +518,31 @@ bool TqRelayStartManaged(
     return true;
 }
 
+#if defined(TQ_UNIT_TESTING) && defined(__linux__)
+bool TqRelayStartManagedOnLinuxWorkerForTest(
+    TqSocketHandle tcpFd,
+    MsQuicStream* stream,
+    std::shared_ptr<TqStreamLifetime> owner,
+    ITqCompressor* compressor,
+    ITqDecompressor* decompressor,
+    TqRelayHandle* handle,
+    const TqTuningConfig& tuning,
+    TqCompressAlgo compressAlgo,
+    bool* tcpFdConsumed,
+    TqLinuxRelayWorker*) {
+    return TqRelayStartManaged(
+        tcpFd,
+        stream,
+        std::move(owner),
+        compressor,
+        decompressor,
+        handle,
+        tuning,
+        compressAlgo,
+        tcpFdConsumed);
+}
+#endif
+
 bool TqSetServerConnectionClientName(MsQuicConnection*, const std::string&) {
     return false;
 }

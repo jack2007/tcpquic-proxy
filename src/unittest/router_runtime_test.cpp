@@ -1457,6 +1457,7 @@ int main() {
         if (relayWorkersResp.find("\"errors\":") == std::string::npos) return 350;
         if (relayWorkersResp.find("\"event_queue_capacity\":") == std::string::npos) return 359;
         if (relayWorkersResp.find("\"snapshot_complete\":true") == std::string::npos) return 1367;
+        if (relayWorkersResp.find("\"compiled_relay_backend\":\"native\"") == std::string::npos) return 1384;
 
         TqHttpRequest activeRelays = Request("GET", "/relay/active-relays", "");
         std::string activeRelaysResp = adminRuntime.HandleAdmin(activeRelays);

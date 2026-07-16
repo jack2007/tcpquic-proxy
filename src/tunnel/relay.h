@@ -9,6 +9,10 @@
 #include "platform_socket.h"
 #include "tuning.h"
 
+#ifndef TCPQUIC_RELAY_BACKEND_LIBUV
+#define TCPQUIC_RELAY_BACKEND_LIBUV 0
+#endif
+
 struct MsQuicStream;
 class TqLinuxRelayWorker;
 class TqWindowsRelayWorker;
@@ -16,6 +20,24 @@ class TqDarwinRelayWorker;
 class TqStreamLifetime;
 class TqTerminalLedger;
 class TqTerminalEscalation;
+struct TqRelayStopControl;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+struct TqUvRelayCommittedState {
+    std::uintptr_t WorkerIdentity{0};
+    std::uint64_t RelayId{0};
+    std::uint32_t WorkerIndex{0};
+    std::shared_ptr<TqRelayStopControl> Control;
+    std::uint64_t ControlGeneration{0};
+};
+#endif
+
+constexpr const char* TqCompiledRelayBackend() noexcept {
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    return "libuv";
+#else
+    return "native";
+#endif
+}
 
 struct TqTerminalHandoffFacts {
     bool DataPlaneStopped{false};
@@ -36,6 +58,8 @@ struct TqTerminalHandoffControl {
     std::atomic<bool> HandoffStartedCounted{false};
     std::atomic<bool> HandoffCompletedCounted{false};
     std::atomic<bool> HandoffFailedCounted{false};
+    std::atomic<bool> AbortUpgradePending{false};
+    std::atomic<bool> AbortUpgradeApplied{false};
     std::shared_ptr<TqTerminalLedger> Ledger;
     std::shared_ptr<TqTerminalEscalation> Escalation;
 
@@ -58,13 +82,20 @@ enum class TqRelayBackendType {
     LinuxWorker,
     WindowsWorker,
     DarwinWorker,
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    LibuvWorker,
+#endif
 };
 
 inline bool TqRelayBackendReleaseReady(
     TqRelayBackendType backend,
     bool legacyStopped,
     const TqTerminalHandoffFacts* facts) noexcept {
-    if (backend == TqRelayBackendType::LinuxWorker) {
+    if (backend == TqRelayBackendType::LinuxWorker
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        || backend == TqRelayBackendType::LibuvWorker
+#endif
+    ) {
         return facts != nullptr && TqTerminalReleaseReady(*facts);
     }
     return legacyStopped;
@@ -102,6 +133,7 @@ struct TqRelayStopControl {
     std::atomic<bool> Stop{false};
     std::atomic<bool> ActiveAccountingReleased{false};
     std::atomic<bool> WorkerEndpointAlive{true};
+    std::atomic<bool> ReleaseAccountingAtBackendTerminal{false};
     std::shared_ptr<TqTerminalHandoffControl> TerminalHandoff;
     std::shared_ptr<TqTerminalEscalation> TerminalEscalation;
 
@@ -151,6 +183,9 @@ struct TqRelayHandle {
     std::shared_ptr<TqRelayStopControl> Control{std::make_shared<TqRelayStopControl>()};
     uint64_t ControlGeneration{0};
     TqRelayBackendType Backend{TqRelayBackendType::None};
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    std::shared_ptr<const TqUvRelayCommittedState> LibuvCommitted;
+#endif
     TqLinuxRelayWorker* LinuxWorker{nullptr};
     uint64_t LinuxRelayId{0};
     uint32_t LinuxWorkerIndex{0};
@@ -172,6 +207,15 @@ TqRelayLinuxCommittedSnapshot(const TqRelayHandle* handle) {
         ? std::atomic_load(&handle->LinuxCommitted)
         : std::shared_ptr<const TqRelayLinuxCommittedState>{};
 }
+
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+inline std::shared_ptr<const TqUvRelayCommittedState>
+TqRelayLibuvCommittedSnapshot(const TqRelayHandle* handle) {
+    return handle != nullptr
+        ? std::atomic_load(&handle->LibuvCommitted)
+        : std::shared_ptr<const TqUvRelayCommittedState>{};
+}
+#endif
 
 bool TqRelayStart(
     TqSocketHandle tcpFd,

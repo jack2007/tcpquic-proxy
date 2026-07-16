@@ -168,6 +168,74 @@ void TestGracefulCompleteNeverArmsFatalWatchdog() {
     CHECK(TqTerminalMetricsSnapshot().TerminalTimeoutPending == 0);
 }
 
+void TestSubmittedGracefulShutdownUpgradesToAbortExactlyOnce() {
+    Reset();
+    auto owner = MakeStartedOwner(191);
+    std::vector<QUIC_STREAM_SHUTDOWN_FLAGS> flagsSeen;
+    owner->SetShutdownHookForTest(
+        [&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS flags) {
+            flagsSeen.push_back(flags);
+            return QUIC_STATUS_PENDING;
+        });
+    auto escalation = std::make_shared<CountingEscalation>();
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(
+        0, sink, escalation,
+        TqTerminalShutdownIntent::GracefulComplete).Submitted);
+    CHECK(flagsSeen.size() == 1);
+    CHECK(flagsSeen[0] == QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+
+    const auto upgraded = owner->UpgradeTerminalShutdownToAbort(
+        92, escalation);
+    CHECK(upgraded.Submitted);
+    CHECK(flagsSeen.size() == 2);
+    CHECK((flagsSeen[1] & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
+    CHECK((flagsSeen[1] & QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE) != 0);
+    CHECK(escalation->Calls.load() == 1);
+    const auto ledger = owner->TerminalLedger()->Snapshot(
+        TqTerminalScheduler::NowForTest());
+    CHECK(ledger.ShutdownIntent ==
+          TqTerminalShutdownIntent::AbortBothImmediate);
+    CHECK(ledger.ShutdownAttempt == 2);
+    CHECK(ledger.ConnectionEscalated);
+
+    const auto duplicate = owner->UpgradeTerminalShutdownToAbort(
+        92, escalation);
+    CHECK(duplicate.Submitted);
+    CHECK(flagsSeen.size() == 2);
+    CHECK(escalation->Calls.load() == 1);
+}
+
+void TestSubmittedGracefulAbortUpgradeRetriesSyncFailure() {
+    Reset();
+    auto owner = MakeStartedOwner(192);
+    std::atomic<std::uint32_t> calls{0};
+    owner->SetShutdownHookForTest(
+        [&](uint64_t, QUIC_STREAM_SHUTDOWN_FLAGS flags) {
+            const auto call = ++calls;
+            if (call == 1) {
+                CHECK(flags == QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL);
+                return QUIC_STATUS_PENDING;
+            }
+            CHECK((flags & QUIC_STREAM_SHUTDOWN_FLAG_ABORT) != 0);
+            return call == 2 ? QUIC_STATUS_OUT_OF_MEMORY
+                             : QUIC_STATUS_PENDING;
+        });
+    auto sink = TqTerminalSink::Create(owner, owner->TerminalLedger());
+    CHECK(owner->BeginTerminalShutdown(
+        0, sink, nullptr,
+        TqTerminalShutdownIntent::GracefulComplete).Submitted);
+
+    const auto failed = owner->UpgradeTerminalShutdownToAbort(93);
+    CHECK(!failed.Submitted);
+    CHECK(QUIC_FAILED(failed.Status));
+    const auto retried = owner->UpgradeTerminalShutdownToAbort(93);
+    CHECK(retried.Submitted);
+    CHECK(calls.load() == 3);
+    CHECK(owner->UpgradeTerminalShutdownToAbort(93).Submitted);
+    CHECK(calls.load() == 3);
+}
+
 void TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible() {
     Reset();
     auto owner = MakeStartedOwner(20);
@@ -995,6 +1063,8 @@ int main() {
     TestTerminalCancelsRetryAndWatchdog();
     TestSubmittedShutdownEscalatesAtFiveSecondsThenTimesOut();
     TestGracefulCompleteNeverArmsFatalWatchdog();
+    TestSubmittedGracefulShutdownUpgradesToAbortExactlyOnce();
+    TestSubmittedGracefulAbortUpgradeRetriesSyncFailure();
     TestTerminalBetweenOwnerCommitAndSchedulerArmIsIrreversible();
     TestTerminalBetweenOwnerCommitAndRetryScheduleIsIrreversible();
     TestCancelWinsAgainstTaskAlreadyRemovedFromHeap();

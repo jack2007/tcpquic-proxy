@@ -16,6 +16,9 @@
 #include "tunnel_reaper.h"
 #include "shutdown.h"
 #include "trace.h"
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+#include "libuv_allocator.h"
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -398,6 +401,13 @@ int RunServer(const TqConfig& cfg) {
 } // namespace
 
 int main(int argc, char** argv) {
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    if (!TqUvInstallAllocator()) {
+        std::fprintf(stderr,
+            "tcpquic-proxy: failed to install the libuv mimalloc allocator\n");
+        return 1;
+    }
+#endif
     TqAdminAuth::SetRuntimeBinaryName(argc > 0 ? argv[0] : nullptr);
     TqInstallCrashDumpHandler();
 

@@ -1,6 +1,9 @@
 #include "memory_stats.h"
 
 #include "relay_alloc.h"
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+#include "libuv_allocator.h"
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -132,6 +135,18 @@ std::string TqMemoryAllocatorStatsJson(const TqMemoryAllocatorStats& stats) {
         {"purge_calls", stats.PurgeCalls},
         {"threads_current", stats.ThreadsCurrent},
     };
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    const TqUvAllocatorSnapshot libuv = TqUvAllocatorStatus();
+    body["compiled_relay_backend"] = "libuv";
+    body["libuv_allocator_mode"] =
+        libuv.Mode == TqUvAllocatorMode::Mimalloc ? "mimalloc" : "system";
+    body["libuv_allocator_attempted"] = libuv.Attempted;
+    body["libuv_allocator_in_progress"] = libuv.InProgress;
+    body["libuv_allocator_installed"] = libuv.Installed;
+    body["libuv_allocator_status"] = libuv.Status;
+#else
+    body["compiled_relay_backend"] = "native";
+#endif
     return body.dump();
 }
 

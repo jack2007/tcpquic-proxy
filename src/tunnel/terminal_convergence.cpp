@@ -1201,6 +1201,9 @@ bool TqParseTerminalRetentionPath(
             if (value == "linux") filter.Backend = TqRelayBackendType::LinuxWorker;
             else if (value == "windows") filter.Backend = TqRelayBackendType::WindowsWorker;
             else if (value == "darwin") filter.Backend = TqRelayBackendType::DarwinWorker;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+            else if (value == "libuv") filter.Backend = TqRelayBackendType::LibuvWorker;
+#endif
             else return false;
         } else if (key == "connection_id") {
             if (filter.ConnectionId != 0 || !parseId(value, filter.ConnectionId)) return false;
@@ -1236,6 +1239,9 @@ std::string TqTerminalRetentionsJson(const TqTerminalRetentionFilter& filter) {
         case TqRelayBackendType::LinuxWorker: backend = "linux"; break;
         case TqRelayBackendType::WindowsWorker: backend = "windows"; break;
         case TqRelayBackendType::DarwinWorker: backend = "darwin"; break;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        case TqRelayBackendType::LibuvWorker: backend = "libuv"; break;
+#endif
         case TqRelayBackendType::None: break;
         }
         if (!first) out << ',';

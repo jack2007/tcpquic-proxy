@@ -148,7 +148,9 @@ struct TqTerminalBinding {
 };
 
 constexpr TqRelayBackend TqTerminalBackend() noexcept {
-#if defined(__linux__)
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    return TqRelayBackendType::LibuvWorker;
+#elif defined(__linux__)
     return TqRelayBackendType::LinuxWorker;
 #elif defined(__APPLE__)
     return TqRelayBackendType::DarwinWorker;
@@ -197,6 +199,11 @@ TqCompressAlgo TqAlgoFromFlags(uint8_t flags) {
 }
 
 std::string TqRelayBackendName(const TqRelayHandle& handle) {
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    if (TqRelayLibuvCommittedSnapshot(&handle) != nullptr) {
+        return "libuv";
+    }
+#endif
     if (TqRelayLinuxCommittedSnapshot(&handle) != nullptr) {
         return "linux";
     }
@@ -207,6 +214,10 @@ std::string TqRelayBackendName(const TqRelayHandle& handle) {
         return "windows";
     case TqRelayBackendType::DarwinWorker:
         return "darwin";
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    case TqRelayBackendType::LibuvWorker:
+        return "libuv";
+#endif
     case TqRelayBackendType::None:
     default:
         return "";
@@ -707,6 +718,15 @@ public:
         uint32_t relayWorkerIndex = 0;
         uint64_t relayId = 0;
         const void* relayWorker = nullptr;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        const auto libuvCommitted = TqRelayLibuvCommittedSnapshot(&RelayHandle);
+        if (libuvCommitted != nullptr) {
+            relayId = libuvCommitted->RelayId;
+            relayWorkerIndex = libuvCommitted->WorkerIndex;
+            relayWorker = reinterpret_cast<const void*>(libuvCommitted->WorkerIdentity);
+        } else
+#endif
+        {
         const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
         if (linuxCommitted != nullptr) {
             relayId = linuxCommitted->RelayId;
@@ -720,6 +740,7 @@ public:
             relayId = RelayHandle.DarwinRelayId;
             relayWorkerIndex = RelayHandle.DarwinWorkerIndex;
             relayWorker = RelayHandle.DarwinWorker;
+        }
         }
         if (TraceTunnelId != 0) {
             TqTraceRelayStarted(
@@ -833,6 +854,15 @@ public:
         const char* backend = "none";
         uint32_t workerIndex = 0;
         uint64_t relayId = 0;
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        const auto libuvCommitted = TqRelayLibuvCommittedSnapshot(&RelayHandle);
+        if (libuvCommitted != nullptr) {
+            backend = "libuv";
+            workerIndex = libuvCommitted->WorkerIndex;
+            relayId = libuvCommitted->RelayId;
+        } else
+#endif
+        {
         const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
         if (linuxCommitted != nullptr) {
             backend = "linux";
@@ -846,6 +876,7 @@ public:
             backend = "darwin";
             workerIndex = RelayHandle.DarwinWorkerIndex;
             relayId = RelayHandle.DarwinRelayId;
+        }
         }
         TqTraceRelayStopping(
             TraceTunnelId,
@@ -1189,6 +1220,13 @@ public:
         metadata.Ingress = TraceIngressProto == 2 ? "http" : (TraceIngressProto == 1 ? "socks" : "");
         metadata.Compress = TqCompressName(algo);
         metadata.RelayBackend = TqRelayBackendName(RelayHandle);
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+        const auto libuvCommitted = TqRelayLibuvCommittedSnapshot(&RelayHandle);
+        if (libuvCommitted != nullptr) {
+            metadata.WorkerIndex = libuvCommitted->WorkerIndex;
+        } else
+#endif
+        {
         const auto linuxCommitted = TqRelayLinuxCommittedSnapshot(&RelayHandle);
         if (linuxCommitted != nullptr) {
             metadata.WorkerIndex = linuxCommitted->WorkerIndex;
@@ -1196,6 +1234,7 @@ public:
             metadata.WorkerIndex = RelayHandle.WindowsWorkerIndex;
         } else if (RelayHandle.Backend == TqRelayBackendType::DarwinWorker) {
             metadata.WorkerIndex = RelayHandle.DarwinWorkerIndex;
+        }
         }
         TqUpdateConnectionTunnelMetadata(QuicConn, this, metadata);
     }

@@ -829,6 +829,100 @@ TqTerminalShutdownResult TqStreamLifetime::BeginTerminalShutdown(
     return result;
 }
 
+TqTerminalShutdownResult TqStreamLifetime::UpgradeTerminalShutdownToAbort(
+    uint64_t errorCode,
+    std::shared_ptr<TqTerminalEscalation> escalation) noexcept {
+    TqTerminalShutdownResult result{};
+    std::shared_ptr<TqStreamLifetime> lease;
+    std::shared_ptr<TqTerminalLedger> ledger;
+    MsQuicStream* stream = nullptr;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        result.Attempt = TerminalShutdownAttempt_;
+        if (TerminalPhase_ == TerminalPhase::TerminalObserved ||
+            Phase_ == Phase::TerminalPublished) {
+            result.AlreadyTerminal = true;
+            return result;
+        }
+        if (TerminalAbortUpgradeApplied_) {
+            result.Submitted = true;
+            return result;
+        }
+        if (TerminalAbortUpgradeReserved_) {
+            return result;
+        }
+        if (TerminalPhase_ != TerminalPhase::ShutdownSubmitted ||
+            (TerminalShutdownIntent_ !=
+                 TqTerminalShutdownIntent::GracefulComplete &&
+             TerminalShutdownIntent_ !=
+                 TqTerminalShutdownIntent::AbortBothImmediate) ||
+            Stream_ == nullptr || TerminalLedger_ == nullptr) {
+            result.Status = QUIC_STATUS_INVALID_STATE;
+            return result;
+        }
+        TerminalAbortUpgradeReserved_ = true;
+        TerminalShutdownIntent_ =
+            TqTerminalShutdownIntent::AbortBothImmediate;
+        TerminalErrorCode_ = errorCode;
+        if (escalation != nullptr) {
+            TerminalEscalation_ = escalation;
+        } else {
+            escalation = TerminalEscalation_;
+        }
+        ++TerminalShutdownAttempt_;
+        result.Attempt = TerminalShutdownAttempt_;
+        lease = shared_from_this();
+        ledger = TerminalLedger_;
+        stream = Stream_;
+    }
+
+    result.Status = CallTerminalShutdown(
+        stream, errorCode,
+        static_cast<QUIC_STREAM_SHUTDOWN_FLAGS>(
+            QUIC_STREAM_SHUTDOWN_FLAG_ABORT |
+            QUIC_STREAM_SHUTDOWN_FLAG_IMMEDIATE));
+
+    bool requestConnectionShutdown = false;
+    {
+        std::lock_guard<std::mutex> guard(ControlMutex_);
+        TerminalAbortUpgradeReserved_ = false;
+        if (TerminalPhase_ == TerminalPhase::TerminalObserved ||
+            Phase_ == Phase::TerminalPublished) {
+            result.AlreadyTerminal = true;
+        } else if (QUIC_SUCCEEDED(result.Status)) {
+            TerminalAbortUpgradeApplied_ = true;
+            result.Submitted = true;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> ledgerGuard(ledger->Mutex_);
+        ledger->State_.ErrorCode = errorCode;
+        ledger->State_.ShutdownStatus = result.Status;
+        ledger->State_.ShutdownIntent =
+            TqTerminalShutdownIntent::AbortBothImmediate;
+        ledger->State_.ShutdownAttempt = result.Attempt;
+        if (result.Submitted &&
+            ledger->State_.Phase != TerminalPhase::TerminalObserved &&
+            ledger->State_.Phase != TerminalPhase::Closed) {
+            ledger->State_.Phase = TerminalPhase::ShutdownSubmitted;
+            if (escalation != nullptr &&
+                !ledger->State_.ConnectionEscalated) {
+                ledger->State_.ConnectionEscalated = true;
+                ledger->State_.Watchdog =
+                    TqTerminalWatchdogState::Escalated;
+                requestConnectionShutdown = true;
+            }
+        }
+    }
+    if (requestConnectionShutdown && escalation != nullptr) {
+        const auto& identity = ledger->Identity();
+        escalation->RequestConnectionShutdown(
+            identity.ConnectionId, identity.StreamId,
+            result.Status, errorCode);
+    }
+    return result;
+}
+
 TqTerminalShutdownResult TqStreamLifetime::RetryTerminalShutdown() noexcept {
     std::shared_ptr<Target> sink;
     std::shared_ptr<TqTerminalEscalation> escalation;

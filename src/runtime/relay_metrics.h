@@ -347,6 +347,22 @@ struct TqRelayWorkerSnapshot {
     uint64_t Errors{0};
     uint64_t EventQueueCapacity{0};
     bool SnapshotComplete{false};
+#if TCPQUIC_RELAY_BACKEND_LIBUV
+    bool LoopAlive{false};
+    uint64_t AliveWorkers{0};
+    uint64_t ExpectedWorkers{0};
+    uint64_t QueueDepth{0};
+    uint64_t WakeAttempts{0};
+    uint64_t WakeSuccesses{0};
+    uint64_t WakeFailures{0};
+    uint64_t WakeCoalesced{0};
+    uint64_t AsyncCallbacks{0};
+    uint64_t TimerCallbacks{0};
+    uint64_t LoopIterations{0};
+    uint64_t LoopLagMicros{0};
+    uint64_t QuicToTcpPendingBytes{0};
+    uint64_t TcpToQuicPendingBytes{0};
+#endif
 };
 
 struct TqRelayWorkersSnapshotResult {

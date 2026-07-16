@@ -103,6 +103,58 @@ function(tcpquic_link_quic_address_deps target)
     endif()
 endfunction()
 
+function(tcpquic_add_libuv_relay_test target)
+    add_tcpquic_executable(${target} ${ARGN})
+    tcpquic_target_include_dirs(${target})
+    target_link_libraries(${target} PRIVATE uv_a libzstd spdlog::spdlog Threads::Threads)
+    target_compile_definitions(${target} PRIVATE TQ_UNIT_TESTING=1 TCPQUIC_RELAY_BACKEND_LIBUV=1)
+    tcpquic_link_mimalloc(${target})
+endfunction()
+
+set(TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES)
+set(TCPQUIC_LIBUV_RELAY_CONDITIONAL_GUARD_FILES
+    runtime/relay_metrics.cpp
+    runtime/memory_stats.cpp)
+set(TCPQUIC_LIBUV_QUIC_TO_TCP_READY 0)
+set(TCPQUIC_LIBUV_TCP_TO_QUIC_READY 0)
+# Tasks append production sources and headers only when they create them.
+# Shared-CMake tasks append here; isolated lanes append from their fragments.
+list(APPEND TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES
+    tunnel/libuv_allocator.h
+    tunnel/libuv_allocator.cpp
+    tunnel/libuv_relay_event_queue.h
+    tunnel/libuv_relay_internal.h
+    tunnel/libuv_relay_worker.h
+    tunnel/libuv_relay_worker.cpp
+    tunnel/libuv_relay.cpp)
+
+if(TCPQUIC_RELAY_BACKEND STREQUAL "libuv")
+    tcpquic_add_libuv_relay_test(tcpquic_libuv_allocator_test
+        unittest/libuv_allocator_test.cpp
+        tunnel/libuv_allocator.cpp)
+    tcpquic_add_libuv_relay_test(tcpquic_libuv_relay_worker_queue_test
+        unittest/libuv_relay_worker_queue_test.cpp
+        unittest/trace_proxy_stub.cpp
+        tunnel/libuv_allocator.cpp
+        tunnel/libuv_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
+        tunnel/terminal_convergence.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        config/tuning.cpp)
+    tcpquic_add_libuv_relay_test(tcpquic_libuv_relay_registration_test
+        unittest/libuv_relay_registration_test.cpp
+        unittest/trace_proxy_stub.cpp
+        tunnel/libuv_allocator.cpp
+        tunnel/libuv_relay.cpp
+        tunnel/libuv_relay_worker.cpp
+        tunnel/stream_lifetime.cpp
+        tunnel/terminal_convergence.cpp
+        tunnel/relay_buffer.cpp
+        tunnel/relay_alloc.cpp
+        config/tuning.cpp)
+endif()
+
 set(TCPQUIC_PLATFORM_SOURCES)
 if(WIN32)
     list(APPEND TCPQUIC_PLATFORM_SOURCES platform/platform_socket_win.cpp)
@@ -127,7 +179,6 @@ set(TCPQUIC_PROXY_SOURCES
     ingress/http_connect_server.cpp
     ingress/proxy_auth.cpp
     ingress/socks5_server.cpp
-    tunnel/relay.cpp
     runtime/thread_pool.cpp
     runtime/listen_socket.cpp
     tunnel/tunnel_reaper.cpp
@@ -161,7 +212,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
-        tunnel/linux_relay_worker.cpp
         runtime/linux_reactor.cpp
     )
 endif()
@@ -176,7 +226,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
         acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
-        tunnel/darwin_relay_worker.cpp
         runtime/darwin_reactor.cpp
     )
 endif()
@@ -191,13 +240,63 @@ if(WIN32)
         acl/acl_filter.cpp
         tunnel/relay_alloc.cpp
         tunnel/relay_buffer.cpp
-        tunnel/windows_relay_worker.cpp
         runtime/windows_reactor.cpp
     )
 endif()
 
+if(TCPQUIC_RELAY_BACKEND STREQUAL "native")
+    list(APPEND TCPQUIC_PROXY_SOURCES tunnel/relay.cpp)
+    set(TCPQUIC_DGX_BACKEND_SOURCE_FILES tunnel/relay.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND TCPQUIC_PROXY_SOURCES tunnel/linux_relay_worker.cpp)
+        list(APPEND TCPQUIC_DGX_BACKEND_SOURCE_FILES tunnel/linux_relay_worker.cpp)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        list(APPEND TCPQUIC_PROXY_SOURCES tunnel/darwin_relay_worker.cpp)
+    elseif(WIN32)
+        list(APPEND TCPQUIC_PROXY_SOURCES tunnel/windows_relay_worker.cpp)
+    endif()
+    set(TCPQUIC_RELAY_BACKEND_LIBUV_VALUE 0)
+else()
+    # Lane fragments append their production files to the manifest above and
+    # may declare isolated test targets with tcpquic_add_libuv_relay_test().
+    include(cmake/libuv_relay_quic_to_tcp.cmake OPTIONAL)
+    include(cmake/libuv_relay_tcp_to_quic.cmake OPTIONAL)
+    include(cmake/libuv_relay_metrics.cmake OPTIONAL)
+    include(cmake/libuv_relay_terminal.cmake OPTIONAL)
+    list(APPEND TCPQUIC_PROXY_SOURCES ${TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES})
+    set(TCPQUIC_DGX_BACKEND_SOURCE_FILES ${TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES})
+    set(TCPQUIC_RELAY_BACKEND_LIBUV_VALUE 1)
+endif()
+
 add_tcpquic_executable(tcpquic-proxy ${TCPQUIC_PROXY_SOURCES})
 set_target_properties(tcpquic-proxy PROPERTIES OUTPUT_NAME raypx2)
+target_compile_definitions(tcpquic-proxy PRIVATE
+    TCPQUIC_RELAY_BACKEND_LIBUV=${TCPQUIC_RELAY_BACKEND_LIBUV_VALUE}
+    TCPQUIC_LIBUV_QUIC_TO_TCP_READY=${TCPQUIC_LIBUV_QUIC_TO_TCP_READY}
+    TCPQUIC_LIBUV_TCP_TO_QUIC_READY=${TCPQUIC_LIBUV_TCP_TO_QUIC_READY})
+
+if(TCPQUIC_RELAY_BACKEND STREQUAL "libuv")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    if(TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES)
+        add_custom_target(tcpquic_libuv_backend_api_check
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check-libuv-backend-api.py"
+                ${TCPQUIC_LIBUV_RELAY_PRODUCTION_FILES}
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check-libuv-backend-api.py"
+                --libuv-branches
+                ${TCPQUIC_LIBUV_RELAY_CONDITIONAL_GUARD_FILES}
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            COMMENT "Checking libuv relay sources for forbidden platform APIs"
+            VERBATIM)
+    else()
+        add_custom_target(tcpquic_libuv_backend_api_check
+            COMMAND "${CMAKE_COMMAND}" -E true
+            COMMENT "No libuv relay production files registered yet"
+            VERBATIM)
+    endif()
+    add_dependencies(tcpquic-proxy tcpquic_libuv_backend_api_check)
+endif()
 
 if(WIN32)
     target_compile_definitions(tcpquic-proxy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN TCPQUIC_WINDOWS_TLS_QUICTLS)
@@ -233,6 +332,33 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
 endif()
 target_compile_definitions(tcpquic-proxy PRIVATE TCPQUIC_HAS_ZSTD=1)
 tcpquic_link_mimalloc(tcpquic-proxy)
+
+# D-24 evidence is captured at link time.  This deliberately avoids a
+# configure-time git snapshot: an incremental .cpp rebuild must seal the live
+# tree/submodule/source hashes that produced the newly linked binary.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set_property(TARGET tcpquic-proxy APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_SOURCE_DIR}/scripts/dgx-netem-evidence.py")
+    add_custom_command(TARGET tcpquic-proxy POST_BUILD
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/dgx-netem-evidence.py"
+            seal-live-build
+            --backend "${TCPQUIC_RELAY_BACKEND}"
+            --binary "$<TARGET_FILE:tcpquic-proxy>"
+            --cmake-cache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+            --source-root "${CMAKE_SOURCE_DIR}"
+            --source-base "${CMAKE_CURRENT_SOURCE_DIR}"
+            --target-sources "$<JOIN:$<TARGET_PROPERTY:tcpquic-proxy,SOURCES>,|>"
+            --backend-sources "${TCPQUIC_DGX_BACKEND_SOURCE_FILES}"
+            --link-libraries "$<JOIN:$<TARGET_PROPERTY:tcpquic-proxy,LINK_LIBRARIES>,|>"
+            --provenance "${CMAKE_BINARY_DIR}/tcpquic-build-provenance.txt"
+            --output "${TCPQUIC_OUTPUT_DIR}/raypx2.build-manifest.json"
+        BYPRODUCTS
+            "${CMAKE_BINARY_DIR}/tcpquic-build-provenance.txt"
+            "${TCPQUIC_OUTPUT_DIR}/raypx2.build-manifest.json"
+        COMMENT "Seal raypx2 DGX build provenance"
+        VERBATIM)
+endif()
 
 option(TCPQUIC_PREFER_STATIC_OPENSSL_HELPER "Prefer a statically linked vendored openssl helper when supported" ON)
 
@@ -1434,5 +1560,56 @@ if(WIN32)
         if(TARGET ${target})
             tcpquic_copy_msquic_runtime(${target})
         endif()
+    endforeach()
+endif()
+
+# A formal Linux native run executes a fixed, reviewed suite. Seal every test
+# immediately after link so a same-name stale or replaced executable cannot be
+# accepted by the evidence collector.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   TCPQUIC_RELAY_BACKEND STREQUAL "native")
+    set(TCPQUIC_NATIVE_TEST_SUITE
+        "${CMAKE_SOURCE_DIR}/scripts/native-test-suite.txt")
+    set(TCPQUIC_NATIVE_TEST_EVIDENCE_TOOL
+        "${CMAKE_SOURCE_DIR}/scripts/native-test-binary-evidence.py")
+    file(STRINGS "${TCPQUIC_NATIVE_TEST_SUITE}"
+        TCPQUIC_NATIVE_TEST_TARGETS)
+    list(LENGTH TCPQUIC_NATIVE_TEST_TARGETS
+        TCPQUIC_NATIVE_TEST_TARGET_COUNT)
+    if(NOT TCPQUIC_NATIVE_TEST_TARGET_COUNT EQUAL 43)
+        message(FATAL_ERROR
+            "native-test-suite.txt must contain exactly 43 targets")
+    endif()
+    foreach(target IN LISTS TCPQUIC_NATIVE_TEST_TARGETS)
+        if(NOT TARGET ${target})
+            message(FATAL_ERROR
+                "canonical native test target does not exist: ${target}")
+        endif()
+        if(target STREQUAL "tcpquic_tcp_tunnel_test")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${TCPQUIC_NATIVE_TEST_EVIDENCE_TOOL}"
+                    seal-test
+                    --root "${CMAKE_SOURCE_DIR}"
+                    --cache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+                    --binary "$<TARGET_FILE_DIR:tcpquic_tunnel_test>/tcpquic_tcp_tunnel_test"
+                    --target "${target}"
+                COMMENT "Seal native test binary provenance: ${target}"
+                VERBATIM)
+            continue()
+        endif()
+        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
+            "${TCPQUIC_NATIVE_TEST_EVIDENCE_TOOL}"
+            "${TCPQUIC_NATIVE_TEST_SUITE}")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${Python3_EXECUTABLE}"
+                "${TCPQUIC_NATIVE_TEST_EVIDENCE_TOOL}"
+                seal-test
+                --root "${CMAKE_SOURCE_DIR}"
+                --cache "${CMAKE_BINARY_DIR}/CMakeCache.txt"
+                --binary "$<TARGET_FILE:${target}>"
+                --target "${target}"
+            COMMENT "Seal native test binary provenance: ${target}"
+            VERBATIM)
     endforeach()
 endif()

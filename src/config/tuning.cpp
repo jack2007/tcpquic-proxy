@@ -1,6 +1,7 @@
 #include "tuning.h"
 
 #include "config.h"
+#include "relay.h"
 #include "trace.h"
 
 #include <algorithm>
@@ -708,20 +709,30 @@ void TqPrintRelayMemoryBudget(FILE* out) {
 }
 
 void TqPrintRelayBackend(FILE* out, const TqTuningConfig& tuning) {
-#if defined(__linux__)
+#if TCPQUIC_RELAY_BACKEND_LIBUV
     std::fprintf(out,
-        "tcpquic-proxy relay backend: linux-epoll (%u workers)\n",
+        "tcpquic-proxy relay backend: %s (%u workers)\n",
+        TqCompiledRelayBackend(),
+        std::max(1u, tuning.LinuxRelayWorkerCount));
+#elif defined(__linux__)
+    std::fprintf(out,
+        "tcpquic-proxy relay backend: %s linux-epoll (%u workers)\n",
+        TqCompiledRelayBackend(),
         std::max(1u, tuning.LinuxRelayWorkerCount));
 #elif defined(_WIN32)
     std::fprintf(out,
-        "tcpquic-proxy relay backend: windows-iocp (%u workers)\n",
+        "tcpquic-proxy relay backend: %s windows-iocp (%u workers)\n",
+        TqCompiledRelayBackend(),
         std::max(1u, tuning.WindowsRelayWorkerCount));
 #elif defined(__APPLE__)
     std::fprintf(out,
-        "tcpquic-proxy relay backend: darwin-kqueue (%u workers)\n",
+        "tcpquic-proxy relay backend: %s darwin-kqueue (%u workers)\n",
+        TqCompiledRelayBackend(),
         std::max(1u, tuning.LinuxRelayWorkerCount));
 #else
-    std::fprintf(out, "tcpquic-proxy relay backend: unsupported\n");
+    std::fprintf(out,
+        "tcpquic-proxy relay backend: %s unsupported\n",
+        TqCompiledRelayBackend());
 #endif
 }
 
